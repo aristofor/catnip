@@ -1,0 +1,267 @@
+# Exemple 8 : Structures de données et itérables
+
+print("⇒ Range : Génération de séquences")
+
+# Range simple de 0 à n-1
+print("range(5):")
+for i in range(5) {
+    print("  ", i)
+}
+
+# Range avec début et fin
+print("\nrange(10, 15):")
+for i in range(10, 15) {
+    print("  ", i)
+}
+
+# Range avec pas
+print("\nrange(0, 20, 3):")
+for i in range(0, 20, 3) {
+    print("  ", i)
+}
+
+# Range décroissant
+print("\nrange(10, 0, -1):")
+for i in range(10, 0, -1) {
+    print("  ", i)
+}
+
+# Range avec pas négatif
+print("\nrange(20, 10, -2):")
+for i in range(20, 10, -2) {
+    print("  ", i)
+}
+
+print("\n⇒ Calculs sur des séquences")
+
+# Somme des nombres de 1 à 10
+somme = 0
+for i in range(1, 11) {
+    somme = somme + i
+}
+print("Somme de 1 à 10:", somme)
+
+# Produit des nombres de 1 à 5
+produit = 1
+for i in range(1, 6) {
+    produit = produit * i
+}
+print("Produit de 1 à 5 (5!):", produit)
+
+# Compter les nombres pairs de 1 à 20
+compteur_pairs = 0
+for i in range(1, 21) {
+    if i % 2 == 0 {
+        compteur_pairs = compteur_pairs + 1
+    }
+}
+print("Nombre de pairs de 1 à 20:", compteur_pairs)
+
+print("\n⇒ Filtrage avec conditions")
+
+# Afficher seulement les multiples de 3
+print("Multiples de 3 entre 1 et 30:")
+for i in range(1, 31) {
+    if i % 3 == 0 {
+        print("  ", i)
+    }
+}
+
+# Afficher les nombres premiers simples (< 30)
+print("\nNombres premiers < 30:")
+for n in range(2, 30) {
+    est_premier = True
+
+    # Vérifier si divisible par un nombre de 2 à n-1
+    diviseur = 2
+    while diviseur < n and est_premier {
+        if n % diviseur == 0 {
+            est_premier = False
+        }
+        diviseur = diviseur + 1
+    }
+
+    if est_premier {
+        print("  ", n)
+    }
+}
+
+print("\n⇒ Accumulation de valeurs")
+
+# Créer une somme cumulative
+print("Sommes cumulatives de 1 à 10:")
+cumul = 0
+for i in range(1, 11) {
+    cumul = cumul + i
+    print("  Somme jusqu'à", i, ":", cumul)
+}
+
+# Puissances de 2
+print("\nPuissances de 2 (2^0 à 2^10):")
+for i in range(11) {
+    puissance = 2 ** i
+    print("  2^", i, "=", puissance)
+}
+
+print("\n⇒ Tables de multiplication")
+
+# Table de multiplication de 7
+print("Table de 7:")
+for i in range(1, 11) {
+    resultat = 7 * i
+    print("  7 x", i, "=", resultat)
+}
+
+print("\n⇒ Patterns avec range")
+
+# Suite arithmétique
+print("Suite arithmétique (début=5, raison=3):")
+debut = 5
+raison = 3
+for i in range(10) {
+    terme = debut + i * raison
+    print("  u", i, "=", terme)
+}
+
+# Suite géométrique
+print("\nSuite géométrique (début=1, raison=2):")
+debut_g = 1
+raison_g = 2
+for i in range(10) {
+    terme_g = debut_g * (raison_g ** i)
+    print("  v", i, "=", terme_g)
+}
+
+print("\n⇒ Statistiques simples")
+
+# Générer des valeurs et calculer des statistiques
+somme_stats = 0
+count = 0
+minimum = 999999
+maximum = -999999
+
+for i in range(1, 21) {
+    # Utiliser une formule pour générer des "données"
+    valeur = i * i % 17 + 5
+
+    somme_stats = somme_stats + valeur
+    count = count + 1
+
+    if valeur < minimum {
+        minimum = valeur
+    }
+
+    if valeur > maximum {
+        maximum = valeur
+    }
+}
+
+moyenne = somme_stats / count
+print("Statistiques sur 20 valeurs:")
+print("  Somme:", somme_stats)
+print("  Moyenne:", moyenne)
+print("  Minimum:", minimum)
+print("  Maximum:", maximum)
+print("  Étendue:", maximum - minimum)
+
+print("\n⇒ Patterns imbriqués")
+
+# Table de multiplication complète
+print("Table de multiplication 1-5:")
+for i in range(1, 6) {
+    ligne = ""
+    for j in range(1, 6) {
+        produit_ij = i * j
+        print("  ", i, "x", j, "=", produit_ij)
+    }
+}
+
+print("\n⇒ Triangle de nombres")
+
+# Afficher un triangle de nombres
+print("Triangle de nombres:")
+for ligne in range(1, 6) {
+    print("Ligne", ligne, ":")
+    for col in range(1, ligne + 1) {
+        print("  ", col)
+    }
+}
+
+print("\n⇒ Compteurs et accumulateurs")
+
+# Compter les occurrences de chiffres
+compteur_0 = 0
+compteur_1 = 0
+compteur_2 = 0
+compteur_3 = 0
+compteur_4 = 0
+
+for i in range(100) {
+    chiffre = i % 5
+    match chiffre {
+        0 => { compteur_0 = compteur_0 + 1 }
+        1 => { compteur_1 = compteur_1 + 1 }
+        2 => { compteur_2 = compteur_2 + 1 }
+        3 => { compteur_3 = compteur_3 + 1 }
+        4 => { compteur_4 = compteur_4 + 1 }
+        _ => { print("Erreur inattendue") }
+    }
+}
+
+print("Fréquences des restes (modulo 5) de 0 à 99:")
+print("  0:", compteur_0)
+print("  1:", compteur_1)
+print("  2:", compteur_2)
+print("  3:", compteur_3)
+print("  4:", compteur_4)
+
+print("\n⇒ Exemple pratique : PGCD")
+
+# Calculer le PGCD de deux nombres (algorithme d'Euclide)
+pgcd = (a, b) => {
+    while b != 0 {
+        temp = b
+        b = a % b
+        a = temp
+    }
+    a
+}
+
+print("PGCD(48, 18) =", pgcd(48, 18))
+print("PGCD(100, 35) =", pgcd(100, 35))
+print("PGCD(17, 19) =", pgcd(17, 19))
+
+print("\n⇒ Exemple pratique : Somme des diviseurs")
+
+# Calculer la somme des diviseurs propres d'un nombre
+print("Somme des diviseurs propres:")
+for n in range(6, 30, 6) {
+    somme_diviseurs = 0
+    for i in range(1, n) {
+        if n % i == 0 {
+            somme_diviseurs = somme_diviseurs + i
+        }
+    }
+    print("  ", n, ":", somme_diviseurs)
+}
+
+print("\n⇒ Application de fonctions")
+
+# Appliquer des transformations
+print("Carrés de 1 à 5:")
+for i in range(1, 6) {
+    carre = i * i
+    print("  ", i, "² =", carre)
+}
+
+print("\nCubes de 1 à 5:")
+for i in range(1, 6) {
+    cube = i * i * i
+    print("  ", i, "³ =", cube)
+}
+
+print("\nInverses de 1 à 5:")
+for i in range(1, 6) {
+    inverse = 1.0 / i
+    print("  1/", i, "=", inverse)
+}

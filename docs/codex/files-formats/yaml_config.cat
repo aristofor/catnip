@@ -1,0 +1,106 @@
+# Parsing et écriture YAML avec PyYAML
+# YAML est le format de config standard (Kubernetes, CI/CD, etc.)
+#
+# Exécuter: catnip -m yaml -m tempfile -m pathlib -m shutil yaml_config.cat
+
+yaml = import("yaml")
+tempfile = import("tempfile")
+pathlib = import("pathlib")
+shutil = import("shutil")
+
+# Parsing d'une chaîne YAML
+
+yaml_string = "
+name: mon-app
+version: 1.2.3
+debug: true
+port: 8080
+features:
+  - auth
+  - logging
+  - cache
+database:
+  host: localhost
+  port: 5432
+"
+
+print("⇒ Parsing YAML")
+config = yaml.safe_load(yaml_string)
+print("  Clés:", config.keys())
+
+# Accès aux données
+
+print("\n⇒ Accès aux données")
+print("  Nom:", config["name"])
+print("  Version:", config["version"])
+print("  Debug:", config["debug"])
+print("  Port:", config["port"])
+
+# Structures imbriquées
+
+print("\n⇒ Structures imbriquées")
+print("  DB host:", config["database"]["host"])
+print("  DB port:", config["database"]["port"])
+
+# Listes
+
+print("\n⇒ Listes")
+print("  Features:")
+for f in config["features"] {
+    print("    -", f)
+}
+
+# Sérialisation YAML
+
+print("\n⇒ Sérialisation YAML")
+output = yaml.dump(config)
+print(output)
+
+# Multi-documents YAML
+
+multi_doc = "
+---
+env: development
+debug: true
+---
+env: production
+debug: false
+"
+
+print("⇒ Multi-documents YAML")
+docs = yaml.safe_load_all(multi_doc)
+i = 0
+for doc in docs {
+    i = i + 1
+    print("  Doc", i, "- env:", doc["env"])
+}
+
+# Création et écriture d'un fichier
+
+temp_dir = pathlib.Path(tempfile.mkdtemp())
+config_file = temp_dir / "config.yaml"
+
+# Créer une config avec dict()
+app_config = dict(name="catnip-demo", version="0.1.0", port=8000)
+
+print("\n⇒ Écriture fichier YAML")
+yaml_output = yaml.dump(app_config)
+config_file.write_text(yaml_output)
+print("  Fichier créé:", config_file)
+
+# Lecture du contenu
+
+print("\n⇒ Contenu du fichier:")
+print(config_file.read_text())
+
+# Relecture avec parsing
+
+print("⇒ Relecture du fichier")
+reloaded = yaml.safe_load(config_file.read_text())
+print("  App name:", reloaded["name"])
+print("  Port:", reloaded["port"])
+
+# Nettoyage
+
+shutil.rmtree(str(temp_dir))
+print("\n⇒ Nettoyage effectué")

@@ -1,0 +1,85 @@
+# Requêtes HTTP avec httpx
+# httpx est un client HTTP moderne (sync/async, HTTP/2)
+#
+# Services HTTP echo interchangeables (même API) :
+#   - https://httpbin.org   (original, parfois instable)
+#   - https://httpbin.dev   (clone fiable)
+#   - https://httpcan.org   (clone Rust)
+#
+# Exécuter: catnip -m httpx -m json httpx_requests.cat
+
+# Service de test (changer ici si besoin)
+BASE_URL = "https://httpbin.dev"
+
+# GET simple
+
+print("⇒ GET request")
+response = httpx.get(f"{BASE_URL}/get")
+print("  Status:", response.status_code)
+print("  Content-Type:", response.headers["content-type"])
+
+# Parsing JSON de la réponse
+
+print("\n⇒ Parsing JSON")
+data = response.json()
+print("  Origin IP:", data["origin"])
+print("  URL:", data["url"])
+
+# GET avec paramètres
+
+print("\n⇒ GET avec paramètres")
+params = dict(name="catnip", version="0.1")
+response = httpx.get(f"{BASE_URL}/get", params=params)
+data = response.json()
+print("  Args reçus:", data["args"])
+
+# GET avec headers
+
+print("\n⇒ GET avec headers custom")
+headers = dict(("X-Custom-Header", "catnip-test"), Accept="application/json")
+response = httpx.get(f"{BASE_URL}/headers", headers=headers)
+data = response.json()
+print("  Headers envoyés:")
+for key in data["headers"].keys() {
+    if key.startswith("X-") {
+        print("    ", key, ":", data["headers"][key])
+    }
+}
+
+# POST avec JSON
+
+print("\n⇒ POST JSON")
+payload = dict(message="Hello from Catnip", count=42)
+response = httpx.post(f"{BASE_URL}/post", json=payload)
+data = response.json()
+print("  JSON envoyé:", data["json"])
+
+# POST form data
+
+print("\n⇒ POST form data")
+form_data = dict(username="alice", password="secret123")
+response = httpx.post(f"{BASE_URL}/post", data=form_data)
+data = response.json()
+print("  Form data:", data["form"])
+
+# Accès aux bytes bruts
+
+print("\n⇒ Réponse en bytes")
+response = httpx.get(f"{BASE_URL}/bytes/16")
+print("  Bytes reçus:", len(response.content), "octets")
+print("  Raw:", response.content)
+
+# Gestion des erreurs HTTP
+
+print("\n⇒ Gestion erreurs")
+response = httpx.get(f"{BASE_URL}/status/404")
+print("  Status 404:", response.status_code)
+print("  Is error:", response.status_code >= 400)
+
+# Timeout
+
+print("\n⇒ Timeout")
+response = httpx.get(f"{BASE_URL}/delay/1", timeout=5.0)
+print("  Requête avec délai: OK (status", response.status_code, ")")
+
+print("\n⇒ Terminé")

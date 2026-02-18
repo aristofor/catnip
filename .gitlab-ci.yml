@@ -1,0 +1,98 @@
+image: python:3.13
+
+stages:
+  - secret-detection
+  - build
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
+  SECRET_DETECTION_ENABLED: "true"
+
+cache:
+  key: "${CI_JOB_NAME}"
+  paths:
+    - .cache/pip
+    - .cache/cargo
+    - target/
+
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+# ----------------------------
+# Build (Rust + Python install)
+# ----------------------------
+build:
+  stage: build
+  rules:
+    - when: manual
+  before_script:
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - python -m venv .venv
+    - source .venv/bin/activate
+    - python -m pip install -U pip setuptools setuptools-rust wheel
+    - python -m pip install -e .
+    - python -m pip install pytest pytest-xdist pytest-rerunfailures
+  script:
+    - source .venv/bin/activate
+    - echo "Build OK"
+  artifacts:
+    paths:
+      - .venv/
+      - catnip/*.so
+    expire_in: 1 month
+
+# -------------
+# Tests (pytest)
+# -------------
+pytest:
+  stage: test
+  needs: ["build"]
+  rules:
+    - when: manual
+  script:
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - source .venv/bin/activate
+    - pytest -n auto --ignore=tests/jit_functions --junitxml=tests-report.xml
+  artifacts:
+    reports:
+      junit: tests-report.xml
+    paths:
+      - tests-report.xml
+    expire_in: 1 month
+
+# ---------------------------
+# Tests JIT (non-régression)
+# ---------------------------
+pytest_jit:
+  stage: test
+  needs: ["build"]
+  rules:
+    - when: manual
+  script:
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - source .venv/bin/activate
+    - pytest tests/serial/jit/ -n 0 -v --junitxml=jit-tests-report.xml
+  artifacts:
+    reports:
+      junit: jit-tests-report.xml
+    paths:
+      - jit-tests-report.xml
+    expire_in: 1 month
+  allow_failure: false
+
+# ----------------
+# Secret Detection
+# ----------------
+secret_detection:
+  stage: secret-detection
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+      when: always
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: always
+    - if: '$CI_COMMIT_TAG'
+      when: always
+    - when: never

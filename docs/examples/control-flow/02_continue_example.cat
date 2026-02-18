@@ -1,0 +1,57 @@
+# Example of using continue in a loop
+
+# Filter even numbers
+print("Odd numbers from 1 to 10:")
+for i in list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) {
+    if i % 2 == 0 {
+        continue  # Skip even numbers
+    }
+    print(i)
+}
+
+# Calculate sum while ignoring certain values
+print("Sum of numbers (except multiples of 3):")
+total = 0
+for i in list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) {
+    if i % 3 == 0 {
+        continue  # Ignore multiples of 3
+    }
+    total = total + i
+}
+print("Total:", total)
+
+# Data validation with continue
+print("Age validation:")
+ages = list(25, -5, 30, 150, 42, 0, 18)
+
+valid_ages = list()
+for age in ages {
+    # Ignore invalid values
+    if age < 0 or age > 120 {
+        print("Invalid age ignored:", age)
+        continue
+    }
+
+    valid_ages = valid_ages + list(age)
+}
+
+print("Valid ages:", valid_ages)
+
+# Sum with continue
+# Without loop scoping: we would have an infinite loop due to the scope of the previous i
+print("Sum calculation with continue:")
+total = 0
+i = 1
+
+while i <= 20 {
+    # Ignore multiples of 3
+    if i % 3 == 0 {
+        i = i + 1
+        continue
+    }
+
+    total = total + i
+    i = i + 1
+}
+
+print("Sum (without multiples of 3):", total)

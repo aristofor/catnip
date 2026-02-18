@@ -1,0 +1,96 @@
+==================
+Simple trait
+==================
+
+trait Drawable {
+    x, y
+    draw(self) => { print("draw") }
+}
+
+---
+
+(source_file
+  (trait_stmt
+    name: (identifier)
+    (struct_fields
+      (struct_field name: (identifier))
+      (struct_field name: (identifier)))
+    (struct_method
+      method_name: (identifier)
+      (lambda_params (identifier))
+      (block
+        (call
+          (identifier)
+          (argument_list (string)))))))
+
+==================
+Trait with extends
+==================
+
+trait Extended extends(Base, Other) {
+    value(self) => { 42 }
+}
+
+---
+
+(source_file
+  (trait_stmt
+    name: (identifier)
+    (trait_extends (identifier) (identifier))
+    (struct_method
+      method_name: (identifier)
+      (lambda_params (identifier))
+      (block (integer)))))
+
+==================
+Struct with implements
+==================
+
+struct Point implements(Drawable, Clickable) {
+    z
+}
+
+---
+
+(source_file
+  (struct_stmt
+    name: (identifier)
+    (struct_implements (identifier) (identifier))
+    (struct_fields
+      (struct_field name: (identifier)))))
+
+==================
+Struct with implements and extends
+==================
+
+struct Button implements(Interactive) extends(Widget) {
+    label
+}
+
+---
+
+(source_file
+  (struct_stmt
+    name: (identifier)
+    (struct_implements (identifier))
+    (struct_extends base: (identifier))
+    (struct_fields
+      (struct_field name: (identifier)))))
+
+==================
+Struct with extends and implements (reverse order)
+==================
+
+struct Panel extends(Widget) implements(Drawable) {
+    color
+}
+
+---
+
+(source_file
+  (struct_stmt
+    name: (identifier)
+    (struct_extends base: (identifier))
+    (struct_implements (identifier))
+    (struct_fields
+      (struct_field name: (identifier)))))

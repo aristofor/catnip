@@ -1,0 +1,72 @@
+# Exemple 3 : Fonctions
+
+print("⇒ Fonctions simples")
+
+# Fonction sans paramètres
+dire_bonjour = () => {
+    print("Bonjour depuis une fonction!")
+}
+
+dire_bonjour()
+
+# Fonction avec paramètres
+additionner = (a, b) => {
+    a + b
+}
+
+resultat = additionner(15, 27)
+print(f"15 + 27 = {resultat}")
+
+# Fonction avec valeur par défaut
+mantra = (nom="World") => {
+    print("Born to segfault,", nom, "!")
+}
+
+mantra()
+mantra("Alice")
+mantra("Bob")
+
+print("\n⇒ Fonctions mathématiques")
+
+# Fonction pour calculer le carré
+carre = (x) => {
+    x * x
+}
+
+print("5² =", carre(5))
+print("12² =", carre(12))
+
+# Fonction pour calculer la puissance
+puissance = (base, exposant) => {
+    resultat = 1
+    i = 0
+    while i < exposant {
+        resultat = resultat * base
+        i = i + 1
+    }
+    resultat
+}
+
+print("2^10 =", puissance(2, 10))
+print("3^4 =", puissance(3, 4))
+
+print("\n⇒ Fonction récursive (avec while)")
+
+# Factorielle utilisant une boucle
+factorielle = (n) => {
+    match n {
+        0 | 1 => { 1 }
+        n => {
+            resultat = 1
+            i = 2
+            while i <= n {
+                resultat = resultat * i
+                i = i + 1
+            }
+            resultat
+        }
+    }
+}
+
+print("5! =", factorielle(5))
+print("10! =", factorielle(10))

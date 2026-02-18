@@ -1,0 +1,7 @@
+recursive-include catnip *.py
+recursive-include catnip_rs *.rs *.toml *.js *.json *.c *.h *.py
+recursive-include tests *
+recursive-include docs *
+include README.md LICENSE Cargo.toml
+global-exclude __pycache__
+global-exclude *.pyc

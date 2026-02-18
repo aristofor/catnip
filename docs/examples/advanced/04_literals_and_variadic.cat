@@ -1,0 +1,134 @@
+# Exemples de littéraux de listes et dictionnaires + fonctions variadiques
+
+# LITTÉRAUX DE LISTES
+
+print("⇒ Littéraux de listes")
+
+# Liste vide
+empty = list()
+print("Liste vide:", empty)
+
+# Liste de nombres
+numbers = list(1, 2, 3, 4, 5)
+print("Nombres:", numbers)
+
+# Liste de chaînes
+names = list("Alice", "Bob", "Charlie")
+print("Noms:", names)
+
+# Liste avec expressions
+computed = list(1 + 1, 2 * 3, 10 / 2)
+print("Calculées:", computed)
+
+# Listes imbriquées
+matrix = list(list(1, 2, 3), list(4, 5, 6), list(7, 8, 9))
+print("Matrice:", matrix)
+
+# Itération sur une liste
+print("\nItération:")
+for n in list(10, 20, 30) {
+    print("  -", n)
+}
+
+# LITTÉRAUX DE DICTIONNAIRES
+
+print("\n⇒ Littéraux de dictionnaires")
+
+# Dictionnaire vide
+empty_dict = dict()
+print("Dict vide:", empty_dict)
+
+# Dictionnaire simple
+person = dict(name="Alice", age=30, city="Paris")
+print("Personne:", person)
+
+# Dictionnaire avec clés numériques
+mapping = dict((1, "un"), (2, "deux"), (3, "trois"))
+print("Mapping:", mapping)
+
+# Dictionnaire avec valeurs calculées
+stats = dict(sum=1 + 2 + 3, product=2 * 3 * 4)
+print("Stats:", stats)
+
+# Structures imbriquées
+data = dict(numbers=list(1, 2, 3), info=dict(x=10, y=20))
+print("Données imbriquées:", data)
+
+# FONCTIONS VARIADIQUES
+
+print("\n⇒ Fonctions variadiques")
+
+# Lambda variadique simple
+collect = (*items) => { items }
+print("collect(1, 2, 3):", collect(1, 2, 3))
+
+# Somme variadique
+somme = (*nums) => {
+    total = 0
+    for x in nums {
+        total = total + x
+    }
+    total
+}
+print("somme(1, 2, 3, 4, 5):", somme(1, 2, 3, 4, 5))
+print("somme(10, 20, 30):", somme(10, 20, 30))
+
+# Variadic avec paramètre régulier
+prefix_list = (prefix, *items) => {
+    result = list(prefix)
+    for item in items {
+        result = result + list(item)
+    }
+    result
+}
+print("prefix_list(0, 1, 2, 3):", prefix_list(0, 1, 2, 3))
+
+# Plusieurs paramètres réguliers + variadic
+make_range = (start, end, *extras) => {
+    dict(start=start, end=end, extras=extras)
+}
+print("make_range(1, 10, 'a', 'b'):", make_range(1, 10, "a", "b"))
+
+# COMBINAISONS AVANCÉES
+
+print("\n⇒ Combinaisons")
+
+# Créer une liste avec variadic
+make_list = (*items) => { list(items) }
+print("make_list(1, 2, 3):", make_list(1, 2, 3))
+
+# Min et max variadique
+find_extremes = (*nums) => { dict(min=min(nums), max=max(nums)) }
+print("find_extremes(5, 2, 9, 1, 7):", find_extremes(5, 2, 9, 1, 7))
+
+# Longueur avec variadic
+count_args = (*args) => { len(args) }
+print("count_args('a', 'b', 'c', 'd'):", count_args("a", "b", "c", "d"))
+
+# EXEMPLE PRATIQUE : CALCULATEUR
+
+print("\n⇒ Calculateur variadique")
+
+# Fonction qui applique une opération à tous les arguments
+apply_op = (op, *nums) => {
+    match op {
+        "sum" => {
+            total = 0
+            for n in nums { total = total + n }
+            total
+        }
+        "product" => {
+            total = 1
+            for n in nums { total = total * n }
+            total
+        }
+        "list" => { nums }
+        _ => { None }
+    }
+}
+
+print("Somme:", apply_op("sum", 1, 2, 3, 4, 5))
+print("Produit:", apply_op("product", 2, 3, 4))
+print("Liste:", apply_op("list", 10, 20, 30, 40))
+
+print("\n⇒ Fin des exemples")

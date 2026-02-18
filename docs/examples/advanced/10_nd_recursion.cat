@@ -1,0 +1,63 @@
+# ND-Recursion : syntaxe des operateurs
+#
+# Ces exemples illustrent la forme implémentée.
+
+# --- @@ : ND-recursion ---
+
+# Forme combinateur : seed initial + lambda avec recur
+@@(0, (v, recur) => {
+    if v < 10 { recur(v + 1) }
+    else { v }
+})
+
+# Forme declaration : fonction ND-recursive
+countdown = @@ (n, recur) => {
+    if n > 0 { recur(n - 1) }
+    else { "done" }
+}
+
+# Forme broadcast simple (equivalent a map)
+data = list(1, 2, 3)
+data.[@@ (v, _) => { v * 2 }]
+
+# Forme broadcast recursive (traverse les structures)
+nested = list(1, list(2, 3), 4)
+nested.[@@ (v, recur) => {
+    if is_list(v) { recur(v) }
+    else { v * 2 }
+}]
+
+
+# --- @> : ND-map (lift) ---
+
+# Lift une fonction dans le contexte ND
+lifted_abs = @> abs
+
+# Forme broadcast : map en contexte ND
+data.[@> abs]
+
+
+# --- @[] : topos vide ---
+
+# Element neutre des operations ND
+empty = @[]
+
+
+# --- Modes d'execution ---
+
+# Mode sequential (defaut) : debug, petits calculs
+pragma("nd_mode", "sequential")
+@@(10, (n, r) => { if n <= 1 { 1 } else { n * r(n-1) } })
+
+# Mode threads : memoization partagee, I/O bound
+pragma("nd_mode", "threads")
+pragma("nd_memoize", "on")
+@@(20, (n, r) => { if n <= 1 { n } else { r(n-1) + r(n-2) } })
+
+# Mode processes : vrai parallelisme, CPU bound
+pragma("nd_mode", "processes")
+pragma("nd_workers", "4")
+list(5, 6, 7, 8).[@@ (n, r) => {
+    if n <= 1 { 1 }
+    else { n * r(n-1) }
+}]

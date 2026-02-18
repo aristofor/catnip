@@ -1,0 +1,100 @@
+#!/usr/bin/env catnip
+# Filtrage et transformation de données
+# Usage: catnip filter_data.cat
+
+# Données utilisateur
+users = list(
+    dict(('id', 1), ('name', 'Alice'), ('age', 28), ('active', True), ('score', 85)),
+    dict(('id', 2), ('name', 'Bob'), ('age', 35), ('active', True), ('score', 92)),
+    dict(('id', 3), ('name', 'Charlie'), ('age', 22), ('active', False), ('score', 78)),
+    dict(('id', 4), ('name', 'Diana'), ('age', 29), ('active', True), ('score', 88)),
+    dict(('id', 5), ('name', 'Eve'), ('age', 31), ('active', False), ('score', 95))
+)
+
+# Fonction de filtrage générique
+filter_users = (lst, predicate, idx, acc) => {
+    if idx >= len(lst) {
+        acc
+    } else {
+        user = lst[idx]
+        new_acc = if predicate(user) { acc + list(user) } else { acc }
+        filter_users(lst, predicate, idx + 1, new_acc)
+    }
+}
+
+# Fonction de mapping générique
+map_users = (lst, transform, idx, acc) => {
+    if idx >= len(lst) {
+        acc
+    } else {
+        user = lst[idx]
+        new_acc = acc + list(transform(user))
+        map_users(lst, transform, idx + 1, new_acc)
+    }
+}
+
+# Prédicats
+is_active = (u) => { u['active'] }
+is_high_score = (u) => { u['score'] >= 85 }
+is_young = (u) => { u['age'] < 30 }
+
+# Transformations
+add_status = (u) => {
+    status = if u['score'] >= 90 { 'excellent' } else { 'good' }
+    dict(
+        ('id', u['id']),
+        ('name', u['name']),
+        ('age', u['age']),
+        ('score', u['score']),
+        ('status', status)
+    )
+}
+
+# Appliquer filtres
+print('Filtrage de données')
+print('')
+
+print('Tous les utilisateurs : ' + str(len(users)))
+
+active_users = filter_users(users, is_active, 0, list())
+print('Utilisateurs actifs : ' + str(len(active_users)))
+
+high_scorers = filter_users(users, is_high_score, 0, list())
+print('Scores >= 85 : ' + str(len(high_scorers)))
+
+young_users = filter_users(users, is_young, 0, list())
+print('Âge < 30 : ' + str(len(young_users)))
+
+print('')
+print('Utilisateurs actifs avec high score :')
+
+# Composition de filtres
+active_and_high = filter_users(
+    active_users,
+    is_high_score,
+    0,
+    list()
+)
+
+i = 0
+while i < len(active_and_high) {
+    u = active_and_high[i]
+    print('  - ' + u['name'] + ' (score: ' + str(u['score']) + ')')
+    i = i + 1
+}
+
+print('')
+print('Transformation avec status :')
+
+# Mapper avec ajout de status
+with_status = map_users(high_scorers, add_status, 0, list())
+
+j = 0
+while j < len(with_status) {
+    u = with_status[j]
+    print('  - ' + u['name'] + ' : ' + u['status'])
+    j = j + 1
+}
+
+# Retourner nombre de résultats finaux
+len(active_and_high)

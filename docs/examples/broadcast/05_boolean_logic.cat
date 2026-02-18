@@ -1,0 +1,87 @@
+# Exemple 04 : Logique booléenne
+# Opérations logiques vectorisées
+
+print("⇒ Opérations logiques")
+
+# Listes de booléens
+a = list(True, True, False, False)
+b = list(True, False, True, False)
+print("Liste a:", a)
+print("Liste b:", b)
+
+# ET logique
+resultat_and = a.[and b]
+print("a AND b:", resultat_and)
+
+# OU logique
+resultat_or = a.[or b]
+print("a OR b:", resultat_or)
+
+print("\n⇒ Négation\n")
+
+valeurs = list(True, False, True, True, False)
+print("Valeurs:", valeurs)
+
+# NON logique (négation)
+negation = valeurs.[not]
+print("NOT valeurs:", negation)
+
+print("\n⇒ Combinaison de comparaisons\n")
+
+# Vérifier plusieurs conditions
+ages = list(15, 22, 18, 35, 12, 45)
+print("Âges:", ages)
+
+# Majeurs (>= 18)
+majeurs = ages.[>= 18]
+print("Majeurs (>= 18):", majeurs)
+
+# Seniors (>= 65)
+seniors = ages.[>= 65]
+print("Seniors (>= 65):", seniors)
+
+# Entre 18 et 65 (adultes actifs)
+sup_18 = ages.[>= 18]
+inf_65 = ages.[< 65]
+print("Age >= 18:", sup_18)
+print("Age < 65:", inf_65)
+
+# Pour combiner : actifs = sup_18 AND inf_65
+actifs = sup_18.[and inf_65]
+print("Adultes actifs (18-64):", actifs)
+
+print("\n⇒ Opérations bitwise\n")
+
+# Opérations bit à bit (utiles pour flags)
+flags_a = list(1, 3, 5, 7)
+flags_b = list(2, 3, 6, 7)
+print("Flags A:", flags_a)
+print("Flags B:", flags_b)
+
+# ET bit à bit
+bit_and = flags_a.[& flags_b]
+print("A & B:", bit_and)
+
+# OU bit à bit
+bit_or = flags_a.[| flags_b]
+print("A | B:", bit_or)
+
+# XOR bit à bit
+bit_xor = flags_a.[^ flags_b]
+print("A ^ B:", bit_xor)
+
+print("\n⇒ Décalages de bits\n")
+
+nombres = list(1, 2, 4, 8)
+print("Nombres:", nombres)
+
+# Décalage gauche (multiplication par 2^n)
+decale_gauche = nombres.[<< 2]
+print("Décalage gauche de 2 (*4):", decale_gauche)
+
+# Décalage droit (division par 2^n)
+grands = list(16, 32, 64, 128)
+print("\nGrands nombres:", grands)
+
+decale_droit = grands.[>> 2]
+print("Décalage droit de 2 (/4):", decale_droit)

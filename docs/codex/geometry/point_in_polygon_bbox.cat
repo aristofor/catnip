@@ -1,0 +1,99 @@
+# Point-in-Polygon avec pré-filtre bounding box
+#
+# Algorithme : ray casting (Jordan curve theorem)
+# Un rayon horizontal vers +x depuis le point test.
+# Nombre d'intersections impair => intérieur.
+#
+# Optimisation : bounding box check en O(1) avant
+# le test O(n) du ray casting.
+#
+# Exécution :
+#   catnip docs/codex/geometry/point_in_polygon_bbox.cat
+#
+
+# Bounding box d'un polygone : [xmin, ymin, xmax, ymax]
+bbox = (polygon) => {
+    xmin = polygon[0][0]
+    ymin = polygon[0][1]
+    xmax = xmin
+    ymax = ymin
+    i = 1
+    while i < len(polygon) {
+        x = polygon[i][0]
+        y = polygon[i][1]
+        if x < xmin { xmin = x }
+        if x > xmax { xmax = x }
+        if y < ymin { ymin = y }
+        if y > ymax { ymax = y }
+        i = i + 1
+    }
+    list(xmin, ymin, xmax, ymax)
+}
+
+# Test rapide : point dans la bounding box ?
+in_bbox = (px, py, bb) => {
+    px >= bb[0] and px <= bb[2] and py >= bb[1] and py <= bb[3]
+}
+
+# Ray casting : rayon horizontal vers +x
+# Parcourt chaque arête (i, j) du polygone fermé.
+# Condition de croisement :
+#   - les deux sommets encadrent py en ordonnée
+#   - l'intersection du rayon avec l'arête est à droite de px
+ray_cast = (px, py, polygon) => {
+    n = len(polygon)
+    inside = False
+    j = n - 1
+    i = 0
+    while i < n {
+        xi = polygon[i][0]
+        yi = polygon[i][1]
+        xj = polygon[j][0]
+        yj = polygon[j][1]
+        if (yi > py) != (yj > py) {
+            x_inter = (xj - xi) * (py - yi) / (yj - yi) + xi
+            if px < x_inter {
+                inside = not(inside)
+            }
+        }
+        j = i
+        i = i + 1
+    }
+    inside
+}
+
+# Version combinée : bbox d'abord, ray casting si nécessaire
+point_in_polygon = (px, py, polygon, bb) => {
+    if not in_bbox(px, py, bb) {
+        False
+    } else {
+        ray_cast(px, py, polygon)
+    }
+}
+
+# --- Démo ---
+
+# Polygone en L (non convexe)
+polygon = list( list(0, 0), list(4, 0), list(4, 2), list(2, 2), list(2, 5), list(0, 5))
+
+bb = bbox(polygon)
+print("Bounding box :", bb)
+
+# Points de test
+tests = list(
+    list(1, 1), # intérieur (branche basse du L)
+    list(1, 4), # intérieur (branche haute du L)
+    list(3, 3), # extérieur (creux du L)
+    list(3, 1), # intérieur (branche basse)
+    list(5, 1), # extérieur (hors bbox)
+    list(-1, 0), # extérieur (hors bbox)
+    list(2, 0)  # sur l'arête (comportement limite)
+)
+
+i = 0
+while i < len(tests) {
+    p = tests[i]
+    r = point_in_polygon(p[0], p[1], polygon, bb)
+    print("  ", p, "=>", r)
+    i = i + 1
+}

@@ -1,0 +1,88 @@
+#!/usr/bin/env catnip
+# Validateur de configuration
+# Usage: catnip config_validator.cat
+
+# Configuration à valider (en production, charger depuis JSON/YAML)
+config = dict(
+    ('server_port', 8080),
+    ('max_connections', 100),
+    ('timeout', 30),
+    ('debug_mode', False),
+    ('log_level', 'info')
+)
+
+# État de validation
+valid = True
+errors = list()
+
+# Règle 1: Port dans intervalle valide
+port = config['server_port']
+if port < 1024 {
+    valid = False
+    errors = errors + list('Port < 1024 (privilégié)')
+}
+if port > 65535 {
+    valid = False
+    errors = errors + list('Port > 65535 (invalide)')
+}
+
+# Règle 2: Max connections raisonnable
+max_conn = config['max_connections']
+if max_conn < 10 {
+    valid = False
+    errors = errors + list('max_connections trop faible (min 10)')
+}
+if max_conn > 10000 {
+    valid = False
+    errors = errors + list('max_connections trop élevé (max 10000)')
+}
+
+# Règle 3: Timeout positif
+timeout = config['timeout']
+if timeout <= 0 {
+    valid = False
+    errors = errors + list('timeout doit être > 0')
+}
+
+# Règle 4: Log level valide
+log_level = config['log_level']
+valid_levels = list('debug', 'info', 'warning', 'error')
+level_valid = False
+i = 0
+while i < 4 {
+    if log_level == valid_levels[i] {
+        level_valid = True
+    }
+    i = i + 1
+}
+if level_valid == False {
+    valid = False
+    errors = errors + list('log_level invalide (debug/info/warning/error)')
+}
+
+# Afficher résultat
+print('Validation de configuration')
+print('')
+
+if valid {
+    print('✓ Configuration valide')
+    print('')
+    print('Paramètres :')
+    print('  - Port : ' + str(config['server_port']))
+    print('  - Max connections : ' + str(config['max_connections']))
+    print('  - Timeout : ' + str(config['timeout']) + 's')
+    print('  - Debug : ' + str(config['debug_mode']))
+    print('  - Log level : ' + config['log_level'])
+} else {
+    print('✗ Configuration invalide')
+    print('')
+    print('Erreurs :')
+    j = 0
+    while j < len(errors) {
+        print('  - ' + errors[j])
+        j = j + 1
+    }
+}
+
+# Retourner status (0 = succès, 1 = échec)
+if valid { 0 } else { 1 }

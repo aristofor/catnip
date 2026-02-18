@@ -1,0 +1,96 @@
+# Exemple 5 : Pattern Matching
+
+print("⇒ Match sur valeurs littérales")
+
+# Correspondance de codes HTTP
+code = 404
+match code {
+    200 => { print("OK - Requête réussie") }
+    404 => { print("Not Found - Page non trouvée") }
+    500 => { print("Internal Server Error") }
+    _ => { print("Code HTTP inconnu:", code) }
+}
+
+print("\n⇒ Capture de variable")
+
+# Capturer et utiliser la valeur
+nombre = 42
+match nombre {
+    0 => { print("C'est zéro") }
+    n => { print("La valeur est:", n) }
+}
+
+print("\n⇒ Guards (conditions)")
+
+# Classification d'âge
+age = 25
+match age {
+    a if a < 13 => { print("Enfant") }
+    a if a < 18 => { print("Adolescent") }
+    a if a < 65 => { print("Adulte") }
+    a => { print("Senior") }
+}
+
+# Classification de notes
+note = 85
+match note {
+    n if n >= 90 => { print("A - Excellent") }
+    n if n >= 80 => { print("B - Très bien") }
+    n if n >= 70 => { print("C - Bien") }
+    n if n >= 60 => { print("D - Passable") }
+    n => { print("F - Insuffisant") }
+}
+
+print("\n⇒ Pattern OR (alternatives)")
+
+# Jours de la semaine
+jour = 6
+match jour {
+    1 | 2 | 3 | 4 | 5 => { print("Jour de travail") }
+    6 | 7 => { print("Weekend!") }
+    _ => { print("Jour invalide") }
+}
+
+# Opérateurs mathématiques
+operateur = "+"
+match operateur {
+    "+" | "-" => { print("Opérateur additif") }
+    "*" | "/" | "%" => { print("Opérateur multiplicatif") }
+    "**" => { print("Exponentiation") }
+    op => { print("Opérateur inconnu:", op) }
+}
+
+print("\n⇒ Fonction avec pattern matching")
+
+# Fonction pour décrire un nombre
+decrire_nombre = (n) => {
+    match n {
+        0 => { "zéro" }
+        n if n < 0 => { "négatif" }
+        n if n == 1 => { "un" }
+        n if n < 10 => { "petit nombre positif" }
+        n if n < 100 => { "nombre moyen" }
+        n if n < 1000 => { "grand nombre" }
+        n => { "très grand nombre" }
+    }
+}
+
+# Tester plusieurs valeurs
+print(-5, "→", decrire_nombre(-5))
+print(0, "→", decrire_nombre(0))
+print(1, "→", decrire_nombre(1))
+print(7, "→", decrire_nombre(7))
+print(50, "→", decrire_nombre(50))
+print(500, "→", decrire_nombre(500))
+print(5000, "→", decrire_nombre(5000))
+
+print("\n⇒ FizzBuzz avec pattern matching")
+
+for i in range(1, 21) {
+    match i {
+        n if n % 15 == 0 => { print(i, ": FizzBuzz") }
+        n if n % 3 == 0 => { print(i, ": Fizz") }
+        n if n % 5 == 0 => { print(i, ": Buzz") }
+        n => { print(i, ":", n) }
+    }
+}

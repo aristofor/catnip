@@ -1,0 +1,8 @@
+# Exemple 1 : BORN TO SEGFAULT
+# Le programme le plus simple en Catnip
+
+print("BORN TO SEGFAULT")
+
+# Utiliser la variable spéciale _ pour obtenir la dernière valeur
+42
+print("La réponse est:", _)

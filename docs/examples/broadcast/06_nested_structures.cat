@@ -1,0 +1,93 @@
+# Exemple 05 : Structures imbriquées
+# Broadcasting sur des listes de listes
+
+print("⇒ Broadcasting sur listes imbriquées")
+
+# Matrice 2D (liste de listes)
+matrice = list(list(1, 2, 3), list(4, 5, 6), list(7, 8, 9))
+print("Matrice:")
+for ligne in matrice {
+    print(" ", ligne)
+}
+
+# Ajouter 10 à chaque ligne (broadcast externe)
+print("\nAjouter 10 à chaque ligne:")
+resultat = matrice.[+ 10]
+for ligne in resultat {
+    print(" ", ligne)
+}
+
+# Multiplier chaque ligne par 2
+print("\nMultiplier chaque ligne par 2:")
+resultat = matrice.[* 2]
+for ligne in resultat {
+    print(" ", ligne)
+}
+
+print("\n⇒ Broadcasting avec vecteurs\n")
+
+# Ajouter un vecteur à chaque ligne
+vecteur = list(10, 20, 30)
+print("Vecteur à ajouter:", vecteur)
+print("Matrice + vecteur:")
+resultat = matrice.[+ vecteur]
+for ligne in resultat {
+    print(" ", ligne)
+}
+
+print("\n⇒ Opérations en chaîne\n")
+
+# ((matrice * 2) + 1) / 3
+print("((matrice * 2) + 1) / 3:")
+resultat = matrice.[* 2].[+ 1].[/ 3]
+for ligne in resultat {
+    print(" ", ligne)
+}
+
+print("\n⇒ Listes de tuples/listes\n")
+
+# Coordonnées (x, y)
+points = list(list(0, 0), list(1, 2), list(3, 4), list(5, 6))
+print("Points:")
+for point in points {
+    print(" ", point)
+}
+
+# Déplacer tous les points de (10, 20)
+deplacement = list(10, 20)
+print("\nDéplacer de", deplacement, ":")
+nouveaux_points = points.[+ deplacement]
+for point in nouveaux_points {
+    print(" ", point)
+}
+
+# Doubler les coordonnées (zoom x2)
+print("\nZoom x2:")
+zoomes = points.[* 2]
+for point in zoomes {
+    print(" ", point)
+}
+
+print("\n⇒ Données tabulaires\n")
+
+# Table de données [id, valeur, quantité)
+donnees = list(
+    list(1, 100, 5),
+    list(2, 200, 3),
+    list(3, 150, 7),
+    list(4, 250, 2)
+)
+
+print("Données brutes:")
+for ligne in donnees {
+    print(" ", ligne)
+}
+
+# Appliquer une réduction de 10% sur les valeurs (colonne 1)
+# Note: en production, on utiliserait une transformation par colonne
+print("\nMultiplier toute la ligne par [1, 0.9, 1]:")
+facteurs = list(1, 0.9, 1)
+avec_reduction = donnees.[* facteurs]
+for ligne in avec_reduction {
+    print(" ", ligne)
+}

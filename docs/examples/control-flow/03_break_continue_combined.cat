@@ -1,0 +1,98 @@
+# Example combining break and continue
+
+# Search with filtering
+print("Search for first number > 50 (not a multiple of 10):")
+
+numbers = list(10, 20, 35, 40, 55, 60, 70, 80)
+found = None
+
+for num in numbers {
+    # Ignore multiples of 10
+    if num % 10 == 0 {
+        print("  Ignored:", num)
+        continue
+    }
+
+    # Find first > 50
+    if num > 50 {
+        found = num
+        print("  Found:", num)
+        break
+    }
+
+    print("  Checked:", num)
+}
+
+if found != None {
+    print("Result:", found)
+}
+
+# Counting with early break
+print("Counting with break:")
+count = 0
+sum = 0
+
+while count < 100 {
+    count = count + 1
+    sum = sum + count
+
+    # Stop if sum exceeds 1000
+    if sum > 1000 {
+        print("Sum exceeded at count =", count)
+        break
+    }
+}
+
+print("Final count:", count, "Sum:", sum)
+
+# Filtering with multiple continue
+print("Number filtering:")
+numbers = list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+result = list()
+
+for n in numbers {
+    # Ignore even numbers
+    if n % 2 == 0 {
+        continue
+    }
+
+    # Ignore multiples of 3
+    if n % 3 == 0 {
+        continue
+    }
+
+    # Keep only remaining numbers
+    result = result + list(n)
+}
+
+print("Numbers kept:", result)
+
+# Search in nested loops
+print("Search in grid:")
+grid = list(list(1, 2, 3), list(4, 5, 6), list(7, 8, 9))
+
+target = 5
+found_row = -1
+found_col = -1
+
+row_idx = 0
+for row in grid {
+    col_idx = 0
+    for val in row {
+        if val == target {
+            found_row = row_idx
+            found_col = col_idx
+            break  # Exit inner loop
+        }
+        col_idx = col_idx + 1
+    }
+
+    # If found, also exit outer loop
+    if found_row >= 0 {
+        break
+    }
+
+    row_idx = row_idx + 1
+}
+
+print("Value", target, "found at [", found_row, ",", found_col, "]")

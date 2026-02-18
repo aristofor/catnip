@@ -1,0 +1,61 @@
+# Exemple 4 : Lambdas et blocs anonymes
+
+print("⇒ Lambdas simples")
+
+# Lambda sans paramètres
+action = () => {
+    print("Lambda exécutée!")
+    42
+}
+
+valeur = action()
+print(f"Résultat de la lambda: {valeur}")
+
+# Lambda avec un paramètre
+doubler = (x) => { x * 2 }
+print("doubler(21) =", doubler(21))
+
+# Lambda avec plusieurs paramètres
+multiplier = (a, b) => { a * b }
+print("multiplier(6, 7) =", multiplier(6, 7))
+
+print("\n⇒ Lambdas avec logique")
+
+# Lambda avec calcul intermédiaire
+calculer_moyenne = (a, b, c) => {
+    somme = a + b + c
+    somme / 3
+}
+
+moyenne = calculer_moyenne(10, 20, 30)
+print(f"Moyenne de 10, 20, 30: {moyenne}")
+
+# Lambda avec condition
+valeur_absolue = (x) => {
+    match x {
+        n if n < 0 => { -n }
+        n => { n }
+    }
+}
+
+print("abs(-42) =", valeur_absolue(-42))
+print("abs(42) =", valeur_absolue(42))
+
+print("\n⇒ Utilisation avec itérations")
+
+# Appliquer une lambda à une séquence
+tripler = (x) => { x * 3 }
+
+print("Tripler les nombres de 1 à 5:")
+for n in range(1, 6) {
+    print(f"  {n} * 3 = {tripler(n)}")
+}
+
+# Lambda pour filtrer
+est_pair = (x) => { x % 2 == 0 }
+print("\nTest de parité:")
+for n in range(1, 11) {
+    if est_pair(n) {
+        print(f"  {n} est pair")
+    }
+}

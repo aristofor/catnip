@@ -1,0 +1,104 @@
+================================================================================
+Simple lambda
+================================================================================
+
+() => { 42 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (lambda_expr
+      (block (statement (integer))))))
+
+================================================================================
+Lambda with parameter
+================================================================================
+
+(x) => { x + 1 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (lambda_expr
+      (lambda_params (lambda_param name: (identifier)))
+      (block (statement (additive (identifier) (add_sub_op) (integer)))))))
+
+================================================================================
+Lambda with default parameter
+================================================================================
+
+(x, y=10) => { x + y }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (lambda_expr
+      (lambda_params
+        (lambda_param name: (identifier))
+        (lambda_param name: (identifier) default: (integer)))
+      (block (statement (additive (identifier) (add_sub_op) (identifier)))))))
+
+================================================================================
+Lambda with variadic parameter
+================================================================================
+
+(x, *rest) => { x }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (lambda_expr
+      (lambda_params
+        (lambda_param name: (identifier))
+        (variadic_param name: (identifier)))
+      (block (statement (identifier))))))
+
+================================================================================
+Named function
+================================================================================
+
+f = (x) => { x * 2 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue (unpack_target (identifier)))
+      (lambda_expr
+        (lambda_params (lambda_param name: (identifier)))
+        (block (statement (multiplicative (identifier) (mul_div_op) (integer))))))))
+
+================================================================================
+Function call
+================================================================================
+
+f(1, 2, 3)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (call
+      (identifier)
+      (arguments (args (integer) (integer) (integer))))))
+
+================================================================================
+Function call with kwargs
+================================================================================
+
+f(a=1, b=2)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (call
+      (identifier)
+      (arguments (kwargs
+        (kwarg key: (identifier) value: (integer))
+        (kwarg key: (identifier) value: (integer)))))))

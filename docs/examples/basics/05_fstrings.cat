@@ -1,0 +1,36 @@
+# F-strings : interpolation, format specs, conversion, debug
+
+# Interpolation basique
+name = "Catnip"
+version = 1
+print(f"Bienvenue dans {name} v{version}")
+
+# Format specs
+pi = 3.14159
+print(f"Pi arrondi : {pi:.2f}")
+print(f"Pi centré  : {pi:^12.4f}")
+
+n = 42
+print(f"Hex : {n:#x}")
+print(f"Bin : {n:08b}")
+print(f"Pad : {n:>10}")
+
+big = 1000000
+print(f"Lisible : {big:,}")
+
+ratio = 0.856
+print(f"Pourcent : {ratio:.1%}")
+
+# Conversion flags
+text = "hello"
+print(f"str : {text!s}")
+print(f"repr: {text!r}")
+print(f"repr+pad: {text!r:>15}")
+
+# Debug syntax
+x = 42
+y = 3.14
+print(f"{x=}")
+print(f"{y=:.1f}")
+print(f"{x + 10=}")
+print(f"{text=!r}")

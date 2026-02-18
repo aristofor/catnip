@@ -1,0 +1,28 @@
+{
+  "grammars": [
+    {
+      "name": "catnip",
+      "camelcase": "Catnip",
+      "scope": "source.catnip",
+      "path": ".",
+      "file-types": [
+        "cat",
+        "catnip"
+      ],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^catnip$"
+    }
+  ],
+  "metadata": {
+    "version": "0.0.5",
+    "license": "GPL-3.0-or-later",
+    "description": "Tree-sitter grammar for Catnip language",
+    "links": {
+      "repository": "https://framagit.org/aristofor/catnip/catnip_grammar"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "python": true
+  }
+}

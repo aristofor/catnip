@@ -1,0 +1,118 @@
+# Pattern matching avec les expressions régulières (re)
+# Le module re permet de rechercher et extraire des motifs dans du texte
+#
+# Exécuter: catnip -m re regex_patterns.cat
+
+re = import("re")
+
+# Données de test (logs simplifiés)
+
+log1 = "2024-03-15 10:23:45 INFO User alice from 192.168.1.100"
+log2 = "2024-03-15 10:24:12 ERROR Connection timeout"
+log3 = "2024-03-15 10:25:01 WARN Memory at 85%"
+log4 = "2024-03-15 10:26:33 INFO User bob from 10.0.0.42"
+log5 = "2024-03-15 10:27:55 ERROR Database deadlock"
+log_lines = list(log1, log2, log3, log4, log5)
+
+emails = list("alice@example.com", "bob@company.co.uk", "invalid", "test@sub.org")
+
+# Recherche simple
+
+print("⇒ Recherche simple (search)")
+for line in log_lines {
+    m = re.search("ERROR", line)
+    if m {
+        print("  Erreur trouvée:", line)
+    }
+}
+
+# Extraction avec groupes
+
+print("\n⇒ Extraction de dates et niveaux (groupes)")
+pattern = "(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}) (\\w+)"
+for line in log_lines {
+    m = re.search(pattern, line)
+    if m {
+        print("  Date:", m.group(1), "| Level:", m.group(3))
+    }
+}
+
+# Groupes nommés
+
+print("\n⇒ Groupes nommés")
+ip_pattern = "(?P<user>\\w+) from (?P<ip>[\\d.]+)"
+for line in log_lines {
+    m = re.search(ip_pattern, line)
+    if m {
+        print("  User:", m.group("user"), "| IP:", m.group("ip"))
+    }
+}
+
+# Validation d'emails
+
+print("\n⇒ Validation d'emails")
+email_pattern = "^[\\w.-]+@[\\w.-]+\\.\\w{2,}$"
+for email in emails {
+    if re.match(email_pattern, email) {
+        print("  [OK]", email)
+    } else {
+        print("  [KO]", email)
+    }
+}
+
+# findall: toutes les correspondances
+
+text = "Contacts: alice@a.com, bob@b.org, charlie@c.net"
+
+print("\n⇒ Extraction de tous les emails (findall)")
+found = re.findall("[\\w.-]+@[\\w.-]+\\.\\w+", text)
+for email in found {
+    print("  -", email)
+}
+
+# Substitution (sub)
+
+print("\n⇒ Anonymisation d'IPs (sub)")
+for line in log_lines {
+    anonymized = re.sub("\\d+\\.\\d+\\.\\d+\\.\\d+", "XXX.XXX.XXX.XXX", line)
+    if anonymized.find("XXX") >= 0 {
+        print("  ", anonymized)
+    }
+}
+
+# Split avec pattern
+
+data = "pomme;orange,banane;kiwi,mangue"
+
+print("\n⇒ Split avec plusieurs séparateurs")
+fruits = re.split("[;,]", data)
+for fruit in fruits {
+    print("  -", fruit)
+}
+
+# Compilation de pattern
+
+print("\n⇒ Pattern compilé (performance)")
+error_re = re.compile("ERROR\\s+(.+)$")
+for line in log_lines {
+    m = error_re.search(line)
+    if m {
+        print("  Message:", m.group(1))
+    }
+}
+
+# Flags: case insensitive
+
+print("\n⇒ Recherche insensible à la casse")
+text_mixed = "Python PYTHON python PyThOn"
+matches = re.findall("python", text_mixed, re.IGNORECASE)
+print("  Trouvés:", len(matches), "occurrences")
+
+# Extraction de structure
+
+print("\n⇒ Parsing de clé=valeur")
+config = "host=localhost port=5432 user=admin"
+pairs = re.findall("(\\w+)=(\\w+)", config)
+for pair in pairs {
+    print("  ", pair[0], "=>", pair[1])
+}

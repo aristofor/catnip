@@ -1,0 +1,104 @@
+================================================================================
+Broadcasting binary operation
+================================================================================
+
+xs.[+ 10]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+
+================================================================================
+Broadcasting comparison
+================================================================================
+
+xs.[> 0]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+
+================================================================================
+Broadcasting unary operation
+================================================================================
+
+xs.[abs]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast (broadcast_op (broadcast_unary (bcast_unary_op)))))))
+
+================================================================================
+Broadcasting with filter
+================================================================================
+
+xs.[if > 0]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast
+        (broadcast_op
+          (broadcast_if (broadcast_binary (bcast_op) (integer))))))))
+
+================================================================================
+Chained broadcasting
+================================================================================
+
+xs.[+ 1].[* 2]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer))))
+      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+
+================================================================================
+Broadcasting with lambda
+================================================================================
+
+xs.[(x) => { x * 2 }]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (broadcast
+        (broadcast_op
+          (lambda_expr
+            (lambda_params (lambda_param name: (identifier)))
+            (block (statement (multiplicative (identifier) (mul_div_op) (integer))))))))))
+
+================================================================================
+Full slice
+================================================================================
+
+xs.[1:5]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (identifier)
+      (fullslice (slice_range (integer) (integer))))))

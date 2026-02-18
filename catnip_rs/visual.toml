@@ -1,0 +1,60 @@
+# FILE: catnip_rs/visual.toml
+# Source unique pour toutes les couleurs Catnip (OKLCH).
+# Consomme par build.rs (Rust) et gen_theme.py (Python + CSS).
+#
+# Format CSS : "oklch(L C H)" ou { color = "oklch(L C H)", bold = true }
+
+[prompts]
+main = "▸ "
+continuation = "▹ "
+
+[box]
+corner_tl = "╭"
+corner_tr = "╮"
+corner_bl = "╰"
+corner_br = "╯"
+vertical  = "│"
+horizontal = "─"
+
+[ui]
+prompt  = "oklch(0.6125 0.110175 181.3166)"
+error   = "oklch(0.6504 0.1973 28.59)"
+info    = "oklch(0.6338 0.179 258.35)"
+success = "oklch(0.6206 0.2023 142)"
+dim     = "oklch(0.7047 0 0)"
+
+[accent.dark]
+keyword  = { color = "oklch(0.5979 0.1279 264)", bold = true }
+constant = { color = "oklch(0.76 0.14 230)", bold = true }
+type     = "oklch(0.75 0.10 175)"
+number   = "oklch(0.82 0.06 135)"
+string   = "oklch(0.7077 0.1677 45.53)"
+builtin  = "oklch(0.87 0.07 100)"
+
+[accent.light]
+keyword  = { color = "oklch(0.5682 0.1279 264)", bold = true }
+constant = { color = "oklch(0.52 0.14 245)", bold = true }
+type     = "oklch(0.52 0.09 210)"
+number   = "oklch(0.52 0.12 160)"
+string   = "oklch(0.66 0.1677 45.53)"
+builtin  = "oklch(0.50 0.10 70)"
+
+[base.dark]
+background  = "oklch(0.20 0.02 250)"
+foreground  = "oklch(0.87 0.01 250)"
+comment     = { color = "oklch(0.58 0.10 142)", italic = true }
+operator    = "oklch(0.87 0.01 250)"
+punctuation = "oklch(0.8739 0.01 250)"
+
+[base.light]
+background  = "oklch(0.99 0.00 0)"
+foreground  = "oklch(0.25 0.01 250)"
+comment     = { color = "oklch(0.48 0.14 142)", italic = true }
+operator    = "oklch(0.25 0.01 250)"
+punctuation = "oklch(0.40 0.01 250)"
+
+[stages]
+parse    = "oklch(0.62 0.12 230)"
+semantic = "oklch(0.65 0.14 50)"
+execute  = "oklch(0.63 0.12 142)"
+result   = "oklch(0.65 0.13 330)"

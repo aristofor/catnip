@@ -1,0 +1,85 @@
+# Syntaxes d'affectation en Catnip
+# Affectation de variables, d'attributs, et par index
+
+types = import("types")
+
+# Affectation simple
+
+print("⇒ Affectation simple")
+x = 10
+y = 20
+print("  x =", x, "| y =", y)
+
+# Affectation chaînée
+
+print("\n⇒ Affectation chaînée")
+a = b = c = 42
+print("  a =", a, "| b =", b, "| c =", c)
+
+# Unpacking
+
+print("\n⇒ Unpacking")
+(first, second) = tuple(1, 2)
+print("  first =", first, "| second =", second)
+
+head, *rest = list(1, 2, 3, 4, 5)
+print("  head =", head, "| rest =", rest)
+
+# Affectation d'attributs
+
+print("\n⇒ Affectation d'attributs")
+obj = types.SimpleNamespace()
+obj.name = "Alice"
+obj.age = 30
+print("  obj.name =", obj.name)
+print("  obj.age =", obj.age)
+
+# Chaînes d'attributs
+
+print("\n⇒ Chaînes d'attributs")
+obj.address = types.SimpleNamespace()
+obj.address.city = "Paris"
+obj.address.zip = "75001"
+print("  obj.address.city =", obj.address.city)
+
+# Affectation par index (dict)
+
+print("\n⇒ Affectation par index (dict)")
+config = dict()
+config["host"] = "localhost"
+config["port"] = 8080
+config["debug"] = True
+print("  config =", config)
+
+# Affectation par index (list)
+
+print("\n⇒ Affectation par index (list)")
+items = list(0, 0, 0, 0, 0)
+items[0] = 10
+items[2] = 30
+items[4] = 50
+print("  items =", items)
+
+# Combinaison : attribut puis index
+
+print("\n⇒ Combinaison attribut + index")
+data = types.SimpleNamespace()
+data.values = dict()
+data.values["x"] = 100
+data.values["y"] = 200
+print("  data.values =", data.values)
+
+# Modification in-place depuis une fonction
+
+print("\n⇒ Modification globale via index")
+state = dict(count=0)
+
+increment = () => {
+    state["count"] = state["count"] + 1
+}
+
+print("  Avant:", state["count"])
+increment()
+increment()
+increment()
+print("  Après 3 increments:", state["count"])

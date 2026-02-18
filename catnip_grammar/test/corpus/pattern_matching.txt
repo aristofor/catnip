@@ -1,0 +1,130 @@
+================================================================================
+Match with literal pattern
+================================================================================
+
+match x {
+  1 => { "one" }
+  2 => { "two" }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern (pattern_or (pattern_literal (integer))))
+        (block (statement (string))))
+      (match_case
+        (pattern (pattern_or (pattern_literal (integer))))
+        (block (statement (string)))))))
+
+================================================================================
+Match with variable pattern
+================================================================================
+
+match x {
+  n => { n + 1 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern (pattern_or (pattern_var (identifier))))
+        (block (statement (additive (identifier) (add_sub_op) (integer))))))))
+
+================================================================================
+Match with wildcard pattern
+================================================================================
+
+match x {
+  _ => { "default" }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern (pattern_or (pattern_wildcard)))
+        (block (statement (string)))))))
+
+================================================================================
+Match with OR pattern
+================================================================================
+
+match x {
+  1 | 2 | 3 => { "small" }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern
+          (pattern_or
+            (pattern_literal (integer))
+            (pattern_literal (integer))
+            (pattern_literal (integer))))
+        (block (statement (string)))))))
+
+================================================================================
+Match with guard
+================================================================================
+
+match x {
+  n if n > 0 => { "positive" }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern (pattern_or (pattern_var (identifier))))
+        guard: (comparison (identifier) (comp_op) (integer))
+        (block (statement (string)))))))
+
+================================================================================
+Match with tuple pattern
+================================================================================
+
+match point {
+  (0, 0) => { "origin" }
+  (x, y) => { x + y }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (match_expr
+      value: (identifier)
+      (match_case
+        (pattern
+          (pattern_or
+            (pattern_tuple
+              (pattern_items
+                (pattern_literal (integer))
+                (pattern_literal (integer))))))
+        (block (statement (string))))
+      (match_case
+        (pattern
+          (pattern_or
+            (pattern_tuple
+              (pattern_items
+                (pattern_var (identifier))
+                (pattern_var (identifier))))))
+        (block (statement (additive (identifier) (add_sub_op) (identifier))))))))

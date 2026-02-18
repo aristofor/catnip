@@ -1,0 +1,141 @@
+# Requêtage JSON avec JMESPath
+# JMESPath est un langage de requête pour JSON (utilisé par AWS CLI)
+#
+# Exécuter: catnip -m jmespath jmespath_query.cat
+
+jmespath = import("jmespath")
+
+# Données de test (réponse API d'exemple)
+
+data = dict(
+    ("users", list(
+        dict(
+            ("id", 1),
+            ("name", "Alice"),
+            ("email", "alice@example.com"),
+            ("role", "admin"),
+            ("active", True),
+            ("projects", list("alpha", "beta"))
+        ),
+        dict(
+            ("id", 2),
+            ("name", "Bob"),
+            ("email", "bob@example.com"),
+            ("role", "developer"),
+            ("active", True),
+            ("projects", list("beta", "gamma"))
+        ),
+        dict(
+            ("id", 3),
+            ("name", "Charlie"),
+            ("email", "charlie@example.com"),
+            ("role", "developer"),
+            ("active", False),
+            ("projects", list("alpha"))
+        )
+    )),
+    ("metadata", dict(
+        ("total", 3),
+        ("page", 1),
+        ("per_page", 10)
+    ))
+)
+
+# Accès simple
+
+print("⇒ Accès simple")
+print("  metadata.total:", jmespath.search("metadata.total", data))
+print("  metadata.page:", jmespath.search("metadata.page", data))
+
+# Accès aux listes
+
+print("\n⇒ Accès aux listes")
+print("  Premier user:", jmespath.search("users[0].name", data))
+print("  Dernier user:", jmespath.search("users[-1].name", data))
+
+# Projection (extraire un champ de chaque élément)
+
+print("\n⇒ Projection")
+names = jmespath.search("users[*].name", data)
+print("  Tous les noms:", names)
+
+emails = jmespath.search("users[*].email", data)
+print("  Tous les emails:", emails)
+
+# Filtrage
+
+print("\n⇒ Filtrage")
+admins = jmespath.search("users[?role=='admin'].name", data)
+print("  Admins:", admins)
+
+active = jmespath.search("users[?active==`true`].name", data)
+print("  Users actifs:", active)
+
+devs = jmespath.search("users[?role=='developer']", data)
+print("  Developers:", len(devs))
+
+# Projection multiple
+
+print("\n⇒ Projection multiple (sélection de champs)")
+subset = jmespath.search("users[*].{nom: name, mail: email}", data)
+print("  Subset:")
+for u in subset {
+    print("    ", u)
+}
+
+# Flatten (aplatir les listes)
+
+print("\n⇒ Flatten")
+all_projects = jmespath.search("users[*].projects[]", data)
+print("  Tous les projets (avec doublons):", all_projects)
+
+# Fonctions
+
+print("\n⇒ Fonctions JMESPath")
+print("  Nombre d'users:", jmespath.search("length(users)", data))
+print("  Premier nom (sort):", jmespath.search("sort(users[*].name)[0]", data))
+print("  Dernier nom (sort):", jmespath.search("sort(users[*].name)[-1]", data))
+
+# Conditions complexes
+
+print("\n⇒ Conditions complexes")
+beta_users = jmespath.search("users[?contains(projects, 'beta')].name", data)
+print("  Users sur projet beta:", beta_users)
+
+# Exemple: réponse API paginée
+
+api_response = dict(
+    items=list(
+        dict(sku="A001", price=29.99, stock=100),
+        dict(sku="A002", price=49.99, stock=0),
+        dict(sku="B001", price=19.99, stock=50),
+        dict(sku="B002", price=99.99, stock=25)
+    ),
+    pagination=dict(
+        next="/api/items?page=2",
+        total_pages=5
+    )
+)
+
+print("\n⇒ Exemple API e-commerce")
+in_stock = jmespath.search("items[?stock > `0`].sku", api_response)
+print("  SKUs en stock:", in_stock)
+
+expensive = jmespath.search("items[?price > `50`].{sku: sku, prix: price}", api_response)
+print("  Produits > 50€:", expensive)
+
+# Max/min avec sort
+
+print("\n⇒ Min/Max")
+cheapest = jmespath.search("sort_by(items, &price)[0]", api_response)
+print("  Moins cher:", cheapest["sku"], "-", cheapest["price"], "€")
+
+most_expensive = jmespath.search("sort_by(items, &price)[-1]", api_response)
+print("  Plus cher:", most_expensive["sku"], "-", most_expensive["price"], "€")
+
+# Compilation pour performance
+
+print("\n⇒ Expression compilée")
+expr = jmespath.compile("users[?active].name")
+result = expr.search(data)
+print("  Résultat:", result)

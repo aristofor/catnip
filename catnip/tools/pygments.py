@@ -1,0 +1,177 @@
+# FILE: catnip/tools/pygments.py
+"""Pygments lexer for the Catnip programming language.
+
+Auto-generated from Tree-sitter grammar - DO NOT EDIT MANUALLY.
+Run `python -m catnip.tools.extract_grammar --update-lexer` to regenerate.
+"""
+
+from pygments.lexer import RegexLexer, bygroups, words
+from pygments.token import (
+    Comment,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    Punctuation,
+    String,
+    Text,
+    Whitespace,
+)
+
+__all__ = ['CatnipLexer']
+
+
+class CatnipLexer(RegexLexer):
+    """Lexer for the Catnip programming language.
+
+    Catnip is a Python-inspired functional language with support for:
+    - Lambda expressions: (params) => { body }
+    - Broadcasting operations: .[op]
+    - Match expressions: match expr { cases }
+    - F-strings and built-in collection types
+    """
+
+    name = 'Catnip'
+    aliases = ['catnip']
+    filenames = ['*.cat', '*.catnip']
+    mimetypes = ['text/x-catnip']
+
+    tokens = {
+        'root': [
+            # Comments
+            (r'#.*?$', Comment.Single),
+            # Whitespace
+            (r'\s+', Whitespace),
+            # Keywords
+            (
+                words(
+                    (
+                        'abs',
+                        'and',
+                        'break',
+                        'continue',
+                        'elif',
+                        'else',
+                        'extends',
+                        'for',
+                        'if',
+                        'implements',
+                        'in',
+                        'match',
+                        'not',
+                        'or',
+                        'return',
+                        'struct',
+                        'trait',
+                        'while',
+                        'pragma',
+                    ),
+                    suffix=r'\b',
+                ),
+                Keyword,
+            ),
+            # Constants
+            (words(('False', 'None', 'True'), suffix=r'\b'), Keyword.Constant),
+            # Built-in types
+            (words(('dict', 'list', 'set', 'tuple'), suffix=r'\b'), Keyword.Type),
+            # F-strings
+            (
+                r'[fF]("""(?:[^"\\]|\\.)*?"""' r"|'''(?:[^'\\]|\\.)*?'''" r'|"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*')",
+                String,
+            ),
+            # Regular strings
+            (r'"""(?:[^"\\]|\\.)*?"""', String),
+            (r"'''(?:[^'\\]|\\.)*?'''", String),
+            (r'"(?:[^"\\]|\\.)*"', String),
+            (r"'(?:[^'\\]|\\.)*'", String),
+            # Numbers (binary, octal, hex, decimal, float)
+            (r'0[bB][01]+', Number.Bin),
+            (r'0[oO][0-7]+', Number.Oct),
+            (r'0[xX][0-9a-fA-F]+', Number.Hex),
+            (r'\d+\.\d+([eE][+-]?\d+)?', Number.Float),
+            (r'\d+[eE][+-]?\d+', Number.Float),
+            (r'\d+', Number.Integer),
+            # Lambda arrow
+            (r'=>', Operator),
+            # Broadcast operations
+            (r'\.\[', Punctuation, 'broadcast'),
+            # Operators (sorted by length for correct matching)
+            (r'(@\[\]|@@|@>|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            # Punctuation
+            (r'[{}()\[\],:;.]', Punctuation),
+            # Identifiers (excluding keywords)
+            (
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|list|match|not|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'[a-zA-Z_]\w*',
+                Name,
+            ),
+        ],
+        # Broadcast context: .[expression]
+        # Broadcasts can contain any Catnip expression
+        'broadcast': [
+            (r'\s+', Whitespace),
+            # Close bracket exits broadcast mode (check first)
+            (r'\]', Punctuation, '#pop'),
+            # Comments
+            (r'#.*?$', Comment.Single),
+            # Keywords (including broadcast-specific 'if')
+            (
+                words(
+                    (
+                        'abs',
+                        'and',
+                        'break',
+                        'continue',
+                        'elif',
+                        'else',
+                        'extends',
+                        'for',
+                        'if',
+                        'implements',
+                        'in',
+                        'match',
+                        'not',
+                        'or',
+                        'return',
+                        'struct',
+                        'trait',
+                        'while',
+                        'pragma',
+                    ),
+                    suffix=r'\b',
+                ),
+                Keyword,
+            ),
+            # Constants
+            (words(('False', 'None', 'True'), suffix=r'\b'), Keyword.Constant),
+            (words(('dict', 'list', 'set', 'tuple'), suffix=r'\b'), Keyword.Type),
+            # Strings (F-strings and regular)
+            (
+                r'[fF]("""(?:[^"\\]|\\.)*?"""' r"|'''(?:[^'\\]|\\.)*?'''" r'|"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*')",
+                String,
+            ),
+            (r'"""(?:[^"\\]|\\.)*?"""', String),
+            (r"'''(?:[^'\\]|\\.)*?'''", String),
+            (r'"(?:[^"\\]|\\.)*"', String),
+            (r"'(?:[^'\\]|\\.)*'", String),
+            # Numbers
+            (r'0[bB][01]+', Number.Bin),
+            (r'0[oO][0-7]+', Number.Oct),
+            (r'0[xX][0-9a-fA-F]+', Number.Hex),
+            (r'\d+\.\d+([eE][+-]?\d+)?', Number.Float),
+            (r'\d+[eE][+-]?\d+', Number.Float),
+            (r'\d+', Number.Integer),
+            # Lambda arrow
+            (r'=>', Operator),
+            # Operators
+            (r'(@\[\]|@@|@>|>>|>=|=>|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            # Punctuation (including nested brackets and braces)
+            (r'[{}()\[\],:;.]', Punctuation),
+            # Identifiers
+            (
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|list|match|not|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'[a-zA-Z_]\w*',
+                Name,
+            ),
+        ],
+    }

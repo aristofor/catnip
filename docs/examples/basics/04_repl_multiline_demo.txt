@@ -1,0 +1,59 @@
+# Démonstration de la REPL multi-lignes
+# Copier-coller ces exemples dans la REPL Catnip
+
+# Exemple 1: Fonction avec if/else sur plusieurs lignes
+factorial = (n) => {
+    if n <= 1 { 1 }
+    else { n * factorial(n - 1) }
+}
+factorial(5)
+
+# Exemple 2: Fonction avec elif
+classify = (n) => {
+    if n < 0 { "negative" }
+    elif n == 0 { "zero" }
+    elif n < 10 { "small" }
+    else { "large" }
+}
+classify(7)
+
+# Exemple 3: Boucle for avec pattern matching
+for n in range(1, 16) {
+    match n {
+        n if n % 15 == 0 => { print("FizzBuzz") }
+        n if n % 3 == 0 => { print("Fizz") }
+        n if n % 5 == 0 => { print("Buzz") }
+        n => { print(n) }
+    }
+}
+
+# Exemple 4: Continuation explicite avec backslash
+x = 10 + \
+    20 + \
+    30
+x
+
+# Exemple 5: Liste avec arguments multiples lignes
+data = list(
+    1,
+    2,
+    3,
+    4,
+    5
+)
+data
+
+# Exemple 6: Fonction avec blocs imbriqués
+process = (items) => {
+    result = list()
+    for item in items {
+        if item > 0 {
+            result.append(item * 2)
+        }
+        else {
+            result.append(0)
+        }
+    }
+    result
+}
+process(list(-1, 2, -3, 4))

@@ -1,0 +1,14 @@
+[package]
+name = "catnip_grammar"
+version.workspace = true
+edition.workspace = true
+description = "Tree-sitter grammar for Catnip language"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+tree-sitter = { workspace = true }
+
+[build-dependencies]
+cc = "1.2"

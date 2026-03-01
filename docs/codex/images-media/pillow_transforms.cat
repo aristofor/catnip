@@ -1,0 +1,213 @@
+# Manipulation d'images avec Pillow (PIL)
+#
+# Pillow : lecture, transformations, filtres, conversion de formats
+#
+# Installation :
+#   uv pip install pillow
+#
+# Exécution :
+#   catnip docs/codex/images-media/pillow_transforms.cat
+#
+
+# Charger les sous-modules PIL nécessaires
+Image = import("PIL.Image")
+ImageFilter = import("PIL.ImageFilter")
+ImageDraw = import("PIL.ImageDraw")
+ImageStat = import("PIL.ImageStat")
+
+# Chargement et informations
+
+print("⇒ Chargement d'image")
+
+# Note : Cet exemple suppose l'existence d'un fichier catnip_test.jpg
+
+# Créer une image de test programmatiquement
+# test_image = Image.new("RGB", tuple(400, 300), tuple(70, 130, 180))
+# test_image.save("catnip_test.jpg")
+# print("Image de test créée : catnip_test.jpg")
+
+# Charger l'image
+img = Image.open("docs/assets/catnip_test.jpg")
+
+# Informations de base
+info = dict(
+    format=img.format,
+    size=img.size,
+    mode=img.mode,
+    width=img.width,
+    height=img.height
+)
+
+print("Info image :", info)
+
+# Transformations géométriques
+
+print("\n⇒ Transformations géométriques")
+
+# Resize (redimensionnement)
+resized = img.resize(tuple(200, 150))
+resized.save("catnip_resized.jpg")
+print("Redimensionné à 200x150 → catnip_resized.jpg")
+
+# Thumbnail (préserve le ratio)
+thumb = img.copy()
+thumb.thumbnail(tuple(100, 100))
+thumb.save("catnip_thumb.jpg")
+print("Thumbnail 100x100 → catnip_thumb.jpg")
+
+# Rotation
+rotated = img.rotate(45)
+rotated.save("catnip_rotated.jpg")
+print("Rotation 45° → catnip_rotated.jpg")
+
+# Crop (découpe)
+# Image de 400x300, on prend le centre 200x200
+left = (img.width - 200) / 2
+top = (img.height - 200) / 2
+right = left + 200
+bottom = top + 200
+cropped = img.crop(tuple(left, top, right, bottom))
+cropped.save("catnip_cropped.jpg")
+print("Crop central 200x200 → catnip_cropped.jpg")
+
+# Flip (miroir)
+flipped_h = img.transpose(Image.FLIP_LEFT_RIGHT)
+flipped_h.save("catnip_flip_h.jpg")
+print("Flip horizontal → catnip_flip_h.jpg")
+
+flipped_v = img.transpose(Image.FLIP_TOP_BOTTOM)
+flipped_v.save("catnip_flip_v.jpg")
+print("Flip vertical → catnip_flip_v.jpg")
+
+# Filtres et effets
+
+print("\n⇒ Filtres et effets")
+
+# Blur (flou)
+blurred = img.filter(ImageFilter.BLUR)
+blurred.save("catnip_blur.jpg")
+print("Blur → catnip_blur.jpg")
+
+# Sharpen (netteté)
+sharpened = img.filter(ImageFilter.SHARPEN)
+sharpened.save("catnip_sharpen.jpg")
+print("Sharpen → catnip_sharpen.jpg")
+
+# Contour
+contour = img.filter(ImageFilter.CONTOUR)
+contour.save("catnip_contour.jpg")
+print("Contour → catnip_contour.jpg")
+
+# Edge enhance (accentuation des bords)
+edges = img.filter(ImageFilter.EDGE_ENHANCE)
+edges.save("catnip_edges.jpg")
+print("Edge enhance → catnip_edges.jpg")
+
+# Conversions de mode et format
+
+print("\n⇒ Conversions")
+
+# RGB → Grayscale (niveaux de gris)
+gray = img.convert("L")
+gray.save("catnip_gray.jpg")
+print("Grayscale → catnip_gray.jpg")
+
+# RGB → PNG avec transparence
+rgba = img.convert("RGBA")
+rgba.save("catnip_rgba.png")
+print("RGBA PNG → catnip_rgba.png")
+
+# Conversion de format
+img.save("catnip_converted.png")
+print("Converti en PNG → catnip_converted.png")
+
+# Manipulation de pixels
+
+print("\n⇒ Manipulation de pixels")
+
+# Créer une nouvelle image pour manipulation
+canvas = Image.new("RGB", tuple(100, 100), tuple(255, 255, 255))
+
+# Accès aux pixels via putpixel
+x = 0
+while x < 100 {
+    y = 0
+    while y < 100 {
+        # Gradient rouge-bleu
+        r = int((x * 255) / 100)
+        b = int((y * 255) / 100)
+        canvas.putpixel(tuple(x, y), tuple(r, 0, b))
+        y = y + 1
+    }
+    x = x + 1
+}
+
+canvas.save("catnip_gradient.png")
+print("Gradient généré → catnip_gradient.png")
+
+# Ajout de texte
+
+print("\n⇒ Ajout de texte")
+
+# Copier l'image originale
+text_img = img.copy()
+draw = ImageDraw.Draw(text_img)
+
+# Dessiner du texte (police par défaut)
+draw.text(tuple(10, 10), "Catnip + Pillow", tuple(255, 255, 255))
+
+# Dessiner des formes
+draw.rectangle(list(tuple(50, 50), tuple(150, 100)), "red", "yellow")
+draw.ellipse(list(tuple(200, 50), tuple(300, 150)), "blue", "cyan")
+
+text_img.save("catnip_annotated.jpg")
+print("Image annotée → catnip_annotated.jpg")
+
+# Traitement par lot (batch processing)
+
+print("\n⇒ Traitement par lot")
+
+# Simuler un batch de fichiers
+batch_sizes = list(tuple(100, 100), tuple(200, 150), tuple(300, 200))
+
+# Générer des thumbnails avec une boucle
+thumbnails = list()
+for size in batch_sizes {
+    thumb = img.copy()
+    thumb.thumbnail(size)
+    filename = "catnip_batch_" + str(size) + ".jpg"
+    thumb.save(filename)
+    info = dict(size=size, file=filename)
+    thumbnails.append(info)
+}
+
+print("Batch généré :")
+for info in thumbnails {
+    print("  -", info)
+}
+
+# Statistiques et analyse
+
+print("\n⇒ Analyse d'image")
+
+# Statistiques de l'image
+stats = ImageStat.Stat(img)
+
+# Afficher les statistiques directement
+print("Moyenne par canal (RGB) :", stats.mean)
+print("Médiane par canal (RGB) :", stats.median)
+print("Écart-type par canal (RGB) :", stats.stddev)
+print("Min/max par canal (RGB) :", stats.extrema)
+
+# Nettoyage
+
+print("\n⇒ Résumé")
+print("Images générées dans le répertoire courant :")
+print("  - Transformations : resized, rotated, cropped, flipped")
+print("  - Filtres : blur, sharpen, contour, edges")
+print("  - Conversions : grayscale, RGBA, PNG")
+print("  - Effets : gradient, annotations")
+print("  - Batch : thumbnails multiples")
+
+# Note : En production, utiliser pathlib pour gérer les chemins
+# et gérer les erreurs (fichier inexistant, format non supporté, etc.)

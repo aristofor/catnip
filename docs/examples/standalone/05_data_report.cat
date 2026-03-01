@@ -1,0 +1,82 @@
+#!/usr/bin/env catnip
+# Générateur de rapport de données
+# Usage: catnip data_report.cat
+
+# Données de ventes (en production, charger depuis DB/CSV)
+sales = list(
+    dict(product='Laptop', quantity=5, price=1000),
+    dict(product='Mouse', quantity=50, price=20),
+    dict(product='Keyboard', quantity=30, price=80),
+    dict(product='Monitor', quantity=10, price=300)
+)
+
+# Calculer métriques
+total_products = len(sales)
+total_revenue = 0
+total_items = 0
+
+i = 0
+while i < total_products {
+    item = sales[i]
+    revenue = item['quantity'] * item['price']
+    total_revenue = total_revenue + revenue
+    total_items = total_items + item['quantity']
+    i = i + 1
+}
+
+avg_price = total_revenue / total_items
+
+# Trouver best seller (par revenue)
+best_seller = sales[0]
+best_revenue = best_seller['quantity'] * best_seller['price']
+
+j = 1
+while j < total_products {
+    item = sales[j]
+    revenue = item['quantity'] * item['price']
+    if revenue > best_revenue {
+        best_seller = item
+        best_revenue = revenue
+    }
+    j = j + 1
+}
+
+# Générer rapport
+print("═══════════════════════════════")
+print("   RAPPORT DE VENTES")
+print("═══════════════════════════════")
+print("")
+print("Résumé")
+print("------")
+print("Total produits : " + str(total_products))
+print("Total articles vendus : " + str(total_items))
+print("Revenu total : $" + str(total_revenue))
+print("Prix moyen : $" + str(avg_price))
+print("")
+print("Top produit")
+print("-----------")
+print("Produit : " + best_seller['product'])
+print("Quantité : " + str(best_seller['quantity']))
+print("Prix unitaire : $" + str(best_seller['price']))
+print("Revenu : $" + str(best_revenue))
+print("")
+print("Détails par produit")
+print("-------------------")
+
+k = 0
+while k < total_products {
+    item = sales[k]
+    revenue = item['quantity'] * item['price']
+    print("")
+    print(item['product'] + " :")
+    print("  Quantité : " + str(item['quantity']))
+    print("  Prix : $" + str(item['price']))
+    print("  Revenu : $" + str(revenue))
+    k = k + 1
+}
+
+print("")
+print("═══════════════════════════════")
+
+# Retourner revenu total
+total_revenue

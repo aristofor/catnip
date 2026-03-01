@@ -1,0 +1,261 @@
+# Exemple 12 : Structures
+
+print("⇒ Declaration et instanciation")
+
+struct Point { x, y }
+
+p1 = Point(10, 20)
+p2 = Point(x=5, y=15)
+
+print("p1 =", p1)
+print("p2 =", p2)
+print("p1.x =", p1.x)
+print("p2.y =", p2.y)
+
+print("\n⇒ Egalite structurelle")
+
+a = Point(1, 2)
+b = Point(1, 2)
+c = Point(3, 4)
+
+print("a == b:", a == b)
+print("a == c:", a == c)
+
+print("\n⇒ Mutation de champs")
+
+struct Color { r, g, b }
+
+c = Color(255, 0, 0)
+c.g = 128
+c.b = 64
+print("apres mutation:", c)
+
+print("\n⇒ Structures imbriquees")
+
+struct Vector2D { x, y }
+struct Particle { position, velocity, mass }
+
+v = Vector2D(10, 20)
+p = Particle(
+    Vector2D(0, 0),
+    Vector2D(5, 10),
+    1.5
+)
+
+print("position:", p.position)
+print("velocity.x:", p.velocity.x)
+print("mass:", p.mass)
+
+print("\n⇒ Structures dans des collections")
+
+points = list(Point(1, 2), Point(3, 4), Point(5, 6))
+
+for pt in points {
+    print("point:", pt.x, pt.y)
+}
+
+print("\n⇒ Structures avec valeurs complexes")
+
+struct Container { data, metadata }
+
+c = Container(
+    list(1, 2, 3),
+    dict(name="test", version=1)
+)
+
+print("data:", c.data)
+print("name:", c.metadata["name"])
+
+print("\n⇒ Methodes inline")
+
+struct Vec2 {
+    x, y
+
+    norm2(self) => {
+        self.x ** 2 + self.y ** 2
+    }
+}
+
+v = Vec2(3, 4)
+print("v.norm2() =", v.norm2())
+
+print("\n⇒ Capture lexicale dans une methode")
+
+factory = () => {
+    offset = 10
+    struct ShiftedPoint {
+        x
+        shifted(self) => { self.x + offset }
+    }
+    ShiftedPoint
+}
+
+ShiftedPoint = factory()
+print("ShiftedPoint(5).shifted() =", ShiftedPoint(5).shifted())
+
+print("\n⇒ Pattern matching de struct")
+
+struct Pixel { r, g, b }
+
+describe = (px) => {
+    match px {
+        Pixel{r, g, b} if r == g and g == b => { "grayscale" }
+        Pixel{r, g, b} => { "rgb" }
+        _ => { "unknown" }
+    }
+}
+
+print("describe(Pixel(10, 10, 10)) =", describe(Pixel(10, 10, 10)))
+print("describe(Pixel(255, 0, 128)) =", describe(Pixel(255, 0, 128)))
+
+print("\n⇒ Heritage simple avec extends")
+
+struct BaseVec {
+    x, y
+
+    sum(self) => { self.x + self.y }
+}
+
+struct ExtendedVec extends(BaseVec) {
+    z
+
+    product(self) => { self.x * self.y * self.z }
+}
+
+ev = ExtendedVec(1, 2, 3)
+print("ev.sum() =", ev.sum())
+print("ev.product() =", ev.product())
+print("ev.x =", ev.x)
+print("ev.z =", ev.z)
+
+print("\n⇒ Heritage avec override de methode")
+
+struct Base {
+    x
+    value(self) => { self.x }
+}
+
+struct Child extends(Base) {
+    value(self) => { self.x * 10 }
+}
+
+print("Base(5).value() =", Base(5).value())
+print("Child(5).value() =", Child(5).value())
+
+print("\n⇒ Heritage avec valeurs par defaut")
+
+struct Config {
+    host, port = 8080
+}
+
+struct SecureConfig extends(Config) {
+    ssl = True
+}
+
+sc = SecureConfig("localhost")
+print("sc.host =", sc.host)
+print("sc.port =", sc.port)
+print("sc.ssl =", sc.ssl)
+print("representation:", sc)
+
+print("\n⇒ Constructeur init")
+
+struct Counter {
+    x
+    init(self) => { self.x = self.x + 1 }
+}
+
+print("Counter(10).x =", Counter(10).x)
+
+struct Validated {
+    x
+    init(self) => { self.x = self.x * 2; 999 }
+}
+
+print("Validated(5).x =", Validated(5).x)
+
+print("\n⇒ Acces au parent avec super")
+
+struct Animal {
+    name
+    speak(self) => { self.name + " ..." }
+}
+
+struct Dog extends(Animal) {
+    speak(self) => { super.speak() + " woof!" }
+}
+
+struct Puppy extends(Dog) {
+    speak(self) => { super.speak() + " *tail wag*" }
+}
+
+print("Dog('Rex').speak() =", Dog("Rex").speak())
+print("Puppy('Max').speak() =", Puppy("Max").speak())
+
+print("\n⇒ super.init()")
+
+struct Logger {
+    tag
+    init(self) => { self.tag = "[" + self.tag + "]" }
+}
+
+struct ErrorLogger extends(Logger) {
+    init(self) => {
+        super.init()
+        self.tag = self.tag + " ERROR"
+    }
+}
+
+print("ErrorLogger('app').tag =", ErrorLogger("app").tag)
+
+print("\n⇒ Extends + Implements")
+
+trait Serializable { serialize(self) => { "json" } }
+
+struct DataVec extends(BaseVec) implements(Serializable) {
+    label
+}
+
+dv = DataVec(1, 2, "origin")
+print("dv.sum() =", dv.sum())
+print("dv.serialize() =", dv.serialize())
+print("dv.label =", dv.label)
+
+print("\n⇒ Abstract methods")
+
+struct Shape {
+    @abstract area(self)
+    @abstract perimeter(self)
+    describe(self) => { f"area={self.area()}, perimeter={self.perimeter()}" }
+}
+
+# Shape() would fail: cannot instantiate abstract struct
+
+struct Circle extends(Shape) {
+    radius
+    area(self) => { 3.14159 * self.radius ** 2 }
+    perimeter(self) => { 2 * 3.14159 * self.radius }
+}
+
+c = Circle(5)
+print("Circle(5).area() =", c.area())
+print("Circle(5).describe() =", c.describe())
+
+print("\n⇒ Static methods")
+
+struct Config {
+    host, port
+
+    @static
+    default() => { Config("localhost", 8080) }
+
+    @static
+    from_port(p) => { Config("0.0.0.0", p) }
+}
+
+print("Config.default() =", Config.default())
+print("Config.from_port(3000) =", Config.from_port(3000))
+
+# callable on instances too
+c = Config("example.com", 443)
+print("c.default() =", c.default())

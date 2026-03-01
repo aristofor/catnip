@@ -1,0 +1,135 @@
+# check: no-check
+# Exemple 07 : Cas d'usage illustratifs
+# Applications illustratives du broadcasting
+
+print("⇒ Analyse de données de ventes")
+
+# Données de ventes [quantité, prix_unitaire)
+ventes = list(
+    list(10, 25.0),
+    list(5, 30.0),
+    list(15, 20.0),
+    list(8, 35.0),
+    list(12, 28.0)
+)
+
+print("Ventes [quantité, prix]:")
+for vente in ventes {
+    print(" ", vente)
+}
+
+# Calculer le total par ligne: quantité * prix
+# Note: ici on multiplie élément par élément dans chaque sous-liste
+print("\nCalcul des totaux (quantité * prix):")
+i = 0
+totaux = list()
+for vente in ventes {
+    quantite = vente[0]
+    prix = vente[1]
+    total = quantite * prix
+    totaux = totaux + list(total)
+    print("  Vente", i + 1, ":", quantite, "×", prix, "=", total)
+    i = i + 1
+}
+
+print("\nTotaux:", totaux)
+total_general = sum(totaux)
+print("Total général:", total_general)
+
+print("\n⇒ Conversion de températures\n")
+
+# Celsius vers Fahrenheit: F = C * 9/5 + 32
+celsius = list(0, 10, 20, 25, 30, 37, 100)
+print("Températures en Celsius:", celsius)
+
+# F = C * 1.8 + 32
+etape1 = celsius.[* 1.8]
+fahrenheit = etape1.[+ 32]
+print("Températures en Fahrenheit:", fahrenheit)
+
+print("\n⇒ Calcul de statistiques\n")
+
+# Données brutes
+valeurs = list(12, 15, 18, 22, 25, 28, 30, 15, 20)
+print("Valeurs:", valeurs)
+
+# Moyenne
+moyenne = sum(valeurs) / len(valeurs)
+print("Moyenne:", moyenne)
+
+# Écart à la moyenne
+ecarts = valeurs.[- moyenne]
+print("Écarts à la moyenne:", ecarts)
+
+# Écarts au carré (pour variance)
+ecarts_carres = ecarts.[** 2]
+print("Écarts au carré:", ecarts_carres)
+
+# Variance
+variance = sum(ecarts_carres) / len(ecarts_carres)
+print("Variance:", variance)
+
+# Écart-type
+ecart_type = variance ** 0.5
+print("Écart-type:", ecart_type)
+
+print("\n⇒ Normalisation de scores\n")
+
+# Scores bruts d'étudiants
+scores = list(45, 78, 92, 65, 88, 72, 55, 95)
+print("Scores bruts:", scores)
+
+# Normaliser sur 100 (si max n'est pas 100)
+max_score = max(scores)
+print("Score maximum:", max_score)
+
+# Ramener sur 100
+normalises = scores.[* (100 / max_score)]
+print("Scores normalisés sur 100:", normalises)
+
+# Arrondir à 1 décimale
+# Note: en production, on utiliserait une fonction round vectorisée
+print("\nScores arrondis:")
+for score in normalises {
+    print(" ", round(score, 1))
+}
+
+print("\n⇒ Calcul de remises progressives\n")
+
+# Prix de base
+prix = list(50, 100, 150, 200, 250)
+print("Prix de base:", prix)
+
+# Remise de 10%
+remise_10 = prix.[* 0.9]
+print("Avec remise 10%:", remise_10)
+
+# Remise de 20%
+remise_20 = prix.[* 0.8]
+print("Avec remise 20%:", remise_20)
+
+# Remise de 30%
+remise_30 = prix.[* 0.7]
+print("Avec remise 30%:", remise_30)
+
+print("\n⇒ Simulation de croissance\n")
+
+# Capital initial
+capital = 1000
+print("Capital initial:", capital)
+
+# Taux de croissance annuel: 5%
+taux = 1.05
+annees = list(1, 2, 3, 4, 5, 10, 20)
+print("Années:", annees)
+
+# Capital après n années: capital * taux^n
+puissances = annees.[(n) => { taux ** n }]
+capitaux = puissances.[* capital]
+
+print("\nÉvolution du capital:")
+for i in range(len(annees)) {
+    annee = annees[i]
+    cap = capitaux[i]
+    print("  Année", annee, ":", round(cap, 2), "€")
+}

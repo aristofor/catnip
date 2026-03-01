@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+build/
+dist/
+*.egg-info/
+target/
+*.so
+test_cache_file.txt
+.venv/
+*.log
+.DS_Store
+# Coq artifacts
+proof/Makefile
+proof/Makefile.conf
+proof/.Makefile.d
+proof/Makefile.coq
+proof/Makefile.coq.conf
+proof/.Makefile.coq.d
+proof/**/*.vo
+proof/**/*.vok
+proof/**/*.vos
+proof/**/*.glob
+proof/**/*.cache
+proof/**/.*.aux

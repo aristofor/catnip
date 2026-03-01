@@ -1,0 +1,112 @@
+# Quickhull 2D
+#
+# Entrée : liste de points [x, y]
+# Sortie : enveloppe convexe dans le sens anti-horaire
+# Complexité : O(n log n) moyen, O(n²) pire cas (points sur un cercle)
+#
+# Divide & conquer analogue à quicksort : on partitionne les points
+# par rapport à la droite formée par les extrêmes, puis on récurse
+# sur chaque côté en cherchant le point le plus éloigné.
+#
+# Ref : https://en.wikipedia.org/wiki/Quickhull
+# Voir aussi : convex_hull.cat (scan de Graham, O(n log n) garanti)
+
+# Produit vectoriel orienté (OA x OB)
+# Positif si B est à gauche de la droite OA
+cross = (o, a, b) => {
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+}
+
+# Filtre les points strictement à gauche de la droite AB
+left_of = (points, a, b) => {
+    result = list()
+    i = 0
+    while i < len(points) {
+        if cross(a, b, points[i]) > 0 {
+            result = result + list(points[i])
+        }
+        i = i + 1
+    }
+    result
+}
+
+# Point le plus éloigné de la droite AB
+# (le cross product est proportionnel à la distance signée)
+farthest = (points, a, b) => {
+    best = points[0]
+    best_d = cross(a, b, points[0])
+    i = 1
+    while i < len(points) {
+        d = cross(a, b, points[i])
+        if d > best_d {
+            best_d = d
+            best = points[i]
+        }
+        i = i + 1
+    }
+    best
+}
+
+# Récursion : hull des points à gauche de AB
+# Trouve le point C le plus éloigné de AB, puis récurse sur AC et CB.
+# Les points à l'intérieur du triangle ABC sont éliminés par left_of.
+hull_rec = (points, a, b) => {
+    if len(points) == 0 {
+        list()
+    } else {
+        c = farthest(points, a, b)
+        left_ac = left_of(points, a, c)
+        left_cb = left_of(points, c, b)
+        hull_rec(left_ac, a, c) + list(c) + hull_rec(left_cb, c, b)
+    }
+}
+
+quickhull = (points) => {
+    if len(points) <= 1 {
+        points
+    } else {
+        # Extrêmes : x min et x max (y pour départager)
+        min_p = points[0]
+        max_p = points[0]
+        i = 1
+        while i < len(points) {
+            p = points[i]
+            if p[0] < min_p[0] or (p[0] == min_p[0] and p[1] < min_p[1]) {
+                min_p = p
+            }
+            if p[0] > max_p[0] or (p[0] == max_p[0] and p[1] > max_p[1]) {
+                max_p = p
+            }
+            i = i + 1
+        }
+
+        # Partition : points au-dessus et en-dessous de la droite min→max
+        upper = left_of(points, min_p, max_p)
+        lower = left_of(points, max_p, min_p)
+
+        # Assemblage CCW : min → upper hull → max → lower hull
+        list(min_p) + hull_rec(upper, min_p, max_p) + list(max_p) + hull_rec(lower, max_p, min_p)
+    }
+}
+
+# Démo (même jeu de points que convex_hull.cat)
+points = list(
+    list(0, 0),
+    list(1, 1),
+    list(2, 2),
+    list(2, 0),
+    list(2, 4),
+    list(3, 3),
+    list(4, 2),
+    list(0, 3),
+    list(1, 2),
+    list(2, 2),  # doublon
+    list(4, 2),  # doublon
+)
+
+hull = quickhull(points)
+
+print("⇒ Quickhull 2D")
+print("Points d'entrée :", len(points))
+print("Hull (CCW) :", hull)
+print("Taille hull :", len(hull))

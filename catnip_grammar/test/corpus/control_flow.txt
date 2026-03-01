@@ -1,0 +1,96 @@
+================================================================================
+Simple if
+================================================================================
+
+if x > 0 { y }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (if_expr
+      condition: (comparison (identifier) (comp_op) (integer))
+      consequence: (block (statement (identifier))))))
+
+================================================================================
+If-else
+================================================================================
+
+if x > 0 { 1 } else { 0 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (if_expr
+      condition: (comparison (identifier) (comp_op) (integer))
+      consequence: (block (statement (integer)))
+      (else_clause body: (block (statement (integer)))))))
+
+================================================================================
+If-elif-else
+================================================================================
+
+if x > 0 { 1 } elif x < 0 { -1 } else { 0 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (if_expr
+      condition: (comparison (identifier) (comp_op) (integer))
+      consequence: (block (statement (integer)))
+      (elif_clause
+        condition: (comparison (identifier) (comp_op) (integer))
+        consequence: (block (statement (unary (unary_op) (integer)))))
+      (else_clause body: (block (statement (integer)))))))
+
+================================================================================
+While loop
+================================================================================
+
+while x > 0 { x = x - 1 }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (while_stmt
+      (comparison (identifier) (comp_op) (integer))
+      (block
+        (statement
+          (assignment
+            (lvalue (unpack_target (identifier)))
+            (additive (identifier) (add_sub_op) (integer))))))))
+
+================================================================================
+For loop
+================================================================================
+
+for x in items { print(x) }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (for_stmt
+      (unpack_target (identifier))
+      (identifier)
+      (block
+        (statement
+          (call (identifier) (arguments (args (identifier)))))))))
+
+================================================================================
+For loop with unpacking
+================================================================================
+
+for k, v in pairs { k }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (for_stmt
+      (unpack_target (unpack_sequence (identifier) (identifier)))
+      (identifier)
+      (block (statement (identifier))))))

@@ -1,0 +1,165 @@
+# Exemple : Pattern Matching
+
+print("⇒ Match sur valeurs littérales")
+
+# Correspondance de codes HTTP
+code = 404
+match code {
+    200 => { print("OK - Requête réussie") }
+    404 => { print("Not Found - Page non trouvée") }
+    500 => { print("Internal Server Error") }
+    _ => { print("Code HTTP inconnu:", code) }
+}
+
+print("\n⇒ Capture de variable")
+
+# Capturer et utiliser la valeur
+nombre = 42
+match nombre {
+    0 => { print("C'est zéro") }
+    n => { print("La valeur est:", n) }
+}
+
+print("\n⇒ Guards (conditions)")
+
+# Classification d'âge
+age = 25
+match age {
+    a if a < 13 => { print("Enfant") }
+    a if a < 18 => { print("Adolescent") }
+    a if a < 65 => { print("Adulte") }
+    a => { print("Senior") }
+}
+
+print("\n⇒ Pattern OR (alternatives)")
+
+# Jours de la semaine
+jour = 6
+match jour {
+    1 | 2 | 3 | 4 | 5 => { print("Jour de travail") }
+    6 | 7 => { print("Weekend!") }
+    _ => { print("Jour invalide") }
+}
+
+# Opérateurs mathématiques
+operateur = "+"
+match operateur {
+    "+" | "-" => { print("Opérateur additif") }
+    "*" | "/" | "%" => { print("Opérateur multiplicatif") }
+    "**" => { print("Exponentiation") }
+    op => { print("Opérateur inconnu:", op) }
+}
+
+print("\n⇒ Patterns tuple (destructuration)")
+
+# Coordonnées
+point = tuple(0, 5)
+match point {
+    (0, 0) => { print("Origine") }
+    (0, y) => { print("Axe Y, y =", y) }
+    (x, 0) => { print("Axe X, x =", x) }
+    (x, y) => { print("Point quelconque:", x, y) }
+}
+
+# Wildcard dans un tuple
+data = tuple(42, 99, 0)
+match data {
+    (x, _, _) => { print("Premier élément:", x) }
+}
+
+# Tuple OR
+value = tuple(1, 1)
+match value {
+    (0, 0) | (1, 1) => { print("Point diagonal ou origine") }
+    _ => { print("Autre") }
+}
+
+print("\n⇒ Patterns star (capture du reste)")
+
+# Tête et reste
+values = list(1, 2, 3, 4, 5)
+match values {
+    (first, *rest) => { print("Premier:", first, "- Reste:", len(rest), "éléments") }
+}
+
+# Dernier élément
+match values {
+    (*init, last) => { print("Dernier:", last) }
+}
+
+# Tête, milieu, queue
+match values {
+    (a, *middle, z) => { print("Premier:", a, "- Milieu:", len(middle), "- Dernier:", z) }
+}
+
+print("\n⇒ Patterns imbriqués")
+
+# Tuple dans un tuple
+nested = list(1, tuple(2, 3))
+match nested {
+    (a, (b, c)) => { print("a =", a, "b =", b, "c =", c) }
+}
+
+# Profondeur arbitraire
+deep = list(1, list(2, list(3, 4)))
+match deep {
+    (a, (b, (c, d))) => { print("Profondeur 3:", a, b, c, d) }
+}
+
+# Liste de paires
+pairs = list(tuple(1, 2), tuple(3, 4))
+match pairs {
+    ((a, b), (c, d)) => { print("Somme:", a + b + c + d) }
+}
+
+print("\n⇒ Patterns struct")
+
+struct Point { x, y }
+struct Vec3 { x, y, z }
+
+p = Point(10, 20)
+match p {
+    Point{x, y} => { print("Point:", x, y) }
+}
+
+# Dispatch par type
+struct Color { r, g, b }
+c = Color(255, 0, 128)
+match c {
+    Point{x, y} => { print("C'est un point") }
+    Color{r, g, b} => { print("C'est une couleur:", r, g, b) }
+    _ => { print("Type inconnu") }
+}
+
+# Struct avec guard
+origin = Point(0, 0)
+match origin {
+    Point{x, y} if x == 0 and y == 0 => { print("Origine!") }
+    Point{x, y} => { print("Point:", x, y) }
+}
+
+# Struct 3D
+v = Vec3(1, 2, 3)
+match v {
+    Vec3{x, y, z} => { print("Vecteur:", x, y, z, "- Norme²:", x**2 + y**2 + z**2) }
+}
+
+print("\n⇒ Tuple + guard combiné")
+
+# Diagonale
+coord = tuple(3, 3)
+match coord {
+    (x, y) if x == y => { print("Sur la diagonale, x = y =", x) }
+    (x, y) => { print("Hors diagonale:", x, y) }
+}
+
+print("\n⇒ FizzBuzz avec pattern matching")
+
+for i in range(1, 21) {
+    match i {
+        n if n % 15 == 0 => { print(i, ": FizzBuzz") }
+        n if n % 3 == 0 => { print(i, ": Fizz") }
+        n if n % 5 == 0 => { print(i, ": Buzz") }
+        n => { print(i, ":", n) }
+    }
+}

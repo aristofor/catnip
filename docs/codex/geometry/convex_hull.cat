@@ -1,0 +1,105 @@
+# Convex hull 2D (scan de Graham)
+#
+# Entrée : liste de points [x, y]
+# Sortie : enveloppe convexe dans le sens anti-horaire
+# Complexité : O(n log n) (tri polaire) + O(n) (scan)
+#
+# Variantes non implémentées ici :
+#   - Monotone chain (Andrew, 1979) : tri lexicographique au lieu de polaire,
+#     évite atan2. Même complexité, meilleure stabilité numérique.
+#   - Chan's algorithm (1996) : O(n log h), output-sensitive.
+#     Combine Graham sur des sous-groupes + Jarvis wrapping.
+# Voir aussi : quickhull.cat (divide & conquer, O(n log n) moyen)
+#
+# Exécution :
+#   catnip docs/codex/geometry/convex_hull.cat
+#
+
+builtins = import("builtins")
+math = import("math")
+
+# Produit vectoriel orienté (OA x OB)
+cross = (o, a, b) => {
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+}
+
+sqdist = (a, b) => {
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    dx * dx + dy * dy
+}
+
+# Point pivot : y minimal, puis x minimal
+find_pivot = (points) => {
+    p = points[0]
+    i = 1
+    while i < len(points) {
+        q = points[i]
+        if q[1] < p[1] or (q[1] == p[1] and q[0] < p[0]) {
+            p = q
+        }
+        i = i + 1
+    }
+    p
+}
+
+graham_hull = (points) => {
+    if len(points) <= 1 {
+        points
+    } else {
+        pivot = find_pivot(points)
+
+        # Tri par angle polaire puis distance au pivot.
+        # Pour points colinéaires au même angle, le plus éloigné reste après le scan.
+        sorted_pts = builtins.sorted(
+            points,
+            key=(p) => {
+                tuple(
+                    math.atan2(p[1] - pivot[1], p[0] - pivot[0]),
+                    sqdist(pivot, p)
+                )
+            }
+        )
+
+        stack = list()
+        i = 0
+        while i < len(sorted_pts) {
+            p = sorted_pts[i]
+            # Ignore les duplicatas exacts consécutifs
+            if len(stack) > 0 {
+                last = stack[len(stack) - 1]
+                if last[0] == p[0] and last[1] == p[1] {
+                    i = i + 1
+                    continue
+                }
+            }
+            while len(stack) >= 2 and cross(stack[len(stack) - 2], stack[len(stack) - 1], p) <= 0 {
+                stack = stack[:len(stack) - 1]
+            }
+            stack = stack + list(p)
+            i = i + 1
+        }
+        stack
+    }
+}
+
+# Démo
+points = list(
+    list(0, 0),
+    list(1, 1),
+    list(2, 2),
+    list(2, 0),
+    list(2, 4),
+    list(3, 3),
+    list(4, 2),
+    list(0, 3),
+    list(1, 2),
+    list(2, 2),  # doublon
+    list(4, 2),  # doublon
+)
+
+hull = graham_hull(points)
+
+print("Points d'entrée :", len(points))
+print("Hull (CCW) :", hull)
+print("Taille hull :", len(hull))

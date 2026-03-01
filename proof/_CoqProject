@@ -1,0 +1,69 @@
+-Q core Catnip
+-Q expr Catnip
+-Q lang Catnip
+-Q optim Catnip
+-Q analysis Catnip
+-Q vm Catnip
+-Q cache Catnip
+-Q struct Catnip
+
+core/GrammarProof.v
+core/CatnipIR.v
+core/CatnipExprModel.v
+
+expr/CatnipExprProof.v
+expr/CatnipExprMonoProof.v
+expr/CatnipAddMulProof.v
+expr/CatnipDimensional.v
+expr/CatnipDimensionalProps.v
+expr/CatnipDimensionalDeep.v
+expr/CatnipNDRecursion.v
+expr/CatnipBroadcastOverload.v
+
+lang/CatnipScopeProof.v
+lang/CatnipFunctionProof.v
+lang/CatnipPatternProof.v
+
+optim/CatnipConstFoldProof.v
+optim/CatnipStorePropProof.v
+optim/CatnipStrengthRedProof.v
+optim/CatnipBluntCodeProof.v
+optim/CatnipDCEFlattenProof.v
+optim/CatnipTailRecLoopProof.v
+optim/CatnipPurityProof.v
+optim/CatnipOptimProof.v
+
+analysis/CatnipVarSet.v
+analysis/CatnipLivenessLinear.v
+analysis/CatnipLivenessCFG.v
+analysis/CatnipLivenessProof.v
+analysis/CatnipDominanceProof.v
+analysis/CatnipCFGSSABase.v
+analysis/CatnipCFGSSACorrectness.v
+analysis/CatnipCFGSSAProof.v
+
+vm/CatnipNanBoxProof.v
+vm/CatnipVMBase.v
+vm/CatnipVMFrame.v
+vm/CatnipVMProof.v
+
+cache/CatnipCacheKey.v
+cache/CatnipCacheMemory.v
+cache/CatnipCacheDisk.v
+cache/CatnipCacheAdapter.v
+cache/CatnipCacheProof.v
+
+struct/CatnipStructBase.v
+struct/CatnipStructOps.v
+struct/CatnipStructExamples.v
+struct/CatnipMROC3Core.v
+struct/CatnipMROC3Properties.v
+struct/CatnipMROFields.v
+struct/CatnipMROMethods.v
+struct/CatnipMROSuper.v
+struct/CatnipMROExamples.v
+struct/CatnipOpDesugar.v
+struct/CatnipOpDesugarProps.v
+struct/CatnipOpDesugarExamples.v
+struct/CatnipOpDesugarSemantics.v
+struct/CatnipMROProof.v

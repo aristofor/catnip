@@ -1,0 +1,89 @@
+# Manipulation de fichiers et chemins avec pathlib
+# pathlib fournit une API orientée objet pour les chemins de fichiers
+#
+# Exécuter: catnip -m pathlib -m tempfile -m shutil pathlib_files.cat
+
+pathlib = import("pathlib")
+tempfile = import("tempfile")
+shutil = import("shutil")
+
+# Création de chemins
+
+home = pathlib.Path.home()
+cwd = pathlib.Path.cwd()
+
+print("⇒ Chemins de base")
+print("  Home:", home)
+print("  CWD:", cwd)
+
+# Création de chemins relatifs et absolus
+docs = pathlib.Path("docs")
+readme = docs / "README.md"
+
+print("\n⇒ Construction de chemins")
+print("  Relatif:", docs)
+print("  Composé:", readme)
+print("  Absolu:", readme.resolve())
+
+# Inspection de chemins
+
+test_path = pathlib.Path("docs/codex/files-formats/pathlib_files.cat")
+
+print("\n⇒ Décomposition d'un chemin")
+print("  Chemin:", test_path)
+print("  Parent:", test_path.parent)
+print("  Nom:", test_path.name)
+print("  Stem:", test_path.stem)
+print("  Suffixe:", test_path.suffix)
+print("  Parts:", test_path.parts)
+
+# Tests d'existence
+
+print("\n⇒ Tests d'existence")
+print("  docs/ existe:", pathlib.Path("docs").exists())
+print("  Est un dossier:", pathlib.Path("docs").is_dir())
+print("  Est un fichier:", test_path.is_file())
+print("  fake.txt existe:", pathlib.Path("fake.txt").exists())
+
+# Lecture de fichier
+
+print("\n⇒ Lecture de fichier")
+content = test_path.read_text()
+lines = content.split("\n")
+print("  Lignes totales:", len(lines))
+print("  Première ligne:", lines[0])
+
+# Création de dossier temporaire
+
+temp_dir = pathlib.Path(tempfile.mkdtemp())
+
+print("\n⇒ Dossier temporaire créé")
+print("  Chemin:", temp_dir)
+
+# Écriture d'un fichier
+test_file = temp_dir / "test.txt"
+test_file.write_text("Hello from Catnip!")
+
+print("\n⇒ Écriture de fichier")
+print("  Fichier créé:", test_file.exists())
+print("  Contenu:", test_file.read_text())
+
+# Créer une sous-arborescence
+subdir = temp_dir / "data" / "2024"
+subdir.mkdir(parents=True)
+print("\n⇒ Création de sous-dossiers")
+print("  data/2024/ créé:", subdir.exists())
+
+# Itération sur un dossier
+
+print("\n⇒ Contenu du dossier temp")
+for item in temp_dir.iterdir() {
+    type_str = if item.is_dir() { "DIR" } else { "FILE" }
+    print("  [" + type_str + "]", item.name)
+}
+
+# Nettoyage
+
+shutil.rmtree(str(temp_dir))
+print("\n⇒ Nettoyage effectué")
+print("  Temp supprimé:", not temp_dir.exists())

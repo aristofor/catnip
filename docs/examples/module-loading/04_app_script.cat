@@ -1,0 +1,41 @@
+# Application script using the app API
+# Run with: catnip docs/examples/module-loading/04_app_script.cat
+
+# Load the app API module
+app = import("./docs/examples/module-loading/07_app_api.py")
+
+# Get all users
+users = app.get_users()
+app.log_message("Fetched all users")
+
+# Access first user using indexing
+first_user = users[0]
+app.log_message("First user accessed")
+
+# Get top 3 users
+top_users = app.get_top_scores(3)
+
+# Calculate average score
+avg_score = app.calculate_average_score()
+app.log_message("Calculated average score")
+
+# Update Bob's score
+app.update_score(2, 95)
+app.log_message("Updated Bob's score to 95")
+
+# Get updated average
+new_avg = app.calculate_average_score()
+
+# Create a report
+report = app.Report()
+report.add_line("Score Report")
+report.add_separator()
+report.add_line("Average score: " + str(new_avg))
+report.add_separator()
+
+# Generate and display report
+report_text = report.generate()
+print(report_text)
+
+# Final result - show new average
+new_avg

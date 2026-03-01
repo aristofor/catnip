@@ -1,0 +1,140 @@
+# FILE: catnip/semantic/opcode.py
+# GENERATED FROM catnip_rs/src/ir/opcode.rs
+# Do not edit the enum manually. Run: python catnip_rs/gen_opcodes.py
+"""
+OpCode enumeration for efficient integer-based operation representation.
+
+Using integer opcodes instead of strings provides:
+- Faster comparison and hashing (integer vs string)
+- Lower memory usage
+- Better performance in tight loops
+- Type safety with enum
+"""
+
+from enum import IntEnum
+
+
+class OpCode(IntEnum):
+    """
+    Enumeration of all operation codes in Catnip.
+
+    Categories:
+    - Other: NOP (no operation)
+    - Control flow: IF, WHILE, FOR, MATCH, BLOCK, RETURN, BREAK, CONTINUE
+    - Functions: CALL, LAMBDA, FN_DEF
+    - Variables: SET_LOCALS, GETATTR
+    - Arithmetic: ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW
+    - Comparison: EQ, NE, LT, LE, GT, GE
+    - Logical: AND, OR, NOT
+    - Bitwise: BAND, BOR, BXOR, BNOT, LSHIFT, RSHIFT
+    - Collections: BROADCAST
+    """
+
+    ADD = 1
+    SUB = 2
+    MUL = 3
+    FLOORDIV = 4
+    MOD = 5
+    POW = 6
+    NEG = 7
+    POS = 8
+    EQ = 9
+    NE = 10
+    LT = 11
+    LE = 12
+    GT = 13
+    GE = 14
+    NOT = 15
+    BAND = 16
+    BOR = 17
+    BXOR = 18
+    BNOT = 19
+    LSHIFT = 20
+    RSHIFT = 21
+    GETATTR = 22
+    SETATTR = 23
+    GETITEM = 24
+    SETITEM = 25
+    BROADCAST = 26
+    ND_RECURSION = 27
+    ND_MAP = 28
+    ND_EMPTY_TOPOS = 29
+    NOP = 30
+    BREAKPOINT = 31
+    OP_IF = 32
+    OP_WHILE = 33
+    OP_FOR = 34
+    OP_MATCH = 35
+    OP_BLOCK = 36
+    OP_RETURN = 37
+    OP_BREAK = 38
+    OP_CONTINUE = 39
+    CALL = 40
+    OP_LAMBDA = 41
+    FN_DEF = 42
+    SET_LOCALS = 43
+    SLICE = 44
+    DIV = 45
+    TRUEDIV = 46
+    AND = 47
+    OR = 48
+    LIST_LITERAL = 49
+    TUPLE_LITERAL = 50
+    SET_LITERAL = 51
+    DICT_LITERAL = 52
+    PUSH = 53
+    POP = 54
+    PUSH_PEEK = 55
+    FSTRING = 56
+    PRAGMA = 57
+    OP_STRUCT = 58
+    TRAIT_DEF = 59
+
+
+# Set of opcodes where arguments should not be evaluated immediately
+# CALL is included to allow passing the node for tail-call optimization
+CONTROL_FLOW_OPS = frozenset(
+    {
+        OpCode.OP_IF,
+        OpCode.OP_WHILE,
+        OpCode.OP_FOR,
+        OpCode.OP_MATCH,
+        OpCode.OP_BLOCK,
+        OpCode.CALL,  # Needs unevaluated args to pass node for tail-call check
+        OpCode.OP_LAMBDA,
+        OpCode.FN_DEF,
+        OpCode.SET_LOCALS,
+        OpCode.ND_RECURSION,  # Lambda received unevaluated
+        OpCode.ND_MAP,  # Function received unevaluated
+        OpCode.OP_STRUCT,  # Body not pre-evaluated
+        OpCode.TRAIT_DEF,  # Method lambdas not pre-evaluated
+    }
+)
+
+# Set of opcodes that are commutative (a op b == b op a)
+COMMUTATIVE_OPS = frozenset(
+    {
+        OpCode.ADD,
+        OpCode.MUL,
+        OpCode.EQ,
+        OpCode.NE,
+        OpCode.BAND,
+        OpCode.BOR,
+        OpCode.BXOR,
+        OpCode.AND,
+        OpCode.OR,
+    }
+)
+
+# Set of opcodes that are associative ((a op b) op c == a op (b op c))
+ASSOCIATIVE_OPS = frozenset(
+    {
+        OpCode.ADD,
+        OpCode.MUL,
+        OpCode.BAND,
+        OpCode.BOR,
+        OpCode.BXOR,
+        OpCode.AND,
+        OpCode.OR,
+    }
+)

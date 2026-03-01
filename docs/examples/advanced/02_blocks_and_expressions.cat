@@ -1,0 +1,162 @@
+# Exemple 7 : Blocs et expressions
+
+print("⇒ Blocs comme expressions")
+
+# Un bloc retourne la valeur de sa dernière expression
+resultat = {
+    x = 10
+    y = 20
+    x + y  # Cette valeur est retournée
+}
+print("Résultat du bloc:", resultat)
+
+# Bloc avec logique conditionnelle
+nombre = 15
+categorie = {
+    if nombre < 10 {
+        "petit"
+    } elif nombre < 20 {
+        "moyen"
+    } else {
+        "grand"
+    }
+}
+print("Catégorie:", categorie)
+
+print("\n⇒ Blocs imbriqués")
+
+# Les blocs peuvent être imbriqués
+resultat_complexe = {
+    a = 5
+    b = {
+        temp = a * 2
+        temp + 3
+    }
+    c = {
+        temp = b * 2
+        temp - 1
+    }
+    print("  a =", a, ", b =", b, ", c =", c)
+    a + b + c
+}
+print("Résultat complexe:", resultat_complexe)
+
+print("\n⇒ Blocs dans les conditions")
+
+# Utiliser des blocs pour des calculs conditionnels
+score = 85
+evaluation = {
+    if score >= 90 {
+        bonus = 10
+        note = "A"
+        print("  Excellent! Bonus de", bonus, "points")
+    } elif score >= 80 {
+        bonus = 5
+        note = "B"
+        print("  Très bien! Bonus de", bonus, "points")
+    } else {
+        bonus = 0
+        note = "C"
+        print("  Bien. Pas de bonus")
+    }
+    note
+}
+print("Note finale:", evaluation)
+
+print("\n⇒ Blocs vides")
+
+# Un bloc vide retourne None
+vide = {}
+print("Bloc vide:", vide)
+
+# Bloc avec seulement des assignations retourne None
+assignations = {
+    x = 1
+    y = 2
+}
+print("Bloc d'assignations:", assignations)
+
+print("\n⇒ Expressions composées")
+
+# Combiner plusieurs opérations en une expression
+x = 10
+y = 20
+z = 30
+
+# Opérations arithmétiques complexes
+resultat = (x + y) * z / (x - 5)
+print("(10 + 20) * 30 / (10 - 5) =", resultat)
+
+# Comparaisons chaînées
+valeur = 15
+dans_intervalle = 10 < valeur < 20
+print("15 est entre 10 et 20:", dans_intervalle)
+
+valeur2 = 25
+hors_intervalle = 10 < valeur2 < 20
+print("25 est entre 10 et 20:", hors_intervalle)
+
+print("\n⇒ Court-circuit logique")
+
+# AND s'arrête au premier False
+compteur = 0
+incrementer = () => {
+    compteur = compteur + 1
+    print("  Fonction appelée, compteur =", compteur)
+    True
+}
+
+print("Test 1: False and fonction()")
+resultat1 = False and incrementer()
+print("Résultat:", resultat1, ", compteur =", compteur)
+
+print("\nTest 2: True and fonction()")
+resultat2 = True and incrementer()
+print("Résultat:", resultat2, ", compteur =", compteur)
+
+# OR s'arrête au premier True
+print("\nTest 3: True or fonction()")
+resultat3 = True or incrementer()
+print("Résultat:", resultat3, ", compteur =", compteur)
+
+print("\nTest 4: False or fonction()")
+resultat4 = False or incrementer()
+print("Résultat:", resultat4, ", compteur =", compteur)
+
+print("\n⇒ Blocs dans match")
+
+# Match utilise des blocs avec plusieurs instructions
+valeur = 42
+match valeur {
+    n if n < 0 => {
+        print("  Nombre négatif détecté")
+        abs_val = -n
+        print("  Valeur absolue doublée:", abs_val * 2)
+    }
+    n if n == 0 => {
+        print("  Zéro détecté")
+        print("  Retour: 1")
+    }
+    n => {
+        print("  Nombre positif détecté")
+        carre = n * n
+        racine_approx = n / 2
+        print("  Carré + racine approx:", carre + racine_approx)
+    }
+}
+
+print("\n⇒ Calculs en une expression")
+
+# Effectuer plusieurs opérations en une seule expression
+valeur = 5
+resultat_final = ((valeur * 2) + 10) ** 2
+print("((5 * 2) + 10) ** 2 =", resultat_final)
+
+# Étape par étape
+print("Détail des étapes:")
+etape1 = valeur * 2
+print("  5 * 2 =", etape1)
+etape2 = etape1 + 10
+print("  10 + 10 =", etape2)
+etape3 = etape2 ** 2
+print("  20 ** 2 =", etape3)

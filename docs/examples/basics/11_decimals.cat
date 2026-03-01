@@ -1,0 +1,23 @@
+# Decimal exact type (base-10, suffix d/D)
+# Arithmetic exacte : 0.1d + 0.2d == 0.3d
+
+# Litteraux
+prix = 99.99d
+taxe = 0.08d
+total = prix + prix * taxe
+print(total)
+
+# Le test canonique IEEE 754
+print(0.1 + 0.2 == 0.3)       # False (float)
+print(0.1d + 0.2d == 0.3d)    # True  (decimal)
+
+# Promotion entier → Decimal
+print(2 + 0.5d)               # 2.5d
+
+# Builtin Decimal()
+pi = Decimal("3.14159265358979323846")
+print(pi)
+
+# Comparaisons
+print(1.0d == 1d)             # True (meme valeur, scale differente)
+print(42d > 41)               # True (int promu)

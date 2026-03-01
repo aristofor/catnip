@@ -1,0 +1,62 @@
+# Example of using break in a loop
+
+# Search for a number in a list
+target = 42
+found = False
+position = -1
+
+numbers = list(10, 25, 30, 42, 50, 60, 70)
+
+i = 0
+for num in numbers {
+    if num == target {
+        found = True
+        position = i
+        break  # Exit as soon as we find it
+    }
+    i = i + 1
+}
+
+if found {
+    print("Found at position:", position)
+} else {
+    print("Not found")
+}
+
+# Example with while and break
+print("Search for first divisor > 1:")
+n = 24
+divisor = 2
+
+while divisor < n {
+    if n % divisor == 0 {
+        print("First divisor:", divisor)
+        break
+    }
+    divisor = divisor + 1
+}
+
+# Nested loops - break only exits the inner loop
+print("Matrix - search for zero:")
+matrix = list(list(1, 2, 3), list(4, 0, 6), list(7, 8, 9))
+
+row_found = -1
+col_found = -1
+
+row = 0
+for line in matrix {
+    col = 0
+    for val in line {
+        if val == 0 {
+            row_found = row
+            col_found = col
+            break  # Only exits the inner loop
+        }
+        col = col + 1
+    }
+    row = row + 1
+}
+
+if row_found >= 0 {
+    print("Zero found at [", row_found, ",", col_found, "]")
+}

@@ -1,0 +1,103 @@
+================================================================================
+Arithmetic expressions
+================================================================================
+
+1 + 2
+3 - 4
+5 * 6
+7 / 8
+9 // 10
+11 % 12
+2 ** 3
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (additive (integer) (add_sub_op) (integer)))
+  (statement (additive (integer) (add_sub_op) (integer)))
+  (statement (multiplicative (integer) (mul_div_op) (integer)))
+  (statement (multiplicative (integer) (mul_div_op) (integer)))
+  (statement (multiplicative (integer) (mul_div_op) (integer)))
+  (statement (multiplicative (integer) (mul_div_op) (integer)))
+  (statement (exponent (integer) (integer))))
+
+================================================================================
+Comparison expressions
+================================================================================
+
+a < b
+a <= b
+a > b
+a >= b
+a == b
+a != b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (comparison (identifier) (comp_op) (identifier)))
+  (statement (comparison (identifier) (comp_op) (identifier)))
+  (statement (comparison (identifier) (comp_op) (identifier)))
+  (statement (comparison (identifier) (comp_op) (identifier)))
+  (statement (comparison (identifier) (comp_op) (identifier)))
+  (statement (comparison (identifier) (comp_op) (identifier))))
+
+================================================================================
+Boolean expressions
+================================================================================
+
+a and b
+a or b
+not a
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (bool_and (identifier) (identifier)))
+  (statement (bool_or (identifier) (identifier)))
+  (statement (bool_not (identifier))))
+
+================================================================================
+Bitwise expressions
+================================================================================
+
+a & b
+a | b
+a ^ b
+a << 2
+a >> 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (bit_and (identifier) (identifier)))
+  (statement (bit_or (identifier) (identifier)))
+  (statement (bit_xor (identifier) (identifier)))
+  (statement (shift (identifier) (shift_op) (integer)))
+  (statement (shift (identifier) (shift_op) (integer))))
+
+================================================================================
+Unary expressions
+================================================================================
+
+-x
++x
+~x
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (unary (unary_op) (identifier)))
+  (statement (unary (unary_op) (identifier)))
+  (statement (unary (unary_op) (identifier))))
+
+================================================================================
+Grouping
+================================================================================
+
+(1 + 2) * 3
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement (multiplicative (group (additive (integer) (add_sub_op) (integer))) (mul_div_op) (integer))))

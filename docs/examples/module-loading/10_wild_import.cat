@@ -1,0 +1,12 @@
+# check: no-check
+# Wild import -- inject exports directly into globals
+# Run with: catnip docs/examples/module-loading/10_wild_import.cat
+
+# Classic import: functions live under a namespace
+host = import("./03_host_module_example")
+host.add(1, 2)
+
+# Wild import: functions are injected as globals
+import("./03_host_module_example", wild=True)
+add(10, 20)
+multiply(3, 7)

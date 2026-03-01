@@ -1,0 +1,95 @@
+# FILE: catnip_rs/src/repl/highlight_demo.cat
+# Catnip Syntax Highlighting Demo
+# Ce fichier montre toutes les constructions supportées
+
+# Constants
+result = True
+flag = False
+nothing = None
+
+# Numbers (diverses bases)
+decimal = 42
+float_val = 3.14159
+binary = 0b1010
+octal = 0o755
+hexa = 0xFF
+
+# Strings
+name = "Catnip"
+message = f"Hello, {name}!"
+multiline = """
+    Multi
+    line
+"""
+
+# Operators
+sum = a + b - c
+product = x * y / z
+power = base ** exponent
+int_div = num // denom
+modulo = a % b
+compare = x == y and z != w
+bitwise = a & b | c ^ d
+shift = val << 2 >> 1
+
+# Control flow (keywords)
+if x > 10:
+    print("big")
+elif x > 5:
+    print("medium")
+else:
+    print("small")
+
+while count > 0:
+    count = count - 1
+    if count == 5:
+        break
+    else:
+        continue
+
+for item in items:
+    print(item)
+
+# Pattern matching
+match value:
+    case 0:
+        "zero"
+    case n if n > 0:
+        "positive"
+    case _:
+        "negative"
+
+# Functions
+fib = (n) => {
+    if n <= 1:
+        n
+    else:
+        fib(n-1) + fib(n-2)
+}
+
+# Builtins
+length = len(items)
+text = str(42)
+number = int("123")
+decimal = float("3.14")
+typeof = type(value)
+absolute = abs(-10)
+numbers = range(10)
+
+# Collections
+my_list = [1, 2, 3]
+my_dict = {"a": 1, "b": 2}
+my_set = {1, 2, 3}
+my_tuple = (1, 2, 3)
+
+# Broadcasting
+doubled = items.[* 2]
+filtered = numbers.[if _ > 5]
+
+# Lambda expressions
+add = (x, y) => x + y
+square = (n) => n * n
+
+# Pragmas
+pragma("tco", True)
+pragma("jit", "on")

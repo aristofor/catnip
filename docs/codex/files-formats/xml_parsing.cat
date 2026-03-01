@@ -1,0 +1,108 @@
+# Parsing XML avec xml.etree.ElementTree
+# Module stdlib pour lire et manipuler des fichiers XML
+#
+# Exécuter: catnip -m xml.etree.ElementTree -m tempfile -m pathlib -m shutil xml_parsing.cat
+
+ET = import("xml.etree.ElementTree")
+tempfile = import("tempfile")
+pathlib = import("pathlib")
+shutil = import("shutil")
+
+# Parsing d'une chaîne XML
+
+xml_string = '<?xml version="1.0"?>
+<catalog>
+    <book id="1" category="fiction">
+        <title>The Great Gatsby</title>
+        <author>F. Scott Fitzgerald</author>
+        <year>1925</year>
+    </book>
+    <book id="2" category="science">
+        <title>A Brief History of Time</title>
+        <author>Stephen Hawking</author>
+        <year>1988</year>
+    </book>
+    <book id="3" category="fiction">
+        <title>1984</title>
+        <author>George Orwell</author>
+        <year>1949</year>
+    </book>
+</catalog>
+'
+
+print("⇒ Parsing XML")
+root = ET.fromstring(xml_string)
+print("  Tag racine:", root.tag)
+print("  Nombre d'enfants:", len(root))
+
+# Navigation dans l'arbre
+
+print("\n⇒ Navigation dans l'arbre")
+for book in root {
+    print("  Book id:", book.get("id"))
+    print("    Titre:", book.find("title").text)
+    print("    Auteur:", book.find("author").text)
+}
+
+# Recherche avec findall
+
+print("\n⇒ Recherche avec findall")
+titles = root.findall(".//title")
+print("  Tous les titres:")
+for t in titles {
+    print("    -", t.text)
+}
+
+# Accès aux attributs
+
+print("\n⇒ Attributs")
+for book in root {
+    attrs = book.attrib
+    print("  Book:", attrs)
+}
+
+# Création d'éléments
+
+print("\n⇒ Création d'un nouveau document")
+config = ET.Element("config")
+config.set("version", "1.0")
+
+# SubElement avec attributs
+server = ET.SubElement(config, "server")
+server.set("host", "localhost")
+server.set("port", "8080")
+
+# Affectation du contenu texte (obj.attr = value)
+server.text = "Server configuration"
+
+# Ajouter un sous-élément avec texte
+database = ET.SubElement(config, "database")
+database.text = "PostgreSQL"
+database.tail = "\n"
+
+print("  Document créé:")
+print("  ", ET.tostring(config, encoding="unicode"))
+
+# Écriture dans un fichier
+
+temp_dir = pathlib.Path(tempfile.mkdtemp())
+xml_file = temp_dir / "catalog.xml"
+
+tree = ET.ElementTree(root)
+tree.write(str(xml_file), encoding="unicode", xml_declaration=True)
+
+print("\n⇒ Fichier XML créé")
+print("  Chemin:", xml_file)
+print("  Taille:", xml_file.stat().st_size, "bytes")
+
+# Relecture
+
+print("\n⇒ Relecture du fichier")
+tree2 = ET.parse(str(xml_file))
+root2 = tree2.getroot()
+print("  Livres dans le fichier:", len(root2))
+
+# Nettoyage
+
+shutil.rmtree(str(temp_dir))
+print("\n⇒ Nettoyage effectué")

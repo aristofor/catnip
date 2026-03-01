@@ -1,0 +1,69 @@
+# Exemples de pragmas et imports Catnip
+
+# 1. Tail-Call Optimization (TCO)
+
+# Activer TCO avec un booléen
+pragma("tco", True)
+
+factorial = (n, acc=1) => {
+    if n <= 1 { acc }
+    else { factorial(n - 1, n * acc) }
+}
+
+print("Factorial(10) with TCO:")
+print(factorial(10))
+
+# Désactiver TCO
+pragma("tco", False)
+
+# 2. Cache Control
+
+# Activer le cache de parsing
+pragma("cache", True)
+
+# Désactiver le cache
+pragma("cache", False)
+
+# 3. Debug Mode
+
+# Activer le mode debug
+pragma("debug", True)
+
+print("Debug mode is now enabled")
+
+# Désactiver le mode debug
+pragma("debug", False)
+
+# 4. Module Loading (via import() builtin)
+
+# Charger le module json
+json = import("json")
+
+data = dict(name="Bob", age=25, city="Paris")
+json_string = json.dumps(data)
+print("JSON string:")
+print(json_string)
+
+# Charger math avec un alias custom
+m = import("math")
+
+print("Square root of 144:")
+print(m.sqrt(144))
+
+print("Pi value:")
+print(m.pi)
+
+# Charger datetime
+dt = import("datetime")
+
+now = dt.datetime.now()
+print("Current datetime:")
+print(now)
+
+# 5. Optimization Level
+
+# Définir le niveau d'optimisation
+pragma("optimize", "high")
+
+# Revenir au niveau par défaut
+pragma("optimize", "default")

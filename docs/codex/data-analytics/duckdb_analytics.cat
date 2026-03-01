@@ -1,0 +1,27 @@
+# DuckDB - Base de données analytique in-process
+# Requêtes SQL natives ultra-rapides sur données locales
+#
+# Exécuter: catnip -m duckdb duckdb_analytics.cat
+
+db = duckdb.connect()
+
+# Créer et peupler une table
+db.execute("CREATE TABLE products (name TEXT, price DECIMAL, stock INT)")
+db.execute("INSERT INTO products VALUES ('Laptop', 999.99, 15), ('Mouse', 29.99, 150), ('Keyboard', 79.99, 80)")
+
+print("⇒ Requête simple")
+for row in db.execute("SELECT * FROM products ORDER BY price DESC").fetchall() {
+    print(" ", row[0], "-", row[1], "€ (stock:", row[2], ")")
+}
+
+print("\n⇒ Agrégation")
+stats = db.execute("SELECT COUNT(*), ROUND(AVG(price), 2), SUM(stock) FROM products").fetchone()
+print("  ", stats[0], "produits, prix moyen", stats[1], "€, stock total:", stats[2])
+
+print("\n⇒ Window function")
+ranked = db.execute("SELECT name, price, RANK() OVER (ORDER BY price DESC) as rank FROM products").fetchall()
+for row in ranked {
+    print("  #", row[2], row[0], "(", row[1], "€)")
+}
+
+db.close()

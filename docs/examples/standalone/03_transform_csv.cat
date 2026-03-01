@@ -1,0 +1,51 @@
+#!/usr/bin/env catnip
+# Transformation CSV simple
+# Usage: catnip transform_csv.cat
+#        chmod +x transform_csv.cat && ./transform_csv.cat
+
+# Note: Pour manipulation CSV réelle, utilisez Python + pandas
+# Ce script montre le cas d'usage standalone : transformation data simple
+
+# Données simulées (en production, charger depuis fichier)
+data = list(
+    dict(name='Alice', age=28, city='Paris'),
+    dict(name='Bob', age=35, city='Lyon'),
+    dict(name='Charlie', age=22, city='Paris')
+)
+
+# Filtrer : âge > 25
+filtered = list()
+i = 0
+while i < 3 {
+    if data[i]['age'] > 25 {
+        filtered = filtered + list(data[i])
+    }
+    i = i + 1
+}
+
+# Transformer : ajouter status
+transformed = list()
+j = 0
+while j < len(filtered) {
+    person = filtered[j]
+    new_person = dict(
+        name=person['name'],
+        age=person['age'],
+        city=person['city'],
+        status='senior'
+    )
+    transformed = transformed + list(new_person)
+    j = j + 1
+}
+
+# Afficher résultat
+print("Personnes > 25 ans :")
+k = 0
+while k < len(transformed) {
+    p = transformed[k]
+    print("  - " + p['name'] + " (" + str(p['age']) + ") de " + p['city'])
+    k = k + 1
+}
+
+# Retourner nombre de résultats
+len(transformed)

@@ -1,0 +1,90 @@
+# SQLAlchemy + DuckDB Engine - ORM complet sur base analytique
+# Combine la puissance de DuckDB avec l'écosystème SQLAlchemy
+#
+# Requires: pip install sqlalchemy duckdb-engine
+# Exécuter: catnip -m sqlalchemy -m duckdb sqlalchemy_duckdb.cat
+
+# Création du moteur DuckDB in-memory via SQLAlchemy
+engine = sqlalchemy.create_engine("duckdb:///:memory:")
+metadata = sqlalchemy.MetaData()
+
+# Tables
+Int = sqlalchemy.Integer
+Str = sqlalchemy.String
+Num = sqlalchemy.Numeric
+Col = sqlalchemy.Column
+
+customers = sqlalchemy.Table("customers", metadata, Col("id", Int(), primary_key=True, autoincrement=False), Col("name", Str()), Col("country", Str()))
+
+orders = sqlalchemy.Table("orders", metadata, Col("id", Int(), primary_key=True, autoincrement=False), Col("customer_id", Int()), Col("product", Str()), Col("qty", Int()), Col("price", Num(10, 2)))
+
+metadata.create_all(engine)
+print("⇒ Schéma créé")
+
+conn = engine.connect()
+
+# Insérer via SQL brut (plus simple en Catnip)
+conn.execute(sqlalchemy.text("INSERT INTO customers VALUES (1, 'Alice', 'France'), (2, 'Bob', 'USA'), (3, 'Charlie', 'China')"))
+
+conn.execute(sqlalchemy.text("INSERT INTO orders VALUES (1, 1, 'Laptop', 1, 1299.99), (2, 1, 'Mouse', 2, 29.99), (3, 2, 'Keyboard', 1, 89.99), (4, 3, 'Monitor', 2, 399.99), (5, 2, 'Laptop', 1, 1299.99)"))
+conn.commit()
+print("⇒ Données insérées (3 clients, 5 commandes)")
+
+# SELECT avec l'API SQLAlchemy
+print("\n⇒ Clients (SQLAlchemy select)")
+stmt = sqlalchemy.select(customers.c.name, customers.c.country).order_by(customers.c.name)
+for row in conn.execute(stmt) {
+    print("  ", row[0], "(", row[1], ")")
+}
+
+# JOIN
+print("\n⇒ Commandes avec JOIN")
+total_col = (orders.c.qty * orders.c.price).label("total")
+stmt = sqlalchemy.select(customers.c.name, orders.c.product, total_col).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).order_by(sqlalchemy.desc("total")).limit(5)
+
+for row in conn.execute(stmt) {
+    print("  ", row[0], "-", row[1], ":", round(row[2], 2), "€")
+}
+
+# GROUP BY avec fonctions d'agrégation
+print("\n⇒ CA par client (GROUP BY)")
+stmt = sqlalchemy.select(customers.c.name, sqlalchemy.func.count(orders.c.id).label("n"), sqlalchemy.func.sum(orders.c.qty * orders.c.price).label("ca")).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).group_by(customers.c.id, customers.c.name).order_by(sqlalchemy.desc("ca"))
+
+for row in conn.execute(stmt) {
+    print("  ", row[0], ":", row[1], "commandes,", round(row[2], 2), "€")
+}
+
+# Sous-requête
+print("\n⇒ Commandes > moyenne (sous-requête)")
+avg_sq = sqlalchemy.select(sqlalchemy.func.avg(orders.c.qty * orders.c.price)).scalar_subquery()
+stmt = sqlalchemy.select(customers.c.name, orders.c.product, (orders.c.qty * orders.c.price).label("t")).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).where((orders.c.qty * orders.c.price).__gt__(avg_sq)).order_by(sqlalchemy.desc("t"))
+
+for row in conn.execute(stmt) {
+    print("  ", row[0], "-", row[1], ":", round(row[2], 2), "€")
+}
+
+# HAVING
+print("\n⇒ Produits vendus > 1 fois (HAVING)")
+stmt = sqlalchemy.select(orders.c.product, sqlalchemy.func.sum(orders.c.qty).label("q")).group_by(orders.c.product).having(sqlalchemy.func.count(orders.c.id).__gt__(1))
+
+for row in conn.execute(stmt) {
+    print("  ", row[0], ":", row[1], "unités")
+}
+
+# SQL brut DuckDB avec window function QUALIFY
+print("\n⇒ Window function QUALIFY (SQL brut DuckDB)")
+sql = sqlalchemy.text("SELECT c.name, o.product, o.qty * o.price as amount FROM customers c JOIN orders o ON c.id = o.customer_id QUALIFY RANK() OVER (PARTITION BY c.id ORDER BY o.qty * o.price DESC) = 1 ORDER BY amount DESC")
+for row in conn.execute(sql) {
+    print("  ", row[0], "- top:", row[1], "(", round(row[2], 2), "€)")
+}
+
+# Stats globales
+print("\n⇒ Stats globales")
+sql = sqlalchemy.text("SELECT COUNT(DISTINCT c.id), COUNT(o.id), ROUND(SUM(o.qty * o.price), 2), ROUND(AVG(o.qty * o.price), 2) FROM customers c JOIN orders o ON c.id = o.customer_id")
+s = conn.execute(sql).fetchone()
+print("  ", s[0], "clients,", s[1], "commandes")
+print("  CA:", s[2], "€, panier moyen:", s[3], "€")
+
+conn.close()
+engine.dispose()
+print("\n⇒ Done")

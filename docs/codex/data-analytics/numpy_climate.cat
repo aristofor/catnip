@@ -1,0 +1,122 @@
+# Analyse des anomalies de température globale (NASA GISTEMP)
+# Dataset: 1880-2023, anomalies par rapport à la moyenne 1951-1980
+# Source: NASA GISS (domaine public)
+#
+# Exécuter: catnip numpy_climate.cat  (depuis ce dossier)
+# Ou:  catnip -m numpy numpy_climate.cat  (sans le import ci-dessous)
+
+numpy = import("numpy")
+
+# Chargement des données
+
+# Lire le CSV avec colonnes séparées
+csv_path = "docs/codex/data-analytics/nasa_temperature.csv"
+years = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=0)
+anomalies = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=1)
+
+print("⇒ Dataset NASA GISTEMP")
+print("  Période:", int(years[0]), "-", int(years[-1]))
+print("  Nombre d'années:", len(years))
+
+# Statistiques descriptives
+
+print("\n⇒ Statistiques globales")
+print("  Moyenne:    ", round(numpy.mean(anomalies), 3), "°C")
+print("  Écart-type: ", round(numpy.std(anomalies), 3), "°C")
+print("  Min:        ", round(numpy.min(anomalies), 3), "°C")
+print("  Max:        ", round(numpy.max(anomalies), 3), "°C")
+
+# Analyse par période
+
+# Fonction pour stats sur une période
+period_stats = (start, end) => {
+    mask_start = numpy.greater_equal(years, start)
+    mask_end = numpy.less_equal(years, end)
+    mask = numpy.logical_and(mask_start, mask_end)
+    subset = anomalies[mask]
+    dict(start=start, end=end, mean=round(numpy.mean(subset), 3), std=round(numpy.std(subset), 3))
+}
+
+print("\n⇒ Évolution par période")
+
+# Période 1: 1880-1920
+s1 = period_stats(1880, 1920)
+print("  ", s1["start"], "-", s1["end"], ": moyenne", s1["mean"], "°C (±", s1["std"], ")")
+
+# Période 2: 1921-1960
+s2 = period_stats(1921, 1960)
+print("  ", s2["start"], "-", s2["end"], ": moyenne", s2["mean"], "°C (±", s2["std"], ")")
+
+# Période 3: 1961-2000
+s3 = period_stats(1961, 2000)
+print("  ", s3["start"], "-", s3["end"], ": moyenne", s3["mean"], "°C (±", s3["std"], ")")
+
+# Période 4: 2001-2023
+s4 = period_stats(2001, 2023)
+print("  ", s4["start"], "-", s4["end"], ": moyenne", s4["mean"], "°C (±", s4["std"], ")")
+
+# Détection des années extrêmes
+
+print("\n⇒ Années les plus chaudes")
+# Indices des 5 plus grandes anomalies
+sorted_idx = numpy.argsort(anomalies)
+top5 = numpy.flip(sorted_idx[-5:])
+for i in top5 {
+    print("  ", int(years[i]), ":", round(anomalies[i], 3), "°C")
+}
+
+print("\n⇒ Années les plus froides")
+bottom5 = sorted_idx[:5]
+for i in bottom5 {
+    print("  ", int(years[i]), ":", round(anomalies[i], 3), "°C")
+}
+
+# Tendance linéaire
+
+# Régression linéaire simple avec numpy
+# Note: utiliser numpy.subtract() pour éviter modification in-place
+x_mean = numpy.mean(years)
+y_mean = numpy.mean(anomalies)
+years_centered = numpy.subtract(years, x_mean)
+anom_centered = numpy.subtract(anomalies, y_mean)
+numerator = numpy.sum(numpy.multiply(years_centered, anom_centered))
+denominator = numpy.sum(numpy.power(years_centered, 2))
+slope = numerator / denominator
+intercept = y_mean - slope * x_mean
+
+print("\n⇒ Tendance linéaire")
+print("  Pente:", round(slope * 100, 3), "°C par siècle")
+print("  Projection 2050:", round(slope * 2050 + intercept, 2), "°C")
+print("  Projection 2100:", round(slope * 2100 + intercept, 2), "°C")
+
+# Moyenne mobile (fenêtre de 10 ans)
+
+window = 10
+kernel = numpy.ones(window) / window
+moving_avg = numpy.convolve(anomalies, kernel, mode="valid")
+
+print("\n⇒ Moyenne mobile (" + str(window) + " ans)")
+print("  1889:", round(moving_avg[0], 3), "°C")
+print("  1950:", round(moving_avg[61], 3), "°C")
+print("  2014:", round(moving_avg[-1], 3), "°C")
+
+# Broadcasting: conversion en Fahrenheit
+
+anomalies_f = anomalies * 1.8  # Conversion directe via broadcasting
+
+print("\n⇒ Anomalies récentes en Fahrenheit")
+last = len(years) - 1
+print("  ", int(years[last-3]), ":", round(anomalies_f[last-3], 3), "°F")
+print("  ", int(years[last-2]), ":", round(anomalies_f[last-2], 3), "°F")
+print("  ", int(years[last-1]), ":", round(anomalies_f[last-1], 3), "°F")
+print("  ", int(years[last]), ":", round(anomalies_f[last], 3), "°F")
+
+# Comptage
+
+threshold = 0.5
+mask_above = numpy.greater(anomalies, threshold)
+above_threshold = numpy.sum(mask_above)
+first_above = int(years[numpy.argmax(mask_above)])
+
+print("\n⇒ Années avec anomalie >", threshold, "°C:", int(above_threshold))
+print("  Première année:", first_above)

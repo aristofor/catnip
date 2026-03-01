@@ -1,0 +1,248 @@
+# Exemple 5 : Lambdas et fonctions d'ordre supérieur
+
+print("⇒ Lambdas comme valeurs")
+
+# Une lambda peut être stockée dans une variable
+doubler = (x) => { x * 2 }
+tripler = (x) => { x * 3 }
+
+print("doubler(5) =", doubler(5))
+print("tripler(5) =", tripler(5))
+
+# Lambda multiligne
+calculer_moyenne = (a, b, c) => {
+    somme = a + b + c
+    somme / 3
+}
+
+print("Moyenne de 10, 20, 30:", calculer_moyenne(10, 20, 30))
+
+print("\n⇒ Simulation de map")
+
+# Appliquer une fonction à chaque élément d'une plage
+print("Doubler les nombres de 1 à 5:")
+for i in range(1, 6) {
+    resultat = doubler(i)
+    print("  {i} → {resultat}")
+}
+
+# Appliquer une transformation complexe
+transformer = (x) => { (x * 2) + 10 }
+print("\nTransformation (x*2)+10 sur 1 à 5:")
+for i in range(1, 6) {
+    resultat = transformer(i)
+    print("  ", i, "→", resultat)
+}
+
+print("\n⇒ Simulation de filter")
+
+# Filtrer selon une condition
+est_pair = (x) => { x % 2 == 0 }
+
+print("Nombres pairs de 1 à 10:")
+for i in range(1, 11) {
+    if est_pair(i) {
+        print("  ", i)
+    }
+}
+
+est_multiple_de_3 = (x) => { x % 3 == 0 }
+print("\nMultiples de 3 de 1 à 20:")
+for i in range(1, 21) {
+    if est_multiple_de_3(i) {
+        print("  ", i)
+    }
+}
+
+print("\n⇒ Composition de transformations")
+
+# Appliquer plusieurs transformations en séquence
+ajouter_5 = (x) => { x + 5 }
+multiplier_par_2 = (x) => { x * 2 }
+
+print("Pipeline: ajouter 5 puis multiplier par 2")
+for i in range(1, 6) {
+    etape1 = ajouter_5(i)
+    etape2 = multiplier_par_2(etape1)
+    print("  ", i, "→ +5 →", etape1, "→ *2 →", etape2)
+}
+
+print("\n⇒ Lambdas avec plusieurs paramètres")
+
+addition = (x, y) => { x + y }
+multiplication = (x, y) => { x * y }
+puissance = (x, y) => { x ** y }
+
+print("addition(5, 3):", addition(5, 3))
+print("multiplication(5, 3):", multiplication(5, 3))
+print("puissance(5, 3):", puissance(5, 3))
+
+print("\n⇒ Validation avec lambdas")
+
+# Créer des validateurs
+sup_a_10 = (x) => { x > 10 }
+inf_a_50 = (x) => { x < 50 }
+est_pair_v2 = (x) => { x % 2 == 0 }
+
+print("Validation (>10, <50, pair):")
+for val in range(5, 55, 5) {
+    valide1 = sup_a_10(val)
+    valide2 = inf_a_50(val)
+    valide3 = est_pair_v2(val)
+    valide_tout = valide1 and valide2 and valide3
+    print(f"  {val} : {valide_tout}")
+}
+
+print("\n⇒ Réduction (accumulation)")
+
+# Somme avec lambda
+somme_lambda = (acc, x) => { acc + x }
+acc = 0
+for i in range(1, 11) {
+    acc = somme_lambda(acc, i)
+}
+print(f"Somme de 1 à 10: {acc}")
+
+# Produit avec lambda
+produit_lambda = (acc, x) => { acc * x }
+acc_prod = 1
+for i in range(1, 6) {
+    acc_prod = produit_lambda(acc_prod, i)
+}
+print(f"Produit de 1 à 5 (5!): {acc_prod}")
+
+print("\n⇒ Sélection de lambdas")
+
+# Créer plusieurs opérations
+op_addition = (a, b) => { a + b }
+op_soustraction = (a, b) => { a - b }
+op_multiplication = (a, b) => { a * b }
+op_division = (a, b) => { a / b }
+
+# Utiliser différentes opérations
+print("addition(10, 5):", op_addition(10, 5))
+print("soustraction(10, 5):", op_soustraction(10, 5))
+print("multiplication(10, 5):", op_multiplication(10, 5))
+print("division(10, 5):", op_division(10, 5))
+
+print("\n⇒ Pipeline de traitement")
+
+# Traiter des données avec plusieurs étapes
+print("Pipeline: filtrer pairs → doubler → ajouter 10")
+for i in range(1, 11) {
+    # Étape 1: filtrer les pairs
+    if i % 2 == 0 {
+        # Étape 2: doubler
+        double = i * 2
+        # Étape 3: ajouter 10
+        final = double + 10
+        print(f"  {i} → {double} → {final}")
+    }
+}
+
+print("\n⇒ Lambdas spécialisées")
+
+# Créer des fonctions spécialisées
+ajouter_10 = (x) => { x + 10 }
+ajouter_100 = (x) => { x + 100 }
+multiplier_par_5 = (x) => { x * 5 }
+
+print("ajouter_10(5) =", ajouter_10(5))
+print("ajouter_10(32) =", ajouter_10(32))
+print("ajouter_100(5) =", ajouter_100(5))
+print("multiplier_par_5(7) =", multiplier_par_5(7))
+
+print("\n⇒ Lambdas dans structures de contrôle")
+
+# Utiliser des lambdas dans des conditions
+condition = (x) => { x > 0 and x < 100 }
+
+print("Nombres valides (0 < x < 100):")
+valeur1 = -5
+if condition(valeur1) {
+    print(f"  {valeur1} est valide")
+} else {
+    print(f"  {valeur1} est invalide")
+}
+
+valeur2 = 50
+if condition(valeur2) {
+    print(f"  {valeur2} est valide")
+} else {
+    print(f"  {valeur2} est invalide")
+}
+
+valeur3 = 150
+if condition(valeur3) {
+    print(f"  {valeur3} est valide")
+} else {
+    print(f"  {valeur3} est invalide")
+}
+
+print("\n⇒ Transformation conditionnelle")
+
+# Appliquer une transformation selon une condition
+appliquer_si_pair = (x) => {
+    if x % 2 == 0 {
+        x * 10
+    } else {
+        x
+    }
+}
+
+print("Multiplier par 10 si pair:")
+for i in range(1, 11) {
+    resultat = appliquer_si_pair(i)
+    print(f"  {i} → {resultat}")
+}
+
+print("\n⇒ Prédicats combinés")
+
+# Combiner plusieurs prédicats
+est_positif = (x) => { x > 0 }
+est_petit = (x) => { x < 100 }
+
+print("Test de prédicats combinés:")
+for val in range(-10, 120, 30) {
+    pos = est_positif(val)
+    pet = est_petit(val)
+    les_deux = pos and pet
+    print(f" {val} → positif: {pos}, petit: {pet}, les deux: {les_deux}")
+}
+
+print("\n⇒ Transformations en chaîne")
+
+# Appliquer plusieurs transformations successivement
+ajouter_3 = (x) => { x + 3 }
+multiplier_par_4 = (x) => { x * 4 }
+soustraire_10 = (x) => { x - 10 }
+
+print("Transformations en chaîne sur 5:")
+val = 5
+print(f"  Valeur initiale: {val}")
+val = ajouter_3(val)
+print(f"  Après +3: {val}")
+val = multiplier_par_4(val)
+print(f"  Après *4: {val}")
+val = soustraire_10(val)
+print(f"  Après -10: {val}")
+
+print("\n⇒ Calculs avec lambdas")
+
+# Différentes fonctions mathématiques
+carre = (x) => { x * x }
+cube = (x) => { x * x * x }
+inverse = (x) => { 1.0 / x }
+
+print("Fonctions mathématiques sur 5:")
+print("  carré(5) =", carre(5))
+print("  cube(5) =", cube(5))
+print("  inverse(5) =", inverse(5))
+
+# Fonction composée
+carre_puis_double = (x) => {
+    c = x * x
+    c * 2
+}
+
+print("  carré puis double(5) =", carre_puis_double(5))

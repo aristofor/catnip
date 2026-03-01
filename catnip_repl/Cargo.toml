@@ -1,0 +1,30 @@
+[package]
+name = "catnip_repl"
+version.workspace = true
+edition.workspace = true
+description = "Interactive REPL for Catnip (ratatui + crossterm)"
+
+[lib]
+name = "_repl"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "catnip-repl"
+path = "bin/repl.rs"
+required-features = ["repl-standalone"]
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module", "catnip_rs/extension-module"]
+embedded = ["pyo3/auto-initialize", "catnip_rs/embedded"]
+repl-standalone = ["embedded"]
+
+[dependencies]
+pyo3 = { workspace = true }
+tree-sitter = { workspace = true }
+catnip_rs = { path = "../catnip_rs", default-features = false }
+catnip_tools = { path = "../catnip_tools" }
+crossterm = "0.29"
+ratatui = "0.30"
+dirs = "6.0"
+libc = "0.2"

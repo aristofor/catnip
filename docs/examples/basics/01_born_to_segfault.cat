@@ -1,0 +1,8 @@
+# Exemple 1 : BORN TO SEGFAULT
+# Le programme le plus simple en Catnip
+
+print("BORN TO SEGFAULT")
+
+# La réponse est toujours 42
+reponse = 42
+print("La réponse est:", reponse)

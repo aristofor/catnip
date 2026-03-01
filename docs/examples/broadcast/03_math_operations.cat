@@ -1,0 +1,78 @@
+# Exemple 02 : Opérations mathématiques avancées
+# Puissance, modulo, division entière, etc.
+
+print("⇒ Opérations mathématiques")
+
+# Puissance
+nombres = list(2, 3, 4, 5)
+print("Nombres:", nombres)
+
+carres = nombres.[** 2]
+print("Carrés (x²):", carres)
+
+cubes = nombres.[** 3]
+print("Cubes (x³):", cubes)
+
+# Racines carrées (puissance 0.5)
+carres = list(1, 4, 9, 16, 25)
+print("\nCarrés:", carres)
+
+racines = carres.[** 0.5]
+print("Racines carrées:", racines)
+
+print("\n⇒ Division entière et modulo\n")
+
+# Division entière
+nombres = list(10, 15, 20, 25, 30)
+print("Nombres:", nombres)
+
+div_par_3 = nombres.[// 3]
+print("Division entière par 3:", div_par_3)
+
+# Modulo (reste)
+reste_par_3 = nombres.[% 3]
+print("Reste de division par 3:", reste_par_3)
+
+# Identifier pairs/impairs
+nombres = list(1, 2, 3, 4, 5, 6, 7, 8)
+print("\nNombres:", nombres)
+
+restes = nombres.[% 2]
+print("Reste par 2 (0=pair, 1=impair):", restes)
+
+print("\n⇒ Combinaisons d'opérations\n")
+
+# Calcul de pourcentages
+valeurs = list(100, 200, 300, 400)
+print("Valeurs:", valeurs)
+
+# 20% de chaque valeur
+pourcentages = valeurs.[* 0.2]
+print("20% de chaque valeur:", pourcentages)
+
+# Valeurs avec TVA (21%)
+avec_tva = valeurs.[* 1.21]
+print("Avec TVA (21%):", avec_tva)
+
+# Valeurs avec remise de 15% puis TVA
+avec_remise = valeurs.[* 0.85].[* 1.21]
+print("Avec remise 15% puis TVA:", avec_remise)
+
+print("\n⇒ Normalisation\n")
+
+# Normaliser des valeurs entre 0 et 1
+valeurs = list(10, 50, 30, 70, 20)
+print("Valeurs brutes:", valeurs)
+
+# Min-max normalization: (x - min) / (max - min)
+min_val = min(valeurs)
+max_val = max(valeurs)
+print("Min:", min_val, "Max:", max_val)
+
+# Soustraire le min
+etape1 = valeurs.[- min_val]
+print("Après soustraction min:", etape1)
+
+# Diviser par (max - min)
+normalise = etape1.[/ (max_val - min_val)]
+print("Normalisé [0, 1]:", normalise)

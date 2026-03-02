@@ -7,6 +7,7 @@
 //! - ConfigManager for unified config handling with precedence
 //! - XDG directory helpers for cross-platform config/cache/data paths
 
+use crate::constants::MEMORY_LIMIT_DEFAULT_MB;
 use crate::policy::{self, ModulePolicy};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -759,6 +760,16 @@ impl ConfigManager {
             },
         );
 
+        // [optimize] memory limit
+        self.values.insert(
+            "memory_limit".to_string(),
+            ConfigValue {
+                value: to_py_any(py, MEMORY_LIMIT_DEFAULT_MB as i64),
+                source: ConfigSource::Default,
+                source_detail: None,
+            },
+        );
+
         // [format] section
         self.format_values.insert(
             "indent_size".to_string(),
@@ -815,6 +826,19 @@ impl ConfigManager {
                     source_detail: Some(detail.to_string()),
                 },
             );
+        } else if opt_lower.starts_with("memory") {
+            if let Some((_, val)) = opt.split_once(':') {
+                if let Ok(mb) = val.parse::<i64>() {
+                    self.values.insert(
+                        "memory_limit".to_string(),
+                        ConfigValue {
+                            value: to_py_any(py, mb),
+                            source,
+                            source_detail: Some(detail.to_string()),
+                        },
+                    );
+                }
+            }
         } else if opt_lower.starts_with("level") {
             if let Some((_, level_str)) = opt.split_once(':') {
                 let level_str = level_str.to_lowercase();
@@ -859,6 +883,7 @@ fn is_valid_key(key: &str) -> bool {
             | "cache_ttl_seconds"
             | "log_weird_errors"
             | "max_weird_logs"
+            | "memory_limit"
     )
 }
 

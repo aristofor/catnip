@@ -134,6 +134,11 @@ impl PyRustVM {
         }
     }
 
+    /// Set memory limit in MB (0 = disabled).
+    fn set_memory_limit(&mut self, mb: u64) {
+        self.vm.set_memory_limit(mb);
+    }
+
     /// Enable JIT compilation.
     fn enable_jit(&mut self) {
         self.vm.enable_jit();

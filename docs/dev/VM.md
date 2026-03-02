@@ -210,6 +210,27 @@ CatnipRuntimeError: division by zero
 > La VM logge la position source de chaque instruction. En exécution normale: rien à signaler. En erreur: ciblage
 > chirurgical.
 
+## Memory Guard
+
+La VM vérifie périodiquement le RSS du processus pour empêcher un script de consommer toute la RAM.
+
+**Mécanisme** : toutes les 65536 instructions (bitwise AND, coût négligeable), lecture de `/proc/self/statm` sur Linux
+(~5 µs par check). Sur les autres plateformes, le guard est inactif (no-op).
+
+**Limite par défaut** : 2048 MB. Configurable via `-o memory:SIZE` (en MB), config TOML (`memory_limit`), ou variable
+d'environnement (`CATNIP_OPTIMIZE=memory:SIZE`). `memory:0` désactive le guard.
+
+**Erreur** : `MemoryError` avec message indiquant le RSS courant, la limite, et comment augmenter ou désactiver.
+
+```
+MemoryError: memory limit exceeded (2100 MB / 2048 MB)
+Increase: catnip -o memory:4096
+Disable:  catnip -o memory:0
+```
+
+**Implémentation** : `catnip_rs/src/vm/memory.rs` (lecture RSS), champs `memory_limit_bytes` et `instruction_count` dans
+la struct `VM`, variante `MemoryLimitExceeded` dans `VMError` (convertie en `PyMemoryError`).
+
 ## Performances Typiques
 
 | Type de code        | VM vs AST |

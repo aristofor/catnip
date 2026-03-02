@@ -1,9 +1,9 @@
-# Tutorial Level
+# Tutorial Level ~ 0 minute
 
 ## Installation éclair
 
 > Ce guide se lit en *0 minute* si tu lis vite et que tu ne tiens pas compte du temps d'installation. Techniquement
-> correct, donc valide.
+> correct, donc validé en mode speedrun.
 
 ```bash
 git clone http://framagit.org/aristofor/catnip
@@ -12,6 +12,8 @@ make venv && make install
 ```
 
 Catnip est prêt : extension Rust compilée, moteur chargé.
+
+> Setup terminé. Le cockpit est live.
 
 ______________________________________________________________________
 
@@ -34,7 +36,7 @@ Puis dans la REPL :
 42
 ```
 
-Si ces trois lignes fonctionnent, l'univers respecte les lois de l'arithmétique **et** Catnip est installé.
+Si ces trois lignes fonctionnent, l'univers respecte les lois de l'arithmétique **et** Catnip est online.
 
 > Si elles échouent, soit l'installation a raté, soit la physique locale a décidé de muter. Statistiquement :
 > l'installation.
@@ -56,7 +58,7 @@ catnip test.cat
 # 5
 ```
 
-Le fichier est évalué, le résultat tombe.
+Le fichier est évalué, le résultat drop.
 
 ______________________________________________________________________
 

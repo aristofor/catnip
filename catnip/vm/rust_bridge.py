@@ -136,6 +136,8 @@ class VMExecutor:
         # Execute via Rust VM
         try:
             result = self._vm.execute(code, args, kwargs, closure_scope)
+        except MemoryError:
+            raise
         except (
             RuntimeError,
             TypeError,

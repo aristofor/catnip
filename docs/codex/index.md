@@ -1,6 +1,6 @@
-# Chargement de Modules Python
+# Codex Python
 
-Exemples d'intégration de bibliothèques Python dans Catnip.
+Exemples d'intégration de bibliothèques Python dans Catnip. Python dans Catnip, sans friction.
 
 ## Principe
 
@@ -41,13 +41,14 @@ catnip -m numpy script.cat
 
 Le module est accessible via son nom : `numpy.array(...)`.
 
-### Injection directe
+### Alias dans le code
 
-```bash
-catnip -m numpy script.cat
+```catnip
+np = import("numpy")
+arr = np.array(list(1, 2, 3))
 ```
 
-Le module est accessible via son nom : `numpy.array(...)` (même syntaxe que le namespace).
+Pour un alias, utiliser `import()` dans le code Catnip.
 
 ### Fichier local
 

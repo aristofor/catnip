@@ -1,7 +1,8 @@
 # Exemples d'intégration
 
 Cette section contient des exemples complets d'intégration de Catnip comme moteur embedded dans des applications Python.
-Chaque exemple montre un cas d'usage et des patterns réutilisables.
+Chaque exemple montre un cas d'usage et des patterns réutilisables. Catnip en mode embedded : branché dans l'app, prêt
+pour la prod.
 
 ## Vue d'ensemble
 
@@ -48,7 +49,7 @@ result = dsl.execute(script)
 
 ### 1. DataFrame DSL (`01_dataframe_dsl.py`)
 
-**Use case** : manipulation de DataFrames pandas avec syntaxe Catnip
+**Cas d'usage** : manipulation de DataFrames pandas avec syntaxe Catnip
 
 Exemple d'embedding simple pour créer un DSL qui manipule des DataFrames pandas. Les transformations sont définies en
 Catnip avec une syntaxe chaînée.
@@ -63,7 +64,7 @@ ______________________________________________________________________
 
 ### 2. Configuration DSL (`02_config_dsl.py`)
 
-**Use case** : validation de fichiers de configuration avec règles déclaratives
+**Cas d'usage** : validation de fichiers de configuration avec règles déclaratives
 
 Montre comment créer un DSL pour valider des configurations utilisateur avec des règles claires (types, ranges,
 patterns, etc.). Idéal pour les systèmes configurables.
@@ -78,7 +79,7 @@ ______________________________________________________________________
 
 ### 3. ETL Pipeline (`03_etl_pipeline.py`)
 
-**Use case** : transformation de données (CSV → JSON/autre format)
+**Cas d'usage** : transformation de données (CSV → JSON/autre format)
 
 Démontre comment utiliser Catnip pour créer des pipelines ETL déclaratifs. Les transformations (filtrage, mapping,
 agrégation) sont définies en Catnip et peuvent être stockées en base de données.
@@ -94,7 +95,7 @@ ______________________________________________________________________
 
 ### 4. Rule Engine (`04_rule_engine.py`)
 
-**Use case** : moteur de règles métier (pricing, éligibilité, calculs)
+**Cas d'usage** : moteur de règles métier (pricing, éligibilité, calculs)
 
 Démontre un moteur de règles pour pricing dynamique, éligibilité crédit, calcul de frais. Les règles métier sont
 définies en Catnip et modifiables sans recompiler.
@@ -110,7 +111,7 @@ ______________________________________________________________________
 
 ### 5. Report Builder (`05_report_builder.py`)
 
-**Use case** : génération de rapports avec templates et données dynamiques
+**Cas d'usage** : génération de rapports avec templates et données dynamiques
 
 Montre comment utiliser Catnip pour générer des rapports personnalisés avec calcul de métriques et formatage. Les
 templates peuvent être définis par les administrateurs.
@@ -126,7 +127,7 @@ ______________________________________________________________________
 
 ### 6. Workflow DSL (`06_workflow_dsl.py`)
 
-**Use case** : orchestration de workflows (ETL, onboarding, traitement de commandes)
+**Cas d'usage** : orchestration de workflows (ETL, onboarding, traitement de commandes)
 
 Illustre comment créer des workflows avec étapes séquentielles, gestion d'état et historique. Les workflows peuvent être
 définis en Catnip et stockés en base de données.
@@ -141,7 +142,7 @@ ______________________________________________________________________
 
 ### 7. Flask Sandbox (`07_flask_sandbox.py`)
 
-**Use case** : exécution sécurisée de scripts utilisateur dans Flask
+**Cas d'usage** : exécution sécurisée de scripts utilisateur dans Flask
 
 Illustre comment créer un sandbox Catnip pour permettre aux utilisateurs d'écrire des workflows personnalisés dans une
 application web. Les scripts sont isolés et n'exposent que les APIs autorisées.
@@ -157,7 +158,7 @@ ______________________________________________________________________
 
 ### 8. Jupyter Integration (`08_jupyter_integration.py`)
 
-**Use case** : magic commands IPython pour Jupyter notebooks
+**Cas d'usage** : magic commands IPython pour Jupyter notebooks
 
 Montre comment créer des magic commands IPython (`%catnip`, `%%catnip`) pour utiliser Catnip dans des notebooks Jupyter.
 Permet l'analyse de données interactive avec partage d'état Python ↔ Catnip.
@@ -180,7 +181,7 @@ ______________________________________________________________________
 
 ### 9. Streamlit App (`09_streamlit_app.py`)
 
-**Use case** : dashboards interactifs et playground web
+**Cas d'usage** : dashboards interactifs et playground web
 
 Démontre l'intégration de Catnip dans Streamlit pour créer un playground interactif et une calculatrice. Les
 utilisateurs peuvent écrire et exécuter du code Catnip dans le navigateur.

@@ -1,10 +1,11 @@
-# Catnip <img alt="Catnip" class="inline size-16" src="assets/catnip-logo.svg"/>
+# Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
 version <!-- catnip:version -->0.0.6<!-- /catnip:version -->
 
 Né comme langage de script embarquable pour Python.
 
-Langage qui fait un 360 no-scope pendant que les chatons compilent les killcams.
+Catnip vise un équilibre entre simplicité d'usage, expressivité et performances. Minimal en surface, solide sous le
+capot.
 
 <!-- doc-snapshot: index/repl-ieee754 -->
 
@@ -61,7 +62,7 @@ Démarrage express. **[tuto/](tuto/)**
 
 ## Interface
 
-Guide Utilisateur **[user/](user/)**
+Guide utilisateur **[user/](user/)**
 
 **Embedding (Catnip comme DSL)** :
 
@@ -81,19 +82,20 @@ Apprendre et utiliser Catnip.
 
 Spécification **[lang/](lang/)**
 
-Référence complète de la syntaxe et des propriétés du langage.
+Référence complète de la syntaxe et des concepts du langage.
 
 - [SYNTAX](lang/SYNTAX.md) - Syntaxe de base, séparateurs, conventions et annexes
 - [TYPES](lang/TYPES.md) - Types de données : nombres, chaînes, f-strings, booléens, collections
 - [EXPRESSIONS](lang/EXPRESSIONS.md) - Expressions multilignes, opérateurs, attributs, indexation et slicing
 - [CONTROL_FLOW](lang/CONTROL_FLOW.md) - Structures de contrôle (`if`, `while`, `for`, `break`, `continue`)
-- [FUNCTIONS](lang/FUNCTIONS.md) - Fonctions, lambdas, décorateurs, tail calls et fonctions intégrées
-- [STRUCTURES](lang/STRUCTURES.md) - Structures, méthodes, traits, héritage, abstract
-- [PATTERN_MATCHING](lang/PATTERN_MATCHING.md) - Référence complète du pattern matching
+- [FUNCTIONS](lang/FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
+- [STRUCTURES](lang/STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
+- [PATTERN_MATCHING](lang/PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
 - [BROADCAST](lang/BROADCAST.md) - Notation vectorielle sur collections
 - [SCOPES_AND_VARIABLES](lang/SCOPES_AND_VARIABLES.md) - Portée des variables et closures
 - [PRAGMAS](lang/PRAGMAS.md) - Pragmas (TCO, JIT, ND-recursion, modules)
-- [TURING_COMPLETENESS](lang/TURING_COMPLETENESS.md) - Preuve de Turing-complétude
+- [TURING_COMPLETENESS](lang/TURING_COMPLETENESS.md) - Socle formel et complétude de Turing
+- [COQ_PROOFS](dev/COQ_PROOFS.md) - Référentiel des preuves Coq
 - [GLOSSARY](lang/GLOSSARY.md) - Termes techniques
 
 ## Matière
@@ -124,7 +126,7 @@ Exemples thématiques utilisant les libs Python. **[codex/](codex/)**
 
 ## Cœur
 
-Doc Développeur **[dev/](dev/)**
+Doc développeur **[dev/](dev/)**
 
 Architecture interne et contribution au projet.
 

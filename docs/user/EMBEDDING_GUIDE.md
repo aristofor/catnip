@@ -25,7 +25,7 @@ Catnip est pensé pour être embarqué dans des applications Python. Le mode emb
 - Syntaxe déclarative accessible aux non-développeurs
 - Exécution native (JIT)
 
-**Use cases typiques** :
+**Cas d'usage typiques** :
 
 - Validation de configuration
 - Pipelines ETL/transformation de données

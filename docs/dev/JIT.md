@@ -218,3 +218,50 @@ Le JIT ne compile pas tout le code :
 
 > Le JIT aime les workloads CPU-bound qui cognent fort. Si ton code attend surtout le réseau/disque, il reste zen et le
 > gain reste modeste.
+
+## SSA et Block Parameters
+
+Cranelift travaille en SSA (Static Single Assignment) en interne. Catnip utilise des **block parameters explicites**
+pour les variables loop-carried, plutôt que de s'appuyer sur l'inférence automatique de phi-nodes.
+
+### Pourquoi des block parameters
+
+L'inférence automatique via `use_var()`/`def_var()` de Cranelift casse quand une variable est utilisée puis redéfinie
+dans le corps d'une boucle (def après use). Le résultat : la variable garde sa valeur initiale à chaque itération.
+
+```python
+# Ce code bouclait infiniment avant le fix
+total = 0
+for i in range(1000) {
+    total = total + i
+}
+```
+
+### Solution : passage explicite
+
+Les variables mutées dans la boucle sont passées comme paramètres du bloc :
+
+```rust
+// Création des paramètres de boucle
+let loop_params: Vec<Value> = locals_order
+    .iter()
+    .map(|_| builder.append_block_param(loop_block, types::I64))
+    .collect();
+
+// Jump initial avec valeurs initiales
+builder.ins().jump(loop_block, &initial_vals);
+
+// Back edge avec valeurs mises à jour
+let back_args: Vec<Value> = locals_order
+    .iter()
+    .map(|slot| builder.use_var(slot_vars[slot]))
+    .collect();
+builder.ins().jump(loop_block, &back_args);
+```
+
+`locals_order` est trié en amont pour garantir que tous les jumps vers `loop_block` passent les arguments dans le même
+ordre.
+
+**Référence SSA** : Cytron et al. (1991), "Efficiently Computing Static Single Assignment Form and the Control
+Dependence Graph" (IEEE TOPLAS). Construction SSA du pipeline CFG/SSA de Catnip : Braun et al. (2013), "Simple and
+Efficient Construction of Static Single Assignment Form".

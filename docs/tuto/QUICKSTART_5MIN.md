@@ -1,4 +1,4 @@
-# Mécaniques débloquées - 5 Minutes
+# Mécaniques débloquées ~ 5 minutes
 
 > Objectif : absorber 100% des primitives Catnip en 5 minutes. Après ça, tu as littéralement **tout** : fonctions,
 > blocs, match avancé, pragmas, broadcasting, modules Python. Le reste n'est que confort.
@@ -27,7 +27,7 @@ exclusive = 5 ^ 3   # 6
 teleport = 5 << 1   # 10
 ```
 
-Des opérateurs **explicites et prévisibles**.
+Des opérateurs **explicites et prévisibles**. Pas de surprise patch-notes.
 
 > Les opérateurs bitwise manipulent des représentations qui n'existent pas vraiment en surface, mais qui sont néanmoins
 > matérialisées en mémoire. Une forme d'abstraction concrète.
@@ -184,7 +184,7 @@ tools = import("./tools.py")
 result = tools.double(21)
 ```
 
-> Catnip ne remplace pas Python. Il s'y **branche** comme un exosquelette syntaxique.
+> Catnip ne remplace pas Python. Il s'y **branche** comme un exosquelette syntaxique, plug-and-play.
 
 ______________________________________________________________________
 
@@ -201,7 +201,7 @@ Tu vois :
 - analyse sémantique
 - exécution
 
-Le mode verbeux expose chaque étape du pipeline. Le runtime commente sa propre mise en scène, sans gêne.
+Le mode verbeux expose chaque étape du pipeline. Le runtime commente sa propre mise en scène, sans gêne, en full debug.
 
 ______________________________________________________________________
 
@@ -242,7 +242,7 @@ Même expression fonctionne :
 - sur un tensor PyTorch
 - sur d'autres objets que ton application décidera de fournir
 
-> C'est du polymorphisme sans théorie - juste une notation qui marche.
+> C'est du polymorphisme sans théorie - juste une notation qui marche, en mode production.
 
 ______________________________________________________________________
 

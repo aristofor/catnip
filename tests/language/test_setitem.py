@@ -111,5 +111,46 @@ lst[i + 1] = x * 2
             c.execute()
 
 
+class TestSetItemInLoops(unittest.TestCase):
+    """Test setitem inside loops (regression: stack corruption in for loops)."""
+
+    def test_setitem_in_for_dict(self):
+        """Dict setitem in for loop."""
+        c = Catnip()
+        c.parse('d = dict(); for ch in list("a", "b", "c") { d[ch] = 1 }')
+        c.execute()
+        self.assertEqual(c.context.globals['d'], {"a": 1, "b": 1, "c": 1})
+
+    def test_setitem_in_for_list(self):
+        """List setitem in for loop."""
+        c = Catnip()
+        c.context.globals['xs'] = [0, 0, 0]
+        c.parse('for i in range(3) { xs[i] = i * 10 }')
+        c.execute()
+        self.assertEqual(c.context.globals['xs'], [0, 10, 20])
+
+    def test_setitem_in_for_with_enumerate(self):
+        """Dict setitem with tuple unpacking in for loop."""
+        c = Catnip()
+        c.parse('uchars = list("a", "b", "c")\nd = dict()\nfor (i, ch) in enumerate(uchars) { d[ch] = i }')
+        c.execute()
+        self.assertEqual(c.context.globals['d'], {"a": 0, "b": 1, "c": 2})
+
+    def test_setitem_in_for_single_iteration(self):
+        """Setitem in for loop with single iteration."""
+        c = Catnip()
+        c.parse('d = dict(); for k in list("x") { d[k] = 42 }')
+        c.execute()
+        self.assertEqual(c.context.globals['d'], {"x": 42})
+
+    def test_setitem_in_nested_for(self):
+        """Setitem in nested for loops."""
+        c = Catnip()
+        c.context.globals['matrix'] = [[0, 0], [0, 0]]
+        c.parse('for i in range(2) { for j in range(2) { matrix[i][j] = i + j } }')
+        c.execute()
+        self.assertEqual(c.context.globals['matrix'], [[0, 1], [1, 2]])
+
+
 if __name__ == '__main__':
     unittest.main()

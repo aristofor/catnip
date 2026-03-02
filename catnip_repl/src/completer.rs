@@ -111,7 +111,7 @@ const BUILTINS: &[&str] = &[
 /// REPL commands (without leading /)
 const REPL_COMMANDS: &[&str] = &[
     "help", "exit", "quit", "clear", "cls", "stats", "version", "jit", "verbose", "history",
-    "load", "debug", "time",
+    "load", "debug", "time", "config",
 ];
 
 /// Common string methods

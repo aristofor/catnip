@@ -196,6 +196,8 @@ factorial(5)
 pas de `await`, pas de callback. Le code reste une expression pure. Le nombre de fils d'exécution et de processeurs est
 ajustable sans modifier le code source. 🐙
 
+> Même script, plusieurs vitesses: tu changes le mode, pas la logique.
+
 Voir [exemples ND-récursion](examples/advanced/nd_recursion.md) pour `~~`, `~>` et `~[]`.
 
 ______________________________________________________________________
@@ -205,7 +207,7 @@ ______________________________________________________________________
 - **APL** : opérations vectorielles universelles
   > les hiéroglyphes aliens, très puissants
 - **NumPy** : broadcasting automatique
-  > l'art de faire croire que `[1,2,3] + 10` a du sens
+  > l'art de faire croire que `[1,2,3] + 10` est normal
 - **MATLAB** : opérations élément par élément
   > le `. *` partout, mais ici sans surcharge cognitive
 - **R** : "tout est un vecteur"

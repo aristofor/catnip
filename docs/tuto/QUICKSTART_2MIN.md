@@ -1,4 +1,4 @@
-# Early Game - 2 Minutes
+# Early Game ~ 2 minutes
 
 > Objectif : absorber 80% de Catnip avant que ton café ne refroidisse. Deux minutes. Pas plus. Pas moins. Juste la dose.
 
@@ -12,7 +12,7 @@ entropy = voltage * 2
 print(entropy)  # → 84
 ```
 
-Catnip applique exactement ce que tu écris : valeur, opération, résultat. Pas d'esthétique superflue.
+Catnip applique exactement ce que tu écris : valeur, opération, résultat. Pas d'esthétique superflue, juste le flow.
 
 > La beauté vient après, jamais avant.
 
@@ -120,7 +120,7 @@ Exécute :
 catnip born_to_segfault.cat
 ```
 
-Tu viens d'écrire ton premier programme Catnip. Dimension-agnostique, simple, propre, sans bruit.
+Tu viens d'écrire ton premier programme Catnip. Dimension-agnostique, simple, propre, sans bruit inutile.
 
 ______________________________________________________________________
 
@@ -148,7 +148,7 @@ Même expression pour :
 - une colonne entière de DataFrame
 - et probablement des choses encore non inventées
 
-> Une seule forme de code pour tous les univers parallèles. Schrödinger aurait adoré.
+> Une seule forme de code pour tous les univers parallèles. Schrödinger aurait validé le build.
 
 ______________________________________________________________________
 

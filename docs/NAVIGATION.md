@@ -49,6 +49,7 @@ ______________________________________________________________________
 - [SCOPES_AND_VARIABLES](lang/SCOPES_AND_VARIABLES.md)
 - [PRAGMAS](lang/PRAGMAS.md)
 - [TURING_COMPLETENESS](lang/TURING_COMPLETENESS.md)
+- [COQ_PROOFS](dev/COQ_PROOFS.md)
 - [GLOSSARY](lang/GLOSSARY.md)
 
 ______________________________________________________________________

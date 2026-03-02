@@ -138,5 +138,33 @@ class TestSetAttrEdgeCases(unittest.TestCase):
         self.assertEqual(obj.value, 42)
 
 
+class TestSetAttrInLoops(unittest.TestCase):
+    """Test setattr inside loops (regression: stack corruption in for loops)."""
+
+    def test_setattr_in_for_loop(self):
+        """Struct field assignment in for loop."""
+        c = Catnip()
+        c.parse(
+            'struct Foo { x }\n'
+            'objs = list(Foo(0), Foo(0), Foo(0))\n'
+            'for obj in objs { obj.x = 42 }\n'
+            'result = objs[2].x'
+        )
+        c.execute()
+        self.assertEqual(c.context.globals['result'], 42)
+
+    def test_setattr_in_for_with_index(self):
+        """Struct field assignment using loop variable."""
+        c = Catnip()
+        c.parse(
+            'struct Foo { x }\n'
+            'objs = list(Foo(0), Foo(0), Foo(0))\n'
+            'for (i, obj) in enumerate(objs) { obj.x = i * 10 }\n'
+            'result = list(objs[0].x, objs[1].x, objs[2].x)'
+        )
+        c.execute()
+        self.assertEqual(c.context.globals['result'], [0, 10, 20])
+
+
 if __name__ == '__main__':
     unittest.main()

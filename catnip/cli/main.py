@@ -171,6 +171,11 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
     catnip.pragma_context.tco_enabled = config_manager.get('tco')
     catnip.pragma_context.optimize_level = config_manager.get('optimize')
 
+    # Memory guard (config-level, not pragma)
+    memory_limit = config_manager.get('memory_limit')
+    if memory_limit is not None:
+        catnip.context.memory_limit = memory_limit
+
     # Store manager for debug access
     catnip._config_manager = config_manager
 
@@ -225,7 +230,7 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
     "optimizations",
     multiple=True,
     type=str,
-    help="Optimizations: tco[:on|off|auto], level[:0-3], jit[:on|off]",
+    help="Optimizations: tco[:on|off], level[:0-3], jit[:on|off], memory[:MB]",
 )
 @click.option(
     "-m",

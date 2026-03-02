@@ -17,6 +17,52 @@ use pyo3::types::{PyDict, PyTuple};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// --- Centralized Python interop helpers for the VM dispatch loop ---
+
+/// Lookup a name in Python context.globals, returning a Value if found.
+#[inline]
+pub(crate) fn lookup_ctx_global(
+    py: Python<'_>,
+    globals: &Py<PyDict>,
+    name: &str,
+) -> Result<Option<Value>, super::core::VMError> {
+    match globals.bind(py).get_item(name) {
+        Ok(Some(val)) => {
+            let value = Value::from_pyobject(py, &val)
+                .map_err(|e| super::core::VMError::RuntimeError(e.to_string()))?;
+            Ok(Some(value))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(super::core::VMError::RuntimeError(e.to_string())),
+    }
+}
+
+/// Store a value into Python context.globals.
+#[inline]
+pub(crate) fn store_ctx_global(
+    py: Python<'_>,
+    globals: &Py<PyDict>,
+    name: &str,
+    value: Value,
+) {
+    let py_value = value.to_pyobject(py);
+    let _ = globals.bind(py).set_item(name, py_value);
+}
+
+/// Call a Python binary operator (operator.add, operator.lt, etc.) with Value args.
+#[inline]
+pub(crate) fn call_binary_op(
+    py: Python<'_>,
+    op: &Py<PyAny>,
+    a: Value,
+    b: Value,
+) -> Result<Value, super::core::VMError> {
+    let py_a = a.to_pyobject(py);
+    let py_b = b.to_pyobject(py);
+    let py_result = op.call1(py, (&py_a, &py_b))?;
+    Ok(Value::from_pyobject(py, py_result.bind(py))?)
+}
+
 pub(crate) fn append_instructions_from_bytecode(
     bytecode: &Bound<'_, PyTuple>,
     code: &mut CodeObject,

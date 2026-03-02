@@ -64,6 +64,7 @@ Les commandes commencent par `/` :
 | `/verbose`       | Activer/désactiver le mode verbeux    |
 | `/debug`         | Activer/désactiver le mode debug      |
 | `/time <expr>`   | Benchmarker une expression            |
+| `/config`        | Editeur interactif de configuration   |
 | `/version`       | Afficher la version                   |
 
 <!-- doc-snapshot: repl/version -->
@@ -93,6 +94,37 @@ JIT compiler: disabled
 ▸ /jit
 JIT compiler: enabled
 ```
+
+## Editeur de configuration (`/config`)
+
+`/config` sans arguments ouvre un overlay interactif sous la ligne de prompt. Toutes les clés de `catnip.toml` y sont
+listées avec leur valeur courante et leur source (default, file, env, cli).
+
+**Navigation** :
+
+| Touche          | Action                                              |
+| --------------- | --------------------------------------------------- |
+| Up / Down / k/j | Naviguer entre les clés                             |
+| Enter / Space   | Toggle (bool), cycle (choice), ou entrer en édition |
+| Esc / q         | Fermer l'éditeur                                    |
+
+**Mode édition** (valeurs numériques) :
+
+| Touche    | Action                       |
+| --------- | ---------------------------- |
+| 0-9       | Saisir la valeur             |
+| Backspace | Effacer un caractère         |
+| Enter     | Valider (avec borne min/max) |
+| Esc       | Annuler l'édition            |
+
+Les modifications sont sauvegardées dans `catnip.toml` immédiatement.
+
+Les sous-commandes textuelles restent disponibles :
+
+- `/config show` : affichage statique (comme `catnip config show`)
+- `/config get KEY` : valeur d'une clé
+- `/config set KEY VALUE` : modifier une clé
+- `/config path` : chemin du fichier de configuration
 
 ## Raccourcis clavier
 

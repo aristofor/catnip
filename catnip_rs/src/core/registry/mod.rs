@@ -833,33 +833,6 @@ impl Registry {
         Ok(result)
     }
 
-    /// Generic fold-left with magic methods (__or__, __xor__, etc.)
-    ///
-    /// Reduces a sequence of values using a magic method.
-    ///
-    /// # Arguments
-    /// * `items` - Tuple of arguments to reduce
-    /// * `method_name` - Name of the magic method (e.g., "__or__")
-    pub(crate) fn fold_left_magic(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-        method_name: &str,
-    ) -> PyResult<Py<PyAny>> {
-        let args = self.unwrap_and_eval_args(py, items)?;
-        if args.is_empty() {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "{} requires at least one argument",
-                method_name
-            )));
-        }
-        let mut result = args[0].clone_ref(py);
-        for val in &args[1..] {
-            result = result.call_method1(py, method_name, (val,))?;
-        }
-        Ok(result)
-    }
-
     /// Generic chained comparison (a < b < c)
     ///
     /// Evaluates a chain of comparisons, short-circuiting on first failure.

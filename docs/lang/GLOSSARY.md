@@ -2,9 +2,9 @@
 
 Ce document définit les concepts clés et la terminologie utilisée dans Catnip, pour éviter les ambiguïtés.
 
-## Architecture et Composants
+## Architecture et composants
 
-### HostApp (Application Hôte)
+### HostApp (application hôte)
 
 L'**application hôte** est le programme Python qui intègre et utilise Catnip comme langage embarqué. Elle fournit :
 
@@ -45,7 +45,7 @@ Le **contexte d'exécution** contient :
 
 **Fichier**: `catnip/context.py`
 
-## Phases d'Exécution
+## Phases d'exécution
 
 ### Parsing
 
@@ -108,7 +108,7 @@ rebinder les paramètres et recommencer.
 
 > La fonction rebondit sur elle-même sans jamais vraiment s'appeler.
 
-## Structures de Données
+## Structures de données
 
 ### IR (Intermediate Representation)
 
@@ -224,7 +224,7 @@ l'exécution.
 
 **Exemple**: `2 + 3 * 4` → `14` (au parse-time)
 
-### Optimisations Performance
+### Optimisations performance
 
 Les composants critiques du runtime sont optimisés pour:
 
@@ -428,7 +428,7 @@ arbitraire.
 
 > Catnip applique toujours l'opération "au bon endroit", même quand la dimension n'est pas connue à l'avance.
 
-## Termes Généraux
+## Termes généraux
 
 ### Builtin
 
@@ -484,7 +484,7 @@ Environnement d'exécution **isolé** qui limite les actions possibles du code.
 
 > Catnip peut s'exécuter dans un contexte restreint où seules certaines fonctions Python sont accessibles.
 
-## Fichiers et Structure
+## Fichiers et structure
 
 ### `.cat`
 
@@ -612,9 +612,9 @@ s'exécutent normalement via l'interpréteur.
 - **GVN**: Global Value Numbering (Numérotation Globale des Valeurs)
 - **LICM**: Loop-Invariant Code Motion (Déplacement de Code Invariant de Boucle)
 
-## Conventions de Nommage
+## Conventions de nommage
 
-### Fonctions Internes
+### Fonctions internes
 
 - Préfixe `_`: Fonction privée (ex: `_execute()`)
 - Préfixe `visit_`: Méthode de visitor pattern (ex: `visit_if()`)
@@ -630,7 +630,7 @@ s'exécutent normalement via l'interpréteur.
 - PascalCase: `PatternLiteral`, `Function`, `Lambda`
 - Suffixe `Mixin`: Classe mixin (ex: `ControlFlowMixin`)
 
-## Relations Entre Concepts
+## Relations entre concepts
 
 ```mermaid
 flowchart TD
@@ -646,7 +646,7 @@ flowchart TD
     F --> H["Context (scopes, variables, fonctions, JIT, cache)"]
 ```
 
-## Exemples d'Usage
+## Exemples d'usage
 
 ### Intégration dans une HostApp
 

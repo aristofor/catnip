@@ -131,6 +131,7 @@ pub const REPL_HELP_TEXT: &str = r#"Catnip REPL Commands:
   /verbose        Toggle verbose mode (show timings)
   /debug          Toggle debug mode (show IR and bytecode)
   /time <expr>    Benchmark an expression (adaptive iterations)
+  /config         Show/edit configuration (show, get, set, path)
   /version        Show Catnip version
 
 Keyboard shortcuts:
@@ -171,6 +172,12 @@ pub const VM_STACK_INITIAL_SIZE: usize = 256;
 
 /// Frame pool size
 pub const VM_FRAME_POOL_SIZE: usize = 64;
+
+/// Default memory limit in MB (0 = disabled)
+pub const MEMORY_LIMIT_DEFAULT_MB: u64 = 2048;
+
+/// Check RSS every N instructions (power of 2 for bitwise AND mask)
+pub const MEMORY_CHECK_INTERVAL: u64 = 0xFFFF; // 65535
 
 // ============================================================================
 // Cache - Configuration

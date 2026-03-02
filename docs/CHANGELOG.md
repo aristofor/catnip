@@ -8,6 +8,8 @@ Changements depuis v0.0.5 (2026-02-18).
 
 - Le préfixe non-déterministe passe de `@` à `~` (`~choose(xs)`, `~amb(1, 2, 3)`)
 
+> en mode draft, l'edit de la grammaire ça n'a pas cassé grand chose (la doc et les exemples ND)
+
 ### Langage
 
 - **Surcharge d'opérateurs** : `op +`, `op *`, etc. dans les structs
@@ -27,11 +29,13 @@ Changements depuis v0.0.5 (2026-02-18).
 
 - Cache JIT persistant (traces + stencils natifs Cranelift)
 - Nombreuses optimisations VM internes
+- **Memory guard** : limite RSS configurable (défaut 2 Go, `-o memory:SIZE`), vérifie toutes les 65536 instructions
 
 ### REPL
 
-- Historique migré vers XDG (`$XDG_STATE_HOME/catnip/repl_history`), migration automatique depuis `~/.catnip_history`
 - Coloration des résultats par type
+- **`/config`** : editeur interactif TUI (navigation clavier, toggle bool, cycle choice, édition inline avec validation
+  min/max, sauvegarde immédiate). Sous-commandes textuelles toujours disponibles (`show`, `get`, `set`, `path`)
 
 ### Bug fixes
 

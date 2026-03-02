@@ -72,7 +72,7 @@ optimize = 1     # Compilation rapide
 tco = true       # TCO utile pour récursion
 ```
 
-**Use cases** :
+**Cas d'usage** :
 
 - Scripts système (config validation, data transform)
 - Cron jobs, automation
@@ -93,7 +93,7 @@ optimize = 2     # Équilibre perf/compilation
 tco = true       # TCO pour expérimentation
 ```
 
-**Use cases** :
+**Cas d'usage** :
 
 - Exploration interactive
 - Debugging
@@ -114,7 +114,7 @@ tco = false      # Pas de TCO : call stacks clairs
 optimize = 0     # Comportement prédictible
 ```
 
-**Use cases** :
+**Cas d'usage** :
 
 - DSL dans applications Python
 - Pandas/data wrangling DSL
@@ -230,6 +230,9 @@ $ catnip config show
 $ catnip config show --debug
 ```
 
+En REPL, `/config` (sans argument) ouvre un éditeur interactif avec navigation clavier, toggle/cycle/édition inline et
+sauvegarde immédiate. Voir [REPL.md](REPL.md#editeur-de-configuration-config) pour les détails.
+
 <!-- doc-snapshot: config/show -->
 
 ```console
@@ -242,6 +245,7 @@ executor = vm
 jit = false
 log_weird_errors = true
 max_weird_logs = 50
+memory_limit = 2048
 no_color = false
 optimize = 3
 tco = true
@@ -261,6 +265,7 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   jit: False  [default]
   log_weird_errors: True  [default]
   max_weird_logs: 50  [default]
+  memory_limit: 2048  [default]
   no_color: False  [default]
   optimize: 3  [default]
   tco: True  [default]

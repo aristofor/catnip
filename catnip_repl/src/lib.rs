@@ -8,6 +8,7 @@ extern crate _rs as catnip_rs;
 pub mod app;
 pub mod completer;
 pub mod config;
+pub mod config_editor;
 pub mod context;
 pub mod executor;
 pub mod highlighter;

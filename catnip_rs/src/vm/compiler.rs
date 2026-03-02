@@ -1604,6 +1604,9 @@ impl Compiler {
                         self.void_context = true;
                         self.compile_node(py, &stmt)?;
                         self.void_context = false;
+                    } else if self.is_void_op(py, &stmt) {
+                        // SetItem/SetAttr: mutation ops that push nothing on the stack
+                        self.compile_node(py, &stmt)?;
                     } else {
                         self.compile_node(py, &stmt)?;
                         self.emit(VMOpCode::PopTop, 0);
@@ -1618,6 +1621,8 @@ impl Compiler {
             self.void_context = true;
             self.compile_node(py, body)?;
             self.void_context = false;
+        } else if self.is_void_op(py, body) {
+            self.compile_node(py, body)?;
         } else {
             self.compile_node(py, body)?;
             self.emit(VMOpCode::PopTop, 0);
@@ -1630,6 +1635,17 @@ impl Compiler {
     fn is_set_locals_node(&self, _py: Python<'_>, node: &Bound<'_, PyAny>) -> bool {
         if let Ok(op) = node.extract::<PyRef<Op>>() {
             op.ident == IROpCode::SetLocals as i32
+        } else {
+            false
+        }
+    }
+
+    /// Check if a node is a void mutation op (pushes nothing on the stack).
+    #[inline]
+    fn is_void_op(&self, _py: Python<'_>, node: &Bound<'_, PyAny>) -> bool {
+        if let Ok(op) = node.extract::<PyRef<Op>>() {
+            let id = op.ident;
+            id == IROpCode::SetItem as i32 || id == IROpCode::SetAttr as i32
         } else {
             false
         }

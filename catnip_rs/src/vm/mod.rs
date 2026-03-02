@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod core;
 pub mod frame;
 pub mod iter;
+pub mod memory;
 pub mod mro;
 pub mod opcode;
 pub mod pattern;

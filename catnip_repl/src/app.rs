@@ -9,6 +9,7 @@
 
 use crate::completer::{CatnipCompleter, CompletionState};
 use crate::config::{version_info, ReplConfig, HELP_TEXT};
+use crate::config_editor::{ConfigAction, ConfigEditorState};
 use crate::executor::{ReplExecutor, ValueKind};
 use crate::highlighter::CatnipHighlighter;
 use crate::hints::HintEngine;
@@ -29,7 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 use ratatui::Terminal;
 use std::io::{self, Stdout, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 /// REPL exit reason
@@ -76,6 +77,10 @@ pub struct App {
     last_popup_lines: u16,
     /// Number of continuation lines displayed (for clearing)
     last_continuation_lines: u16,
+    /// Number of config editor lines displayed on last render (for clearing)
+    last_config_editor_lines: u16,
+    /// Interactive config editor overlay
+    config_editor: ConfigEditorState,
     /// Viewport Y position (line 0) in the terminal
     viewport_y: u16,
 }
@@ -85,7 +90,6 @@ impl App {
         let executor = ReplExecutor::new()?;
 
         let history_path = get_history_path(&config);
-        migrate_history(&history_path);
         let history = History::load(&history_path, config.max_history);
 
         let completer = CatnipCompleter::new();
@@ -105,6 +109,8 @@ impl App {
             exit_reason: None,
             last_popup_lines: 0,
             last_continuation_lines: 0,
+            last_config_editor_lines: 0,
+            config_editor: ConfigEditorState::new(),
             viewport_y: 0,
         })
     }
@@ -121,7 +127,9 @@ impl App {
 
         loop {
             // Track previous extra lines for cleanup
-            let prev_extra = self.last_continuation_lines + self.last_popup_lines;
+            let prev_extra = self.last_continuation_lines
+                + self.last_popup_lines
+                + self.last_config_editor_lines;
 
             // Hide cursor during render to prevent flicker
             crossterm::queue!(
@@ -141,9 +149,13 @@ impl App {
             self.draw_continuation_lines(&mut stdout)?;
             // Popup via crossterm (queued, not flushed)
             self.draw_completion_popup(&mut stdout)?;
+            // Config editor overlay (queued, not flushed)
+            self.draw_config_editor(&mut stdout)?;
 
             // Clear excess lines from previous frame
-            let curr_extra = self.last_continuation_lines + self.last_popup_lines;
+            let curr_extra = self.last_continuation_lines
+                + self.last_popup_lines
+                + self.last_config_editor_lines;
             for i in curr_extra..prev_extra {
                 let y = self.viewport_y + 1 + i;
                 crossterm::queue!(
@@ -262,7 +274,9 @@ impl App {
             0
         };
 
-        let total_needed = extra_lines + popup_needed;
+        let config_editor_needed = self.config_editor.visible_lines();
+
+        let total_needed = extra_lines + popup_needed + config_editor_needed;
         if total_needed == 0 {
             return Ok(());
         }
@@ -427,6 +441,11 @@ impl App {
         key: KeyEvent,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
+        // Config editor intercepts all keys when active
+        if self.config_editor.active {
+            return self.handle_config_editor_key(key, terminal);
+        }
+
         match (key.modifiers, key.code) {
             // Ctrl+D : quit
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
@@ -632,8 +651,10 @@ impl App {
         // Reset render bookkeeping after full screen wipe.
         self.last_popup_lines = 0;
         self.last_continuation_lines = 0;
+        self.last_config_editor_lines = 0;
         self.viewport_y = 0;
         self.completion.reset();
+        self.config_editor.reset();
 
         // Keep ratatui internal buffers in sync with terminal state.
         terminal.clear()?;
@@ -927,6 +948,9 @@ impl App {
                     self.benchmark_expression(&expression, terminal);
                 }
             }
+            "config" => {
+                self.handle_config_command(&parts[1..], terminal);
+            }
             _ => {
                 self.print_error(terminal, &format!("Unknown command: /{}", parts[0]));
                 self.print_output(terminal, "Type /help for available commands");
@@ -934,6 +958,435 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    /// Create a ConfigManager via Python, with file + env loaded.
+    fn make_config_manager<'py>(
+        &self,
+        py: pyo3::Python<'py>,
+    ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+        use pyo3::prelude::*;
+        let rs = py.import(pyo3::intern!(py, "catnip._rs"))?;
+        let cm = rs.getattr("ConfigManager")?.call0()?;
+        cm.call_method0("load_file")?;
+        cm.call_method0("load_env")?;
+        Ok(cm)
+    }
+
+    /// Parse a raw config value string into the appropriate Python type.
+    fn parse_config_value(&self, py: pyo3::Python<'_>, raw: &str) -> pyo3::Py<pyo3::PyAny> {
+        use pyo3::prelude::*;
+        use pyo3::types::PyBool;
+        match raw {
+            "true" | "on" | "yes" => PyBool::new(py, true).to_owned().into_any().unbind(),
+            "false" | "off" | "no" => PyBool::new(py, false).to_owned().into_any().unbind(),
+            "unlimited" => py.None(),
+            v => {
+                if let Ok(i) = v.parse::<i64>() {
+                    i.into_pyobject(py).unwrap().into_any().unbind()
+                } else {
+                    v.into_pyobject(py).unwrap().into_any().unbind()
+                }
+            }
+        }
+    }
+
+    fn handle_config_command(
+        &mut self,
+        args: &[&str],
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) {
+        use pyo3::prelude::*;
+
+        match args.first().copied() {
+            None => {
+                // Open interactive config editor
+                self.open_config_editor(terminal);
+            }
+            Some("show") => {
+                Python::attach(|py| {
+                    let cm = match self.make_config_manager(py) {
+                        Ok(cm) => cm,
+                        Err(e) => {
+                            self.print_error(terminal, &format!("{}", e));
+                            return;
+                        }
+                    };
+                    let lines: Vec<String> =
+                        match cm.call_method0("debug_report").and_then(|r| r.extract()) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                self.print_error(terminal, &format!("{}", e));
+                                return;
+                            }
+                        };
+
+                    let path = catnip_rs::config::get_config_path();
+                    let mut output = format!("# {}\n", path.display());
+                    for line in &lines {
+                        output.push_str(line);
+                        output.push('\n');
+                    }
+                    self.print_output(terminal, output.trim_end());
+                });
+            }
+            Some("get") => {
+                if args.len() < 2 {
+                    self.print_error(terminal, "Usage: /config get KEY");
+                    return;
+                }
+                let key = args[1];
+                Python::attach(|py| {
+                    let cm = match self.make_config_manager(py) {
+                        Ok(cm) => cm,
+                        Err(e) => {
+                            self.print_error(terminal, &format!("{}", e));
+                            return;
+                        }
+                    };
+                    match cm.call_method1("get", (key,)) {
+                        Ok(val) => {
+                            let repr = val
+                                .repr()
+                                .map(|r| r.to_string())
+                                .unwrap_or_else(|_| "?".to_string());
+                            self.print_output(terminal, &format!("{}: {}", key, repr));
+                        }
+                        Err(e) => {
+                            self.print_error(terminal, &format!("{}", e));
+                        }
+                    }
+                });
+            }
+            Some("set") => {
+                if args.len() < 3 {
+                    self.print_error(terminal, "Usage: /config set KEY VALUE");
+                    return;
+                }
+                let key = args[1];
+                let raw_value = args[2..].join(" ");
+                Python::attach(|py| {
+                    let py_value = self.parse_config_value(py, &raw_value);
+                    match py
+                        .import(pyo3::intern!(py, "catnip.config"))
+                        .and_then(|m| m.getattr("set_config_value"))
+                        .and_then(|f| f.call1((key, py_value)))
+                    {
+                        Ok(_) => {
+                            self.print_output(
+                                terminal,
+                                &format!("{} = {} (saved)", key, raw_value),
+                            );
+                        }
+                        Err(e) => {
+                            self.print_error(terminal, &format!("{}", e));
+                        }
+                    }
+                });
+            }
+            Some("path") => {
+                let path = catnip_rs::config::get_config_path();
+                self.print_output(terminal, &path.to_string_lossy());
+            }
+            _ => {
+                self.print_error(terminal, "Usage: /config [show|get KEY|set KEY VALUE|path]");
+            }
+        }
+    }
+
+    // -- Config editor --
+
+    /// Load config data from Python and activate the editor overlay.
+    fn open_config_editor(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+        use pyo3::prelude::*;
+
+        Python::attach(|py| {
+            let cm = match self.make_config_manager(py) {
+                Ok(cm) => cm,
+                Err(e) => {
+                    self.print_error(terminal, &format!("{}", e));
+                    return;
+                }
+            };
+
+            // Extract config entries via debug_report
+            let mut entries = Vec::new();
+            let lines: Vec<String> = match cm.call_method0("debug_report").and_then(|r| r.extract())
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    self.print_error(terminal, &format!("{}", e));
+                    return;
+                }
+            };
+
+            let mut format_entries = Vec::new();
+            let mut in_format = false;
+
+            for line in &lines {
+                if line.starts_with("--- format") {
+                    in_format = true;
+                    continue;
+                }
+
+                // Parse "key: value_repr  [source (detail)]" or "format.key: ..."
+                let (raw_key, rest) = match line.split_once(": ") {
+                    Some(pair) => pair,
+                    None => continue,
+                };
+
+                let key = raw_key
+                    .strip_prefix("format.")
+                    .unwrap_or(raw_key)
+                    .to_string();
+
+                // Split "value_repr  [source...]"
+                let (value, source) = if let Some(bracket_pos) = rest.rfind('[') {
+                    let val = rest[..bracket_pos].trim().to_string();
+                    let src = rest[bracket_pos + 1..]
+                        .trim_end_matches(']')
+                        .split_once(' ')
+                        .map(|(s, _)| s)
+                        .unwrap_or(rest[bracket_pos + 1..].trim_end_matches(']'))
+                        .to_string();
+                    (val, src)
+                } else {
+                    (rest.to_string(), "default".to_string())
+                };
+
+                if in_format {
+                    format_entries.push((key, value, source));
+                } else {
+                    entries.push((key, value, source));
+                }
+            }
+
+            self.config_editor.load(entries, format_entries);
+        });
+    }
+
+    /// Handle key events while the config editor is active.
+    fn handle_config_editor_key(
+        &mut self,
+        key: KeyEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> io::Result<()> {
+        // Edit mode: intercept typing keys
+        if self.config_editor.edit.is_some() {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Esc) => {
+                    self.config_editor.cancel_edit();
+                }
+                (_, KeyCode::Enter) => {
+                    if let Some(action) = self.config_editor.confirm_edit() {
+                        self.apply_config_action(action, terminal);
+                    }
+                }
+                (_, KeyCode::Backspace) => {
+                    self.config_editor.edit_backspace();
+                }
+                (_, KeyCode::Left) => {
+                    self.config_editor.edit_move_left();
+                }
+                (_, KeyCode::Right) => {
+                    self.config_editor.edit_move_right();
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(ch)) => {
+                    self.config_editor.edit_insert_char(ch);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Navigation mode
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
+                self.config_editor.reset();
+            }
+            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                self.config_editor.select_prev();
+            }
+            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                self.config_editor.select_next();
+            }
+            (_, KeyCode::Enter) | (_, KeyCode::Char(' ')) => {
+                if let Some(action) = self.config_editor.toggle_or_enter_edit() {
+                    self.apply_config_action(action, terminal);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Apply a config change via Python's set_config_value.
+    fn apply_config_action(
+        &mut self,
+        action: ConfigAction,
+        _terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) {
+        use pyo3::prelude::*;
+
+        match action {
+            ConfigAction::SetValue {
+                key,
+                value,
+                is_format,
+            } => {
+                Python::attach(|py| {
+                    let py_value = self.parse_config_value(py, &value);
+                    let target_key = if is_format {
+                        format!("format.{}", key)
+                    } else {
+                        key.clone()
+                    };
+                    match py
+                        .import(pyo3::intern!(py, "catnip.config"))
+                        .and_then(|m| m.getattr("set_config_value"))
+                        .and_then(|f| f.call1((&target_key, py_value)))
+                    {
+                        Ok(_) => {
+                            self.config_editor.status_message =
+                                Some(format!("{} = {} (saved)", key, value));
+                        }
+                        Err(e) => {
+                            self.config_editor.status_message = Some(format!("Error: {}", e));
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Render the config editor overlay below input lines (queued, caller flushes).
+    fn draw_config_editor(&mut self, stdout: &mut Stdout) -> io::Result<()> {
+        if !self.config_editor.active || self.config_editor.total_items() == 0 {
+            self.last_config_editor_lines = 0;
+            return Ok(());
+        }
+
+        let base_y = self.viewport_y + self.input.line_count() as u16 + self.last_popup_lines;
+
+        let (term_w, _) = ct::size()?;
+        let w = (term_w as usize).min(60);
+
+        let mut line_idx: u16 = 0;
+
+        // Header
+        let header = format!("  {:<24} {:<14} {}", "key", "value", "source");
+        crossterm::queue!(
+            stdout,
+            cursor::MoveTo(0, base_y + line_idx),
+            ct::Clear(ct::ClearType::CurrentLine)
+        )?;
+        write!(stdout, "\x1b[1m{}\x1b[0m", &header[..header.len().min(w)])?;
+        line_idx += 1;
+
+        // Separator
+        let sep: String = "\u{2500}".repeat(w.min(50));
+        crossterm::queue!(
+            stdout,
+            cursor::MoveTo(0, base_y + line_idx),
+            ct::Clear(ct::ClearType::CurrentLine)
+        )?;
+        write!(stdout, "  \x1b[90m{}\x1b[0m", sep)?;
+        line_idx += 1;
+
+        // Main items
+        let main_count = self.config_editor.items.len();
+        for i in 0..main_count {
+            let item = &self.config_editor.items[i];
+            let is_selected = i == self.config_editor.selected;
+            self.draw_config_item(stdout, base_y + line_idx, item, is_selected, i, w)?;
+            line_idx += 1;
+        }
+
+        // Format separator
+        crossterm::queue!(
+            stdout,
+            cursor::MoveTo(0, base_y + line_idx),
+            ct::Clear(ct::ClearType::CurrentLine)
+        )?;
+        write!(stdout, "  \x1b[90m--- format ---\x1b[0m")?;
+        line_idx += 1;
+
+        // Format items
+        for i in 0..self.config_editor.format_items.len() {
+            let item = &self.config_editor.format_items[i];
+            let global_idx = main_count + i;
+            let is_selected = global_idx == self.config_editor.selected;
+            self.draw_config_item(stdout, base_y + line_idx, item, is_selected, global_idx, w)?;
+            line_idx += 1;
+        }
+
+        // Status/help line
+        crossterm::queue!(
+            stdout,
+            cursor::MoveTo(0, base_y + line_idx),
+            ct::Clear(ct::ClearType::CurrentLine)
+        )?;
+        if let Some(ref msg) = self.config_editor.status_message {
+            write!(stdout, "  \x1b[33m{}\x1b[0m", msg)?;
+        } else if self.config_editor.edit.is_some() {
+            write!(stdout, "  \x1b[90m[Enter] save  [Esc] cancel\x1b[0m")?;
+        } else {
+            write!(
+                stdout,
+                "  \x1b[90m[Enter] edit  [\u{2191}\u{2193}] navigate  [Esc] close\x1b[0m"
+            )?;
+        }
+        line_idx += 1;
+
+        self.last_config_editor_lines = line_idx;
+        Ok(())
+    }
+
+    /// Draw a single config item line.
+    fn draw_config_item(
+        &self,
+        stdout: &mut Stdout,
+        y: u16,
+        item: &crate::config_editor::ConfigItem,
+        selected: bool,
+        _global_idx: usize,
+        _max_width: usize,
+    ) -> io::Result<()> {
+        crossterm::queue!(
+            stdout,
+            cursor::MoveTo(0, y),
+            ct::Clear(ct::ClearType::CurrentLine)
+        )?;
+
+        let marker = if selected { ">" } else { " " };
+
+        // Show edit buffer if this item is selected and in edit mode
+        let value_display = if selected {
+            if let Some(ref edit) = self.config_editor.edit {
+                format!("{}\u{2502}", edit.buffer) // cursor indicator
+            } else {
+                item.value.clone()
+            }
+        } else {
+            item.value.clone()
+        };
+
+        if selected {
+            write!(
+                stdout,
+                "\x1b[48;2;60;60;80m\x1b[1m{} {:<24} {:<14} \x1b[90m{:<10}\x1b[0m",
+                marker, item.key, value_display, item.source
+            )?;
+        } else {
+            write!(
+                stdout,
+                "{} {:<24} {:<14} \x1b[90m{:<10}\x1b[0m",
+                marker, item.key, value_display, item.source
+            )?;
+        }
+
+        Ok(())
     }
 
     fn load_and_execute(
@@ -1164,17 +1617,6 @@ fn get_history_path(config: &ReplConfig) -> PathBuf {
     let dir = catnip_rs::config::get_state_dir();
     let _ = std::fs::create_dir_all(&dir);
     dir.join(&config.history_file)
-}
-
-/// Migrate ~/.catnip_history to XDG location if needed.
-fn migrate_history(new_path: &Path) {
-    if new_path.exists() {
-        return;
-    }
-    let old_path = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".catnip_history"));
-    if let Some(old) = old_path.filter(|p| p.exists()) {
-        let _ = std::fs::rename(&old, new_path);
-    }
 }
 
 // -- Multiline helpers (inline, avoids cross-crate dep for internal use) --

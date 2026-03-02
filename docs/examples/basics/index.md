@@ -1,6 +1,6 @@
 # Basics
 
-Exemples simples pour découvrir Catnip.
+Le kit de démarrage : exemples simples pour découvrir Catnip.
 
 - [01_born_to_segfault.cat](01_born_to_segfault.cat) - Premier programme, debug et affichage
 - [02_loops.cat](02_loops.cat) - Boucles for et while

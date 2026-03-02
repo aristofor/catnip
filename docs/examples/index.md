@@ -1,6 +1,6 @@
-# Exemples Catnip
+# Exemples
 
-> Les exemples avancés et multi-fichiers sont dans [advanced/](advanced/).
+> No gods, no masters, juste du code: si ça compile c'est un exemple, sinon c'est un bug avec de l'attitude.
 
 ## Bases (`basics/`)
 
@@ -106,12 +106,6 @@ Scripts Catnip exécutables en ligne de commande :
 - [`03_transform_csv.cat`](standalone/03_transform_csv.cat) - Transformation de données tabulaires
 - [`04_config_validator.cat`](standalone/04_config_validator.cat) - Validation de configuration
 - [`05_data_report.cat`](standalone/05_data_report.cat) - Rapport de données
-
-## Performance
-
-Section temporairement retiree de la documentation publique.
-
-Les exemples de performance ont ete deplaces sous `wip/examples/performance/` pour refonte.
 
 ## Control Flow Graph (`cfg/`)
 

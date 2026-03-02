@@ -1,36 +1,37 @@
-# Spécification du Langage
+# Spécification du langage
 
-Documentation complète de la syntaxe et des propriétés du langage Catnip.
+Documentation de référence du langage Catnip, du plus accessible au plus avancé.
 
-## Référence Principale
+## Commencer ici
 
 - [SYNTAX](SYNTAX.md) - Syntaxe de base, séparateurs, conventions et annexes
 - [TYPES](TYPES.md) - Types de données : nombres, décimales exactes, complexes, chaînes, f-strings, booléens,
   collections
 - [EXPRESSIONS](EXPRESSIONS.md) - Expressions multilignes, opérateurs, attributs, indexation et slicing
 - [CONTROL_FLOW](CONTROL_FLOW.md) - Structures de contrôle (`if`, `while`, `for`, `break`, `continue`)
-- [FUNCTIONS](FUNCTIONS.md) - Fonctions, lambdas, décorateurs, tail calls et fonctions intégrées
-- [STRUCTURES](STRUCTURES.md) - Structures, méthodes, traits, héritage, abstract
-- [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du pattern matching
+- [FUNCTIONS](FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
+- [STRUCTURES](STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
+- [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
 
-## Concepts du Langage
+## Aller plus loin
 
-- [BROADCAST](BROADCAST.md) - Notation vectorielle sur collections Opérations vectorielles avec `A.[op M]`,
-  transformations sur listes/dicts, patterns de broadcasting
+- [BROADCAST](BROADCAST.md) - Notation vectorielle sur collections : opérations avec `A.[op M]`, transformations sur
+  listes et dictionnaires, motifs de broadcasting
 
-- [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Assignation, portée des variables et closures Résolution de scope,
-  shadowing, captures de variables, closures, durée de vie
+- [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Affectation, portée des variables et closures : résolution de
+  portée, masquage (shadowing), captures et durée de vie
 
-## Directives et Pragmas
+- [PRAGMAS](PRAGMAS.md) - Directives de compilation (TCO, JIT avec `@jit` et `pragma("jit", "all")`), récursion ND (mode
+  parallèle, mémoïsation) et import de modules
 
-- [PRAGMAS](PRAGMAS.md) - Directives de compilation TCO, JIT (`@jit`, `pragma("jit", "all")`), ND-recursion (mode
-  parallèle, memoization), import de modules
+## Théorie et preuves (optionnel)
 
-## Propriétés Formelles
-
-- [TURING_COMPLETENESS](TURING_COMPLETENESS.md) - Preuve de Turing-complétude. Démonstration formelle, critères
-  théoriques, exemples d'algorithmes
+- [TURING_COMPLETENESS](TURING_COMPLETENESS.md) - Le socle formel du langage : il peut exprimer tout type d'algorithme.
+  Les preuves formelles servent à vérifier ces garanties (audit, recherche, sécurité), sans être nécessaires pour coder
+  au quotidien
+- [COQ_PROOFS](../dev/COQ_PROOFS.md) - Référentiel des preuves Coq : ce qui est prouvé, comment vérifier (`make proof`)
+  et où trouver les modules de preuve
 
 ## Glossaire
 
-- [GLOSSARY](GLOSSARY.md) - Termes techniques Définitions des concepts clés, terminologie du langage
+- [GLOSSARY](GLOSSARY.md) - Définitions des concepts clés et de la terminologie du langage

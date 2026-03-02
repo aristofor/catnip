@@ -248,6 +248,16 @@ catnip -o level:3 script.cat      # Toutes (défaut)
 
 Niveaux, alias et détails : voir [Pragmas](../lang/PRAGMAS.md).
 
+**Memory guard** (défaut: `2048` MB) :
+
+```bash
+catnip -o memory:4096 script.cat  # Limite 4 Go
+catnip -o memory:0 script.cat     # Désactive le guard
+```
+
+La VM vérifie périodiquement le RSS du processus et lève `MemoryError` si la limite est dépassée. Actif par défaut à
+2048 MB, Linux uniquement (no-op sur autres plateformes). Voir [VM](../dev/VM.md#memory-guard).
+
 ### Options de Chargement de Modules
 
 #### `-m, --module MODULE`
@@ -524,8 +534,8 @@ Options:
   --no-cache                 Disable disk cache for parsing/bytecode
   --config PATH              Use alternate config file instead of
                              ~/.config/catnip/catnip.toml
-  -o, --optimize TEXT        Optimizations: tco[:on|off|auto], level[:0-3],
-                             jit[:on|off]
+  -o, --optimize TEXT        Optimizations: tco[:on|off], level[:0-3],
+                             jit[:on|off], memory[:MB]
   -m, --module TEXT          Load Python module as namespace (e.g., -m math,
                              -m numpy)
   -x, --executor [vm|ast]    Execution mode: vm=bytecode VM (default), ast=AST
@@ -716,6 +726,9 @@ catnip repl
 
 Gère la configuration persistante. Fichier par défaut : `~/.config/catnip/catnip.toml`
 
+Aussi disponible en REPL via `/config` : sans argument, ouvre un éditeur interactif TUI. Les sous-commandes `show`,
+`get`, `set`, `path` restent accessibles.
+
 ```bash
 # Afficher toutes les valeurs
 catnip config show
@@ -751,6 +764,7 @@ executor = vm
 jit = false
 log_weird_errors = true
 max_weird_logs = 50
+memory_limit = 2048
 no_color = false
 optimize = 3
 tco = true
@@ -770,6 +784,7 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   jit: False  [default]
   log_weird_errors: True  [default]
   max_weird_logs: 50  [default]
+  memory_limit: 2048  [default]
   no_color: False  [default]
   optimize: 3  [default]
   tco: True  [default]
@@ -796,6 +811,7 @@ jit = false
 tco = true
 optimize = 3        # 0=none, 1=low, 2=medium, 3=high
 executor = "vm"     # vm, ast
+memory_limit = 2048 # RSS limit in MB (0 = disabled, Linux only)
 
 [cache]
 cache_max_size_mb = 100     # Limite 100 Mo (ou "unlimited")
@@ -823,6 +839,7 @@ Voir `catnip.toml.example` dans le dépôt pour un fichier exemple commenté.
 - `enable_cache` (bool) : Active le cache disque (défaut: `true`, via fichier)
 - `cache_max_size_mb` (int|"unlimited") : Taille max cache en Mo
 - `cache_ttl_seconds` (int|"unlimited") : TTL des entrées en secondes
+- `memory_limit` (int) : Limite mémoire RSS en MB (défaut: `2048`, `0` = désactivé, Linux uniquement)
 - `log_weird_errors` (bool) : Enregistre les erreurs internes sur disque (défaut: `true`)
 - `max_weird_logs` (int) : Nombre max de crash reports conservés (défaut: `50`)
 
@@ -841,6 +858,7 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   jit: False  [cli (-o jit:off)]
   log_weird_errors: True  [default]
   max_weird_logs: 50  [default]
+  memory_limit: 2048  [default]
   no_color: False  [default]
   optimize: 3  [default]
   tco: True  [default]
@@ -914,8 +932,8 @@ $ catnip cache stats
 Disk Cache Statistics
 ==================================================
 Directory:      /home/ari/.cache/catnip
-Entries:        25
-Volume:         0.03 MB (28024 bytes)
+Entries:        2
+Volume:         1.58 KB (1623 bytes)
 Max size:       100.00 MB
 TTL:            86400 seconds
 

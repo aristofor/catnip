@@ -11,28 +11,34 @@
 #   catnip docs/codex/geometry/point_in_polygon_bbox.cat
 #
 
-# Bounding box d'un polygone : [xmin, ymin, xmax, ymax]
-bbox = (polygon) => {
-    xmin = polygon[0][0]
-    ymin = polygon[0][1]
-    xmax = xmin
-    ymax = ymin
-    i = 1
-    while i < len(polygon) {
-        x = polygon[i][0]
-        y = polygon[i][1]
-        if x < xmin { xmin = x }
-        if x > xmax { xmax = x }
-        if y < ymin { ymin = y }
-        if y > ymax { ymax = y }
-        i = i + 1
-    }
-    list(xmin, ymin, xmax, ymax)
-}
+struct Point { x, y }
 
-# Test rapide : point dans la bounding box ?
-in_bbox = (px, py, bb) => {
-    px >= bb[0] and px <= bb[2] and py >= bb[1] and py <= bb[3]
+struct BBox {
+    xmin, ymin, xmax, ymax
+
+    # Test rapide : point dans la bounding box ?
+    contains(self, p) => {
+        p.x >= self.xmin and p.x <= self.xmax and p.y >= self.ymin and p.y <= self.ymax
+    }
+
+    # Construit la bounding box d'un polygone
+    @static
+    from_polygon(polygon) => {
+        xmin = polygon[0].x
+        ymin = polygon[0].y
+        xmax = xmin
+        ymax = ymin
+        i = 1
+        while i < len(polygon) {
+            p = polygon[i]
+            if p.x < xmin { xmin = p.x }
+            if p.x > xmax { xmax = p.x }
+            if p.y < ymin { ymin = p.y }
+            if p.y > ymax { ymax = p.y }
+            i = i + 1
+        }
+        BBox(xmin, ymin, xmax, ymax)
+    }
 }
 
 # Ray casting : rayon horizontal vers +x
@@ -40,19 +46,17 @@ in_bbox = (px, py, bb) => {
 # Condition de croisement :
 #   - les deux sommets encadrent py en ordonnée
 #   - l'intersection du rayon avec l'arête est à droite de px
-ray_cast = (px, py, polygon) => {
+ray_cast = (p, polygon) => {
     n = len(polygon)
     inside = False
     j = n - 1
     i = 0
     while i < n {
-        xi = polygon[i][0]
-        yi = polygon[i][1]
-        xj = polygon[j][0]
-        yj = polygon[j][1]
-        if (yi > py) != (yj > py) {
-            x_inter = (xj - xi) * (py - yi) / (yj - yi) + xi
-            if px < x_inter {
+        pi = polygon[i]
+        pj = polygon[j]
+        if (pi.y > p.y) != (pj.y > p.y) {
+            x_inter = (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x
+            if p.x < x_inter {
                 inside = not(inside)
             }
         }
@@ -63,37 +67,34 @@ ray_cast = (px, py, polygon) => {
 }
 
 # Version combinée : bbox d'abord, ray casting si nécessaire
-point_in_polygon = (px, py, polygon, bb) => {
-    if not in_bbox(px, py, bb) {
+point_in_polygon = (p, polygon, bb) => {
+    if not bb.contains(p) {
         False
     } else {
-        ray_cast(px, py, polygon)
+        ray_cast(p, polygon)
     }
 }
 
 # --- Démo ---
 
 # Polygone en L (non convexe)
-polygon = list(list(0, 0), list(4, 0), list(4, 2), list(2, 2), list(2, 5), list(0, 5))
+polygon = list(Point(0, 0), Point(4, 0), Point(4, 2), Point(2, 2), Point(2, 5), Point(0, 5))
 
-bb = bbox(polygon)
+bb = BBox.from_polygon(polygon)
 print("Bounding box :", bb)
 
 # Points de test
 tests = list(
-    list(1, 1), # intérieur (branche basse du L)
-    list(1, 4), # intérieur (branche haute du L)
-    list(3, 3), # extérieur (creux du L)
-    list(3, 1), # intérieur (branche basse)
-    list(5, 1), # extérieur (hors bbox)
-    list(-1, 0), # extérieur (hors bbox)
-    list(2, 0)  # sur l'arête (comportement limite)
+    Point(1, 1), # intérieur (branche basse du L)
+    Point(1, 4), # intérieur (branche haute du L)
+    Point(3, 3), # extérieur (creux du L)
+    Point(3, 1), # intérieur (branche basse)
+    Point(5, 1), # extérieur (hors bbox)
+    Point(-1, 0), # extérieur (hors bbox)
+    Point(2, 0)  # sur l'arête (comportement limite)
 )
 
-i = 0
-while i < len(tests) {
-    p = tests[i]
-    r = point_in_polygon(p[0], p[1], polygon, bb)
+for p in tests {
+    r = point_in_polygon(p, polygon, bb)
     print("  ", p, "=>", r)
-    i = i + 1
 }

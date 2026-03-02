@@ -2,8 +2,76 @@
 # Validateur de configuration
 # Usage: catnip config_validator.cat
 
+struct Config {
+    server_port, max_connections, timeout, debug_mode, log_level
+}
+
+# Chaque validateur retourne une liste d'erreurs (vide si OK)
+
+trait Validator {
+    @abstract validate(self, config)
+}
+
+struct PortValidator implements(Validator) {
+    validate(self, config) => {
+        errors = list()
+        if config.server_port < 1024 {
+            errors = errors + list("Port < 1024 (privilégié)")
+        }
+        if config.server_port > 65535 {
+            errors = errors + list("Port > 65535 (invalide)")
+        }
+        errors
+    }
+}
+
+struct ConnectionValidator implements(Validator) {
+    validate(self, config) => {
+        errors = list()
+        if config.max_connections < 10 {
+            errors = errors + list("max_connections trop faible (min 10)")
+        }
+        if config.max_connections > 10000 {
+            errors = errors + list("max_connections trop élevé (max 10000)")
+        }
+        errors
+    }
+}
+
+struct TimeoutValidator implements(Validator) {
+    validate(self, config) => {
+        if config.timeout <= 0 {
+            list("timeout doit être > 0")
+        } else {
+            list()
+        }
+    }
+}
+
+struct LogLevelValidator implements(Validator) {
+    validate(self, config) => {
+        valid_levels = list('debug', 'info', 'warning', 'error')
+        found = False
+        for level in valid_levels {
+            if config.log_level == level { found = True }
+        }
+        if found { list() } else { list("log_level invalide (debug/info/warning/error)") }
+    }
+}
+
+# Pipeline de validation
+validators = list(PortValidator(), ConnectionValidator(), TimeoutValidator(), LogLevelValidator())
+
+run_validation = (config, validators) => {
+    errors = list()
+    for v in validators {
+        errors = errors + v.validate(config)
+    }
+    errors
+}
+
 # Configuration à valider (en production, charger depuis JSON/YAML)
-config = dict(
+config = Config(
     server_port=8080,
     max_connections=100,
     timeout=30,
@@ -11,78 +79,29 @@ config = dict(
     log_level='info'
 )
 
-# État de validation
-valid = True
-errors = list()
-
-# Règle 1: Port dans intervalle valide
-port = config['server_port']
-if port < 1024 {
-    valid = False
-    errors = errors + list("Port < 1024 (privilégié)")
-}
-if port > 65535 {
-    valid = False
-    errors = errors + list("Port > 65535 (invalide)")
-}
-
-# Règle 2: Max connections raisonnable
-max_conn = config['max_connections']
-if max_conn < 10 {
-    valid = False
-    errors = errors + list("max_connections trop faible (min 10)")
-}
-if max_conn > 10000 {
-    valid = False
-    errors = errors + list("max_connections trop élevé (max 10000)")
-}
-
-# Règle 3: Timeout positif
-timeout = config['timeout']
-if timeout <= 0 {
-    valid = False
-    errors = errors + list("timeout doit être > 0")
-}
-
-# Règle 4: Log level valide
-log_level = config['log_level']
-valid_levels = list('debug', 'info', 'warning', 'error')
-level_valid = False
-i = 0
-while i < 4 {
-    if log_level == valid_levels[i] {
-        level_valid = True
-    }
-    i = i + 1
-}
-if level_valid == False {
-    valid = False
-    errors = errors + list("log_level invalide (debug/info/warning/error)")
-}
+errors = run_validation(config, validators)
 
 # Afficher résultat
 print("Validation de configuration")
 print("")
 
-if valid {
+if len(errors) == 0 {
     print("✓ Configuration valide")
     print("")
     print("Paramètres :")
-    print("  - Port : " + str(config['server_port']))
-    print("  - Max connections : " + str(config['max_connections']))
-    print("  - Timeout : " + str(config['timeout']) + "s")
-    print("  - Debug : " + str(config['debug_mode']))
-    print("  - Log level : " + config['log_level'])
+    print("  - Port : " + str(config.server_port))
+    print("  - Max connections : " + str(config.max_connections))
+    print("  - Timeout : " + str(config.timeout) + "s")
+    print("  - Debug : " + str(config.debug_mode))
+    print("  - Log level : " + config.log_level)
 } else {
     print("✗ Configuration invalide")
     print("")
     print("Erreurs :")
-    j = 0
-    while j < len(errors) {
-        print("  - " + errors[j])
-        j = j + 1
+    for e in errors {
+        print("  - " + e)
     }
 }
 
 # Retourner status (0 = succès, 1 = échec)
-if valid { 0 } else { 1 }
+if len(errors) == 0 { 0 } else { 1 }

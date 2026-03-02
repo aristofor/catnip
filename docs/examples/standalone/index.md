@@ -6,7 +6,7 @@ Scripts Catnip exécutables directement via CLI.
 
 Le mode standalone est approprié pour :
 
-### ✓ Use cases valides
+### ✓ Cas d'usage valides
 
 1. **Scripts de traitement de données one-off**
 
@@ -49,7 +49,7 @@ ______________________________________________________________________
 
 ### 1. [01_calculate.cat](01_calculate.cat)
 
-**Use case** : Calculatrice avec fonctions mathématiques
+**Cas d'usage** : Calculatrice avec fonctions mathématiques
 
 ```bash
 catnip 01_calculate.cat
@@ -67,7 +67,7 @@ ______________________________________________________________________
 
 ### 2. [02_filter_data.cat](02_filter_data.cat)
 
-**Use case** : Filtrage et transformation fonctionnelle
+**Cas d'usage** : Filtrage et transformation fonctionnelle
 
 ```bash
 catnip 02_filter_data.cat
@@ -86,7 +86,7 @@ ______________________________________________________________________
 
 ### 3. [03_transform_csv.cat](03_transform_csv.cat)
 
-**Use case** : Transformation de données CSV/JSON simple
+**Cas d'usage** : Transformation de données CSV/JSON simple
 
 ```bash
 catnip 03_transform_csv.cat
@@ -107,7 +107,7 @@ ______________________________________________________________________
 
 ### 4. [04_config_validator.cat](04_config_validator.cat)
 
-**Use case** : Validation de configuration
+**Cas d'usage** : Validation de configuration
 
 ```bash
 catnip 04_config_validator.cat
@@ -125,7 +125,7 @@ ______________________________________________________________________
 
 ### 5. [05_data_report.cat](05_data_report.cat)
 
-**Use case** : Génération de rapport de données
+**Cas d'usage** : Génération de rapport de données
 
 ```bash
 catnip 05_data_report.cat

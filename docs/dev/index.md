@@ -1,8 +1,7 @@
 # Doc développeur
 
-Architecture interne et contribution au projet Catnip.
-
-> Si tu lis ceci, tu es déjà dans le circuit, branché au flux.
+Architecture interne et contribution au projet Catnip. Section technique destinée à l'implémentation du runtime et des
+outils. Le cap est simple : comprendre le moteur, puis le faire aller plus vite.
 
 ## Vue d'ensemble
 
@@ -36,17 +35,17 @@ Détails de chaque étape : voir [Architecture](ARCHITECTURE.md).
 
 ## Composants principaux
 
-| Composant       | Rôle                                      | Implémentation            | Opcodes     |
-| --------------- | ----------------------------------------- | ------------------------- | ----------- |
-| **Parser**      | Analyse syntaxique Tree-sitter            | Rust                      | -           |
-| **Transformer** | Parse tree → IR (Intermediate Repr.)      | Rust (72 transformateurs) | IROpCode 56 |
-| **Semantic**    | Analyse et optimisation IR → Op           | Rust (6 passes)           | OpCode 56   |
-| **CFG**         | Control Flow Graph pour analyse           | Rust (dominance, loops)   | -           |
-| **Compiler**    | Op → Bytecode (mode VM uniquement)        | Rust                      | -           |
-| **VM**          | Exécution bytecode stack-based            | Rust (NaN-boxing, JIT)    | -           |
-| **Registry**    | Dispatch direct des opérations (mode AST) | Rust                      | -           |
-| **Scope**       | Gestion des variables O(1)                | Rust                      | -           |
-| **Context**     | Environnement d'exécution, pragmas        | Python                    | -           |
+| Composant       | Rôle                                      | Implémentation          | Opcodes  |
+| --------------- | ----------------------------------------- | ----------------------- | -------- |
+| **Parser**      | Analyse syntaxique Tree-sitter            | Rust                    | -        |
+| **Transformer** | Parse tree → IR (Intermediate Repr.)      | Rust                    | IROpCode |
+| **Semantic**    | Analyse et optimisation IR → Op           | Rust                    | OpCode   |
+| **CFG**         | Control Flow Graph pour analyse           | Rust (dominance, loops) | -        |
+| **Compiler**    | Op → Bytecode (mode VM uniquement)        | Rust                    | -        |
+| **VM**          | Exécution bytecode stack-based            | Rust (NaN-boxing, JIT)  | -        |
+| **Registry**    | Dispatch direct des opérations (mode AST) | Rust                    | -        |
+| **Scope**       | Gestion des variables O(1)                | Rust                    | -        |
+| **Context**     | Environnement d'exécution, pragmas        | Python                  | -        |
 
 ## Documents de cette section
 
@@ -60,8 +59,7 @@ Détails de chaque étape : voir [Architecture](ARCHITECTURE.md).
 - **[BENCHMARKING](BENCHMARKING.md)** - Méthodologie de mesure et comparaison de performances
 - **[EXTENDING](EXTENDING.md)** - Ajouter opcodes, opérations, extensions
 - **[CONSTANTS](CONSTANTS.md)** - Configuration par défaut (prompts, couleurs, seuils JIT, etc.)
-- **[COQ_PROOFS](COQ_PROOFS.md)** - Preuves Coq (9 fichiers) : grammaire, parsing, broadcasting, IR, scopes, patterns,
-  fonctions, optimisations
+- **[COQ_PROOFS](COQ_PROOFS.md)** - Preuves Coq : périmètre, vérification (`make proof`), modules de preuve
 
 ## Où trouver le code
 
@@ -90,5 +88,4 @@ make test
 make grammar-deps
 ```
 
-> Pipeline simple et composable : chaque étape prépare la suivante. C'est moins "Unix pur", mais plus lisible pour un
-> moteur qui exécute du code.
+Pipeline composable : chaque étape prépare la suivante.

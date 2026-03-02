@@ -13,39 +13,43 @@ math = import("math")
 # Rayon moyen de la Terre (km)
 R = 6371.0
 
-# Haversine : distance entre deux points (lat, lon) en degrés
-haversine = (p1, p2) => {
-    dlat = math.radians(p2[0] - p1[0])
-    dlon = math.radians(p2[1] - p1[1])
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(p1[0])) * math.cos(math.radians(p2[0])) * math.sin(dlon / 2) ** 2
-    2 * R * math.asin(math.sqrt(a))
+struct Location {
+    lat, lon
+
+    # Distance géodésique vers un autre point (km)
+    distance_to(self, other) => {
+        dlat = math.radians(other.lat - self.lat)
+        dlon = math.radians(other.lon - self.lon)
+        a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(self.lat)) * math.cos(math.radians(other.lat)) * math.sin(dlon / 2) ** 2
+        2 * R * math.asin(math.sqrt(a))
+    }
 }
 
-# Coordonnées de villes (lat, lon)
+# Coordonnées de villes
 
-paris     = list(48.8566,    2.3522)
-london    = list(51.5074,   -0.1278)
-new_york  = list(40.7128,  -74.0060)
-tokyo     = list(35.6762,  139.6503)
-sydney    = list(-33.8688, 151.2093)
-cape_town = list(-33.9249,  18.4241)
-rio       = list(-22.9068, -43.1729)
-moscow    = list(55.7558,   37.6173)
+paris     = Location(48.8566,    2.3522)
+london    = Location(51.5074,   -0.1278)
+new_york  = Location(40.7128,  -74.0060)
+tokyo     = Location(35.6762,  139.6503)
+sydney    = Location(-33.8688, 151.2093)
+cape_town = Location(-33.9249,  18.4241)
+rio       = Location(-22.9068, -43.1729)
+moscow    = Location(55.7558,   37.6173)
 
 # Distance directe entre paires
 
 print("⇒ Distances depuis Paris")
-print("  → Londres  :", round(haversine(paris, london), 1), "km")
-print("  → New York :", round(haversine(paris, new_york), 1), "km")
-print("  → Tokyo    :", round(haversine(paris, tokyo), 1), "km")
-print("  → Sydney   :", round(haversine(paris, sydney), 1), "km")
+print("  → Londres  :", round(paris.distance_to(london), 1), "km")
+print("  → New York :", round(paris.distance_to(new_york), 1), "km")
+print("  → Tokyo    :", round(paris.distance_to(tokyo), 1), "km")
+print("  → Sydney   :", round(paris.distance_to(sydney), 1), "km")
 
 # Broadcasting : distances d'un point de référence vers toutes les villes
 
 cities = list(london, new_york, tokyo, sydney, cape_town, rio, moscow)
 names  = list("Londres", "New York", "Tokyo", "Sydney", "Le Cap", "Rio", "Moscou")
 
-distances = cities.[(city) => { round(haversine(paris, city), 1) }]
+distances = cities.[(city) => { round(paris.distance_to(city), 1) }]
 
 print("\n⇒ Broadcasting : distances depuis Paris")
 for i in range(len(names)) {
@@ -61,10 +65,10 @@ print("\n⇒ Extrêmes")
 print("  Plus proche :", names[distances.index(closest)], "(", closest, "km )")
 print("  Plus loin   :", names[distances.index(farthest)], "(", farthest, "km )")
 
-# Variante curried : haversine comme générateur de fonctions distance
+# Variante curried : générateur de fonctions distance
 
 dist_from = (ref) => {
-    (point) => { round(haversine(ref, point), 1) }
+    (point) => { round(ref.distance_to(point), 1) }
 }
 
 print("\n⇒ Variante curried : distances depuis Tokyo")
@@ -82,7 +86,7 @@ print("\n⇒ Matrice de distances (km)")
 sample       = list(paris, london, new_york, tokyo, sydney)
 sample_names = list("Paris", "Londres", "New York", "Tokyo", "Sydney")
 
-matrix = sample.[(a) => { sample.[(b) => { round(haversine(a, b)) }] }]
+matrix = sample.[(a) => { sample.[(b) => { round(a.distance_to(b)) }] }]
 
 for i in range(len(sample_names)) {
     row = sample_names[i]
@@ -109,7 +113,7 @@ etapes = list("Paris→Londres", "Londres→NY", "NY→Rio", "Rio→Le Cap", "Le
 
 total = 0
 for i in range(len(etapes)) {
-    d = round(haversine(trajet[i], trajet[i + 1]), 1)
+    d = round(trajet[i].distance_to(trajet[i + 1]), 1)
     print("  ", etapes[i], ":", d, "km")
     total = total + d
 }

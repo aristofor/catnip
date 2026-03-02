@@ -8,14 +8,16 @@ use super::frame::{
 };
 use super::iter::SeqIter;
 use super::pattern::{VMPattern, VMPatternElement};
-use super::py_interop::convert_code_object;
+use super::py_interop::{call_binary_op, convert_code_object, lookup_ctx_global, store_ctx_global};
 use super::structs::{
     CatnipStructType, MethodKey, StructField, StructRegistry, StructType, StructTypeId,
 };
 use super::traits::{TraitDef, TraitField, TraitRegistry};
 use super::value::Value;
 use super::OpCode;
-use crate::constants::{JIT_PURE_BUILTINS, JIT_THRESHOLD_DEFAULT};
+use crate::constants::{
+    JIT_PURE_BUILTINS, JIT_THRESHOLD_DEFAULT, MEMORY_CHECK_INTERVAL, MEMORY_LIMIT_DEFAULT_MB,
+};
 use crate::jit::builtin_dispatch::builtin_name_to_id;
 use crate::jit::{HotLoopDetector, JITExecutor, TraceOp, TraceRecorder};
 use num_bigint::BigInt;
@@ -236,6 +238,7 @@ pub enum VMError {
     TypeError(String),
     RuntimeError(String),
     ZeroDivisionError(String),
+    MemoryLimitExceeded(String),
     Return(Value),
     Break,
     Continue,
@@ -250,6 +253,7 @@ impl std::fmt::Display for VMError {
             VMError::TypeError(s) => write!(f, "type error: {}", s),
             VMError::RuntimeError(s) => write!(f, "runtime error: {}", s),
             VMError::ZeroDivisionError(s) => write!(f, "{}", s),
+            VMError::MemoryLimitExceeded(s) => write!(f, "{}", s),
             VMError::Return(_) => write!(f, "return signal"),
             VMError::Break => write!(f, "break signal"),
             VMError::Continue => write!(f, "continue signal"),
@@ -265,6 +269,7 @@ impl From<VMError> for PyErr {
             VMError::NameError(s) => pyo3::exceptions::PyNameError::new_err(s),
             VMError::TypeError(s) => pyo3::exceptions::PyTypeError::new_err(s),
             VMError::ZeroDivisionError(s) => pyo3::exceptions::PyZeroDivisionError::new_err(s),
+            VMError::MemoryLimitExceeded(s) => pyo3::exceptions::PyMemoryError::new_err(s),
             _ => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         }
     }
@@ -436,6 +441,10 @@ pub struct VM {
     block_globals_snapshot: Vec<Vec<String>>,
     /// Last source byte offset seen in dispatch loop (for error context)
     last_src_byte: u32,
+    /// Memory limit in bytes (0 = disabled)
+    memory_limit_bytes: u64,
+    /// Instruction counter for periodic RSS checks
+    instruction_count: u64,
 }
 
 impl VM {
@@ -491,6 +500,8 @@ impl VM {
             trait_registry: TraitRegistry::new(),
             block_globals_snapshot: Vec::new(),
             last_src_byte: 0,
+            memory_limit_bytes: MEMORY_LIMIT_DEFAULT_MB * 1024 * 1024,
+            instruction_count: 0,
         }
     }
 
@@ -521,6 +532,11 @@ impl VM {
         self.jit_guard_failed = None;
         // Clear compiled traces
         *self.jit.lock().unwrap() = None;
+    }
+
+    /// Set memory limit in MB (0 = disabled).
+    pub fn set_memory_limit(&mut self, mb: u64) {
+        self.memory_limit_bytes = mb * 1024 * 1024;
     }
 
     /// Set the Python context for name resolution.
@@ -588,6 +604,7 @@ impl VM {
             VMError::TypeError(s) => ("TypeError".to_string(), s.clone()),
             VMError::ZeroDivisionError(s) => ("ZeroDivisionError".to_string(), s.clone()),
             VMError::RuntimeError(s) => ("RuntimeError".to_string(), s.clone()),
+            VMError::MemoryLimitExceeded(s) => ("MemoryError".to_string(), s.clone()),
             VMError::StackUnderflow => (
                 "RuntimeError".to_string(),
                 "WeirdError: VM stack underflow".to_string(),
@@ -876,6 +893,23 @@ impl VM {
             self.last_src_byte = _current_src_byte;
             frame.ip += 1;
 
+            // Periodic RSS check for memory guard
+            self.instruction_count = self.instruction_count.wrapping_add(1);
+            if self.memory_limit_bytes > 0 && self.instruction_count & MEMORY_CHECK_INTERVAL == 0 {
+                if let Some(rss) = super::memory::get_rss_bytes() {
+                    if rss > self.memory_limit_bytes {
+                        let rss_mb = rss / (1024 * 1024);
+                        let limit_mb = self.memory_limit_bytes / (1024 * 1024);
+                        return Err(VMError::MemoryLimitExceeded(format!(
+                            "memory limit exceeded ({rss_mb} MB / {limit_mb} MB)\n\
+                             Increase: catnip -o memory:{}\n\
+                             Disable:  catnip -o memory:0",
+                            limit_mb * 2
+                        )));
+                    }
+                }
+            }
+
             if self.trace {
                 eprintln!("[TRACE] {:?} arg={}", instr.op, instr.arg);
             }
@@ -1052,9 +1086,7 @@ impl VM {
                     }
                     // 3. Fallback to ctx_globals (Python builtins, modules)
                     if let Some(ref py_globals) = ctx_globals {
-                        if let Ok(Some(val)) = py_globals.bind(py).get_item(name) {
-                            let value = Value::from_pyobject(py, &val)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        if let Some(value) = lookup_ctx_global(py, py_globals, name)? {
                             resolved_value = value;
                             frame.push(resolved_value);
 
@@ -1142,8 +1174,7 @@ impl VM {
                         // Also sync to Python context.globals immediately
                         // so closures created later can access these values
                         if let Some(ref py_globals) = ctx_globals {
-                            let py_value = value.to_pyobject(py);
-                            let _ = py_globals.bind(py).set_item(name.as_str(), py_value);
+                            store_ctx_global(py, py_globals, name.as_str(), value);
                         }
                     }
                 }
@@ -1154,9 +1185,7 @@ impl VM {
                         frame.push(value);
                     } else if let Some(ref py_globals) = ctx_globals {
                         // Try to get from Python context.globals
-                        if let Ok(Some(val)) = py_globals.bind(py).get_item(name.as_str()) {
-                            let value = Value::from_pyobject(py, &val)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        if let Some(value) = lookup_ctx_global(py, py_globals, name.as_str())? {
                             frame.push(value);
                         } else {
                             return Err(VMError::NameError(name.to_owned()));
@@ -1215,10 +1244,7 @@ impl VM {
                                 continue;
                             }
                             // Fallback to Python for strings, lists, etc.
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_add.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
+                            call_binary_op(py, &op_add, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1242,10 +1268,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_sub.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
+                            call_binary_op(py, &op_sub, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1270,10 +1293,7 @@ impl VM {
                                 continue;
                             }
                             // Fallback to Python for string * int, etc.
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_mul.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
+                            call_binary_op(py, &op_mul, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1351,10 +1371,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_pow.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
+                            call_binary_op(py, &op_pow, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1622,12 +1639,7 @@ impl VM {
                     }
                     let result = match compare_lt(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => {
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_lt.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
-                        }
+                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_lt, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1651,12 +1663,7 @@ impl VM {
                     }
                     let result = match compare_le(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => {
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_le.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
-                        }
+                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_le, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1680,12 +1687,7 @@ impl VM {
                     }
                     let result = match compare_gt(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => {
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_gt.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
-                        }
+                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_gt, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1709,12 +1711,7 @@ impl VM {
                     }
                     let result = match compare_ge(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => {
-                            let py_a = a.to_pyobject(py);
-                            let py_b = b.to_pyobject(py);
-                            let py_result = op_ge.call1(py, (&py_a, &py_b))?;
-                            Value::from_pyobject(py, py_result.bind(py))?
-                        }
+                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_ge, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1863,15 +1860,10 @@ impl VM {
                                                 .or_else(|| {
                                                     // 2. Check context.globals
                                                     if let Some(ref py_globals) = ctx_globals {
-                                                        if let Ok(Some(val)) =
-                                                            py_globals.bind(py).get_item(name)
-                                                        {
-                                                            Value::from_pyobject(py, &val)
-                                                                .ok()
-                                                                .and_then(|v| v.as_int())
-                                                        } else {
-                                                            None
-                                                        }
+                                                        lookup_ctx_global(py, py_globals, name)
+                                                            .ok()
+                                                            .flatten()
+                                                            .and_then(|v| v.as_int())
                                                     } else {
                                                         None
                                                     }
@@ -2680,12 +2672,10 @@ impl VM {
                                             if current.has_native_tag() {
                                                 return None;
                                             }
-                                            match py_globals.bind(py).get_item(name.as_str()) {
-                                                Ok(Some(val)) => Value::from_pyobject(py, &val)
-                                                    .ok()
-                                                    .map(|v| (name.clone(), slot_idx, v)),
-                                                _ => None,
-                                            }
+                                            lookup_ctx_global(py, py_globals, name.as_str())
+                                                .ok()
+                                                .flatten()
+                                                .map(|v| (name.clone(), slot_idx, v))
                                         })
                                         .collect();
                                     for (name, slot_idx, v) in updates {
@@ -4398,15 +4388,10 @@ impl VM {
                                                 .or_else(|| {
                                                     // 2. Check context.globals
                                                     if let Some(ref py_globals) = ctx_globals {
-                                                        if let Ok(Some(val)) =
-                                                            py_globals.bind(py).get_item(name)
-                                                        {
-                                                            Value::from_pyobject(py, &val)
-                                                                .ok()
-                                                                .and_then(|v| v.as_int())
-                                                        } else {
-                                                            None
-                                                        }
+                                                        lookup_ctx_global(py, py_globals, name)
+                                                            .ok()
+                                                            .flatten()
+                                                            .and_then(|v| v.as_int())
                                                     } else {
                                                         None
                                                     }
@@ -5850,10 +5835,7 @@ fn binary_div(py: Python<'_>, op_truediv: &Py<PyAny>, a: Value, b: Value) -> VMR
     }
     // Fallback to Python
     inc(&PY_BINARY_DIV_FALLBACKS);
-    let py_a = a.to_pyobject(py);
-    let py_b = b.to_pyobject(py);
-    let py_result = op_truediv.call1(py, (&py_a, &py_b))?;
-    Ok(Value::from_pyobject(py, py_result.bind(py))?)
+    Ok(call_binary_op(py, op_truediv, a, b)?)
 }
 
 #[inline]
@@ -5897,10 +5879,7 @@ fn binary_floordiv(py: Python<'_>, op_floordiv: &Py<PyAny>, a: Value, b: Value) 
     }
     // Fallback to Python
     inc(&PY_BINARY_FLOORDIV_FALLBACKS);
-    let py_a = a.to_pyobject(py);
-    let py_b = b.to_pyobject(py);
-    let py_result = op_floordiv.call1(py, (&py_a, &py_b))?;
-    Ok(Value::from_pyobject(py, py_result.bind(py))?)
+    Ok(call_binary_op(py, op_floordiv, a, b)?)
 }
 
 #[inline]
@@ -5940,10 +5919,7 @@ fn binary_mod(py: Python<'_>, op_mod: &Py<PyAny>, a: Value, b: Value) -> VMResul
     }
     // Fallback to Python (for string formatting, etc.)
     inc(&PY_BINARY_MOD_FALLBACKS);
-    let py_a = a.to_pyobject(py);
-    let py_b = b.to_pyobject(py);
-    let py_result = op_mod.call1(py, (&py_a, &py_b))?;
-    Ok(Value::from_pyobject(py, py_result.bind(py))?)
+    Ok(call_binary_op(py, op_mod, a, b)?)
 }
 
 #[inline]

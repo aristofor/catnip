@@ -1,6 +1,6 @@
 # Convex hull 2D (scan de Graham)
 #
-# Entrée : liste de points [x, y]
+# Entrée : liste de Point{x, y}
 # Sortie : enveloppe convexe dans le sens anti-horaire
 # Complexité : O(n log n) (tri polaire) + O(n) (scan)
 #
@@ -18,15 +18,22 @@
 builtins = import("builtins")
 math = import("math")
 
-# Produit vectoriel orienté (OA x OB)
-cross = (o, a, b) => {
-    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-}
+struct Point {
+    x, y
 
-sqdist = (a, b) => {
-    dx = a[0] - b[0]
-    dy = a[1] - b[1]
-    dx * dx + dy * dy
+    # Produit vectoriel orienté (self→a) × (self→b)
+    cross(self, a, b) => {
+        (a.x - self.x) * (b.y - self.y) - (a.y - self.y) * (b.x - self.x)
+    }
+
+    # Distance carrée à un autre point
+    sqdist(self, other) => {
+        dx = self.x - other.x
+        dy = self.y - other.y
+        dx * dx + dy * dy
+    }
+
+    op ==(self, rhs) => { self.x == rhs.x and self.y == rhs.y }
 }
 
 # Point pivot : y minimal, puis x minimal
@@ -35,7 +42,7 @@ find_pivot = (points) => {
     i = 1
     while i < len(points) {
         q = points[i]
-        if q[1] < p[1] or (q[1] == p[1] and q[0] < p[0]) {
+        if q.y < p.y or (q.y == p.y and q.x < p.x) {
             p = q
         }
         i = i + 1
@@ -55,8 +62,8 @@ graham_hull = (points) => {
             points,
             key=(p) => {
                 tuple(
-                    math.atan2(p[1] - pivot[1], p[0] - pivot[0]),
-                    sqdist(pivot, p)
+                    math.atan2(p.y - pivot.y, p.x - pivot.x),
+                    pivot.sqdist(p)
                 )
             }
         )
@@ -68,12 +75,12 @@ graham_hull = (points) => {
             # Ignore les duplicatas exacts consécutifs
             if len(stack) > 0 {
                 last = stack[len(stack) - 1]
-                if last[0] == p[0] and last[1] == p[1] {
+                if last == p {
                     i = i + 1
                     continue
                 }
             }
-            while len(stack) >= 2 and cross(stack[len(stack) - 2], stack[len(stack) - 1], p) <= 0 {
+            while len(stack) >= 2 and stack[len(stack) - 2].cross(stack[len(stack) - 1], p) <= 0 {
                 stack = stack[:len(stack) - 1]
             }
             stack = stack + list(p)
@@ -85,17 +92,17 @@ graham_hull = (points) => {
 
 # Démo
 points = list(
-    list(0, 0),
-    list(1, 1),
-    list(2, 2),
-    list(2, 0),
-    list(2, 4),
-    list(3, 3),
-    list(4, 2),
-    list(0, 3),
-    list(1, 2),
-    list(2, 2),  # doublon
-    list(4, 2),  # doublon
+    Point(0, 0),
+    Point(1, 1),
+    Point(2, 2),
+    Point(2, 0),
+    Point(2, 4),
+    Point(3, 3),
+    Point(4, 2),
+    Point(0, 3),
+    Point(1, 2),
+    Point(2, 2),  # doublon
+    Point(4, 2),  # doublon
 )
 
 hull = graham_hull(points)

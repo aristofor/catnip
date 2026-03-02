@@ -1,7 +1,7 @@
 # Broadcast - cas illustratifs
 
 Documentation courte pour un exemple de broadcast appliqué à des cas concrets. Le fichier source est
-[`07_cas_illustratifs.cat`](07_cas_illustratifs.cat).
+[`07_cas_illustratifs.cat`](07_cas_illustratifs.cat). Une forme, plusieurs dimensions.
 
 ## Ce que cela montre
 

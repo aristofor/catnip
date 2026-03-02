@@ -39,6 +39,11 @@ class VMExecutor:
             self.vm._vm.enable_jit()
             self.logger.debug("JIT compilation enabled")
 
+        # Apply memory limit from config
+        memory_limit = getattr(context, 'memory_limit', None)
+        if memory_limit is not None:
+            self.vm._vm.set_memory_limit(memory_limit)
+
     def execute(self, statements, trace=False):
         """
         Execute statements via VM.

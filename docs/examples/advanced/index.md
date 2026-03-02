@@ -1,6 +1,6 @@
 # Coins sombres
 
-Exemples plus costauds, à lire après les bases.
+Exemples plus costauds, à lire après les bases. Ici, on passe en mode expert.
 
 ## Fichiers
 

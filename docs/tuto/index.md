@@ -1,6 +1,6 @@
 # Tutorials
 
-Démarrage express.
+Démarrage express, mode turbo.
 
 - [QUICKSTART_0MIN](QUICKSTART_0MIN.md) - Aperçu très court
 - [QUICKSTART_2MIN](QUICKSTART_2MIN.md) - Bases essentielles en 2 minutes

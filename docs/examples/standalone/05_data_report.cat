@@ -2,44 +2,49 @@
 # Générateur de rapport de données
 # Usage: catnip data_report.cat
 
-# Données de ventes (en production, charger depuis DB/CSV)
-sales = list(
-    dict(product='Laptop', quantity=5, price=1000),
-    dict(product='Mouse', quantity=50, price=20),
-    dict(product='Keyboard', quantity=30, price=80),
-    dict(product='Monitor', quantity=10, price=300)
-)
+struct Product {
+    name, quantity, price
 
-# Calculer métriques
-total_products = len(sales)
-total_revenue = 0
-total_items = 0
-
-i = 0
-while i < total_products {
-    item = sales[i]
-    revenue = item['quantity'] * item['price']
-    total_revenue = total_revenue + revenue
-    total_items = total_items + item['quantity']
-    i = i + 1
+    revenue(self) => { self.quantity * self.price }
 }
 
-avg_price = total_revenue / total_items
+struct SalesReport {
+    products
 
-# Trouver best seller (par revenue)
-best_seller = sales[0]
-best_revenue = best_seller['quantity'] * best_seller['price']
-
-j = 1
-while j < total_products {
-    item = sales[j]
-    revenue = item['quantity'] * item['price']
-    if revenue > best_revenue {
-        best_seller = item
-        best_revenue = revenue
+    total_items(self) => {
+        total = 0
+        for p in self.products { total = total + p.quantity }
+        total
     }
-    j = j + 1
+
+    total_revenue(self) => {
+        total = 0
+        for p in self.products { total = total + p.revenue() }
+        total
+    }
+
+    avg_price(self) => { self.total_revenue() / self.total_items() }
+
+    best_seller(self) => {
+        best = self.products[0]
+        i = 1
+        while i < len(self.products) {
+            if self.products[i].revenue() > best.revenue() {
+                best = self.products[i]
+            }
+            i = i + 1
+        }
+        best
+    }
 }
+
+# Données de ventes (en production, charger depuis DB/CSV)
+report = SalesReport(list(
+    Product('Laptop', 5, 1000),
+    Product('Mouse', 50, 20),
+    Product('Keyboard', 30, 80),
+    Product('Monitor', 10, 300)
+))
 
 # Générer rapport
 print("═══════════════════════════════")
@@ -48,35 +53,33 @@ print("════════════════════════�
 print("")
 print("Résumé")
 print("------")
-print("Total produits : " + str(total_products))
-print("Total articles vendus : " + str(total_items))
-print("Revenu total : $" + str(total_revenue))
-print("Prix moyen : $" + str(avg_price))
+print("Total produits : " + str(len(report.products)))
+print("Total articles vendus : " + str(report.total_items()))
+print("Revenu total : $" + str(report.total_revenue()))
+print("Prix moyen : $" + str(report.avg_price()))
 print("")
+
+best = report.best_seller()
 print("Top produit")
 print("-----------")
-print("Produit : " + best_seller['product'])
-print("Quantité : " + str(best_seller['quantity']))
-print("Prix unitaire : $" + str(best_seller['price']))
-print("Revenu : $" + str(best_revenue))
+print("Produit : " + best.name)
+print("Quantité : " + str(best.quantity))
+print("Prix unitaire : $" + str(best.price))
+print("Revenu : $" + str(best.revenue()))
 print("")
 print("Détails par produit")
 print("-------------------")
 
-k = 0
-while k < total_products {
-    item = sales[k]
-    revenue = item['quantity'] * item['price']
+for p in report.products {
     print("")
-    print(item['product'] + " :")
-    print("  Quantité : " + str(item['quantity']))
-    print("  Prix : $" + str(item['price']))
-    print("  Revenu : $" + str(revenue))
-    k = k + 1
+    print(p.name + " :")
+    print("  Quantité : " + str(p.quantity))
+    print("  Prix : $" + str(p.price))
+    print("  Revenu : $" + str(p.revenue()))
 }
 
 print("")
 print("═══════════════════════════════")
 
 # Retourner revenu total
-total_revenue
+report.total_revenue()

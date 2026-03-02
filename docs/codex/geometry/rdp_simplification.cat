@@ -1,37 +1,36 @@
 # RDP simplification
+#
+# Ramer-Douglas-Peucker : simplification de polyligne en 2D.
+# Élimine les points dont la distance au segment est inférieure à epsilon.
+#
+# Ref : https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm
 
-# Distance carrée point-segment (2D)
-dist2_point_segment = (p, a, b) => {
-    ax = a[0]
-    ay = a[1]
-    bx = b[0]
-    by = b[1]
-    px = p[0]
-    py = p[1]
+struct Point {
+    x, y
 
-    abx = bx - ax
-    aby = by - ay
-    apx = px - ax
-    apy = py - ay
+    # Distance carrée à un segment [a, b]
+    dist2_to_segment(self, a, b) => {
+        abx = b.x - a.x
+        aby = b.y - a.y
+        apx = self.x - a.x
+        apy = self.y - a.y
 
-    ab2 = abx * abx + aby * aby
-    if ab2 == 0 {
-        dx = px - ax
-        dy = py - ay
-        dx * dx + dy * dy
-    } else {
-        t = (apx * abx + apy * aby) / ab2
-        if t < 0 {
-            t = 0
+        ab2 = abx * abx + aby * aby
+        if ab2 == 0 {
+            # Segment dégénéré (a == b)
+            dx = self.x - a.x
+            dy = self.y - a.y
+            dx * dx + dy * dy
+        } else {
+            t = (apx * abx + apy * aby) / ab2
+            if t < 0 { t = 0 }
+            if t > 1 { t = 1 }
+            qx = a.x + t * abx
+            qy = a.y + t * aby
+            dx = self.x - qx
+            dy = self.y - qy
+            dx * dx + dy * dy
         }
-        if t > 1 {
-            t = 1
-        }
-        qx = ax + t * abx
-        qy = ay + t * aby
-        dx = px - qx
-        dy = py - qy
-        dx * dx + dy * dy
     }
 }
 
@@ -50,7 +49,7 @@ rdp = (points, epsilon) => {
 
         i = 1
         while i < n - 1 {
-            d2 = dist2_point_segment(points[i], a, b)
+            d2 = points[i].dist2_to_segment(a, b)
             if d2 > best_d2 {
                 best_d2 = d2
                 best_i = i
@@ -70,16 +69,16 @@ rdp = (points, epsilon) => {
 
 # Démo
 polyline = list(
-    list(0.0, 0.0),
-    list(1.0, 0.2),
-    list(2.0, -0.1),
-    list(3.0, 5.0),
-    list(4.0, 6.0),
-    list(5.0, 7.0),
-    list(6.0, 8.1),
-    list(7.0, 9.0),
-    list(8.0, 9.2),
-    list(9.0, 9.0),
+    Point(0.0, 0.0),
+    Point(1.0, 0.2),
+    Point(2.0, -0.1),
+    Point(3.0, 5.0),
+    Point(4.0, 6.0),
+    Point(5.0, 7.0),
+    Point(6.0, 8.1),
+    Point(7.0, 9.0),
+    Point(8.0, 9.2),
+    Point(9.0, 9.0),
 )
 
 epsilon = 0.75

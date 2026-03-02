@@ -1,6 +1,6 @@
 # Quickhull 2D
 #
-# Entrée : liste de points [x, y]
+# Entrée : liste de Point{x, y}
 # Sortie : enveloppe convexe dans le sens anti-horaire
 # Complexité : O(n log n) moyen, O(n²) pire cas (points sur un cercle)
 #
@@ -10,34 +10,43 @@
 #
 # Ref : https://en.wikipedia.org/wiki/Quickhull
 # Voir aussi : convex_hull.cat (scan de Graham, O(n log n) garanti)
+#
+# Run:
+#   catnip docs/codex/geometry/quickhull.cat
 
-# Produit vectoriel orienté (OA x OB)
-# Positif si B est à gauche de la droite OA
-cross = (o, a, b) => {
-    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+struct Point {
+    x, y
+
+    # Comparaison lexicographique (x puis y)
+    op <(self, rhs) => { self.x < rhs.x or (self.x == rhs.x and self.y < rhs.y) }
+    op >(self, rhs) => { self.x > rhs.x or (self.x == rhs.x and self.y > rhs.y) }
+
+    # Produit vectoriel orienté (self→a) × (self→b)
+    # Positif si b est à gauche de la droite self→a
+    cross(self, a, b) => {
+        (a.x - self.x) * (b.y - self.y) - (a.y - self.y) * (b.x - self.x)
+    }
 }
 
-# Filtre les points strictement à gauche de la droite AB
+# Filtre les points strictement à gauche de la droite a→b
 left_of = (points, a, b) => {
     result = list()
-    i = 0
-    while i < len(points) {
-        if cross(a, b, points[i]) > 0 {
-            result = result + list(points[i])
+    for p in points {
+        if a.cross(b, p) > 0 {
+            result = result + list(p)
         }
-        i = i + 1
     }
     result
 }
 
-# Point le plus éloigné de la droite AB
+# Point le plus éloigné de la droite a→b
 # (le cross product est proportionnel à la distance signée)
 farthest = (points, a, b) => {
     best = points[0]
-    best_d = cross(a, b, points[0])
+    best_d = a.cross(b, points[0])
     i = 1
     while i < len(points) {
-        d = cross(a, b, points[i])
+        d = a.cross(b, points[i])
         if d > best_d {
             best_d = d
             best = points[i]
@@ -47,9 +56,9 @@ farthest = (points, a, b) => {
     best
 }
 
-# Récursion : hull des points à gauche de AB
-# Trouve le point C le plus éloigné de AB, puis récurse sur AC et CB.
-# Les points à l'intérieur du triangle ABC sont éliminés par left_of.
+# Récursion : hull des points à gauche de a→b
+# Trouve le point c le plus éloigné de a→b, puis récurse sur a→c et c→b.
+# Les points à l'intérieur du triangle abc sont éliminés par left_of.
 hull_rec = (points, a, b) => {
     if len(points) == 0 {
         list()
@@ -71,12 +80,8 @@ quickhull = (points) => {
         i = 1
         while i < len(points) {
             p = points[i]
-            if p[0] < min_p[0] or (p[0] == min_p[0] and p[1] < min_p[1]) {
-                min_p = p
-            }
-            if p[0] > max_p[0] or (p[0] == max_p[0] and p[1] > max_p[1]) {
-                max_p = p
-            }
+            if p < min_p { min_p = p }
+            if p > max_p { max_p = p }
             i = i + 1
         }
 
@@ -91,17 +96,17 @@ quickhull = (points) => {
 
 # Démo (même jeu de points que convex_hull.cat)
 points = list(
-    list(0, 0),
-    list(1, 1),
-    list(2, 2),
-    list(2, 0),
-    list(2, 4),
-    list(3, 3),
-    list(4, 2),
-    list(0, 3),
-    list(1, 2),
-    list(2, 2),  # doublon
-    list(4, 2),  # doublon
+    Point(0, 0),
+    Point(1, 1),
+    Point(2, 2),
+    Point(2, 0),
+    Point(2, 4),
+    Point(3, 3),
+    Point(4, 2),
+    Point(0, 3),
+    Point(1, 2),
+    Point(2, 2),  # doublon
+    Point(4, 2),  # doublon
 )
 
 hull = quickhull(points)

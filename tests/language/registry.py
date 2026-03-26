@@ -7,7 +7,7 @@ ctx = Context()
 ctx.local = dict(a=1, b=4)
 
 reg = Registry(ctx)
-debug = ctx.globals["debug"]
+debug = ctx.globals['debug']
 
 debug("test")
 

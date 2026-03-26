@@ -165,9 +165,3 @@ Tu maîtrises maintenant :
 Tu es à 60% de Catnip. Les 40% restants tiennent dans le guide suivant :
 
 **[Guide 5 minutes](QUICKSTART_5MIN.md)**
-
-## Références
-
-- [Langage (référence)](../lang/index.md)
-- [Scopes et variables](../lang/SCOPES_AND_VARIABLES.md)
-- [Broadcasting](../lang/BROADCAST.md)

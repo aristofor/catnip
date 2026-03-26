@@ -6,6 +6,7 @@ from __future__ import annotations
 import click
 
 from ...config import (
+    VALID_FORMAT_KEYS,
     VALID_KEYS,
     ConfigManager,
     get_config_path,
@@ -22,7 +23,7 @@ def _parse_bool(value: str) -> bool:
     raise ValueError(f"Invalid boolean: {value}")
 
 
-@click.group("config")
+@click.group('config')
 @click.pass_context
 def cmd_config(ctx):
     """Manage Catnip configuration.
@@ -40,8 +41,8 @@ def cmd_config(ctx):
     pass
 
 
-@cmd_config.command("show")
-@click.option("--debug", is_flag=True, help="Show value sources (default/file/env/cli)")
+@cmd_config.command('show')
+@click.option('--debug', is_flag=True, help="Show value sources (default/file/env/cli)")
 @click.pass_context
 def config_show(ctx, debug):
     """Display all configuration values.
@@ -93,9 +94,28 @@ def config_show(ctx, debug):
             else:
                 click.echo(f"{key} = {value}")
 
+        # Modules section
+        auto = config_manager.get_auto_modules()
+        policy = config_manager.get_module_policy()
+        profiles = config_manager.list_policy_profiles()
+        if auto or policy or profiles:
+            click.echo("")
+            click.echo("[modules]")
+            if auto:
+                click.echo(f"auto = {auto}")
+            for m in ('repl', 'cli', 'dsl'):
+                mode_auto = config_manager.get_auto_modules(m)
+                if mode_auto != auto:
+                    click.echo(f"[modules.{m}] auto = {mode_auto}")
+            if policy:
+                click.echo(f"policy = {policy.summary()}")
+            for name in profiles:
+                p = config_manager.get_module_policy(name)
+                click.echo(f"[modules.policies.{name}] {p.summary()}")
 
-@cmd_config.command("get")
-@click.argument("key")
+
+@cmd_config.command('get')
+@click.argument('key')
 @click.pass_context
 def config_get(ctx, key):
     """Get a configuration value.
@@ -115,6 +135,7 @@ def config_get(ctx, key):
 
     config_manager = ConfigManager()
     config_manager.load_file(config_path)
+    config_manager.load_env()
 
     try:
         value = config_manager.get(key)
@@ -126,9 +147,9 @@ def config_get(ctx, key):
         raise click.ClickException(f"Unknown config key: {key}")
 
 
-@cmd_config.command("set")
-@click.argument("key")
-@click.argument("value")
+@cmd_config.command('set')
+@click.argument('key')
+@click.argument('value')
 @click.pass_context
 def config_set(ctx, key, value):
     """Set a configuration value.
@@ -148,10 +169,11 @@ def config_set(ctx, key, value):
     """
     from pathlib import Path
 
-    from ...config import DEFAULT_CONFIG, save_config
+    from ...config import DEFAULT_CONFIG, set_config_value
 
-    if key not in VALID_KEYS:
-        raise click.ClickException(f"Unknown config key: {key}. Valid keys: {', '.join(sorted(VALID_KEYS))}")
+    all_keys = VALID_KEYS | VALID_FORMAT_KEYS
+    if key not in all_keys:
+        raise click.ClickException(f"Unknown config key: {key}. Valid keys: {', '.join(sorted(all_keys))}")
 
     # Determine config path (custom or default)
     parent_obj = ctx.parent.obj if ctx.parent else None
@@ -159,25 +181,17 @@ def config_set(ctx, key, value):
     if parent_obj and 'config_path' in parent_obj:
         config_path = Path(parent_obj['config_path']) if parent_obj['config_path'] else None
 
-    # Load config
-    config_manager = ConfigManager()
-    config_manager.load_file(config_path)
-    config = config_manager.items()
-
     # Parse value based on expected type (from defaults)
-    # Find default value to determine expected type
     expected_type = None
-    for section in ['repl', 'optimize', 'format', 'cache']:
-        if key in DEFAULT_CONFIG[section]:
+    for section in ['repl', 'optimize', 'format', 'cache', 'diagnostics']:
+        if key in DEFAULT_CONFIG.get(section, {}):
             default_value = DEFAULT_CONFIG[section][key]
-            # For cache options, None is a valid type (means unlimited)
             expected_type = type(default_value) if default_value is not None else None
             break
 
     # Special handling for "unlimited" keyword (maps to None)
     if value.lower() == 'unlimited':
         parsed = None
-    # Parse according to type
     elif expected_type is bool:
         try:
             parsed = _parse_bool(value)
@@ -191,7 +205,6 @@ def config_set(ctx, key, value):
     elif expected_type is str:
         parsed = value
     else:
-        # Fallback: try boolean, then int, then string
         try:
             parsed = _parse_bool(value)
         except ValueError:
@@ -200,9 +213,7 @@ def config_set(ctx, key, value):
             except ValueError:
                 parsed = value
 
-    # Update and save
-    config[key] = parsed
-    save_config(config, config_path)
+    set_config_value(key, parsed, config_path)
 
     actual_path = config_path or get_config_path()
     if parsed is None:
@@ -213,7 +224,28 @@ def config_set(ctx, key, value):
         click.echo(f"Set {key} = {parsed} in {actual_path}")
 
 
-@cmd_config.command("path")
+@cmd_config.command('edit')
+@click.pass_context
+def config_edit(ctx):
+    """Interactive config editor (TUI)."""
+    from pathlib import Path
+
+    parent_obj = ctx.parent.obj if ctx.parent else None
+    config_path = None
+    if parent_obj and 'config_path' in parent_obj:
+        config_path = Path(parent_obj['config_path']) if parent_obj['config_path'] else None
+
+    try:
+        from catnip import _repl
+
+        _repl.run_config_editor(config_path)
+    except ImportError:
+        raise click.ClickException("REPL module not available (catnip._repl)")
+    except Exception as e:
+        raise click.ClickException(str(e))
+
+
+@cmd_config.command('path')
 @click.pass_context
 def config_path(ctx):
     """Show the configuration file path."""

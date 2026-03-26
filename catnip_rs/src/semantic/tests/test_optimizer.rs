@@ -9,6 +9,7 @@
 //! flattening, chained comparisons, optimization levels) are covered by
 //! the Python test suite: tests/optimization/test_optimizer.py
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -17,7 +18,7 @@ fn test_optimizer_creates_with_default_passes() {
     // Optimizer() should create 10 default passes
     Python::initialize();
     Python::attach(|py| {
-        let rs = py.import("catnip._rs").expect("import catnip._rs");
+        let rs = py.import(PY_MOD_RS).expect("import catnip._rs");
         let optimizer = rs
             .getattr("Optimizer")
             .expect("get Optimizer")
@@ -27,11 +28,7 @@ fn test_optimizer_creates_with_default_passes() {
         let passes = optimizer.getattr("passes").expect("get passes");
         let passes_list = passes.cast::<PyList>().expect("passes is a list");
 
-        assert_eq!(
-            passes_list.len(),
-            10,
-            "Default optimizer should have 10 passes"
-        );
+        assert_eq!(passes_list.len(), 10, "Default optimizer should have 10 passes");
     });
 }
 
@@ -40,7 +37,7 @@ fn test_optimizer_with_custom_passes() {
     // Optimizer(passes=[ConstantFoldingPass()]) should have exactly 1 pass
     Python::initialize();
     Python::attach(|py| {
-        let rs = py.import("catnip._rs").expect("import catnip._rs");
+        let rs = py.import(PY_MOD_RS).expect("import catnip._rs");
         let cf_pass = rs
             .getattr("ConstantFoldingPass")
             .expect("get ConstantFoldingPass")
@@ -57,24 +54,20 @@ fn test_optimizer_with_custom_passes() {
         let result_passes = optimizer.getattr("passes").expect("get passes");
         let result_list = result_passes.cast::<PyList>().expect("passes is a list");
 
-        assert_eq!(
-            result_list.len(),
-            1,
-            "Custom optimizer should have exactly 1 pass"
-        );
+        assert_eq!(result_list.len(), 1, "Custom optimizer should have exactly 1 pass");
     });
 }
 
 // Removed: test_optimizer_optimize_literal_{int,string,none}, test_optimizer_optimize_{list,tuple}
 // Literal/container passthrough is trivially proven by cf_const_id, cf_bconst_id, cf_qconst_id,
-// cf_var_id (CatnipConstFoldProof.v:151-160) — no transformation applies to non-IR values.
+// cf_var_id (CatnipConstFoldProof.v:151-160) - no transformation applies to non-IR values.
 
 #[test]
 fn test_optimizer_max_iterations() {
     // optimize(42, max_iterations=1) should not crash
     Python::initialize();
     Python::attach(|py| {
-        let rs = py.import("catnip._rs").expect("import catnip._rs");
+        let rs = py.import(PY_MOD_RS).expect("import catnip._rs");
         let optimizer = rs
             .getattr("Optimizer")
             .expect("get Optimizer")
@@ -91,15 +84,15 @@ fn test_optimizer_max_iterations() {
     });
 }
 
-// Removed: test_optimizer_folds_constant_addition — proven by cf_add_fold_sem (CatnipConstFoldProof.v:305)
-// Removed: test_optimizer_simplifies_blunt_code — proven by blunt_double_neg (CatnipOptimProof.v:429)
-// Removed: test_optimizer_composes_passes — proven by compose_preserves_eval (CatnipOptimProof.v:1075)
+// Removed: test_optimizer_folds_constant_addition - proven by cf_add_fold_sem (CatnipConstFoldProof.v:305)
+// Removed: test_optimizer_simplifies_blunt_code - proven by blunt_double_neg (CatnipOptimProof.v:429)
+// Removed: test_optimizer_composes_passes - proven by compose_preserves_eval (CatnipOptimProof.v:1075)
 
 #[test]
 fn test_optimizer_repr() {
     Python::initialize();
     Python::attach(|py| {
-        let rs = py.import("catnip._rs").expect("import catnip._rs");
+        let rs = py.import(PY_MOD_RS).expect("import catnip._rs");
         let optimizer = rs
             .getattr("Optimizer")
             .expect("get Optimizer")

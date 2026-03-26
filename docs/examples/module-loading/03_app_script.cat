@@ -1,0 +1,42 @@
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 03_app_script.cat
+# Script d'application utilisant l'API de l'app
+
+# Charger le module d'API de l'app
+app = import('07_app_api')
+
+# Récupérer tous les utilisateurs
+users = app.get_users()
+app.log_message("Fetched all users")
+
+# Accéder au premier utilisateur par indexation
+first_user = users[0]
+app.log_message("First user accessed")
+
+# Récupérer les 3 meilleurs utilisateurs
+top_users = app.get_top_scores(3)
+
+# Calculer le score moyen
+avg_score = app.calculate_average_score()
+app.log_message("Calculated average score")
+
+# Mettre à jour le score de Bob
+app.update_score(2, 95)
+app.log_message("Updated Bob's score to 95")
+
+# Récupérer la nouvelle moyenne
+new_avg = app.calculate_average_score()
+
+# Créer un rapport
+report = app.Report()
+report.add_line("Score Report")
+report.add_separator()
+report.add_line(f"Average score: {new_avg}")
+report.add_separator()
+
+# Générer et afficher le rapport
+report_text = report.generate()
+print(report_text)
+
+# Résultat final : afficher la nouvelle moyenne
+new_avg

@@ -27,7 +27,8 @@
 //! ```
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyTuple};
@@ -96,11 +97,7 @@ impl OptimizationPass for TailRecursionToLoopPass {
 
 impl TailRecursionToLoopPass {
     /// Try to transform a SET_LOCALS if it contains a tail-recursive lambda
-    fn try_transform_set_locals(
-        &self,
-        py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn try_transform_set_locals(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let args = node.getattr("args")?;
         let args_tuple = args.cast::<PyTuple>()?;
 
@@ -163,22 +160,15 @@ impl TailRecursionToLoopPass {
         let transformed_lambda = self.transform_lambda_to_loop(py, &value, &func_name_str)?;
 
         // Create new SET_LOCALS with transformed lambda
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &[names.unbind(), transformed_lambda])?;
         let ident = node.getattr("ident")?;
         let kwargs = node.getattr("kwargs")?;
-        op_class
-            .call1((ident, new_args, kwargs))
-            .map(|obj| obj.unbind())
+        op_class.call1((ident, new_args, kwargs)).map(|obj| obj.unbind())
     }
 
     /// Check if a lambda is tail-recursive (all recursive calls are tail calls)
-    fn is_tail_recursive(
-        &self,
-        py: Python<'_>,
-        lambda_node: &Bound<'_, PyAny>,
-        func_name: &str,
-    ) -> PyResult<bool> {
+    fn is_tail_recursive(&self, py: Python<'_>, lambda_node: &Bound<'_, PyAny>, func_name: &str) -> PyResult<bool> {
         let args = lambda_node.getattr("args")?;
         let args_tuple = args.cast::<PyTuple>()?;
         if args_tuple.len() < 2 {
@@ -211,12 +201,7 @@ impl TailRecursionToLoopPass {
     }
 
     /// Find all CALL nodes to a specific function
-    fn find_all_calls(
-        &self,
-        py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-        func_name: &str,
-    ) -> PyResult<Vec<Py<PyAny>>> {
+    fn find_all_calls(&self, py: Python<'_>, node: &Bound<'_, PyAny>, func_name: &str) -> PyResult<Vec<Py<PyAny>>> {
         let mut calls = Vec::new();
 
         // Check if this node is a CALL to func_name
@@ -246,12 +231,7 @@ impl TailRecursionToLoopPass {
     }
 
     /// Check if a node is a CALL to a specific function
-    fn is_call_to_function(
-        &self,
-        _py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-        func_name: &str,
-    ) -> PyResult<bool> {
+    fn is_call_to_function(&self, _py: Python<'_>, node: &Bound<'_, PyAny>, func_name: &str) -> PyResult<bool> {
         // Check if it's an Op node
         let node_type = node.get_type();
         let type_name_bound = node_type.name()?;
@@ -308,13 +288,11 @@ impl TailRecursionToLoopPass {
         let loop_body = self.transform_body_to_loop(py, &body, &params, func_name)?;
 
         // Create new lambda with loop body
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let ident = lambda_node.getattr("ident")?;
         let new_args = PyTuple::new(py, &[params.unbind(), loop_body])?;
         let kwargs = lambda_node.getattr("kwargs")?;
-        let result = op_class
-            .call1((ident, new_args, kwargs))
-            .map(|obj| obj.unbind())?;
+        let result = op_class.call1((ident, new_args, kwargs)).map(|obj| obj.unbind())?;
         Ok(result)
     }
 
@@ -400,12 +378,11 @@ impl TailRecursionToLoopPass {
             Err(_e) => {
                 // Generic transformation: while true { transformed_body }
                 // transform_node_for_loop handles nested ifs, tail calls → rebinding, base cases → return
-                let transformed_body =
-                    self.transform_node_for_loop(py, body, &param_names, func_name)?;
+                let transformed_body = self.transform_node_for_loop(py, body, &param_names, func_name)?;
 
                 // Wrap in while true { ... }
                 // In Catnip, literals are direct Python values, not Op nodes
-                let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+                let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
                 let while_ident = OpCode::OP_WHILE as i32;
                 let true_literal: Py<PyAny> = PyBool::new(py, true).to_owned().into_any().unbind();
                 let while_args = PyTuple::new(py, &[true_literal, transformed_body])?;
@@ -419,7 +396,7 @@ impl TailRecursionToLoopPass {
 
     /// Wrap a node in OP_RETURN
     fn wrap_in_return(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let return_ident = OpCode::OP_RETURN as i32;
         let return_args = PyTuple::new(py, &[node.clone().unbind()])?;
         let kwargs = PyDict::new(py);
@@ -500,16 +477,13 @@ impl TailRecursionToLoopPass {
 
                     // Transform only the last statement (the return expression)
                     let last_stmt = args_tuple.get_item(len - 1)?;
-                    let transformed_last =
-                        self.transform_node_for_loop(py, &last_stmt, param_names, func_name)?;
+                    let transformed_last = self.transform_node_for_loop(py, &last_stmt, param_names, func_name)?;
                     transformed_stmts.push(transformed_last);
 
-                    let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+                    let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
                     let new_args = PyTuple::new(py, &transformed_stmts)?;
                     let kwargs = node.getattr("kwargs")?;
-                    op_class
-                        .call1((ident, new_args, kwargs))
-                        .map(|obj| obj.unbind())
+                    op_class.call1((ident, new_args, kwargs)).map(|obj| obj.unbind())
                 }
                 _ => {
                     // Other operations (arithmetic, comparison, etc.) are base cases → wrap in RETURN
@@ -556,8 +530,7 @@ impl TailRecursionToLoopPass {
             let block = branch_tuple.get_item(1)?;
 
             // Transform the block - this will wrap base cases in RETURN, leave rebindings as-is
-            let transformed_block =
-                self.transform_node_for_loop(py, &block, param_names, func_name)?;
+            let transformed_block = self.transform_node_for_loop(py, &block, param_names, func_name)?;
 
             // Create new branch tuple
             let new_branch = PyTuple::new(py, &[condition.unbind(), transformed_block])?;
@@ -596,17 +569,12 @@ impl TailRecursionToLoopPass {
         };
 
         // Create new if with transformed branches
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let ident = if_node.getattr("ident")?;
-        let new_args = PyTuple::new(
-            py,
-            &[transformed_branches_tuple.unbind().into(), transformed_else],
-        )?;
+        let new_args = PyTuple::new(py, &[transformed_branches_tuple.unbind().into(), transformed_else])?;
         let kwargs = if_node.getattr("kwargs")?;
 
-        op_class
-            .call1((ident, new_args, kwargs))
-            .map(|obj| obj.unbind())
+        op_class.call1((ident, new_args, kwargs)).map(|obj| obj.unbind())
     }
 
     /// Transform a tail call into parameter rebinding
@@ -641,15 +609,10 @@ impl TailRecursionToLoopPass {
 
         // Build arg_values: maps param index → value
         // Start with positional args
-        let mut arg_values: Vec<Option<Py<PyAny>>> = Vec::new();
-        for _ in 0..param_names.len() {
-            arg_values.push(None);
-        }
-        for i in 0..num_positional {
-            if i < param_names.len() {
-                let arg = args_tuple.get_item(i + 1)?;
-                arg_values[i] = Some(arg.unbind());
-            }
+        let mut arg_values: Vec<Option<Py<PyAny>>> = std::iter::repeat_with(|| None).take(param_names.len()).collect();
+        for (i, slot) in arg_values.iter_mut().enumerate().take(num_positional) {
+            let arg = args_tuple.get_item(i + 1)?;
+            *slot = Some(arg.unbind());
         }
 
         // Add kwargs
@@ -662,7 +625,7 @@ impl TailRecursionToLoopPass {
             }
         }
 
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let set_locals_ident = OpCode::SET_LOCALS as i32;
         let mut statements = Vec::new();
 
@@ -671,10 +634,9 @@ impl TailRecursionToLoopPass {
         for (i, arg_opt) in arg_values.iter().enumerate() {
             if let Some(arg) = arg_opt {
                 let tmp_name = format!("_tmp_{}", i);
-                let names = PyTuple::new(py, &[tmp_name])?;
+                let names = PyTuple::new(py, [tmp_name])?;
                 let arg_bound = arg.bind(py);
-                let set_local_args =
-                    PyTuple::new(py, &[names.into_any().unbind(), arg_bound.clone().unbind()])?;
+                let set_local_args = PyTuple::new(py, [names.into_any().unbind(), arg_bound.clone().unbind()])?;
                 let kwargs = PyDict::new(py);
                 let stmt = op_class.call1((set_locals_ident, set_local_args, kwargs))?;
                 statements.push(stmt.unbind());
@@ -682,14 +644,14 @@ impl TailRecursionToLoopPass {
         }
 
         // Phase 2: Rebind all parameters from temporaries
-        let ref_class = py.import("catnip.nodes")?.getattr("Ref")?;
+        let ref_class = py.import(PY_MOD_NODES)?.getattr("Ref")?;
         for (i, arg_opt) in arg_values.iter().enumerate() {
             if arg_opt.is_some() {
                 let param_name = &param_names[i];
                 let tmp_name = format!("_tmp_{}", i);
-                let names = PyTuple::new(py, &[param_name.clone()])?;
+                let names = PyTuple::new(py, std::slice::from_ref(param_name))?;
                 let ref_value = ref_class.call1((tmp_name,))?.unbind();
-                let set_local_args = PyTuple::new(py, &[names.into_any().unbind(), ref_value])?;
+                let set_local_args = PyTuple::new(py, [names.into_any().unbind(), ref_value])?;
                 let kwargs = PyDict::new(py);
                 let stmt = op_class.call1((set_locals_ident, set_local_args, kwargs))?;
                 statements.push(stmt.unbind());
@@ -732,8 +694,8 @@ impl TailRecursionToLoopPass {
         // Check if if_node is OP_IF
         let if_ident = if_node.getattr("ident")?;
         let if_ident_int: i32 = if_ident.extract()?;
-        let if_opcode = OpCode::from_i32(if_ident_int)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid opcode"))?;
+        let if_opcode =
+            OpCode::from_i32(if_ident_int).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid opcode"))?;
 
         if if_opcode != OpCode::OP_IF {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -746,9 +708,7 @@ impl TailRecursionToLoopPass {
         let args = if_node.getattr("args")?;
         let args_tuple = args.cast::<PyTuple>()?;
         if args_tuple.len() != 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Invalid if structure",
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err("Invalid if structure"));
         }
 
         let branches = args_tuple.get_item(0)?;
@@ -764,9 +724,7 @@ impl TailRecursionToLoopPass {
         let branch_pair = branches_tuple.get_item(0)?;
         let pair_tuple = branch_pair.cast::<PyTuple>()?;
         if pair_tuple.len() != 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Invalid branch structure",
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err("Invalid branch structure"));
         }
 
         let condition = pair_tuple.get_item(0)?;
@@ -817,11 +775,7 @@ impl TailRecursionToLoopPass {
     }
 
     /// Unwrap OP_BLOCK to get the inner node (recursively unwraps nested blocks)
-    fn unwrap_block<'py>(
-        &self,
-        py: Python<'py>,
-        node: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn unwrap_block<'py>(&self, _py: Python<'py>, node: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let node_type = node.get_type();
         let type_name_bound = node_type.name()?;
         let type_name = type_name_bound.to_str()?;
@@ -843,19 +797,15 @@ impl TailRecursionToLoopPass {
         if args_tuple.len() == 1 {
             // Recursively unwrap nested blocks
             let inner = args_tuple.get_item(0)?;
-            self.unwrap_block(py, &inner)
+            self.unwrap_block(_py, &inner)
         } else {
             Ok(node.clone())
         }
     }
 
     /// Negate a condition (converts cond to NOT(cond))
-    fn negate_condition<'py>(
-        &self,
-        py: Python<'py>,
-        cond: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+    fn negate_condition<'py>(&self, py: Python<'py>, cond: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let not_ident = OpCode::NOT as i32;
         let args = PyTuple::new(py, &[cond.clone().unbind()])?;
         let kwargs = PyDict::new(py);
@@ -875,11 +825,10 @@ impl TailRecursionToLoopPass {
         let tail_call_unwrapped = self.unwrap_block(py, tail_call)?;
 
         // Transform tail call to rebindings
-        let rebindings =
-            self.transform_tail_call_to_rebinding(py, &tail_call_unwrapped, param_names)?;
+        let rebindings = self.transform_tail_call_to_rebinding(py, &tail_call_unwrapped, param_names)?;
 
         // Create while loop: while !exit_cond { rebindings }
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let while_ident = OpCode::OP_WHILE as i32;
 
         // Negate exit condition for while loop

@@ -1,12 +1,11 @@
 # Exemples d'intégration
 
-Cette section contient des exemples complets d'intégration de Catnip comme moteur embedded dans des applications Python.
-Chaque exemple montre un cas d'usage et des patterns réutilisables. Catnip en mode embedded : branché dans l'app, prêt
-pour la prod.
+Cette section contient des exemples complets d'intégration de Catnip comme DSL dans des applications Python. Chaque
+exemple montre un cas d'usage et des patterns réutilisables.
 
 ## Vue d'ensemble
 
-Catnip est conçu pour être embarqué dans des applications Python comme moteur de scripting sécurisé. Les exemples
+Catnip est conçu comme DSL embarqué dans des applications Python, avec un moteur de scripting sécurisé. Les exemples
 ci-dessous montrent des cas où Catnip permet aux utilisateurs ou admins de définir des règles, des workflows ou des
 transformations sans changer le code.
 

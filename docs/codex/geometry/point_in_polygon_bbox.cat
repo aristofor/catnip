@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Point-in-Polygon avec pré-filtre bounding box
 #
 # Algorithme : ray casting (Jordan curve theorem)
@@ -6,15 +7,11 @@
 #
 # Optimisation : bounding box check en O(1) avant
 # le test O(n) du ray casting.
-#
-# Exécution :
-#   catnip docs/codex/geometry/point_in_polygon_bbox.cat
-#
 
-struct Point { x, y }
+struct Point { x; y; }
 
 struct BBox {
-    xmin, ymin, xmax, ymax
+    xmin; ymin; xmax; ymax;
 
     # Test rapide : point dans la bounding box ?
     contains(self, p) => {
@@ -28,7 +25,7 @@ struct BBox {
         ymin = polygon[0].y
         xmax = xmin
         ymax = ymin
-        i = 1
+        i    = 1
         while i < len(polygon) {
             p = polygon[i]
             if p.x < xmin { xmin = p.x }
@@ -85,13 +82,13 @@ print("Bounding box :", bb)
 
 # Points de test
 tests = list(
-    Point(1, 1), # intérieur (branche basse du L)
-    Point(1, 4), # intérieur (branche haute du L)
-    Point(3, 3), # extérieur (creux du L)
-    Point(3, 1), # intérieur (branche basse)
-    Point(5, 1), # extérieur (hors bbox)
-    Point(-1, 0), # extérieur (hors bbox)
-    Point(2, 0)  # sur l'arête (comportement limite)
+    Point(1, 1),   # intérieur (branche basse du L)
+    Point(1, 4),   # intérieur (branche haute du L)
+    Point(3, 3),   # extérieur (creux du L)
+    Point(3, 1),   # intérieur (branche basse)
+    Point(5, 1),   # extérieur (hors bbox)
+    Point(-1, 0),  # extérieur (hors bbox)
+    Point(2, 0),   # sur l'arête (comportement limite)
 )
 
 for p in tests {

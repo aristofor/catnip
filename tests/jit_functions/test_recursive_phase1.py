@@ -33,17 +33,10 @@ result
     print("=" * 60)
 
     c = Catnip(vm_mode='on')
-    ast = c.parse(code)
-    compiler = Compiler()
-    compiled = compiler.compile(ast)
-
-    vm = VM()
-    vm.set_context(c.context)
-    vm.enable_jit()
-    vm.set_trace(True)  # Enable trace to see JIT messages
-
-    # Execute - factorial should become hot and start tracing
-    result = vm.execute(compiled, ())
+    c.pragma_context.jit_enabled = True
+    c.pragma_context.jit_all = True
+    c.parse(code)
+    result = c.execute()
 
     print(f"\nResult: {result}")
     print(f"Expected: {362880}  (9!)")

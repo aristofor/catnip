@@ -20,7 +20,7 @@ def test_cached_with_key_func():
         """Simule un hash de fichiers"""
         return "|".join(sorted(files))
 
-    cat.context.globals["file_hash"] = file_hash
+    cat.context.globals['file_hash'] = file_hash
 
     code = """
     counter = 0
@@ -69,11 +69,11 @@ def test_cached_with_validator():
 
     def validator_func(cached_result, *args, **kwargs):
         """Validator that checks an external flag"""
-        return cache_valid["value"]
+        return cache_valid['value']
 
-    cat.context.globals["validator"] = validator_func
-    cat.context.globals["invalidate_external"] = lambda: cache_valid.update({"value": False})
-    cat.context.globals["validate_external"] = lambda: cache_valid.update({"value": True})
+    cat.context.globals['validator'] = validator_func
+    cat.context.globals['invalidate_external'] = lambda: cache_valid.update({'value': False})
+    cat.context.globals['validate_external'] = lambda: cache_valid.update({'value': True})
 
     code = """
     counter = 0
@@ -136,8 +136,8 @@ def test_cached_file_based_invalidation():
     def file_validator(cached_result, filename):
         return Path(filename).exists()
 
-    cat.context.globals["file_key"] = file_key
-    cat.context.globals["file_validator"] = file_validator
+    cat.context.globals['file_key'] = file_key
+    cat.context.globals['file_validator'] = file_validator
 
     code = """
     counter = 0
@@ -171,8 +171,8 @@ def test_cached_file_based_invalidation():
     # Re-parse and execute
     cat2 = Catnip()
     cat2.context.memoization = cat.context.memoization  # Reuse the same cache
-    cat2.context.globals["file_key"] = file_key
-    cat2.context.globals["file_validator"] = file_validator
+    cat2.context.globals['file_key'] = file_key
+    cat2.context.globals['file_validator'] = file_validator
 
     code2 = """
     counter = 2  # Continue the counter
@@ -215,7 +215,7 @@ def test_cached_with_dependencies():
         deps = compute_deps(files_list)
         return f"{','.join(files_list)}:{deps}"
 
-    cat.context.globals["build_key"] = build_key
+    cat.context.globals['build_key'] = build_key
 
     code = """
     builds = 0
@@ -248,7 +248,7 @@ def test_cached_with_dependencies():
     # Re-execute with modified content
     cat2 = Catnip()
     cat2.context.memoization = cat.context.memoization
-    cat2.context.globals["build_key"] = build_key
+    cat2.context.globals['build_key'] = build_key
 
     code2 = """
     builds = 1  # Continue the counter

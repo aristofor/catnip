@@ -62,11 +62,7 @@ impl DebugCallback {
         };
         let snippet = {
             let mut sm = self.source_map.lock().unwrap();
-            sm.get_snippet(
-                start_byte as usize,
-                start_byte as usize + 1,
-                DEBUG_PAUSE_CONTEXT_LINES,
-            )
+            sm.get_snippet(start_byte as usize, start_byte as usize + 1, DEBUG_PAUSE_CONTEXT_LINES)
         };
 
         // Build locals repr

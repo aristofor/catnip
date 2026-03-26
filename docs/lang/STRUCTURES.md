@@ -1,17 +1,9 @@
 # Structures et Traits
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 Le mot-clé `struct` permet de déclarer une structure nommée avec des champs :
 
 ```catnip
-struct Point { x, y }
+struct Point { x; y; }
 ```
 
 Les structures créent des types de données personnalisés avec des champs nommés. Une fois déclarées, elles peuvent être
@@ -19,7 +11,7 @@ instanciées comme des fonctions :
 
 ```catnip
 # Déclaration
-struct Point { x, y }
+struct Point { x; y; }
 
 # Instanciation avec arguments positionnels
 p1 = Point(10, 20)
@@ -37,12 +29,13 @@ print(p2.y)  # 15
 Les structures sont des types natifs Rust avec accès aux champs en O(1). Propriétés :
 
 - **Attributs mutables** : les champs peuvent être modifiés après création
-- **Représentation automatique** : `str()` et `repr()` affichent la structure avec ses valeurs
+- **Représentation automatique** : `str()` et `repr()` affichent la structure avec ses valeurs (`Point(x=1, y=2)`)
+- **Introspection** : `dir()` retourne les champs, méthodes et méthodes statiques (utilisé par la complétion REPL)
 - **Égalité structurelle** : deux instances avec les mêmes valeurs sont considérées égales
 - **Validation des arguments** : erreurs claires si arguments manquants ou en trop
 
 ```catnip
-struct Color { r, g, b }
+struct Color { r; g; b; }
 
 # Mutation
 c = Color(255, 0, 0)
@@ -60,7 +53,7 @@ print(c1 == c2)  # True
 Les champs de structure supportent des valeurs par défaut, avec la même syntaxe que les paramètres de fonctions :
 
 ```catnip
-struct Point { x, y = 0 }
+struct Point { x; y = 0; }
 
 Point(5)        # Point(x=5, y=0)
 Point(1, 2)     # Point(x=1, y=2)
@@ -70,7 +63,7 @@ Point(x=3)      # Point(x=3, y=0)
 Les champs sans défaut doivent précéder ceux avec défaut :
 
 ```catnip
-struct Config { host, port = 8080, debug = False }
+struct Config { host; port = 8080; debug = False; }
 
 Config("localhost")              # Config(host="localhost", port=8080, debug=False)
 Config("0.0.0.0", 3000, True)   # Config(host="0.0.0.0", port=3000, debug=True)
@@ -79,7 +72,7 @@ Config("0.0.0.0", 3000, True)   # Config(host="0.0.0.0", port=3000, debug=True)
 Si tous les champs ont un défaut, l'instanciation sans argument est possible :
 
 ```catnip
-struct Opts { verbose = False, retries = 3 }
+struct Opts { verbose = False; retries = 3; }
 Opts()  # Opts(verbose=False, retries=3)
 ```
 
@@ -91,7 +84,7 @@ Opts()  # Opts(verbose=False, retries=3)
 Les champs peuvent contenir n'importe quel type de valeur :
 
 ```catnip
-struct Container { data, metadata }
+struct Container { data; metadata; }
 
 c = Container(
     list(1, 2, 3),
@@ -107,8 +100,8 @@ print(c.metadata["name"])  # "test"
 On peut définir plusieurs structures dans le même programme :
 
 ```catnip
-struct Vector2D { x, y }
-struct Particle { position, velocity, mass }
+struct Vector2D { x; y; }
+struct Particle { position; velocity; mass; }
 
 v = Vector2D(10, 20)
 p = Particle(
@@ -128,7 +121,7 @@ Les structures peuvent définir des méthodes inline avec un paramètre `self` e
 
 ```catnip
 struct Point {
-    x, y
+    x; y;
 
     distance(self, other) => {
         sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
@@ -148,18 +141,16 @@ print(a.translate(1, 2))   # Point(x=1, y=2)
 Les méthodes sont déclarées après les champs, avec la syntaxe `nom(self, ...) => { corps }`. Le premier paramètre
 (`self`) est lié automatiquement à l'instance lors de l'appel, via le protocole descripteur Python (`__get__`).
 
-Un point-virgule peut séparer visuellement les champs des méthodes :
+Le point-virgule (`;`) après chaque champ est optionnel :
 
 ```catnip
 struct Point {
-    x, y;
+    x; y;
     sum(self) => { self.x + self.y }
 }
 
 Point(3, 4).sum()  # 7
 ```
-
-La virgule traîlante (`x, y,`) est aussi acceptée.
 
 Les méthodes respectent la portée lexicale: elles peuvent capturer des variables locales du scope englobant.
 
@@ -180,6 +171,24 @@ P(3).shifted()   # 13
 > Une méthode est une fonction attachée à la `struct`. `self` désigne l'instance courante: protagoniste local, budget
 > infini en parenthèses.
 
+## Résolution de méthodes
+
+Quand une méthode est appelée sur une instance, le dispatch suit cette chaîne :
+
+```mermaid
+flowchart LR
+    CALL["instance.method()"] --> OWN{"Méthodes propres ?"}
+    OWN -->|Trouvé| EXEC["Exécution"]
+    OWN -->|Non| MRO{"Héritage (MRO) ?"}
+    MRO -->|Trouvé| EXEC
+    MRO -->|Non| TRAIT{"Méthodes traits ?"}
+    TRAIT -->|Trouvé| EXEC
+    TRAIT -->|Non| ERR["AttributeError"]
+```
+
+Les méthodes propres de la structure ont toujours priorité. L'héritage suit l'ordre C3 (MRO). Les traits sont intégrés
+après les parents directs. En cas de conflit entre traits, un override explicite est requis.
+
 ## Surcharge d'opérateurs
 
 La syntaxe `op <symbole>` définit le comportement d'un opérateur pour une structure. Quand l'opérateur est appliqué à
@@ -199,7 +208,7 @@ une instance, le dispatch cherche la méthode correspondante et l'appelle.
 
 ```catnip
 struct Vec2 {
-    x, y
+    x; y;
 
     op +(self, rhs) => { Vec2(self.x + rhs.x, self.y + rhs.y) }
     op *(self, rhs) => { Vec2(self.x * rhs, self.y * rhs) }
@@ -210,7 +219,7 @@ b = Vec2(3, 4)
 
 a + b      # Vec2(x=4, y=6)
 a * 3      # Vec2(x=3, y=6)
-a + b + a  # Vec2(x=5, y=8) -- chaînage par fold left
+a + b + a  # Vec2(x=5, y=8) - chaînage par fold left
 ```
 
 Si la méthode n'est pas définie, l'opérateur lève une erreur de type.
@@ -230,13 +239,38 @@ Sans `op ==` défini, l'égalité structurelle s'applique (même type + mêmes c
 
 ### Opérateurs bitwise
 
-| Syntaxe | Signature     |
-| ------- | ------------- |
-| `op &`  | `(self, rhs)` |
-| `op \|` | `(self, rhs)` |
-| `op ^`  | `(self, rhs)` |
-| `op <<` | `(self, rhs)` |
-| `op >>` | `(self, rhs)` |
+| Syntaxe            | Signature     |
+| ------------------ | ------------- |
+| `op &`             | `(self, rhs)` |
+| <code>op \|</code> | `(self, rhs)` |
+| `op ^`             | `(self, rhs)` |
+| `op <<`            | `(self, rhs)` |
+| `op >>`            | `(self, rhs)` |
+
+### Opérateurs d'appartenance
+
+| Syntaxe     | Signature      |
+| ----------- | -------------- |
+| `op in`     | `(self, item)` |
+| `op not in` | `(self, item)` |
+
+`op in` définit le comportement de `item in instance`. `op not in` définit le comportement de `item not in instance`.
+
+Si seul `op in` est défini, `not in` utilise sa négation automatiquement (protocole Python `__contains__`).
+
+```catnip
+struct Bag {
+    items
+
+    op in(self, item) => { item in self.items }
+}
+
+b = Bag(list(1, 2, 3))
+2 in b        # True
+5 not in b    # True (negation de op in)
+```
+
+Sans `op in` défini, `in` lève `TypeError`.
 
 ### Opérateurs unaires
 
@@ -250,7 +284,7 @@ Désambiguïsation : 1 paramètre = unaire, 2 paramètres = binaire.
 
 ```catnip
 struct Vec2 {
-    x, y
+    x; y;
     op -(self) => { Vec2(-self.x, -self.y) }
 }
 
@@ -263,13 +297,13 @@ Les opérateurs sont hérités via `extends`, comme toute autre méthode :
 
 ```catnip
 struct Base {
-    x, y
+    x; y;
     op +(self, rhs) => { Base(self.x + rhs.x, self.y + rhs.y) }
 }
 
 struct Child extends(Base) { }
 
-Child(1, 2) + Child(3, 4)  # Child(x=4, y=6) -- op + hérité de Base
+Child(1, 2) + Child(3, 4)  # Child(x=4, y=6) - op + hérité de Base
 ```
 
 > Un struct sans `op +` face à `+` : erreur de type. Un struct avec : dispatch silencieux, une seule forme de code pour
@@ -287,9 +321,9 @@ struct S {
     op *(self, rhs) => { S(self.val * rhs) }
 }
 
-S(10) + 5    # S(val=15) -- dispatch forward classique
-5 + S(10)    # S(val=15) -- dispatch inverse, self = S(10), rhs = 5
-3 * S(7)     # S(val=21) -- idem
+S(10) + 5    # S(val=15) - dispatch forward classique
+5 + S(10)    # S(val=15) - dispatch inverse, self = S(10), rhs = 5
+3 * S(7)     # S(val=21) - idem
 ```
 
 Le struct reste toujours `self` (premier paramètre). Pour les opérateurs commutatifs (`+`, `*`, `&`, `|`, `^`), le
@@ -302,8 +336,8 @@ struct S {
     op -(self, rhs) => { S(self.val - rhs) }
 }
 
-S(10) - 3    # S(val=7)  -- forward: S(10).val - 3
-3 - S(10)    # S(val=-7) -- reverse: S(10).val - 3 (self = S(10))
+S(10) - 3    # S(val=7)  - forward: S(10).val - 3
+3 - S(10)    # S(val=-7) - reverse: S(10).val - 3 (self = S(10))
 ```
 
 Priorité : le forward (opérande gauche) gagne toujours. Le reverse ne se déclenche que si l'opérande gauche ne gère pas
@@ -324,15 +358,15 @@ struct Counter {
 }
 
 Counter.zero()        # Counter(value=0)
-Counter(5).zero()     # Counter(value=0) -- aussi callable sur une instance
+Counter(5).zero()     # Counter(value=0) - aussi callable sur une instance
 ```
 
-Une méthode `@static` n'a pas de paramètre `self` -- déclarer `self` comme premier paramètre est une erreur. Elle peut
+Une méthode `@static` n'a pas de paramètre `self` - déclarer `self` comme premier paramètre est une erreur. Elle peut
 prendre d'autres paramètres :
 
 ```catnip
 struct Point {
-    x, y
+    x; y;
 
     @static
     from_scalar(n) => {
@@ -347,7 +381,7 @@ Les méthodes statiques et d'instance coexistent librement dans une même struct
 
 ```catnip
 struct Vec2 {
-    x, y
+    x; y;
 
     length_sq(self) => { self.x * self.x + self.y * self.y }
 
@@ -387,7 +421,7 @@ Les traits peuvent déclarer des méthodes `@static`, y compris `@abstract @stat
 ## Méthodes abstraites
 
 Le décorateur `@abstract` déclare une méthode sans corps. Une structure contenant des méthodes abstraites ne peut pas
-être instanciée directement -- une sous-structure doit fournir l'implémentation :
+être instanciée directement - une sous-structure doit fournir l'implémentation :
 
 ```catnip
 struct Shape {
@@ -430,7 +464,7 @@ struct Counter {
 Counter(10).x   # 11
 ```
 
-La valeur de retour de `init` est ignorée -- l'instance est toujours renvoyée :
+La valeur de retour de `init` est ignorée - l'instance est toujours renvoyée :
 
 ```catnip
 struct S {
@@ -445,7 +479,7 @@ S(5).x   # 10 (pas 999)
 
 ```catnip
 struct Config {
-    host, port = 8080
+    host; port = 8080;
     init(self) => { self.host = self.host + ":auto" }
 }
 
@@ -463,7 +497,7 @@ Les structures supportent l'héritage via `extends(Base)` (simple) ou `extends(B
 
 ```catnip
 struct Point {
-    x, y
+    x; y;
     sum(self) => { self.x + self.y }
 }
 
@@ -504,7 +538,7 @@ L'héritage fonctionne avec les valeurs par défaut. Les champs avec défaut du 
 
 ```catnip
 struct Config {
-    host, port = 8080
+    host; port = 8080;
 }
 
 struct SecureConfig extends(Config) {
@@ -726,7 +760,7 @@ trait Printable {
 }
 
 struct Point implements(Printable) {
-    x, y
+    x; y;
 }
 
 Point(3, 4).repr()  # "(3, 4)"
@@ -783,7 +817,7 @@ trait Serializable {
 }
 
 struct Config implements(Serializable) {
-    key, value
+    key; value;
     serialize(self) => { f"{self.key}: {self.value}" }
 }
 
@@ -807,7 +841,7 @@ struct Widget implements(Factory) { v }
 Widget.create()   # 42
 ```
 
-Un trait peut déclarer une méthode `@abstract @static` -- la structure doit alors fournir l'implémentation :
+Un trait peut déclarer une méthode `@abstract @static` - la structure doit alors fournir l'implémentation :
 
 ```catnip
 trait Buildable {
@@ -832,7 +866,7 @@ définissent la même méthode statique, c'est une erreur.
 ### Composition multiple et conflits
 
 Quand une structure implémente plusieurs traits, les méthodes sont fusionnées. Si deux traits définissent la même
-méthode, c'est une erreur -- sauf si la structure fournit un override :
+méthode, c'est une erreur - sauf si la structure fournit un override :
 
 ```catnip
 trait X { f(self) => { 1 } }

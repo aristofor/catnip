@@ -1,27 +1,113 @@
-# DuckDB - Base de données analytique in-process
-# Requêtes SQL natives ultra-rapides sur données locales
-#
-# Exécuter: catnip -m duckdb duckdb_analytics.cat
+#!/usr/bin/env catnip
+# DuckDB + Catnip : analytics declaratif et composable
+# DuckDB execute le SQL, Catnip orchestre les scenarios analytiques.
 
+duckdb = import('duckdb')
+
+line = () => { print("-" * 60) }
+
+# Donnees sources typees
+struct Product {
+    name
+    category
+    price
+    stock
+
+    inventory(self) => { self.price * self.stock }
+    to_row(self) => { list(self.name, self.category, self.price, self.stock) }
+}
+
+products = list(
+    Product("Laptop", "Hardware", 999.99, 15),
+    Product("Mouse", "Accessory", 29.99, 150),
+    Product("Keyboard", "Accessory", 79.99, 80),
+    Product("Monitor", "Hardware", 299.99, 35),
+    Product("Dock", "Accessory", 149.99, 40),
+)
+
+# Interop : Catnip structs -> DuckDB table
 db = duckdb.connect()
+db.execute("CREATE TABLE products (name TEXT, category TEXT, price DOUBLE, stock INT)")
 
-# Créer et peupler une table
-db.execute("CREATE TABLE products (name TEXT, price DECIMAL, stock INT)")
-db.execute("INSERT INTO products VALUES ('Laptop', 999.99, 15), ('Mouse', 29.99, 150), ('Keyboard', 79.99, 80)")
-
-print("⇒ Requête simple")
-for row in db.execute("SELECT * FROM products ORDER BY price DESC").fetchall() {
-    print(" ", row[0], "-", row[1], "€ (stock:", row[2], ")")
+for p in products {
+    db.execute("INSERT INTO products VALUES (?, ?, ?, ?)", p.to_row())
 }
 
-print("\n⇒ Agrégation")
-stats = db.execute("SELECT COUNT(*), ROUND(AVG(price), 2), SUM(stock) FROM products").fetchone()
-print("  ", stats[0], "produits, prix moyen", stats[1], "€, stock total:", stats[2])
+print(f"⇒ {len(products)} produits chargés dans DuckDB")
+line()
 
-print("\n⇒ Window function")
-ranked = db.execute("SELECT name, price, RANK() OVER (ORDER BY price DESC) as rank FROM products").fetchall()
+# KPI : specs declaratives
+struct Metric {
+    label
+    sql
+    unit
+
+    run(self, db) => {
+        value = db.execute(self.sql).fetchone()[0]
+        f"  {self.label} : {value}{self.unit}"
+    }
+}
+
+metrics = list(
+    Metric("Produits", "SELECT COUNT(*) FROM products", ""),
+    Metric("Prix moyen", "SELECT ROUND(AVG(price), 2) FROM products", " €"),
+    Metric("Valeur stock", "SELECT ROUND(SUM(price * stock), 2) FROM products", " €"),
+    Metric("Prix max", "SELECT ROUND(MAX(price), 2) FROM products", " €"),
+)
+
+print("⇒ KPI globaux")
+# Broadcast sur structs : chaque Metric est une feuille, passé entier à la lambda
+results = metrics.[(m) => { m.run(db) }]
+for r in results { print(r) }
+line()
+
+# Ranking composable
+ranking_sql = (order_expr, n) => {
+    "SELECT name, category, price, stock, ROUND(price * stock, 2) " +
+        f"FROM products ORDER BY {order_expr} DESC LIMIT {n}"
+}
+
+top_by = (order_expr, n) => {
+    rows = db.execute(ranking_sql(order_expr, n)).fetchall()
+    out = list()
+    for row in rows {
+        out.append(f"  {row[0]} | {row[1]} | {row[4]} €")
+    }
+    out
+}
+
+print("⇒ Top 3 par valeur de stock")
+for item in top_by("price * stock", 3) { print(item) }
+line()
+
+# Segmentation : SQL window + pattern matching Catnip
+ranked = db.execute("SELECT name, category, price, RANK() OVER (ORDER BY price DESC) as r FROM products").fetchall()
+
+struct Segment {
+    name
+    price
+    rank
+    tier
+
+    display(self) => { f"  #{self.rank} {self.name} ({self.price} €) => {self.tier}" }
+}
+
+tier_for = (price, rank) => {
+    match True {
+        _ if rank <= 2 => { "premium" }
+        _ if price >= 100 => { "mid" }
+        _ => { "entry" }
+    }
+}
+
+segments = list()
 for row in ranked {
-    print("  #", row[2], row[0], "(", row[1], "€)")
+    segments.append(Segment(row[0], row[2], row[3], tier_for(row[2], row[3])))
 }
 
+print("⇒ Segmentation sur résultat SQL")
+# Broadcast explicite : les structs sont des feuilles, pas de descente récursive
+segments.[(s) => { print(s.display()) }]
+
+line()
 db.close()

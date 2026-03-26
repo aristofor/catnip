@@ -19,6 +19,7 @@ class CatnipFrame:
     filename: str  # Source filename
     start_byte: int  # Start position in source
     end_byte: int  # End position in source
+    line: int | None = None  # 1-based line number (precomputed)
 
     def format(self, sourcemap=None) -> str:
         """Format frame for display."""

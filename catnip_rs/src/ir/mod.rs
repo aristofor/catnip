@@ -7,14 +7,11 @@
 pub mod json;
 pub mod opcode;
 pub mod pure;
+pub mod pyclass;
 pub mod to_python;
 
-#[cfg(test)]
-mod tests;
-
-pub use json::{
-    ir_from_json, ir_to_json, ir_to_json_compact, ir_to_json_compact_pretty, ir_to_json_pretty,
-};
+pub use json::{ir_from_json, ir_to_json, ir_to_json_compact, ir_to_json_compact_pretty, ir_to_json_pretty};
 pub use opcode::IROpCode;
-pub use pure::{BroadcastType, IRPure};
+pub use pure::{BroadcastType, IR};
+pub use pyclass::PyIRNode;
 pub use to_python::ir_pure_to_python;

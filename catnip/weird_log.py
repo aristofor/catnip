@@ -56,9 +56,9 @@ def _extract_traceback_frames(exc):
         return None
     return [
         (
-            getattr(f, 'function', None),
+            getattr(f, 'name', None),
             getattr(f, 'filename', None),
-            _to_int(getattr(f, 'line', None)),
+            _to_int(getattr(f, 'start_byte', None)),
         )
         for f in frames
     ]

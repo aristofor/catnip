@@ -5,7 +5,7 @@ matching, fonctions/TCO, et passes d'optimisation.
 
 ## TL;DR
 
-50 fichiers Coq dans `proof/` (~17400 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
+56 fichiers Coq dans `proof/` (~18500 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
 parsing, le broadcasting, la résolution de scopes, le pattern matching, le trampoline TCO, les 10/10 passes
 d'optimisation IR, l'analyse de liveness, la ND-récursion, le pipeline CFG/SSA (Braun et al. 2013), la dominance, le
 NaN-boxing VM, la sécurité de pile VM, les frames/IP/jumps, la linéarisation C3 (MRO), les structs/traits, le desugaring
@@ -20,28 +20,27 @@ Cranelift ne sont pas formellement prouvés dans ce repo.
 
 Catnip utilise tree-sitter pour parser, et tree-sitter fait son travail correctement. Mais la grammaire déclarée dans
 `grammar.js` encode des invariants implicites : la précédence de `*` sur `+`, l'associativité gauche de `-`, le fait que
-`not` lie plus fort que `and`. Ces propriétés ne sont vérifiées par aucun test unitaire classique -- un test vérifie
+`not` lie plus fort que `and`. Ces propriétés ne sont vérifiées par aucun test unitaire classique - un test vérifie
 qu'un cas marche, pas que tous les cas marchent.
 
 Les fichiers dans `proof/` couvrent six axes :
 
-- **Syntaxe** -- invariants de parsing de la grammaire (`grammar.js`) via un parseur à descente récursive formalisé.
-- **Sémantique** -- propriétés structurelles du modèle dimensionnel (broadcast, ND-récursion).
-- **Runtime** -- IR opcodes, scopes (shadowing, isolation), pattern matching (6 types, déterminisme), fonctions
-  (binding, trampoline TCO, tail detection), NaN-boxing VM (7 tags), VM opcodes et stack safety, frames/IP/jumps, C3
-  linearization (MRO), structs/traits (field access, method resolution, inheritance), desugaring opérateurs
-  (injectivité, totalité, cohérence IR).
-- **Optimisations** -- 10/10 passes IR prouvées : strength reduction, blunt code, DCE, block flattening, constant
+- **Syntaxe** - invariants de parsing de la grammaire (`grammar.js`) via un parseur à descente récursive formalisé.
+- **Sémantique** - propriétés structurelles du modèle dimensionnel (broadcast, ND-récursion).
+- **Runtime** - IR opcodes, scopes (shadowing, isolation), pattern matching (6 types, déterminisme), fonctions (binding,
+  trampoline TCO, tail detection), NaN-boxing VM (7 tags), VM opcodes et stack safety, frames/IP/jumps, C3 linearization
+  (MRO), structs/traits (field access, method resolution, inheritance), desugaring opérateurs (injectivité, totalité,
+  cohérence IR).
+- **Optimisations** - 10/10 passes IR prouvées : strength reduction, blunt code, DCE, block flattening, constant
   folding, constant/copy propagation, CSE, DSE, tail recursion to loop.
-- **Analyses** -- liveness analysis (linéaire + CFG), dead store elimination, fixpoint, dominance CFG (idom,
-  frontières).
-- **Infrastructure** -- CFG/SSA (single assignment, phi-nodes, GVN, LICM, CSE inter-blocs, DSE globale), cache (FIFO,
+- **Analyses** - liveness analysis (linéaire + CFG), dead store elimination, fixpoint, dominance CFG (idom, frontières).
+- **Infrastructure** - CFG/SSA (single assignment, phi-nodes, GVN, LICM, CSE inter-blocs, DSE globale), cache (FIFO,
   LRU+TTL, memoization, atomic writes).
 
 Coq vérifie chaque étape de raisonnement : si `make proof` passe, les propriétés sont vraies.
 
 Ce ne sont pas des preuves du runtime lui-même. L'alignement entre les modèles Coq et le code Rust est maintenu
-manuellement -- les commentaires en tête de chaque fichier `.v` citent les définitions correspondantes.
+manuellement - les commentaires en tête de chaque fichier `.v` citent les définitions correspondantes.
 
 ## Vue d'ensemble
 
@@ -71,9 +70,9 @@ Prouvent cohérence, confluence, terminaison partielle et universalité du modè
 
 Formalise la structure de l'IR et ses invariants structurels.
 
-| Fichier      | Couverture                                         | Théorèmes clés                                                               |
-| ------------ | -------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `CatnipIR.v` | IROpCode, IRPure, bijection, classification, arity | `opcode_to_nat_injective`, `opcode_roundtrip`, `control_flow_not_arithmetic` |
+| Fichier      | Couverture                                     | Théorèmes clés                                                               |
+| ------------ | ---------------------------------------------- | ---------------------------------------------------------------------------- |
+| `CatnipIR.v` | IROpCode, IR, bijection, classification, arity | `opcode_to_nat_injective`, `opcode_roundtrip`, `control_flow_not_arithmetic` |
 
 ### D. Preuves runtime
 
@@ -121,10 +120,16 @@ Prouvent les invariants des composants runtime avancés.
 
 | Fichier                      | Couverture                                                                                              | Théorèmes clés                                                                                                                                                                           |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CatnipNanBoxProof.v`        | NaN-boxing VM : 7 tags (SmallInt/Bool/Nil/Symbol/PyObj/Struct/BigInt), encoding 48-bit                  | `tag_injective`, `encode_decode_roundtrip`, `smallint_range`, `promote_demote_id`                                                                                                        |
-| `CatnipVMBase.v`             | VM opcodes (74), stack effects, stack safety, instruction sequences, compiler invariants                | `vm_opcode_roundtrip`, `stack_safety_fixed`, `exec_seq_app`, `arg_dependent_opcodes`                                                                                                     |
+| `CatnipNanBoxProof.v`        | NaN-boxing VM : 8 tags (SmallInt/Bool/Nil/Symbol/PyObj/Struct/BigInt/VMFunc), encoding 47-bit           | `tag_injective`, `encode_decode_roundtrip`, `smallint_range`, `promote_demote_id`                                                                                                        |
+| `CatnipVMOpCode.v`           | VM opcodes (83), bijection `VMOpCode <-> nat`, injectivité, range [1..83]                               | `vm_opcode_to_nat_injective`, `vm_opcode_roundtrip`, `nat_to_vm_opcode_roundtrip`                                                                                                        |
+| `CatnipVMState.v`            | Stack effect model (`Fixed`/`ArgDependent`), `VMState` record, classification                           | `fixed_effect_count`                                                                                                                                                                     |
+| `CatnipVMStackSafety.v`      | Stack safety, net effects par catégorie, arg-dependent effects, instruction sequences                   | `stack_safety_fixed`, `exec_seq_app`, `call_stack_safety`, `exit_stack_safety`, `membership_net_effect`                                                                                  |
+| `CatnipVMInvariants.v`       | Compilation invariants : expression net +1, statement net 0, DupTop/RotTwo                              | `load_net_plus_one`, `binop_pattern_depth`, `assignment_pattern_depth`                                                                                                                   |
+| `CatnipVMExamples.v`         | 10 exemples concrets, classification completeness (effect_total, arg_dependent_opcodes)                 | `effect_total`, `arg_dependent_opcodes`                                                                                                                                                  |
 | `CatnipVMFrame.v`            | VM frames (locals, IP, jumps, block stack, ForRange encoding roundtrips)                                | `get_set_same`, `ip_advance_in_bounds`, `jump_preserves_bounds`, `push_pop_restores`, `for_range_full_roundtrip`                                                                         |
-| `CatnipVMProof.v`            | Façade de compatibilité (`Require Export` de `CatnipVMBase` + `CatnipVMFrame`)                          | -                                                                                                                                                                                        |
+| `CatnipArithProof.v`         | Floor div/mod (Python semantics), equality, overflow promotion                                          | `floor_div_mod_identity`, `floor_mod_sign`, `exact_div_mod_zero`, `neg_overflow_only_min`                                                                                                |
+| `CatnipPureFrameProof.v`     | PureFrame bind_args, copy_args, fill_defaults, pool alloc/free                                          | `copy_args_slot_bound`, `bind_args_length`, `bind_args_no_defaults`, `pool_round_trip`                                                                                                   |
+| `CatnipVMProof.v`            | Façade (`Require Export` des 5 modules VM + `CatnipVMFrame`)                                            | -                                                                                                                                                                                        |
 | `CatnipMROC3Core.v`          | C3 merge algorithm, self-first property                                                                 | `c3_self_first`, `c3_self_is_head`, `c3_no_parents`                                                                                                                                      |
 | `CatnipMROC3Properties.v`    | C3 local precedence and monotonicity                                                                    | `c3_preserves_local_precedence`, `c3_monotonicity`, `c3_merge_preserves_order`                                                                                                           |
 | `CatnipMROFields.v`          | MRO field merge, diamond dedup, redefinition detection                                                  | `dedup_at_most_once`, `no_redefinition_correct`, `redefinition_detected`                                                                                                                 |
@@ -156,10 +161,10 @@ racine (`tree_sound`). La preuve construit la chaîne de réécritures explicite
 productions.
 
 **Non-ambiguïté structurelle** : pour chaque non-terminal, il n'existe qu'une seule forme d'arbre
-(`grammar_unambiguous_S`). La preuve procède par destruction dépendante -- Coq élimine structurellement toute
+(`grammar_unambiguous_S`). La preuve procède par destruction dépendante - Coq élimine structurellement toute
 alternative.
 
-**Non-ambiguïté via yield** : formulation standard en théorie des langages -- si deux arbres pour le même non-terminal
+**Non-ambiguïté via yield** : formulation standard en théorie des langages - si deux arbres pour le même non-terminal
 produisent la même chaîne de terminaux, les arbres sont identiques (`grammar_unambiguous`). La preuve passe par
 `yield_injective` (injectivité de la fonction yield), puis `congruence`. La complétude est aussi prouvée : tout arbre
 pour S engendre `[ta; tb]` et dérive via la relation (`yield_S_unique`, `tree_complete_S`).
@@ -185,7 +190,7 @@ Le modèle Coq garde `+` et `*` avec atomes parenthésés. Cinq fonctions mutuel
 
 - **Précédence** (`precedence_example`) : `n + n * n` parse comme `n + (n * n)`, pas `(n + n) * n`
 - **Associativité gauche** (`left_assoc_add_example`) : `n + n + n` parse comme `(n + n) + n`
-- **Parenthèses** (`paren_example`) : `(n + n) * n` parse comme `(n + n) * n` -- les parenthèses forcent la structure
+- **Parenthèses** (`paren_example`) : `(n + n) * n` parse comme `(n + n) * n` - les parenthèses forcent la structure
 
 Le déterminisme (`parse_expr_deterministic`) est trivial : deux appels sur la même entrée produisent le même résultat,
 par réécriture et inversion.
@@ -225,7 +230,7 @@ Douze fonctions mutuellement récursives (6 niveaux de précédence, chacun avec
 
 **Parenthèses** : forcent la structure à travers tous les niveaux (`paren_override_bool`).
 
-**Opérateurs de comparaison** : les 6 opérateurs sont testés individuellement (`comparison_ops_examples`) -- chacun
+**Opérateurs de comparaison** : les 6 opérateurs sont testés individuellement (`comparison_ops_examples`) - chacun
 produit le bon noeud AST.
 
 **Chaînage** : `n < n <= n` parse comme `(n < n) <= n` syntaxiquement (`comparison_chain_example`). Le fichier inclut
@@ -273,8 +278,8 @@ filtres (`filter_filter`).
 Propriétés structurelles et algébriques avancées, split de `CatnipDimensional.v` pour réduire la mémoire de compilation.
 
 **Universalité** : toute opération *elementwise* (qui préserve la longueur et commute avec l'extraction par index) sur
-une collection est nécessairement `Coll (map op xs)` -- c'est-à-dire `broadcast_map op` (`universality`). Il n'existe
-pas d'autre façon de lifter une opération aux collections avec ces propriétés (`broadcast_unique`). Pour les collections
+une collection est nécessairement `Coll (map op xs)` - c'est-à-dire `broadcast_map op` (`universality`). Il n'existe pas
+d'autre façon de lifter une opération aux collections avec ces propriétés (`broadcast_unique`). Pour les collections
 plates, le broadcast est entièrement déterminé par son noyau scalaire (`broadcast_minimal_flat`). Le broadcast Catnip
 est caractérisé comme le foncteur libre sur les collections plates sous les axiomes d'elementwise-ness.
 
@@ -300,7 +305,7 @@ data.[g].[f] == data.[x => f(g(x))]
 - *Pullback broadcast-filter-map* (`broadcast_filter_map`) : corollaire au niveau `Val`.
 - *Masque booléen* (`mask_select`) : all-true = identité (`mask_all_true`), all-false = vide (`mask_all_false`),
   commutation avec map (`mask_map_commute`), borne de longueur (`mask_length_le`).
-- *Homomorphisme de liste* (`broadcast_concat`) : le broadcast distribue sur la concaténation -- fondation algébrique de
+- *Homomorphisme de liste* (`broadcast_concat`) : le broadcast distribue sur la concaténation - fondation algébrique de
   la parallélisation.
 - *Sémantique un-niveau* (`broadcast_shallow`, `broadcast_two_levels`) : le broadcast opère à exactement un niveau de
   profondeur ; le broadcast récursif nécessite un emboîtement explicite.
@@ -312,7 +317,7 @@ résultats :
 
 - *Fusion complète* (`map_chain_fusion`) : toute chaîne de n broadcasts maps se réduit à un seul broadcast avec la
   fonction composée. Sûre (préserve la sémantique) et complète (n quelconque).
-- *Equivalence transformationnelle* : trois règles de réécriture prouvées correctes -- map;map fusionne
+- *Equivalence transformationnelle* : trois règles de réécriture prouvées correctes - map; map fusionne
   (`equiv_map_map`), map;filter se réordonne en filter;map (`equiv_filter_map_swap`), filter;filter s'absorbe
   (`equiv_filter_filter`).
 - *Normalisation* (`pipeline_normalization`) : tout pipeline mixte de maps et filters sur une collection se réduit à une
@@ -348,8 +353,8 @@ numérotation via `opcode_to_nat : IROpCode -> nat` (bijection) et `nat_to_opcod
 `is_control_flow_op`, `is_arithmetic_op` avec propriétés de disjointness (`literal_not_op`,
 `control_flow_not_arithmetic`).
 
-**IRPure** : inductif représentant les noeuds IR (IRInt, IRFloat, IRBool, IRStr, IRNone, IRDecimal, IRImaginary, IROp),
-avec `ir_size` (taille structurelle), `ir_op` (constructeur par opcode + args), `ir_binop` (spécialisation binaire).
+**IR** : inductif représentant les noeuds IR (IRInt, IRFloat, IRBool, IRStr, IRNone, IRDecimal, IRImaginary, IROp), avec
+`ir_size` (taille structurelle), `ir_op` (constructeur par opcode + args), `ir_binop` (spécialisation binaire).
 
 Ce fichier sert de fondation importée par `CatnipStrengthRedProof.v`, `CatnipBluntCodeProof.v` et
 `CatnipDCEFlattenProof.v`.
@@ -394,7 +399,7 @@ attrape tout (`or_with_wildcard`).
 **Dispatch** : `match_cases_first_wins` (premier case qui matche est sélectionné), `match_cases_guard_fail` (si le guard
 échoue, on passe au case suivant), `match_cases_wildcard_catches_all` (un wildcard en dernier case attrape tout).
 
-**Déterminisme** : `match_pattern_deterministic` et `match_cases_deterministic` -- le résultat du match est unique.
+**Déterminisme** : `match_pattern_deterministic` et `match_cases_deterministic` - le résultat du match est unique.
 
 ### CatnipFunctionProof.v
 
@@ -411,7 +416,7 @@ soit un `Tail args` (tail call = rebind + continuer). `trampoline_normal_termina
 `trampoline_tail_continues` (un Tail rebind les params et relance), `trampoline_fuel_monotone`, `trampoline_two_steps`,
 `trampoline_three_steps` (exemples multi-itérations).
 
-**Scope** : `trampoline_preserves_scope_depth` -- le trampoline ne modifie pas la profondeur du scope.
+**Scope** : `trampoline_preserves_scope_depth` - le trampoline ne modifie pas la profondeur du scope.
 
 **Tail detection** : `tail_position_produces_tailcall` (si le TCO est actif et la position est tail, un appel récursif
 produit un TailCall), `non_tail_produces_normal` (en position non-tail, l'appel est normal),
@@ -462,28 +467,45 @@ Idempotence (`flatten_stmts_idempotent`, `flatten_block_idempotent`) prouvée vi
 > propagation, CSE, DSE, tail rec to loop) ont été ajoutées dans `CatnipConstFoldProof.v`, `CatnipStorePropProof.v`,
 > `CatnipLivenessProof.v` et `CatnipTailRecLoopProof.v`.
 
-### CatnipVMBase.v
+### CatnipVMOpCode.v
 
-Modélise les opcodes VM de `catnip_rs/src/vm/opcode.rs` et prouve la sécurité de pile.
+Modélise les 83 opcodes VM de `catnip_core/src/vm/opcode.rs`. Bijection `VMOpCode <-> nat` avec
+`vm_opcode_to_nat_injective` et `vm_opcode_roundtrip`. 83 constructeurs (repr(u8) 1..83). Même technique que
+`CatnipIR.v` pour les IR opcodes.
 
-**Opcode numbering** : bijection `VMOpCode <-> nat` avec `vm_opcode_to_nat_injective` et `vm_opcode_roundtrip`. Même
-technique que `CatnipIR.v` pour les IR opcodes.
+### CatnipVMState.v
 
-**Stack effects** : chaque opcode a un effet de pile `(pops, pushes)`. La majorité ont un effet fixe (connu
-statiquement), le reste est arg-dépendant (`Call`, `BuildList`, `BuildDict`, etc.). La classification est exhaustive
-(`effect_total`, `arg_dependent_opcodes`).
+Définit le modèle d'état VM et la classification des effets de pile. Chaque opcode a un effet `(pops, pushes)`. 68
+opcodes ont un effet fixe (connu statiquement), 15 sont arg-dépendants (`Call`, `BuildList`, `BuildDict`, `Exit`, etc.).
+Prédicats `is_fixed_effect`, `get_pops`, `get_pushes`.
 
-**Stack safety** : théorème central `stack_safety_fixed` -- pour tout opcode à effet fixe, si la pile a au moins `pops`
+### CatnipVMStackSafety.v
+
+Prouve la sécurité de pile et les propriétés d'exécution.
+
+**Stack safety** : théorème central `stack_safety_fixed` - pour tout opcode à effet fixe, si la pile a au moins `pops`
 éléments, l'exécution produit une pile de profondeur `depth - pops + pushes`, sans underflow. Pour les opcodes
 arg-dépendants, safety prouvée paramétriquement (`call_stack_safety`, `build_seq_stack_safety`,
-`build_dict_stack_safety`, `unpack_seq_stack_safety`).
+`build_dict_stack_safety`, `unpack_seq_stack_safety`, `exit_stack_safety`).
+
+**Propriétés par catégorie** : net effects uniformes - arithmétique = -1, comparaison = -1, membership/identity = -1,
+unaire = 0 (inclut `ToBool`), load = +1, store = -1, noop = 0 (inclut `MatchFail`), conditional jumps = Fixed 1 0
+(inclut `JumpIfNotNoneOrPop`), match transforms = Fixed 1 1 (inclut `MatchAssignPatternVM`).
+
+**Exit** : arg-dépendant (`arg=0` : pops 0, `arg=1` : pops 1). `exit_zero_noop`, `exit_one_requires_one`.
 
 **Instruction sequences** : `exec_seq` exécute une liste d'instructions, `exec_seq_app` prouve la composition.
-Invariants du compilateur prouvés par exemples : expression = net +1 (`binop_pattern_depth`), assignment = net 0
-(`assignment_pattern_depth`), discard = net 0 (`discard_pattern_depth`).
 
-**Propriétés par catégorie** : net effects uniformes pour les classes d'opcodes -- arithmétique = -1, comparaison = -1,
-unaire = 0, load = +1, store = -1, noop = 0.
+### CatnipVMInvariants.v
+
+Invariants du compilateur. Expression = net +1 (`binop_pattern_depth`, `membership_pattern_depth`), statement = net 0
+(`assignment_pattern_depth`, `discard_pattern_depth`). Propriétés DupTop (net +1) et RotTwo (net 0).
+
+### CatnipVMExamples.v
+
+10 exemples concrets d'exécution (addition, assignation, négation, expressions imbriquées, membership, etc.) prouvés par
+réflexivité. Classification exhaustive : `effect_total` (tout opcode est Fixed ou ArgDependent), `arg_dependent_opcodes`
+(énumération des 15).
 
 ### CatnipVMFrame.v
 
@@ -506,9 +528,30 @@ incrémente/décrémente), `push_pop_saved_region` (la région sauvegardée est 
 **ForRange encoding** : roundtrips pour le bitpacking `ForRangeInt` (slot_i, slot_stop, step_sign, offset) et
 `ForRangeStep` (slot_i, step, target). 7 théorèmes de roundtrip individuels couvrant chaque champ.
 
+### CatnipArithProof.v
+
+Prouve les propriétés des opérations arithmétiques pures de `catnip_vm/src/ops/arith.rs`. Couvre floor division et floor
+modulo (sémantique Python, distincte de la division tronquée C), propriétés d'égalité native, et correction de la
+promotion overflow SmallInt vers BigInt.
+
+Théorèmes clés : `floor_div_mod_identity` (a = q\*b + r pour tout b != 0), `floor_mod_sign` (le reste a le signe du
+diviseur), `floor_mod_bound_pos/neg` (bornes du reste), `exact_div_mod_zero` (division exacte implique reste nul),
+`neg_overflow_only_min` (seul -SMALLINT_MIN déborde en négation). 10 exemples concrets validés par réflexivité contre
+les résultats Python.
+
+### CatnipPureFrameProof.v
+
+Prouve les propriétés spécifiques au PureFrame de `catnip_vm/src/vm/frame.rs` : liaison d'arguments positionnels
+(`bind_args`), copie dans les slots locaux, remplissage des valeurs par défaut, et invariants du pool de frames.
+
+Théorèmes clés : `copy_args_slot_bound` (les arguments atterrissent aux bons slots), `copy_args_unbound_nil` (slots non
+liés restent Nil), `bind_args_length` (préserve la taille des locals), `bind_args_no_defaults` (sans défauts, les slots
+correspondent aux args), `pool_alloc_fresh` / `pool_alloc_all_nil` (alloc produit des locals propres),
+`pool_free_bounded` (taille du pool bornée), `pool_round_trip` (free puis alloc = frame propre).
+
 ### CatnipVMProof.v
 
-Façade de compatibilité (`Require Export` de `CatnipVMBase` + `CatnipVMFrame`).
+Façade (`Require Export` des 5 modules VM + `CatnipVMFrame`).
 
 ### CatnipMRO\*.v (6 modules)
 
@@ -538,7 +581,7 @@ chaining, field dedup.
 
 ### CatnipOpDesugar\*.v (4 modules)
 
-Modélisent le desugaring des opérateurs surchargés (`op <symbol>`) de `catnip_rs/src/parser/pure_transforms.rs`. Le
+Modélisent le desugaring des opérateurs surchargés (`op <symbol>`) de `catnip_core/src/parser/pure_transforms.rs`. Le
 mapping `(symbol, arity) → method_name` est prouvé injectif et total.
 
 **CatnipOpDesugar.v** : Modèle du mapping (19 symboles, 21 combinaisons valides sur 38). `desugar_injective` (deux
@@ -594,7 +637,7 @@ variables vivantes. La preuve procède par induction sur le chemin.
 
 ## Technique : récursion à carburant
 
-Coq exige que toute récursion termine. Un RDP ne termine pas structurellement sur sa liste de tokens -- la tail function
+Coq exige que toute récursion termine. Un RDP ne termine pas structurellement sur sa liste de tokens - la tail function
 consomme des tokens mais Coq ne le voit pas. Les parseurs dans `CatnipAddMulProof.v` et `CatnipExprProof.v` utilisent le
 pattern **fuel-based recursion** :
 
@@ -607,7 +650,7 @@ le fuel est épuisé, le parseur retourne `None`. Coq accepte la définition par
 structurellement.
 
 En pratique, les théorèmes par réflexivité (`Proof. vm_compute; reflexivity. Qed.`) calculent le résultat exact du
-parseur sur une entrée concrète -- Coq exécute le parseur et vérifie que le résultat correspond.
+parseur sur une entrée concrète - Coq exécute le parseur et vérifie que le résultat correspond.
 
 **Monotonie** : le théorème `fuel_mono` (prouvé dans les deux fichiers de parsing) établit que si le parseur réussit
 avec un fuel `f`, il réussit avec le même résultat pour tout `f' >= f`. Cela élimine la dépendance aux constantes de
@@ -631,8 +674,8 @@ Prérequis : Coq installé (`coqc`, `coq_makefile`). Le fichier `proof/_CoqProje
 
 ## Références
 
-- [The Coq Proof Assistant](https://coq.inria.fr/) -- assistant de preuve utilisé
-- [Braun et al. 2013](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf) -- Simple and Efficient Construction
-  of Static Single Assignment Form (utilisé dans le pipeline SSA de Catnip, [ARCHITECTURE](ARCHITECTURE.md))
-- [`grammar.js`](../../catnip_grammar/grammar.js) -- grammaire tree-sitter source de vérité, citée en tête de chaque
+- [The Coq Proof Assistant](https://coq.inria.fr/) - assistant de preuve utilisé
+- [Braun et al. 2013](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf) - Simple and Efficient Construction of
+  Static Single Assignment Form (utilisé dans le pipeline SSA de Catnip, [ARCHITECTURE](ARCHITECTURE.md))
+- [`grammar.js`](../../catnip_grammar/grammar.js) - grammaire tree-sitter source de vérité, citée en tête de chaque
   fichier `.v`

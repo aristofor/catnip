@@ -1,10 +1,11 @@
-# Tail Recursion Examples
+#!/usr/bin/env catnip
+# Exemples de récursion terminale
 # ======================
-# Demonstrates automatic tail-call optimization in Catnip
+# Montre l'optimisation automatique des appels terminaux en Catnip
 
-# Basic tail recursion: factorial
+# Récursion terminale de base : factorielle
 # --------------------------------
-# All recursive calls are in tail position (last operation)
+# Tous les appels récursifs sont en position terminale (dernière opération)
 factorial = (n, acc=1) => {
     if n <= 1 { acc }
     else { factorial(n - 1, n * acc) }
@@ -13,11 +14,10 @@ factorial = (n, acc=1) => {
 print("factorial(5) =", factorial(5))    # 120
 print("factorial(10) =", factorial(10))  # 3628800
 
-# Can handle deep recursion without stack overflow
+# Peut gérer une récursion profonde sans débordement de pile
 print("factorial(100) digits:", len(str(factorial(100))))  # 158 digits
 
-
-# Countdown example
+# Exemple de compte à rebours
 # -----------------
 countdown = (n) => {
     if n == 0 {
@@ -25,47 +25,43 @@ countdown = (n) => {
         "Done"
     } else {
         print(n)
-        countdown(n - 1)  # Tail call
+        countdown(n - 1)  # Appel terminal
     }
 }
 
 countdown(5)
 
-
-# Sum from 1 to N (tail recursive)
+# Somme de 1 à N (récursion terminale)
 # ---------------------------------
 sum_to = (n, acc=0) => {
     if n == 0 { acc }
     else { sum_to(n - 1, acc + n) }
 }
 
-print("\nsum_to(100) =", sum_to(100))    # 5050
-print("sum_to(1000) =", sum_to(1000))    # 500500
+print("\nsum_to(100) =", sum_to(100))  # 5050
+print("sum_to(1000) =", sum_to(1000))  # 500500
 
-
-# Range sum (tail recursive)
+# Somme d'intervalle (récursion terminale)
 # ---------------------------
 range_sum = (start, end, acc=0) => {
     if start > end { acc }
-    else { range_sum(start + 1, end, acc + start) }  # Tail call
+    else { range_sum(start + 1, end, acc + start) }  # Appel terminal
 }
 
 print("\nrange_sum(1, 10) =", range_sum(1, 10, 0))  # 55
 print("range_sum(50, 100) =", range_sum(50, 100, 0))  # 3825
 
-
-# GCD (greatest common divisor) - Euclidean algorithm
+# PGCD (plus grand commun diviseur) - algorithme d'Euclide
 # ----------------------------------------------------
 gcd = (a, b) => {
     if b == 0 { a }
-    else { gcd(b, a % b) }  # Tail call
+    else { gcd(b, a % b) }  # Appel terminal
 }
 
-print("\ngcd(48, 18) =", gcd(48, 18))    # 6
+print("\ngcd(48, 18) =", gcd(48, 18))  # 6
 print("gcd(1071, 462) =", gcd(1071, 462))  # 21
 
-
-# Power function (tail recursive)
+# Fonction puissance (récursion terminale)
 # --------------------------------
 power = (base, exp, acc=1) => {
     if exp == 0 { acc }
@@ -75,10 +71,9 @@ power = (base, exp, acc=1) => {
 print("\npower(2, 10) =", power(2, 10))  # 1024
 print("power(3, 5) =", power(3, 5))      # 243
 
-
-# Comparison: Non-tail vs Tail recursive
+# Comparaison : non terminale vs terminale
 # ---------------------------------------
-# Non-tail: recursive call NOT in final position
+# Non terminale : l'appel récursif n'est PAS en position finale
 
 fib_non_tail = (n) => {
     if n <= 1 { n }
@@ -87,28 +82,27 @@ fib_non_tail = (n) => {
     }
 }
 
-# Tail-recursive version with accumulator
+# Version terminale avec accumulateur
 fib_tail = (n, a=0, b=1) => {
     if n == 0 { a }
-    else { fib_tail(n - 1, b, a + b) }  # Tail call
+    else { fib_tail(n - 1, b, a + b) }  # Appel terminal
 }
 
-print("\n--- Fibonacci Comparison ---")
-print("Non-tail fib(10):", fib_non_tail(10))  # Slow, exponential time
-print("Tail fib(10):", fib_tail(10))          # Fast, linear time
-print("Tail fib(100):", fib_tail(100))        # Works for large N!
+print("\n--- Comparaison Fibonacci ---")
+print("Fib non terminale(10) :", fib_non_tail(10))  # Lente, temps exponentiel
+print("Fib terminale(10) :", fib_tail(10))          # Rapide, temps linéaire
+print("Fib terminale(100) :", fib_tail(100))        # Fonctionne pour de grandes valeurs de N
 
-
-# How it works
+# Comment ça marche
 # ------------
-# Catnip automatically transforms tail-recursive functions into while loops:
+# Catnip transforme automatiquement les fonctions terminales récursives en boucles `while` :
 #
 # factorial = (n, acc=1) => {
 #     if n <= 1 { acc }
 #     else { factorial(n - 1, n * acc) }
 # }
 #
-# Becomes (conceptually):
+# Devient (conceptuellement) :
 #
 # factorial = (n, acc=1) => {
 #     while true {
@@ -120,7 +114,7 @@ print("Tail fib(100):", fib_tail(100))        # Works for large N!
 #     }
 # }
 #
-# Benefits:
-# - O(1) stack space (no stack overflow)
-# - Near-native loop performance
-# - No manual conversion needed
+# Avantages :
+# - Espace pile en O(1) (pas de débordement de pile)
+# - Performances proches d'une boucle native
+# - Aucune conversion manuelle nécessaire

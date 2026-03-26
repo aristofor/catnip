@@ -14,8 +14,11 @@ pub mod cfg;
 pub mod cli;
 pub mod config;
 pub mod constants;
+pub mod context;
 pub mod core;
 pub mod debug;
+pub mod dispatch;
+pub mod freeze;
 pub mod ir;
 pub mod jit;
 pub mod nd;
@@ -24,8 +27,8 @@ pub mod pipeline;
 pub mod policy;
 pub mod pragma;
 pub mod repl;
+pub mod runtime;
 pub mod semantic;
-pub mod standalone;
 pub mod tools;
 pub mod transformer;
 pub mod types;
@@ -37,30 +40,43 @@ pub mod weird_log;
 pub use catnip_tools::get_language as get_tree_sitter_language;
 
 use crate::core::{
-    function, BoundCatnipMethod, CatnipMeta, CatnipMethod, Op, PatternLiteral, PatternOr,
-    PatternStruct, PatternTuple, PatternVar, PatternWildcard, Ref, Registry, RustFunction,
-    RustLambda, Scope, TailCall,
+    BoundCatnipMethod, CatnipMeta, CatnipMethod, Op, PatternLiteral, PatternOr, PatternStruct, PatternTuple,
+    PatternVar, PatternWildcard, Ref, Scope, TailCall,
 };
-use crate::jit::HotLoopDetector;
-use crate::nd::{NDFuture, NDRecur, NDScheduler, NDState};
+#[cfg(feature = "ast-executor")]
+use crate::core::{Function, Lambda, Registry, function};
+use crate::jit::PyHotLoopDetector;
+use crate::nd::{
+    NDDeclaration, NDFuture, NDParallelDecl, NDParallelRecur, NDRecur, NDScheduler, NDState, NDVmDecl, NDVmRecur,
+};
 use crate::parser::{TreeNode, TreeSitterParser};
 use crate::semantic::{
     BlockFlatteningPass, BluntCodePass, CommonSubexpressionEliminationPass, ConstantFoldingPass,
-    ConstantPropagationPass, CopyPropagationPass, DeadCodeEliminationPass,
-    DeadStoreEliminationPass, FunctionInliningPass, OptimizationPassBase, Optimizer, Semantic,
-    StrengthReductionPass, TailRecursionToLoopPass,
+    ConstantPropagationPass, CopyPropagationPass, DeadCodeEliminationPass, DeadStoreEliminationPass,
+    FunctionInliningPass, OptimizationPassBase, Optimizer, Semantic, StrengthReductionPass, TailRecursionToLoopPass,
 };
 use crate::tools::{FormatConfig, Formatter};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
-use vm::py_interop::{
-    append_constants_from_tuple, append_instructions_from_bytecode, convert_args,
-};
+use vm::py_interop::{append_constants_from_tuple, append_instructions_from_bytecode, convert_args};
 use vm::{
-    convert_code_object, CatnipStructProxy, CatnipStructType, CodeObject, Instruction, OpCode,
-    PyCodeObject, PyCompiler, PyVMContext, RustClosureScope, RustVMFunction, SuperProxy,
-    TraitRegistry, Value, VM,
+    CatnipStructProxy, CatnipStructType, ClosureScope, CodeObject, Instruction, OpCode, PyCodeObject, PyCompiler,
+    PyVMContext, SuperProxy, TraitRegistry, VM, VMFunction, Value, convert_code_object,
 };
+
+// VMError -> PyErr conversion at the Python boundary (only used in PyO3 #[pymethods])
+impl From<vm::core::VMError> for PyErr {
+    fn from(err: vm::core::VMError) -> PyErr {
+        match err {
+            vm::core::VMError::NameError(s) => pyo3::exceptions::PyNameError::new_err(s),
+            vm::core::VMError::TypeError(s) => pyo3::exceptions::PyTypeError::new_err(s),
+            vm::core::VMError::ZeroDivisionError(s) => pyo3::exceptions::PyZeroDivisionError::new_err(s),
+            vm::core::VMError::MemoryLimitExceeded(s) => pyo3::exceptions::PyMemoryError::new_err(s),
+            vm::core::VMError::Exit(code) => pyo3::exceptions::PySystemExit::new_err(code),
+            _ => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+        }
+    }
+}
 
 /// Python-exposed VM.
 #[pyclass(name = "VM")]
@@ -164,7 +180,13 @@ impl PyRustVM {
         let detector_stats = self.vm.jit_detector.stats();
         let dict = PyDict::new(py);
         dict.set_item("total_loops_tracked", detector_stats.total_loops_tracked)?;
-        dict.set_item("hot_loops", detector_stats.hot_loops)?;
+        // Include warm-start compiled loops in hot count
+        let executor_compiled = if let Ok(jit) = self.vm.jit.lock() {
+            jit.as_ref().map(|e| e.stats().compiled_traces).unwrap_or(0)
+        } else {
+            0
+        };
+        dict.set_item("hot_loops", detector_stats.hot_loops + executor_compiled)?;
         dict.set_item("tracing_loops", detector_stats.tracing_loops)?;
 
         // Get compiled count from executor if available
@@ -250,19 +272,21 @@ impl PyRustVM {
         // registry (not the parent's), preventing TAG_STRUCT values from leaking
         // across VM boundaries.
         let prev_registry = vm::value::save_struct_registry();
+        let prev_func_table = vm::value::save_func_table();
         vm::value::set_struct_registry(&self.vm.struct_registry as *const _);
+        vm::value::set_func_table(&self.vm.func_table as *const _);
 
         // Convert Python CodeObject to Rust CodeObject
-        let rust_code = convert_code_object(py, code).map_err(|e| {
+        let rust_code = convert_code_object(py, code).inspect_err(|_| {
             vm::value::restore_struct_registry(prev_registry);
-            e
+            vm::value::restore_func_table(prev_func_table);
         })?;
 
         // Convert args
         let rust_args = if let Some(a) = args {
-            convert_args(py, a).map_err(|e| {
+            convert_args(py, a).inspect_err(|_| {
                 vm::value::restore_struct_registry(prev_registry);
-                e
+                vm::value::restore_func_table(prev_func_table);
             })?
         } else {
             Vec::new()
@@ -277,15 +301,14 @@ impl PyRustVM {
             .vm
             .execute_with_closure(py, rust_code, &rust_args, native_closure)
             .map_err(|e| {
-                // Restore before propagating error
                 vm::value::restore_struct_registry(prev_registry);
+                vm::value::restore_func_table(prev_func_table);
                 PyErr::from(e)
             })?;
 
         // Sync globals back to Python context (registry still installed)
         if let Some(ref ctx) = self.context {
             let ctx_bound = ctx.bind(py);
-            // Access context.globals (a dict)
             if let Ok(py_globals) = ctx_bound.getattr("globals") {
                 for (name, value) in self.vm.get_globals() {
                     let py_value = value.to_pyobject(py);
@@ -297,8 +320,9 @@ impl PyRustVM {
         // Convert result back to Python (registry still installed)
         let py_result = result.to_pyobject(py);
 
-        // Now safe to restore previous registry
+        // Now safe to restore previous registries
         vm::value::restore_struct_registry(prev_registry);
+        vm::value::restore_func_table(prev_func_table);
 
         Ok(py_result)
     }
@@ -313,14 +337,10 @@ impl PyRustVM {
     ///
     /// Returns:
     ///     The execution result
-    fn compile_and_run(
-        &mut self,
-        py: Python<'_>,
-        ir_node: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn compile_and_run(&mut self, py: Python<'_>, ir_node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // Compile IR to bytecode
-        let mut compiler = vm::Compiler::new();
-        let code = std::sync::Arc::new(compiler.compile(py, ir_node)?);
+        let mut compiler = vm::unified_compiler::UnifiedCompiler::new();
+        let code = std::sync::Arc::new(compiler.compile_py(py, ir_node)?);
 
         // Execute
         let result = self.vm.execute(py, code, &[]).map_err(PyErr::from)?;
@@ -436,6 +456,18 @@ impl PyRustVM {
     }
 }
 
+/// Extract identifier from a NameError message. Returns None if no match.
+#[pyfunction]
+fn extract_name_from_error(msg: &str) -> Option<String> {
+    catnip_core::constants::extract_name_from_error(msg).map(|s| s.to_string())
+}
+
+/// Return the canonical list of pragma directives from Rust.
+#[pyfunction]
+fn pragma_directives() -> Vec<&'static str> {
+    catnip_core::constants::PRAGMA_DIRECTIVES.to_vec()
+}
+
 /// Python module definition.
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -443,6 +475,7 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVMContext>()?;
     m.add_class::<Scope>()?;
     m.add_class::<Op>()?;
+    #[cfg(feature = "ast-executor")]
     m.add_class::<Registry>()?;
     m.add_class::<PyCompiler>()?;
     m.add_class::<PyCodeObject>()?;
@@ -462,11 +495,13 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CommonSubexpressionEliminationPass>()?;
     m.add_class::<TailRecursionToLoopPass>()?;
     m.add_class::<Semantic>()?;
-    m.add_class::<HotLoopDetector>()?;
-    m.add_class::<RustFunction>()?;
-    m.add_class::<RustLambda>()?;
-    m.add_class::<RustVMFunction>()?;
-    m.add_class::<RustClosureScope>()?;
+    m.add_class::<PyHotLoopDetector>()?;
+    #[cfg(feature = "ast-executor")]
+    m.add_class::<Function>()?;
+    #[cfg(feature = "ast-executor")]
+    m.add_class::<Lambda>()?;
+    m.add_class::<VMFunction>()?;
+    m.add_class::<ClosureScope>()?;
 
     // Pattern classes
     m.add_class::<PatternLiteral>()?;
@@ -493,22 +528,39 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Meta namespace
     m.add_class::<CatnipMeta>()?;
 
+    // Builtin constant namespaces
+    m.add_class::<core::builtins::FrozenNamespace>()?;
+    m.add_function(wrap_pyfunction!(core::builtins::build_nd, m)?)?;
+    m.add_function(wrap_pyfunction!(core::builtins::build_int, m)?)?;
+
     // ND module classes
     m.add_class::<NDState>()?;
     m.add_class::<NDFuture>()?;
     m.add_class::<NDRecur>()?;
     m.add_class::<NDScheduler>()?;
+    m.add_class::<NDDeclaration>()?;
+    m.add_class::<NDVmDecl>()?;
+    m.add_class::<NDVmRecur>()?;
+    m.add_class::<NDParallelDecl>()?;
+    m.add_class::<NDParallelRecur>()?;
 
-    // Register function module functions
+    // Register function module functions (AST executor only)
+    #[cfg(feature = "ast-executor")]
     function::register_module(m)?;
 
     // Register REPL functions
     m.add_function(wrap_pyfunction!(repl::should_continue_multiline, m)?)?;
     m.add_function(wrap_pyfunction!(repl::preprocess_multiline, m)?)?;
     m.add_function(wrap_pyfunction!(repl::parse_repl_command, m)?)?;
+    m.add_function(wrap_pyfunction!(repl::repl_exit_message, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_name_from_error, m)?)?;
+    m.add_function(wrap_pyfunction!(pragma_directives, m)?)?;
 
     // Standalone pipeline
-    m.add_class::<standalone::PyStandalonePipeline>()?;
+    m.add_class::<pipeline::PyPipeline>()?;
+
+    // IR inspection
+    m.add_class::<ir::PyIRNode>()?;
 
     // Register pragma classes
     pragma::register_module(m)?;
@@ -519,8 +571,8 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register JSON serialization
     ir::json::register_module(m)?;
 
-    // Register pipeline functions
-    pipeline::init_module(m)?;
+    // Register dispatch functions (process_input)
+    dispatch::init_module(m)?;
 
     // Register CFG module
     cfg::register_module(m.py(), m)?;
@@ -540,30 +592,12 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tools::PyDebugCommandKind>()?;
     m.add_class::<tools::PyParsedDebugCommand>()?;
     m.add_class::<tools::PySourceMap>()?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::parse_debug_command,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::format_debug_help,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::format_debug_header,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::format_debug_pause,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::format_debug_vars,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        tools::debugger_shims::format_debug_backtrace,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::parse_debug_command, m)?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::format_debug_help, m)?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::format_debug_header, m)?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::format_debug_pause, m)?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::format_debug_vars, m)?)?;
+    m.add_function(wrap_pyfunction!(tools::debugger_shims::format_debug_backtrace, m)?)?;
     m.add_function(wrap_pyfunction!(
         tools::debugger_shims::format_debug_unknown_command,
         m
@@ -577,6 +611,15 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register cache module
     cache::register_module(m)?;
+
+    // Register freeze/thaw module
+    freeze::register_module(m)?;
+
+    // Execution context
+    m.add_class::<context::ContextBase>()?;
+
+    // Runtime introspection
+    m.add_class::<runtime::CatnipRuntime>()?;
 
     // Register debug module
     debug::register_module(m)?;

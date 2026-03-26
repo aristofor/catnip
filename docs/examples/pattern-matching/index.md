@@ -1,4 +1,4 @@
-# Pattern Matching
+# Pattern matching
 
 Matching et destructuration, avec un exemple complet. Quand le `if/elif` fatigue, `match` prend le relais.
 

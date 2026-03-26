@@ -1,32 +1,33 @@
-# Example of using continue in a loop
+#!/usr/bin/env catnip
+# Exemple d'utilisation de `continue` dans une boucle
 
-# Filter even numbers
+# Filtrer les nombres pairs
 print("Odd numbers from 1 to 10:")
 for i in list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) {
     if i % 2 == 0 {
-        continue  # Skip even numbers
+        continue  # Ignorer les nombres pairs
     }
     print(i)
 }
 
-# Calculate sum while ignoring certain values
+# Calculer une somme en ignorant certaines valeurs
 print("Sum of numbers (except multiples of 3):")
 total = 0
 for i in list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) {
     if i % 3 == 0 {
-        continue  # Ignore multiples of 3
+        continue  # Ignorer les multiples de 3
     }
     total = total + i
 }
 print("Total:", total)
 
-# Data validation with continue
+# Validation de données avec `continue`
 print("Age validation:")
 ages = list(25, -5, 30, 150, 42, 0, 18)
 
 valid_ages = list()
 for age in ages {
-    # Ignore invalid values
+    # Ignorer les valeurs invalides
     if age < 0 or age > 120 {
         print("Invalid age ignored:", age)
         continue
@@ -37,14 +38,14 @@ for age in ages {
 
 print("Valid ages:", valid_ages)
 
-# Sum with continue
-# Without loop scoping: we would have an infinite loop due to the scope of the previous i
+# Somme avec `continue`
+# Sans le scope de boucle, on aurait une boucle infinie à cause de la portée du `i` précédent
 print("Sum calculation with continue:")
 total = 0
 i = 1
 
 while i <= 20 {
-    # Ignore multiples of 3
+    # Ignorer les multiples de 3
     if i % 3 == 0 {
         i = i + 1
         continue

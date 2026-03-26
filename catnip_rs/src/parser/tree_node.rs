@@ -28,10 +28,7 @@ pub struct TreeNode {
 impl TreeNode {
     #[getter]
     fn children(&self, py: Python) -> Vec<Py<PyAny>> {
-        self.children
-            .iter()
-            .map(|c| c.clone_ref(py).into_any())
-            .collect()
+        self.children.iter().map(|c| c.clone_ref(py).into_any()).collect()
     }
 
     fn pretty(&self, py: Python) -> String {
@@ -39,10 +36,7 @@ impl TreeNode {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "<TreeNode {} {}..{}>",
-            self.kind, self.start_byte, self.end_byte
-        )
+        format!("<TreeNode {} {}..{}>", self.kind, self.start_byte, self.end_byte)
     }
 }
 

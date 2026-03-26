@@ -1,9 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["catnip_rs", "catnip_tools", "catnip_repl", "catnip_grammar"]
+members = [
+    "catnip_core",
+    "catnip_vm",
+    "catnip_rs",
+    "catnip_tools",
+    "catnip_repl",
+    "catnip_grammar",
+    "catnip_libs/io/rust",
+    "catnip_libs/sys/rust",
+]
 
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 authors = ["Catnip Contributors"]
 license = "MIT"

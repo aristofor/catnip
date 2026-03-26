@@ -3,7 +3,6 @@
 VM-based executor for Catnip code.
 
 Compiles IR to bytecode and executes via the Rust VM.
-Compiles IR to bytecode and executes via the Rust VM.
 """
 
 import logging
@@ -11,7 +10,6 @@ import logging
 from catnip._rs import Compiler
 
 from .rust_bridge import VMExecutor as RustVM
-from .rust_bridge import is_rust_vm_available
 
 
 class VMExecutor:
@@ -29,9 +27,6 @@ class VMExecutor:
         self.logger = logger or context.logger or logging.getLogger(__name__)
 
         self.compiler = Compiler()
-
-        if not is_rust_vm_available():
-            raise RuntimeError("Rust VM not available. Build with: make compile-rust")
         self.vm = RustVM(registry, context)
 
         # Enable JIT if requested via pragma

@@ -4,10 +4,10 @@
 
 Le contenu broadcast est maintenant séparé pour clarifier les usages :
 
-- [BROADCAST_SPEC.md](./BROADCAST_SPEC.md) : syntaxe normative, sémantique, règles ND implicites.
-- [BROADCAST_GUIDE.md](./BROADCAST_GUIDE.md) : exemples progressifs, patterns d'usage, cas concrets.
-- [BROADCAST_RUNTIME.md](./BROADCAST_RUNTIME.md) : détails d'implémentation, fast paths, contraintes runtime.
-- [BROADCAST_RATIONALE.md](./BROADCAST_RATIONALE.md) : motivation, comparaisons, base théorique.
+- [BROADCAST_SPEC](BROADCAST_SPEC.md) : syntaxe normative, sémantique, règles ND implicites.
+- [BROADCAST_GUIDE](BROADCAST_GUIDE.md) : exemples progressifs, patterns d'usage, cas concrets.
+- [BROADCAST_RUNTIME](BROADCAST_RUNTIME.md) : détails d'implémentation, fast paths, contraintes runtime.
+- [BROADCAST_RATIONALE](BROADCAST_RATIONALE.md) : motivation, comparaisons, base théorique.
 
 ## Broadcast Deep
 

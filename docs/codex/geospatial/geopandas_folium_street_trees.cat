@@ -1,0 +1,421 @@
+#!/usr/bin/env catnip
+# Rennes -- rues a replanter via arbres publics + voirie OSM + folium
+# Pipeline:
+#   1) charge un jeu de points arbres local (GeoJSON / GPKG / Shapefile / ZIP)
+#   2) telecharge la voirie OSM de la ville via osmnx
+#   3) associe chaque arbre a la rue la plus proche
+#   4) calcule un score arbres / 100 m par segment de rue
+#   5) exporte une carte folium et un GeoJSON des rues scorees
+#
+# Source dataset conseillee pour Rennes:
+#   https://data.rennesmetropole.fr/explore/dataset/arbre/map/
+#   https://www.data.gouv.fr/datasets/arbres-sur-lespace-public-dans-rennes-metropole/
+#
+# DEPS: branca httpx geopandas osmnx folium orjson pandas tqdm
+# INTERNET: oui, pour recuperer la voirie OSM si elle n'est pas deja en cache osmnx
+
+import('pathlib', 'Path')
+sys       = import('sys')
+httpx     = import('httpx')
+numpy     = import('numpy')
+orjson    = import('orjson')
+pandas    = import('pandas')
+geopandas = import('geopandas')
+osmnx     = import('osmnx')
+folium    = import('folium')
+branca_cm = import('branca.colormap')
+tqdm      = import('tqdm').tqdm
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+script_dir = Path(META.file).parent
+data_dir = script_dir / "cache"
+data_dir.mkdir(exist_ok=True)
+output_dir = script_dir / "output"
+output_dir.mkdir(exist_ok=True)
+
+# osmnx cache dans le meme repertoire que nos donnees (pas le CWD)
+osmnx.settings.cache_folder = str(data_dir)
+
+city_name = "Rennes, Ille-et-Vilaine, Bretagne, France"
+trees_path = data_dir / "rennes_arbres.geojson"
+trees_download_url = "https://data.rennesmetropole.fr/api/explore/v2.1/catalog/datasets/arbre/exports/geojson?lang=fr&timezone=Europe%2FParis"
+streets_cache_path = data_dir / "rennes_osm_streets.geojson"
+osm_network_type = "drive"
+tree_max_distance_m = 15.0
+min_street_length_m = 30.0
+refresh_trees_cache = False
+refresh_streets_cache = False
+
+print("⇒ Configuration")
+print(f"  Ville                : {city_name}")
+print(f"  Arbres               : {trees_path}")
+print(f"  Source arbres        : {trees_download_url}")
+print(f"  Cache voirie OSM     : {streets_cache_path}")
+print(f"  Type de reseau OSM   : {osm_network_type}")
+print(f"  Distance max arbre→rue : {tree_max_distance_m} m")
+print(f"  Refresh arbres       : {refresh_trees_cache}")
+print(f"  Refresh voirie OSM   : {refresh_streets_cache}")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+street_style = (feature) => {
+    props = feature['properties']
+    dict(
+        color=props.get('stroke', "#666666"),
+        weight=props.get('stroke_width', 3),
+        opacity=0.85,
+    )
+}
+
+street_highlight = (feature) => { dict(weight=6, opacity=1.0) }
+
+# Telecharge url vers destination avec :
+# - ecriture atomique (.part + rename) : fichier intact ou absent, jamais corrompu
+# - cache conditionnel (ETag / Last-Modified via sidecar .meta)
+download_file = (url, destination) => {
+    dest = Path(destination)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    meta = dest.with_suffix(dest.suffix + ".meta")
+
+    # conditional GET si cache existant
+    headers = dict()
+    if dest.exists() and meta.exists() {
+        tag = meta.read_text().strip()
+        if tag.startswith('etag:') {
+            headers['If-None-Match'] = tag[5:]
+        } elif tag.startswith('modified:') {
+            headers['If-Modified-Since'] = tag[9:]
+        }
+    }
+
+    # TODO: refactorer avec `with` quand le statement sera implementé dans catnip
+    stream = httpx.stream("GET", url, follow_redirects=True, timeout=120, headers=headers)
+    response = stream.__enter__()
+
+    if response.status_code == 304 {
+        stream.__exit__(None, None, None)
+        print("  Cache valide (304 Not Modified)")
+        str(dest)
+    } else {
+        response.raise_for_status()
+        total = int(response.headers.get('content-length', 0))
+        bar = tqdm(total=total, unit="B", unit_scale=True, desc=dest.name)
+        fh = part.open("wb")
+        for chunk in response.iter_bytes() {
+            fh.write(chunk)
+            bar.update(len(chunk))
+        }
+        fh.close()
+        bar.close()
+
+        # persister le header de cache pour le prochain appel
+        etag = response.headers.get('etag', "")
+        last_mod = response.headers.get('last-modified', "")
+        stream.__exit__(None, None, None)
+
+        if etag {
+            meta.write_text(f"etag:{etag}")
+        } elif last_mod {
+            meta.write_text(f"modified:{last_mod}")
+        }
+
+        # rename atomique
+        part.rename(dest)
+        str(dest)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Telechargement dataset si absent
+# ---------------------------------------------------------------------------
+
+if refresh_trees_cache or not trees_path.exists() {
+    print()
+    print("⇒ Telechargement du dataset arbres")
+    print(f"  Source : {trees_download_url}")
+    download_file(trees_download_url, str(trees_path))
+    print(f"  Sauve sous : {trees_path}")
+}
+
+# ---------------------------------------------------------------------------
+# Chargement arbres
+# ---------------------------------------------------------------------------
+
+print()
+print("⇒ Chargement des arbres")
+
+trees_raw = geopandas.read_file(trees_path)
+if trees_raw.crs is None {
+    print("  CRS absent -> hypothese EPSG:4326")
+    trees_raw = trees_raw.set_crs("EPSG:4326")
+}
+
+trees = trees_raw[trees_raw.geometry.notnull()].copy()
+trees = trees[trees.geometry.is_empty.eq(False)].copy()
+
+print(f"  Arbres chargés : {len(trees)}")
+print(f"  CRS arbres     : {trees.crs}")
+
+if len(trees) == 0 {
+    print("\n✗ Aucun arbre exploitable dans le dataset.")
+    sys.exit(1)
+}
+
+# ---------------------------------------------------------------------------
+# Voirie OSM
+# ---------------------------------------------------------------------------
+
+print()
+print("⇒ Telechargement / chargement de la voirie OSM")
+
+if streets_cache_path.exists() and not refresh_streets_cache {
+    print("  Cache local détecté -> lecture GeoJSON")
+    streets = geopandas.read_file(streets_cache_path)
+} else {
+    print("  Cache absent ou refresh demande -> requete OSM")
+    graph = osmnx.graph_from_place(city_name, network_type=osm_network_type, simplify=True)
+    streets = osmnx.graph_to_gdfs(graph, nodes=False, edges=True).reset_index()
+
+    streets['name'] = streets['name'].fillna("Rue sans nom")
+    streets['highway_label'] = streets['highway'].astype(str)
+
+    highway_mask = streets['highway_label'].str.contains(
+        "residential|living_street|unclassified|service|tertiary|secondary|primary",
+        case=False,
+        regex=True,
+    )
+    streets = streets[highway_mask].copy()
+    streets.to_file(streets_cache_path, driver='GeoJSON')
+    print(f"  Cache ecrit : {streets_cache_path}")
+}
+
+if 'name' not in streets.columns {
+    streets['name'] = "Rue sans nom"
+} else {
+    streets['name'] = streets['name'].fillna("Rue sans nom")
+}
+
+if 'highway_label' not in streets.columns {
+    if 'highway' in streets.columns {
+        streets['highway_label'] = streets['highway'].astype(str)
+    } else {
+        streets['highway_label'] = "unknown"
+    }
+}
+
+print(f"  Segments OSM gardes : {len(streets)}")
+
+if len(streets) == 0 {
+    print("\n✗ Aucun segment de rue après filtrage.")
+    sys.exit(1)
+}
+
+# ---------------------------------------------------------------------------
+# Projection metrique + preparation
+# ---------------------------------------------------------------------------
+
+metric_crs = trees.estimate_utm_crs()
+print(f"\n⇒ Projection metrique : {metric_crs}")
+
+trees_metric = trees.to_crs(metric_crs).copy()
+streets_metric = streets.to_crs(metric_crs).copy().reset_index(drop=True)
+
+streets_metric['street_id'] = streets_metric.index.astype(str)
+streets_metric['length_m'] = streets_metric.geometry.length
+streets_metric = streets_metric[streets_metric['length_m'] >= min_street_length_m].copy()
+
+print(f"  Segments >= {min_street_length_m} m : {len(streets_metric)}")
+
+# ---------------------------------------------------------------------------
+# Jointure spatiale arbre -> rue la plus proche
+# ---------------------------------------------------------------------------
+
+print()
+print("⇒ Association arbres -> rues")
+
+joined = geopandas.sjoin_nearest(
+    trees_metric[list("geometry")],
+    streets_metric[list("street_id", "name", "highway_label", "length_m", "geometry")],
+    how="left",
+    max_distance=tree_max_distance_m,
+    distance_col="tree_to_street_m",
+)
+
+matched = joined[joined['street_id'].notna()].copy()
+unmatched_count = len(joined) - len(matched)
+
+print(f"  Arbres associes   : {len(matched)}")
+print(f"  Arbres non relies : {unmatched_count}")
+
+tree_counts = matched.groupby('street_id').size().reset_index(name='tree_count')
+tree_distances = matched.groupby('street_id')['tree_to_street_m'].mean().reset_index(name='avg_tree_distance_m')
+
+street_scores                        = streets_metric.merge(tree_counts, on="street_id", how="left")
+street_scores                        = street_scores.merge(tree_distances, on="street_id", how="left")
+street_scores['tree_count']          = street_scores['tree_count'].fillna(0).astype(int)
+street_scores['avg_tree_distance_m'] = street_scores['avg_tree_distance_m'].fillna(-1.0)
+street_scores['trees_per_100m']      = street_scores['tree_count'] * 100.0 / street_scores['length_m'].clip(lower=1.0)
+
+classify_score = (score) => {
+    match True {
+        _ if score == 0  => { "a_replanter" }
+        _ if score < 0.5 => { "faiblement_plantee" }
+        _ if score < 1.5 => { "correcte" }
+        _                => { "bien_plantee" }
+    }
+}
+
+score_values = street_scores['trees_per_100m'].tolist()
+street_scores['category'] = score_values.[(v) => { classify_score(v) }]
+
+print()
+print("⇒ Statistiques")
+print(f"  Rues scorees        : {len(street_scores)}")
+print(f"  Score moyen / 100 m : {round(float(street_scores['trees_per_100m'].mean()), 3)}")
+print(f"  Score max / 100 m   : {round(float(street_scores['trees_per_100m'].max()), 3)}")
+
+# ---------------------------------------------------------------------------
+# Style carto
+# ---------------------------------------------------------------------------
+
+max_score = float(street_scores['trees_per_100m'].quantile(0.95))
+if max_score <= 0 {
+    max_score = 1.0
+}
+
+colormap = branca_cm.LinearColormap(
+    list("#b2182b", "#ef8a62", "#fddbc7", "#d1e5f0", "#67a9cf", "#2166ac"),
+    vmin=0.0,
+    vmax=max_score,
+)
+colormap.caption = "Arbres publics associes / 100 m de rue"
+
+stroke_color = score_values.[(value) => { colormap(min(float(value), max_score)) }]
+stroke_width = score_values.[(value) => {
+        match True {
+            _ if value == 0  => { 3 }
+            _ if value < 0.5 => { 4 }
+            _ if value < 1.5 => { 5 }
+            _                => { 6 }
+        }
+    }]
+
+street_scores['stroke'] = stroke_color
+street_scores['stroke_width'] = stroke_width
+
+# ---------------------------------------------------------------------------
+# Export GeoJSON + folium
+# ---------------------------------------------------------------------------
+
+# colonnes utiles uniquement
+street_scores = street_scores[list("street_id", "name", "highway_label", "length_m",
+        "tree_count", "avg_tree_distance_m", "trees_per_100m", "category",
+        "stroke", "stroke_width", "geometry")].copy()
+
+# aplatir les ndarrays OSM (name, highway...) en types Python natifs
+# certaines colonnes OSM contiennent des numpy.ndarray quand un segment a plusieurs valeurs
+ndarray_fix = (x) => { if isinstance(x, numpy.ndarray) { " / ".join(x.tolist()) } else { x } }
+for col in street_scores.select_dtypes(include=list('object')).columns {
+    if col != "geometry" {
+        street_scores[col] = street_scores[col].apply(ndarray_fix)
+    }
+}
+
+print()
+print("⇒ Export")
+
+street_scores_wgs84 = street_scores.to_crs("EPSG:4326").copy()
+
+geojson_path = output_dir / "rennes_street_tree_score.geojson"
+html_path = output_dir / "rennes_street_tree_score.html"
+
+# orjson gère ndarray / numpy scalars nativement (OPT_SERIALIZE_NUMPY)
+export_columns = list('name', 'highway_label', 'length_m', 'tree_count',
+    'trees_per_100m', 'avg_tree_distance_m', 'category', 'stroke', 'stroke_width', 'geometry')
+json_fallback = (x) => { if isinstance(x, numpy.ndarray) { x.tolist() } else { str(x) } }
+geojson_bytes = orjson.dumps(street_scores_wgs84[export_columns].__geo_interface__,
+    json_fallback, orjson.OPT_SERIALIZE_NUMPY)
+Path(geojson_path).write_bytes(geojson_bytes)
+# reutilise pour folium (evite re-serialisation json.dumps qui crashe sur ndarray)
+geojson_str = geojson_bytes.decode('utf-8')
+print(f"  GeoJSON : {geojson_path}")
+
+bounds = street_scores_wgs84.total_bounds
+center_lat = (bounds[1] + bounds[3]) / 2
+center_lon = (bounds[0] + bounds[2]) / 2
+
+m = folium.Map(
+    location=list(center_lat, center_lon),
+    zoom_start=13,
+    tiles="CartoDB positron",
+    control_scale=True,
+)
+
+street_layer = folium.GeoJson(
+    geojson_str,
+    name="Rues scorees",
+    style_function=street_style,
+    highlight_function=street_highlight,
+    tooltip=folium.GeoJsonTooltip(
+        fields=list("name", "highway_label", "length_m", "tree_count", "trees_per_100m", "category"),
+        aliases=list("Rue", "Type OSM", "Longueur (m)", "Arbres associes", "Arbres / 100 m", "Categorie"),
+        localize=True,
+        sticky=False,
+    ),
+)
+street_layer.add_to(m)
+
+colormap.add_to(m)
+folium.LayerControl(collapsed=False).add_to(m)
+m.fit_bounds(list(list(bounds[1], bounds[0]), list(bounds[3], bounds[2])))
+
+m.save(str(html_path))
+print(f"  HTML    : {html_path}")
+
+# ---------------------------------------------------------------------------
+# Top 10 rues les moins vegetalisées
+# ---------------------------------------------------------------------------
+
+print()
+print("⇒ Top 10 rues a regarder")
+
+# agreger par nom de rue (un meme nom couvre plusieurs segments OSM)
+by_street = street_scores.groupby('name').agg(
+    length_m=pandas.NamedAgg(column='length_m', aggfunc='sum'),
+    tree_count=pandas.NamedAgg(column='tree_count', aggfunc='sum'),
+).reset_index()
+by_street['trees_per_100m'] = by_street['tree_count'] * 100.0 / by_street['length_m'].clip(lower=1.0)
+by_street['category'] = by_street['trees_per_100m'].tolist().[(v) => { classify_score(v) }]
+
+top_low = by_street[by_street['length_m'] >= 80].sort_values(
+    by=list("trees_per_100m", "length_m"),
+    ascending=list(True, False),
+).head(10)
+
+for row in top_low.itertuples() {
+    print(
+        f"  {row.name} | {round(float(row.length_m), 1)} m | {row.tree_count} arbres | {round(float(row.trees_per_100m), 3)} / 100 m | {row.category}")
+}
+
+# ---------------------------------------------------------------------------
+# Ouverture navigateur via serveur HTTP one-shot
+# ---------------------------------------------------------------------------
+
+http_server = import('http.server')
+functools   = import('functools')
+webbrowser  = import('webbrowser')
+
+handler = functools.partial(http_server.SimpleHTTPRequestHandler, directory=str(output_dir))
+server = http_server.HTTPServer(tuple("127.0.0.1", 0), handler)
+port = server.server_address[1]
+url = f"http://127.0.0.1:{port}/{html_path.name}"
+webbrowser.open(url)
+print(f"\n⇒ Dashboard : {url}")
+server.handle_request()
+server.server_close()

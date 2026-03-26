@@ -281,7 +281,6 @@ def analyze_optimizations(code, name):
     print(f'Edges: {before_edges} → {after_edges} ({before_edges - after_edges} removed)')
     print(f'Dead: {dead}, Merged: {merged}, Empty: {empty}, Branches: {branches}')
     print()
-
 # Analyser différents patterns
 analyze_optimizations('x = 1; y = 2; z = 3', 'linear')
 analyze_optimizations('while x < 10 { x = x + 1 }', 'loop')

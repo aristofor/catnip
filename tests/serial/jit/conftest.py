@@ -54,8 +54,8 @@ def catnip_with_jit():
 
         def eval(self, code_str):
             """Compile and execute code with JIT."""
-            ast = self.catnip.parse(code_str)
-            bytecode = self.compiler.compile(ast)
+            self.catnip.parse(code_str)
+            bytecode = self.compiler.compile(self.catnip.code)
             return self.vm.execute(bytecode, (), {}, None)
 
     return CatnipJIT()
@@ -64,6 +64,15 @@ def catnip_with_jit():
 def compile_code(code_str):
     """Helper to compile Catnip code to bytecode."""
     c = Catnip(vm_mode='on')
-    ast = c.parse(code_str)
+    c.parse(code_str)
     compiler = Compiler()
-    return compiler.compile(ast)
+    return compiler.compile(c.code)
+
+
+def jit_eval(code_str):
+    """Execute code through the full pipeline with JIT enabled."""
+    c = Catnip(vm_mode='on')
+    c.pragma_context.jit_enabled = True
+    c.pragma_context.jit_all = True
+    c.parse(code_str)
+    return c.execute()

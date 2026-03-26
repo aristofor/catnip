@@ -1,0 +1,12 @@
+#!/usr/bin/env catnip
+# Selective import - pick specific names from a module
+
+# Import specific names into globals
+import('math', 'sqrt', 'pi')
+print(sqrt(144))  # → 12.0
+print(pi)         # → 3.141592653589793
+
+# With aliases (name:alias syntax, same as CLI -m)
+import('math', 'factorial:fact', 'ceil')
+print(fact(10))   # → 3628800
+print(ceil(2.3))  # → 3

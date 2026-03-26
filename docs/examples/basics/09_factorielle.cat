@@ -1,0 +1,13 @@
+#!/usr/bin/env catnip
+# Calcul de factorielle
+
+factorielle = (n) => {
+    match n {
+        0 | 1 => { 1 }
+        n => {
+            fold(range(2, n + 1), 1, (acc, i) => { acc * i })
+        }
+    }
+}
+
+print("10! =", factorielle(10))  # → 10! = 3628800

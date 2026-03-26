@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Example combining break and continue
 
 # Search with filtering

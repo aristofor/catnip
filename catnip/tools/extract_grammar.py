@@ -27,13 +27,13 @@ class GrammarExtractor:
         if grammar_path is None:
             # Use Rust-generated grammar (single source of truth)
             project_root = Path(__file__).parent.parent.parent
-            grammar_path = project_root / "catnip_grammar" / "src" / "grammar.json"
+            grammar_path = project_root / 'catnip_grammar' / 'src' / 'grammar.json'
 
         self.grammar_path = grammar_path
         self.grammar_json = json.loads(grammar_path.read_text())
 
         # Load node-types.json for additional metadata
-        self.node_types_path = grammar_path.parent / "node-types.json"
+        self.node_types_path = grammar_path.parent / 'node-types.json'
         if self.node_types_path.exists():
             self.node_types = json.loads(self.node_types_path.read_text())
         else:
@@ -46,20 +46,89 @@ class GrammarExtractor:
             Dictionary containing keywords, operators, terminals, rules, etc.
         """
         return {
-            "keywords": self.extract_keywords(),
-            "operators": self.extract_operators(),
-            "terminals": self.extract_terminals(),
-            "rules": self.extract_rules(),
-            "metadata": {
-                "source": str(self.grammar_path),
-                "parser": "tree-sitter",
+            'keywords': self.extract_keywords(),
+            'operators': self.extract_operators(),
+            'terminals': self.extract_terminals(),
+            'rules': self.extract_rules(),
+            'metadata': {
+                'source': str(self.grammar_path),
+                'parser': 'tree-sitter',
             },
         }
 
     # Classification sets: stable categories, rarely change
-    _CONSTANTS = frozenset({"True", "False", "None"})
-    _TYPES = frozenset({"list", "tuple", "dict", "set"})
-    _PRAGMAS = frozenset({"pragma"})
+    _CONSTANTS = frozenset({'True', 'False', 'None'})
+    _TYPES = frozenset({'list', 'tuple', 'dict', 'set'})
+    _PRAGMAS = frozenset({'pragma'})
+    # Grammar keywords that are actually builtin functions (broadcast unary ops)
+    _BUILTIN_OPS = frozenset({'abs'})
+
+    # Type constructors not in the grammar (grammar types are in _TYPES above).
+    # Highlighted as types alongside dict/list/set/tuple.
+    BUILTIN_TYPE_CONSTRUCTORS = (
+        'bool',
+        'bytes',
+        'complex',
+        'Decimal',
+        'float',
+        'frozenset',
+        'int',
+        'str',
+    )
+
+    # Canonical list of builtin functions exposed in Catnip context.
+    # Source of truth for all editor syntax generators (Pygments, tmLanguage, CodeMirror).
+    # Excludes type constructors (in BUILTIN_TYPE_CONSTRUCTORS) and grammar types (in _TYPES).
+    # Synced with catnip/context.py Context.__init__() globals.
+    # Excludes type constructors (BUILTIN_TYPE_CONSTRUCTORS), internal wrappers
+    # (_cache, import, jit, pure, debug, cached) and namespaces (META, ND, INT).
+    BUILTIN_FUNCTIONS = (
+        'abs',
+        'all',
+        'any',
+        'ascii',
+        'bin',
+        'callable',
+        'chr',
+        'delattr',
+        'dir',
+        'divmod',
+        'enumerate',
+        'filter',
+        'fold',
+        'format',
+        'freeze',
+        'getattr',
+        'hash',
+        'hasattr',
+        'hex',
+        'id',
+        'input',
+        'isinstance',
+        'issubclass',
+        'iter',
+        'len',
+        'map',
+        'max',
+        'min',
+        'next',
+        'oct',
+        'ord',
+        'pow',
+        'print',
+        'range',
+        'reduce',
+        'repr',
+        'reversed',
+        'round',
+        'setattr',
+        'slice',
+        'sorted',
+        'sum',
+        'thaw',
+        'vars',
+        'zip',
+    )
 
     def extract_keywords(self) -> Dict[str, List[str]]:
         """Extracts grammar keywords, classified by category.
@@ -76,21 +145,24 @@ class GrammarExtractor:
         constants = all_kw & self._CONSTANTS
         types = all_kw & self._TYPES
         pragmas = all_kw & self._PRAGMAS
-        control_flow = all_kw - constants - types - pragmas
+        builtin_ops = all_kw & self._BUILTIN_OPS
+        control_flow = all_kw - constants - types - pragmas - builtin_ops
 
         return {
-            "control_flow": sorted(control_flow),
-            "constants": sorted(constants),
-            "types": sorted(types),
-            "pragmas": sorted(pragmas),
-            "all": sorted(all_kw),
+            'control_flow': sorted(control_flow),
+            'constants': sorted(constants),
+            'types': sorted(types),
+            'builtin_types': sorted(self.BUILTIN_TYPE_CONSTRUCTORS),
+            'pragmas': sorted(pragmas),
+            'builtins': sorted(self.BUILTIN_FUNCTIONS),
+            'all': sorted(all_kw),
         }
 
     def _extract_keyword_strings(self, obj: Any, keywords: Set[str]) -> None:
         """Recursively extract alphabetic keyword strings from grammar JSON."""
         if isinstance(obj, dict):
-            if obj.get("type") == "STRING":
-                value = obj.get("value", "")
+            if obj.get('type') == 'STRING':
+                value = obj.get('value', '')
                 if value.isalpha() and len(value) > 1:
                     keywords.add(value)
             else:
@@ -121,12 +193,12 @@ class GrammarExtractor:
         all_ops = arithmetic | comparison | bitwise | special | found_operators
 
         return {
-            "arithmetic": sorted(arithmetic, key=lambda x: (len(x), x), reverse=True),
-            "comparison": sorted(comparison, key=lambda x: (len(x), x), reverse=True),
-            "bitwise": sorted(bitwise, key=lambda x: (len(x), x), reverse=True),
-            "logical": sorted(logical),
-            "special": sorted(special, key=lambda x: (len(x), x), reverse=True),
-            "all": sorted(all_ops, key=lambda x: (len(x), x), reverse=True),
+            'arithmetic': sorted(arithmetic, key=lambda x: (len(x), x), reverse=True),
+            'comparison': sorted(comparison, key=lambda x: (len(x), x), reverse=True),
+            'bitwise': sorted(bitwise, key=lambda x: (len(x), x), reverse=True),
+            'logical': sorted(logical),
+            'special': sorted(special, key=lambda x: (len(x), x), reverse=True),
+            'all': sorted(all_ops, key=lambda x: (len(x), x), reverse=True),
         }
 
     def _extract_operator_strings(self, obj: Any, operators: Set[str]) -> None:
@@ -151,11 +223,11 @@ class GrammarExtractor:
             "#",  # string/comment delimiters
         }
         if isinstance(obj, dict):
-            if obj.get("type") == "STRING":
-                value = obj.get("value", "")
+            if obj.get('type') == 'STRING':
+                value = obj.get('value', '')
                 # Check if it's an operator (non-alphabetic, not delimiter)
                 if value and not value.isalpha() and value not in excluded:
-                    if len(value) <= 3 and not any(c in value for c in ["\\", "?"]):
+                    if len(value) <= 3 and "\\" not in value:
                         operators.add(value)
             else:
                 for v in obj.values():
@@ -244,7 +316,7 @@ class GrammarExtractor:
             "Run `python -m catnip.tools.extract_grammar --update-lexer` to regenerate.",
             '"""',
             "",
-            "from pygments.lexer import RegexLexer, bygroups, words",
+            "from pygments.lexer import RegexLexer, words",
             "from pygments.token import (",
             "    Comment,",
             "    Keyword,",
@@ -253,7 +325,6 @@ class GrammarExtractor:
             "    Operator,",
             "    Punctuation,",
             "    String,",
-            "    Text,",
             "    Whitespace,",
             ")",
             "",
@@ -308,8 +379,9 @@ class GrammarExtractor:
         constants_str = "(" + ", ".join(repr(c) for c in keywords["constants"]) + ")"
         lines.append(f"            (words({constants_str}, suffix=r'\\b'), Keyword.Constant),")
 
-        # Types
-        types_str = "(" + ", ".join(repr(t) for t in keywords["types"]) + ")"
+        # Types (grammar types + builtin type constructors)
+        all_types = sorted(set(keywords["types"] + keywords["builtin_types"]))
+        types_str = "(" + ", ".join(repr(t) for t in all_types) + ")"
         lines.append("            # Built-in types")
         lines.append(f"            (words({types_str}, suffix=r'\\b'), Keyword.Type),")
 
@@ -349,6 +421,11 @@ class GrammarExtractor:
         if ops_filtered:
             ops_pattern = "|".join(re.escape(op) for op in ops_filtered)
             lines.append(f"            (r'({ops_pattern})', Operator),")
+
+        # Builtins
+        builtins_str = "(" + ", ".join(repr(b) for b in sorted(self.BUILTIN_FUNCTIONS)) + ")"
+        lines.append("            # Builtin functions")
+        lines.append(f"            (words({builtins_str}, suffix=r'\\b'), Name.Builtin),")
 
         # Identifiers
         all_kw_pattern = "|".join(keywords["all"])
@@ -427,11 +504,15 @@ class GrammarExtractor:
             ]
         )
 
-        # All operators in broadcast (except .[)
-        broadcast_ops_filtered = [op for op in operators["all"] if op not in [".["]]
+        # All operators in broadcast (except .[ and =>, handled above)
+        broadcast_ops_filtered = [op for op in operators["all"] if op not in [".[", "=>"]]
         if broadcast_ops_filtered:
             broadcast_pattern = "|".join(re.escape(op) for op in broadcast_ops_filtered)
             lines.append(f"            (r'({broadcast_pattern})', Operator),")
+
+        # Builtins in broadcast
+        lines.append("            # Builtin functions")
+        lines.append(f"            (words({builtins_str}, suffix=r'\\b'), Name.Builtin),")
 
         lines.extend(
             [
@@ -470,57 +551,134 @@ class GrammarExtractor:
         keywords = self.extract_keywords()
         operators = self.extract_operators()
 
-        # Build keyword pattern
         control_kw = "|".join(re.escape(k) for k in keywords["control_flow"])
         constants = "|".join(re.escape(c) for c in keywords["constants"])
-        types = "|".join(re.escape(t) for t in keywords["types"])
-        builtins = "abs|len|range|print|sum|map|filter|zip"
+        all_types = sorted(set(keywords["types"] + keywords["builtin_types"]))
+        types = "|".join(re.escape(t) for t in all_types)
+        builtins = "|".join(re.escape(f) for f in keywords["builtins"])
 
-        # Build operator pattern (sorted by length, longest first)
         ops_sorted = sorted(operators["all"], key=len, reverse=True)
-        ops_pattern = "|".join(re.escape(op) for op in ops_sorted if op not in [".[", "=>"])
+        ops_pattern = "|".join(re.escape(op) for op in ops_sorted if op not in [".[", "=>", "=", "??"])
+
+        escape_pattern = [{"name": "constant.character.escape.catnip", "match": r"\\."}]
+
+        def fstring_patterns():
+            return escape_pattern + [
+                {
+                    "name": "meta.interpolation.catnip",
+                    "begin": r"\{",
+                    "end": r"\}",
+                    "beginCaptures": {"0": {"name": "punctuation.section.interpolation.begin.catnip"}},
+                    "endCaptures": {"0": {"name": "punctuation.section.interpolation.end.catnip"}},
+                    "patterns": [{"include": "source.catnip"}],
+                }
+            ]
+
+        patterns = [
+            # Comments
+            {"name": "comment.line.number-sign.catnip", "match": r"#.*$"},
+            # Pragma
+            {"name": "keyword.control.pragma.catnip", "match": r"\bpragma\s*\("},
+            # Decorators
+            {
+                "name": "meta.decorator.catnip",
+                "match": r"(@)([a-zA-Z_]\w*)",
+                "captures": {
+                    "1": {"name": "punctuation.definition.decorator.catnip"},
+                    "2": {"name": "entity.name.function.decorator.catnip"},
+                },
+            },
+            # Triple-quoted f-strings
+            {
+                "name": "string.quoted.triple.fstring.catnip",
+                "begin": r'[fF]"""',
+                "end": r'"""',
+                "patterns": fstring_patterns(),
+            },
+            {
+                "name": "string.quoted.triple.fstring.catnip",
+                "begin": r"[fF]'''",
+                "end": r"'''",
+                "patterns": fstring_patterns(),
+            },
+            # Single f-strings
+            {
+                "name": "string.quoted.double.fstring.catnip",
+                "begin": r'[fF]"',
+                "end": r'"',
+                "patterns": fstring_patterns(),
+            },
+            {
+                "name": "string.quoted.single.fstring.catnip",
+                "begin": r"[fF]'",
+                "end": r"'",
+                "patterns": fstring_patterns(),
+            },
+            # Triple-quoted b-strings
+            {
+                "name": "string.quoted.triple.bytes.catnip",
+                "begin": r'[bB]"""',
+                "end": r'"""',
+                "patterns": escape_pattern,
+            },
+            {
+                "name": "string.quoted.triple.bytes.catnip",
+                "begin": r"[bB]'''",
+                "end": r"'''",
+                "patterns": escape_pattern,
+            },
+            # Single b-strings
+            {"name": "string.quoted.double.bytes.catnip", "begin": r'[bB]"', "end": r'"', "patterns": escape_pattern},
+            {"name": "string.quoted.single.bytes.catnip", "begin": r"[bB]'", "end": r"'", "patterns": escape_pattern},
+            # Triple-quoted regular strings (must come after prefixed variants)
+            {"name": "string.quoted.triple.double.catnip", "begin": r'"""', "end": r'"""', "patterns": escape_pattern},
+            {"name": "string.quoted.triple.single.catnip", "begin": r"'''", "end": r"'''", "patterns": escape_pattern},
+            # Regular strings
+            {"name": "string.quoted.double.catnip", "begin": r'"', "end": r'"', "patterns": escape_pattern},
+            {"name": "string.quoted.single.catnip", "begin": r"'", "end": r"'", "patterns": escape_pattern},
+            # Numbers: hex, binary, octal must come before generic patterns
+            {"name": "constant.numeric.hex.catnip", "match": r"\b0[xX][0-9a-fA-F_]+\b"},
+            {"name": "constant.numeric.binary.catnip", "match": r"\b0[bB][01_]+\b"},
+            {"name": "constant.numeric.octal.catnip", "match": r"\b0[oO][0-7_]+\b"},
+            # Imaginary and decimal suffixes before float/int
+            {"name": "constant.numeric.imaginary.catnip", "match": r"\b[0-9][0-9_]*(\.[0-9_]+)?[jJ]\b"},
+            {"name": "constant.numeric.decimal-exact.catnip", "match": r"\b[0-9][0-9_]*(\.[0-9_]+)?[dD]\b"},
+            {"name": "constant.numeric.float.catnip", "match": r"\b[0-9][0-9_]*\.[0-9_]*([eE][+-]?[0-9_]+)?\b"},
+            {"name": "constant.numeric.integer.catnip", "match": r"\b[0-9][0-9_]*([eE][+-]?[0-9_]+)?\b"},
+            # Lambda params: (params) =>
+            {
+                "name": "meta.function.lambda.catnip",
+                "match": r"\(([^)]*)\)\s*=>",
+                "captures": {
+                    "1": {"patterns": [{"name": "variable.parameter.catnip", "match": r"\b[a-zA-Z_][a-zA-Z0-9_]*\b"}]},
+                },
+            },
+            # Keywords
+            {"name": "keyword.control.catnip", "match": rf"\b({control_kw})\b"},
+            # Operator keywords
+            {"name": "keyword.operator.logical.catnip", "match": r"\b(and|or|not)\b"},
+            # Constants
+            {"name": "constant.language.catnip", "match": rf"\b({constants})\b"},
+            # Builtin functions
+            {"name": "support.function.builtin.catnip", "match": rf"\b({builtins})\b"},
+            # Builtin types
+            {"name": "support.type.builtin.catnip", "match": rf"\b({types})\b"},
+            # Operators
+            {"name": "keyword.operator.arrow.catnip", "match": r"=>"},
+            {"name": "keyword.operator.nullcoalesce.catnip", "match": r"\?\?"},
+            {"name": "keyword.operator.broadcast.catnip", "match": r"\.\["},
+            {"name": "keyword.operator.assignment.catnip", "match": r"="},
+            {"name": "keyword.operator.catnip", "match": rf"({ops_pattern})"},
+            # Punctuation
+            {"name": "punctuation.bracket.catnip", "match": r"[{}()\[\],.;:]"},
+        ]
 
         grammar = {
+            "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
             "name": "Catnip",
             "scopeName": "source.catnip",
             "fileTypes": ["cat", "catnip"],
-            "patterns": [
-                {"name": "keyword.control.pragma.catnip", "match": r"\bpragma\s*\("},
-                {"name": "comment.line.catnip", "match": r"#.*$"},
-                {"name": "keyword.control.catnip", "match": rf"\b({control_kw})\b"},
-                {"name": "constant.language.catnip", "match": rf"\b({constants})\b"},
-                {"name": "support.function.builtin.catnip", "match": rf"\b({builtins})\b"},
-                {"name": "keyword.type.catnip", "match": rf"\b({types})\b"},
-                {
-                    "name": "string.quoted.double.catnip",
-                    "begin": '"',
-                    "end": '"',
-                    "patterns": [{"name": "constant.character.escape.catnip", "match": r"\\."}],
-                },
-                {
-                    "name": "string.quoted.single.catnip",
-                    "begin": "'",
-                    "end": "'",
-                    "patterns": [{"name": "constant.character.escape.catnip", "match": r"\\."}],
-                },
-                {"name": "constant.numeric.hex.catnip", "match": r"\b0[xX][0-9a-fA-F_]+\b"},
-                {"name": "constant.numeric.binary.catnip", "match": r"\b0[bB][01_]+\b"},
-                {"name": "constant.numeric.octal.catnip", "match": r"\b0[oO][0-7_]+\b"},
-                {"name": "constant.numeric.float.catnip", "match": r"\b[0-9][0-9_]*\.[0-9_]*([eE][+-]?[0-9_]+)?\b"},
-                {"name": "constant.numeric.integer.catnip", "match": r"\b[0-9][0-9_]*([eE][+-]?[0-9_]+)?\b"},
-                {
-                    "name": "meta.function.lambda.catnip",
-                    "match": r"\(([^)]*)\)\s*=>",
-                    "captures": {
-                        "1": {
-                            "patterns": [{"name": "variable.parameter.catnip", "match": r"\b[a-zA-Z_][a-zA-Z0-9_]*\b"}]
-                        }
-                    },
-                },
-                {"name": "keyword.operator.broadcast.catnip", "match": r"\.\["},
-                {"name": "keyword.operator.arrow.catnip", "match": r"=>"},
-                {"name": "keyword.operator.catnip", "match": rf"({ops_pattern})"},
-            ],
+            "patterns": patterns,
         }
 
         json_str = json.dumps(grammar, indent=2, ensure_ascii=False)
@@ -528,7 +686,7 @@ class GrammarExtractor:
         if output_path:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json_str)
+            output_path.write_text(json_str + "\n")
 
         return json_str
 
@@ -587,14 +745,9 @@ def extract_grammar(
     "--textmate",
     "textmate_path",
     type=click.Path(path_type=Path),
-    help="Output path for TextMate grammar (VS Code)",
+    help="Output path for TextMate grammar",
 )
-@click.option(
-    "--update-vscode",
-    is_flag=True,
-    help="Update VS Code grammar in dev/vscode/syntaxes/catnip.tmLanguage.json",
-)
-def main(json_path, update_lexer, lexer_path, print_category, textmate_path, update_vscode):
+def main(json_path, update_lexer, lexer_path, print_category, textmate_path):
     """Extract elements from Catnip grammar."""
     extractor = GrammarExtractor()
 
@@ -620,17 +773,14 @@ def main(json_path, update_lexer, lexer_path, print_category, textmate_path, upd
         extractor.generate_pygments_lexer(lexer_path)
         click.echo(f"Pygments lexer generated: {lexer_path}")
 
-    # TextMate grammar generation (VS Code)
-    if update_vscode:
-        vscode_output = Path(__file__).parent.parent.parent / "dev" / "vscode" / "syntaxes" / "catnip.tmLanguage.json"
-        extractor.generate_textmate_grammar(vscode_output)
-        click.echo(f"VS Code grammar updated: {vscode_output}")
-    elif textmate_path:
+    # TextMate grammar (custom path)
+    if textmate_path:
         extractor.generate_textmate_grammar(textmate_path)
         click.echo(f"TextMate grammar generated: {textmate_path}")
 
     # Default display if no options
-    if not any([json_path, update_lexer, lexer_path, print_category, textmate_path, update_vscode]):
+    all_flags = [json_path, update_lexer, lexer_path, print_category, textmate_path]
+    if not any(all_flags):
         click.echo("Catnip Grammar Extraction")
         click.echo("=" * 80)
         click.echo()
@@ -640,6 +790,7 @@ def main(json_path, update_lexer, lexer_path, print_category, textmate_path, upd
         click.echo(f"  Control flow: {', '.join(keywords['control_flow'])}")
         click.echo(f"  Constants: {', '.join(keywords['constants'])}")
         click.echo(f"  Types: {', '.join(keywords['types'])}")
+        click.echo(f"  Builtins: {len(keywords['builtins'])} functions")
         click.echo()
 
         operators = extractor.extract_operators()

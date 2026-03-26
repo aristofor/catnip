@@ -125,21 +125,21 @@ class TestDecimalNegationTruthiness(unittest.TestCase):
 
     def test_zero_falsy(self):
         c = run("x = if 0d { 1 } else { 0 }")
-        assert c.context.globals["x"] == 0
+        assert c.context.globals['x'] == 0
 
     def test_nonzero_truthy(self):
         c = run("x = if 1d { 1 } else { 0 }")
-        assert c.context.globals["x"] == 1
+        assert c.context.globals['x'] == 1
 
 
 class TestDecimalBuiltin(unittest.TestCase):
 
     def test_builtin_string(self):
-        result = val('Decimal("3.14")')
+        result = val('import("decimal", "Decimal"); Decimal("3.14")')
         assert result == Decimal("3.14")
 
     def test_builtin_int(self):
-        result = val("Decimal(42)")
+        result = val('import("decimal", "Decimal"); Decimal(42)')
         assert result == Decimal("42")
 
 

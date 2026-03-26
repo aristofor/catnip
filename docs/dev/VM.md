@@ -54,21 +54,46 @@ La VM utilise le **NaN-boxing** pour représenter toutes les valeurs sur 64 bits
 **Principe** : les floats IEEE-754 ont des patterns NaN inutilisés qu'on peut exploiter
 
 ```
-[Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:3][Payload:48]
+[Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:4][Payload:47]
 ```
 
-| Tag   | Type     | Payload                         |
-| ----- | -------- | ------------------------------- |
-| `000` | SmallInt | 48-bit signed integer           |
-| `001` | Bool     | 0 = false, 1 = true             |
-| `010` | Nil      | (unused)                        |
-| `011` | Symbol   | symbol id                       |
-| `100` | PyObject | pointeur `Py<PyAny>` (48-bit)   |
-| `101` | Struct   | index dans le StructRegistry    |
-| `110` | BigInt   | pointeur `Arc<BigInt>` (48-bit) |
+| Tag    | Type        | Payload                         |
+| ------ | ----------- | ------------------------------- |
+| `0000` | SmallInt    | 47-bit signed integer           |
+| `0001` | Bool        | 0 = false, 1 = true             |
+| `0010` | Nil         | (unused)                        |
+| `0011` | Symbol      | symbol id                       |
+| `0100` | PyObject    | handle ObjectTable (u32)        |
+| `0101` | Struct      | index dans le StructRegistry    |
+| `0110` | BigInt      | pointeur `Arc<GmpInt>` (47-bit) |
+| `0111` | VMFunc      | index dans la FunctionTable     |
+| `1000` | NativeStr   | pointeur `Arc<NativeString>`    |
+| `1001` | NativeList  | pointeur `Arc<NativeList>`      |
+| `1010` | NativeDict  | pointeur `Arc<NativeDict>`      |
+| `1011` | NativeTuple | pointeur `Arc<NativeTuple>`     |
+| `1100` | NativeSet   | pointeur `Arc<NativeSet>`       |
+| `1101` | NativeBytes | pointeur `Arc<NativeBytes>`     |
+| `1110` | StructType  | type_id dans PureStructRegistry |
+
+Tags 5, 8-14 sont définis dans `catnip_vm` (VM pure Rust, sans PyO3). Tag 5 (Struct) utilise un index dans
+`PureStructRegistry` avec refcount explicite (pas Arc). Tag 14 (StructType) est un type callable pour la construction.
+Les types mutables (List, Dict, Set) utilisent `RefCell` pour la mutabilité single-threaded. Les types immutables
+(Tuple, Bytes) utilisent `Box<[T]>`.
 
 Les floats sont stockés directement (pas dans un NaN pattern). Toutes les primitives tiennent dans 8 bytes sans
 allocation heap.
+
+**Garde refcount** : les tags 6-13 pointent vers des `Arc` heap-allocated. `clone_refcount()` et `decref()` dans
+`catnip_vm` doivent vérifier `!is_float()` avant d'inspecter le tag, car certains floats normaux (subnormals, grands
+exposants) ont des bits 50-47 qui matchent accidentellement un tag heap. Sans cette garde, un float comme `1e-100`
+déclencherait `Arc::increment_strong_count` sur un pointeur invalide. `catnip_rs` n'a pas ce problème car ses méthodes
+`is_bigint()`/`is_pyobj()` vérifient le préfixe QNAN_BASE complet.
+
+**`clone_refcount()` unifié** : dans `catnip_rs`, `Value::clone_refcount()` gère les trois types refcountés : BigInt
+(Arc increment), PyObject (ObjectTable handle), et Struct instance (thread-local `struct_registry_incref()`). Tout code
+qui duplique une Value (DupTop, StoreScope vers globals, default parameter binding) passe par cette méthode unique. La
+variante `clone_refcount_bigint()` ne gère que les BigInt (utilisée par les Load opcodes qui font l'incref struct
+explicitement via `self.struct_registry.incref()`).
 
 **Avantages** :
 
@@ -76,14 +101,51 @@ allocation heap.
 - Conversions zero-cost (reinterpret_cast)
 - Cache-friendly (64 bits = 1 word)
 
-**Promotion automatique** : quand un SmallInt overflow (48-bit), l'arithmétique promeut en BigInt (`Arc<BigInt>` via
-`num-bigint`). La demotion inverse se fait automatiquement si le résultat tient dans un SmallInt.
+**Promotion automatique** : quand un SmallInt overflow (47-bit), l'arithmétique promeut en BigInt (`Arc<GmpInt>` via
+`rug`/GMP, linké statiquement). La demotion inverse se fait automatiquement si le résultat tient dans un SmallInt.
 
-**Struct round-trip** : quand un TAG_STRUCT traverse la frontière Python (ex: stocké dans une `list()`), il est converti
-en `CatnipStructProxy` (PyObject) via `to_pyobject()`. Le proxy porte un `native_instance_idx` qui permet à
-`from_pyobject()` de restaurer le TAG_STRUCT natif si l'instance appartient au StructRegistry courant. Le pointeur
-thread-local du StructRegistry est sauvegardé/restauré dans `PyRustVM::execute()` pour gérer les appels VM réentrants
-(méthodes récursives sur structs dans des collections).
+**Arithmétique overflow-safe** : les opérations binaires (+, -, \*) utilisent `checked_add`/`checked_sub`/`checked_mul`
+pour détecter le dépassement i64. Si `checked_*` retourne `None` (overflow i64), promotion directe en BigInt via
+`Integer::from(a) op Integer::from(b)`. Si le résultat i64 dépasse la plage SmallInt 47-bit, même promotion. La
+restauration après exécution JIT fait un `decref` de l'ancienne valeur avant d'écrire le nouveau `Value` pour éviter les
+corruptions de refcount sur les `BigInt` heap-allocated.
+
+**Sentinelle NaN** : les floats IEEE-754 NaN ont des bits qui collisionnent avec le tag SmallInt(0). Pour distinguer un
+vrai `float('nan')` d'un entier zéro, la VM utilise un signaling NaN canonique (`0x7FF0_0000_0000_0001`) comme
+sentinelle. Les floats sont exclus du raccourci d'égalité bitwise.
+
+**ObjectTable** : les TAG_PYOBJ ne stockent pas de pointeur brut mais un handle `u32` vers une `ObjectTable` globale
+(protégée par `Mutex`, jamais contended sous le GIL). La table maintient un refcount par slot ; `clone_refcount()` et
+`decref()` gèrent le cycle de vie. La table est globale (pas per-VM) car les handles doivent rester valides quand des
+Values traversent les frontières de threads (workers ND).
+
+**VMFunc round-trip** : les fonctions VM sont stockées nativement avec TAG_VMFUNC (index dans une `FunctionTable`
+grow-only). Quand une fonction traverse la frontière Python (ex: callback, `print(fn)`), `to_pyobject()` crée un
+`VMFunction` lazy avec `func_table_idx`. `from_pyobject()` détecte `VMFunction` et restaure TAG_VMFUNC si l'index
+appartient à la FunctionTable courante. Ce mécanisme évite le round-trip PyO3 dans la boucle de dispatch (`Call` fast
+path : `func.is_vmfunc()` → lecture directe de la FunctionTable, sans ObjectTable ni downcast).
+
+**Struct round-trip** : même pattern pour TAG_STRUCT. Quand un TAG_STRUCT traverse la frontière Python (ex: stocké dans
+une `list()`), il est converti en `CatnipStructProxy` (PyObject) via `to_pyobject()`. Le proxy porte un
+`native_instance_idx` et possède un refcount sur le slot StructRegistry : `instance_to_pyobject()` incref à la création,
+`CatnipStructProxy.__del__` decref via `struct_registry_release()`. `from_pyobject()` détecte le proxy et restaure le
+TAG_STRUCT natif avec incref (la nouvelle Value possède son propre refcount). `GetAttr`/`SetAttr` decref l'objet poppé
+du stack après utilisation. `CallFunc` incref via `self.struct_registry` quand il reconstruit un TAG_STRUCT depuis
+`BoundCatnipMethod.native_instance_idx`. `InstanceSlot.refcount` utilise `AtomicU32` pour permettre `incref(&self)` sans
+aliasing avec les accès thread-local `*const`. Les pointeurs thread-local (StructRegistry, FunctionTable) sont
+sauvegardés/restaurés dans `PyRustVM::execute()` et dans `VMFunction::__call__` (mode standalone) pour gérer les appels
+VM réentrants. `Executor` implémente `Drop` pour nettoyer ces pointeurs, évitant les dangling references après
+exécution. `FunctionTable::get()` retourne `Option` : les accès invalides produisent un `VMError` au lieu d'un panic.
+
+**Réentrance standalone** : quand un callback Catnip (lambda capturant des variables) est appelé depuis Python (ex:
+`fold` appelle un lambda), `VMFunction::__call__` crée un VM temporaire. Deux mécanismes assurent la continuité :
+
+- **Closure** : `execute_with_host()` accepte un `closure_scope: Option<NativeClosureScope>` qui est assigné au frame
+  initial, permettant au callback de résoudre les variables capturées.
+- **FunctionTable** : le VM enfant copie les entrées de la FunctionTable du parent avant exécution. Sans cette copie,
+  les valeurs TAG_VMFUNC dans la closure (indices dans la table du parent) provoqueraient des accès invalides.
+- **Globals** : `take_vm_globals()` récupère l'Arc globals du parent (posé par `set_vm_globals()` avant le dispatch
+  broadcast) et le transmet au `VMHost` du VM enfant pour que les mutations globales se propagent.
 
 **Références** :
 
@@ -95,21 +157,52 @@ thread-local du StructRegistry est sauvegardé/restauré dans `PyRustVM::execute
 
 ## Pipeline d'Exécution
 
+En mode VM, la classe `Catnip` délègue à `Pipeline` qui orchestre le pipeline Rust complet :
+
 ```mermaid
 flowchart TD
-    A["Op nodes (AST)"] --> B["VM Compiler (Rust)"]
-    B --> C["Bytecode (CodeObject)"]
-    C --> D["VM Executor (Rust)"]
-    D --> E["Result"]
+    A["Source text"] --> B["Pipeline"]
+    B --> B1["Parser + Transformer"]
+    B1 --> B2["IR"]
+    B2 --> SA["SemanticAnalyzer"]
+    SA --> UC["UnifiedCompiler"]
+    UC -->|"Pure IR"| PC["PureCompiler (catnip_vm)"]
+    UC -->|"IR + Decimal/Imaginary"| UC2["Inline compile (PyO3)"]
+    UC -->|"Op (PyObject)"| UC2
+    PC --> CONV["convert_pure_compile_output"]
+    CONV --> D["Bytecode (CodeObject)"]
+    UC2 --> D
+    D --> E["VM Executor (Rust)"]
+    E --> F["Result"]
 ```
 
-### Compilation : Op → Bytecode
+### Compilation : IR → Bytecode
 
-Le compiler (`catnip_rs/src/vm/compiler.rs`) transforme les nœuds Op en instructions bytecode :
+Deux compilateurs, un seul pipeline :
+
+- **PureCompiler** (`catnip_vm/src/compiler/`) : compilateur 100% Rust, zéro PyO3. Compile IR → bytecode avec Value
+  NaN-boxed natifs (NativeStr, NativeTuple). Gère tous les opcodes IR sauf Decimal/Imaginary (qui nécessitent Python)
+- **UnifiedCompiler** (`catnip_rs/src/vm/unified_compiler.rs`) : bridge PyO3. Délègue `compile_pure()` au PureCompiler,
+  convertit le résultat via `convert_pure_compile_output()`. Fallback inline pour IR contenant Decimal/Imaginary. Chemin
+  Op (PyObject) reste inchangé
+
+Structure du PureCompiler :
+
+| Fichier                   | Rôle                                                                 |
+| ------------------------- | -------------------------------------------------------------------- |
+| `compiler/mod.rs`         | PureCompiler, CompileOutput, toutes les méthodes compile\_\*         |
+| `compiler/core.rs`        | CompilerCore (emit, patch, add_const, emit_store, build_code_object) |
+| `compiler/code_object.rs` | CodeObject pur Rust                                                  |
+| `compiler/pattern.rs`     | VMPattern/VMPatternElement                                           |
+| `compiler/error.rs`       | CompileError, CompileResult                                          |
+| `compiler/input.rs`       | Helpers IR (ir_to_name, has_complex_pattern, etc.)                   |
+
+Produit un `CompileOutput` (CodeObject principal + sous-fonctions). Les sous-fonctions (lambdas, méthodes) sont
+référencées par `Value::from_vmfunc(idx)` et converties en `PyCodeObject` wraps lors du passage à catnip_rs.
 
 **Génération** :
 
-- Traverse récursivement les Op nodes
+- Traverse récursivement les nœuds IR
 - Génère les instructions (opcode + arg)
 - Construit les tables (constants, names, varnames)
 
@@ -117,7 +210,7 @@ Le compiler (`catnip_rs/src/vm/compiler.rs`) transforme les nœuds Op en instruc
 
 - Slot allocation pour variables locales
 - Constant pooling
-- Jump optimization
+- Jump optimization (peephole via catnip_core)
 
 **Output** : `CodeObject` avec bytecode linéaire
 
@@ -143,13 +236,66 @@ loop {
 }
 ```
 
+**Résolution LoadScope** : la VM résout les noms en 4 étapes, du plus rapide au plus coûteux :
+
+```mermaid
+flowchart LR
+    LS["LoadScope 'name'"] --> CAP{"Captured vars ?"}
+    CAP -->|Trouvé| VAL["Value"]
+    CAP -->|Non| GLO{"self.globals ?"}
+    GLO -->|Trouvé| VAL
+    GLO -->|Non| CLP{"Closure parent chain ?"}
+    CLP -->|Trouvé| VAL
+    CLP -->|Non| CTX{"ctx_globals (Python) ?"}
+    CTX -->|Trouvé| VAL
+    CTX -->|Non| ERR["NameError"]
+```
+
+Les deux premiers niveaux (captured vars, self.globals) sont des IndexMap lookups O(1) en Rust pur, sans traverser la
+frontière PyO3. La closure parent chain et ctx_globals impliquent des appels Python et ne sont atteints que pour les
+variables non locales ni capturées.
+
+**Host abstraction** (`vm/host.rs`) : le dispatch loop ne fait pas d'appels PyO3 directs pour les opérations hôte. Le
+trait `VmHost` (13+ méthodes) abstrait la résolution de noms (`lookup_global`, `store_global`, `delete_global`,
+`has_global`), les opérateurs binaires Python (`binary_op` via `BinaryOp` enum, 11 variants), l'accès au registry
+(`resolve_registry`), l'itération (`get_iter`), la construction de closures (`build_closure_parent`), l'accès
+attributs/items Python (`obj_getattr`, `obj_setattr`, `obj_getitem`, `obj_setitem`), et le broadcast ND
+(`broadcast_nd_recursion`, `broadcast_nd_map`). Trois implémentations : `ContextHost` (context Python, instancié dans
+`run()`), `VMHost` (standalone, globals Rust IndexMap), et **PureVM** (`catnip_vm/src/vm/broadcast.rs`, Rust pur sans
+PyO3, séquentiel uniquement). Le broadcast ND est délégué au host depuis `core.rs` -- la boucle inline est remplacée par
+un appel à `host.broadcast_nd_recursion/map`. PureVM implémente broadcast directement dans la dispatch loop via
+`call_vmfunc_sync` (save/restore frame_stack). L'implémentation par défaut du trait est séquentielle. `VMHost` supporte
+trois modes via `NdMode` :
+
+- **Sequential** : boucle simple, `NDVmDecl`/`NDVmRecur`
+- **Thread** (rayon) : `par_iter().map_with()`, GIL relâché (`py.detach`), chaque thread rayon re-acquiert le GIL
+  (`Python::attach`), reçoit un snapshot indépendant des globals, et exécute le lambda ND avec `NDParallelDecl`
+  (Send+Sync, cache `Arc<Mutex>`, depth `AtomicUsize`)
+- **Process** : pool persistant de workers Rust natifs (`catnip worker`) communicant via IPC bincode (length-prefixed
+  sur stdin/stdout). Si la lambda a un `encoded_ir` et que captures + seeds sont freezables, le `WorkerPool` distribue
+  en round-robin sans passer par Python. Sinon, fallback transparent vers `ProcessPoolExecutor` avec
+  `_worker_execute_simple`. Le pool est lazy-init au premier appel process et persiste pour la durée de vie du `VMHost`
+
+Config via `Pipeline.set_nd_mode("thread"|"sequential"|"process")`.
+
+**Optimisation NDVmRecur** : en mode standalone, le VM Call opcode détecte `NDVmRecur` et pousse un frame sur la stack
+courante au lieu de créer une VM par appel récursif. `NDVmRecur` stocke `vm_code`/`vm_closure` extraits du `VMFunction`
+au moment de la création. Le tracking se fait via `nd_recur_stack` (depth guard, memoization cache, cleanup sur pop et
+erreur).
+
 **Frame** : structure d'exécution
 
 - Operand stack (valeurs NaN-boxed)
 - Local variables (slots)
 - Program counter (PC)
 
-**Frame pooling** : réutilisation des frames pour éviter les allocations
+**Frame pooling** : `FramePool` recycle les frames libérées (`free` → `reset` → stockage). `alloc_with_code` réutilise
+un frame existant (conserve la capacité des Vec internes) ou en alloue un nouveau. Taille du pool : 64 frames.
+
+**Call fast path** : pour les fonctions TAG_VMFUNC avec \<= 8 args et sans varargs, les arguments sont copiés
+directement de la stack du caller vers les locals du callee via un buffer inline `[Value; 8]` (pas d'allocation Vec).
+Les defaults sont remplis pour les params manquants. Le slow path (varargs, > 8 args, PyObject callables) utilise
+`bind_args` avec un Vec.
 
 ## Modes d'Exécution
 
@@ -160,22 +306,21 @@ catnip script.cat              # Mode VM
 catnip -x vm script.cat        # Explicite
 ```
 
-**AST mode** (fallback) :
+**Mode AST** (interne, pour les contributeurs) :
 
 ```bash
 catnip -x ast script.cat       # Interprétation AST directe
 ```
 
-**Rôle du mode AST** : implémentation de référence pour le développement de la VM. L'interpréteur AST existait avant la
-VM et exécute directement les nœuds Op via le Registry. Son intérêt est de fournir un oracle indépendant :
+Le mode AST exécute les Op nodes via le Registry sans passer par la compilation bytecode. Il sert d'implémentation de
+référence pour valider la VM :
 
-- **Validation** : tout test qui passe en AST et échoue en VM isole un bug de compilation ou de dispatch VM
-- **Debugging** : pas de couche de compilation entre l'IR et l'exécution, le flux est plus lisible
-- **Régression** : `make test-all` exécute la suite complète dans les deux modes, ce qui garantit l'équivalence
-  sémantique
+- Un test qui passe en AST et échoue en VM isole un bug de compilation ou de dispatch VM
+- `make test-all` exécute la suite dans les deux modes pour garantir l'équivalence sémantique
+- Le flux est plus lisible pour le debug (pas de couche de compilation entre l'IR et l'exécution)
 
-Le mode AST n'est pas destiné aux utilisateurs finaux. Il est plus lent (pas de NaN-boxing, dispatch indirect via
-Python) mais plus simple à raisonner.
+Le mode AST n'est pas exposé dans la documentation utilisateur. Il est plus lent (dispatch indirect, pas de NaN-boxing)
+et n'a pas accès au JIT. Code Rust derrière le feature flag `ast-executor`.
 
 ## Error Handling
 
@@ -183,39 +328,71 @@ La VM produit des messages d'erreur avec position source (fichier, ligne, colonn
 
 **Principe** : capture lazy - zéro overhead sur le chemin normal d'exécution.
 
+**Variantes `VMError`** : au-delà des erreurs classiques (`NameError`, `TypeError`, `RuntimeError`, `ZeroDivisionError`,
+`MemoryLimitExceeded`), deux variantes contrôlent l'arrêt du processus :
+
+- `VMError::Exit(i32)` - arrêt explicite avec code de sortie. Produit par l'opcode `Exit` ou par conversion d'un
+  `SystemExit` Python intercepté dans `pyerr_to_vmerror` (`py_interop.rs`)
+- `VMError::Interrupted` - interruption coopérative (Ctrl+C depuis le REPL). Converti en `KeyboardInterrupt` côté Python
+
+**Opcode `Exit` (83)** : termine le processus avec un code de sortie. Encoding de l'argument :
+
+- `arg=0` : exit code 0 (succès)
+- `arg=1` : pop le code de sortie depuis la stack
+
 **Line table** : le `CodeObject` contient une table parallèle aux instructions, chaque entrée mappe une instruction vers
 son `start_byte`. Le peephole optimizer maintient cette correspondance.
 
 **Call stack** : la VM empile/dépile les frames d'appel avec nom de fonction et position source.
 
-**Capture** : quand une erreur se produit, la VM consulte la line table et snapshote le call stack. Le bridge Python
-convertit le `start_byte` en ligne/colonne via `SourceMap` et enrichit l'exception avec un extrait.
+**Capture** : quand une erreur se produit, la VM consulte la line table et snapshote le call stack dans un
+`ErrorContext` (start_byte, error_type, message, call_stack).
 
-**Exemple de sortie** :
+**Enrichissement** : deux chemins distincts selon le mode d'exécution :
+
+- **Standalone (binaire Rust)** : `Executor.enrich_error()` lit l'`ErrorContext` (sans le consommer) et génère un
+  snippet via `SourceMap.get_snippet()`. Le snippet est ajouté au message d'erreur sous forme de texte
+- **Python (PyO3)** : `_enrich_with_position()` dans `compat.py` ou `_enrich_error()` dans `rust_bridge.py` récupère
+  l'`ErrorContext` via `get_last_error_context()` et enrichit l'exception `CatnipError` avec les champs structurés
+  (`filename`, `line`, `column`, `context`, `traceback`)
+
+**Format des messages** : `VMError::Display` utilise les préfixes Python standards (`TypeError:`, `ValueError:`, etc.)
+sans double-wrapping. Les types sans variante dédiée (`IndexError`, `KeyError`, etc.) préfixent le message dans
+`pyerr_to_vmerror` pour préserver le type à travers la conversion `VMError::RuntimeError(String)`.
+
+**Exemple de sortie** (standalone) :
 
 ```
-File '<input>', line 2, column 14: division by zero
-    2 | f = (x) => { x / 0 }
-    |              ^
-Traceback (most recent call last):
-  File "<input>", in <lambda>
-CatnipRuntimeError: division by zero
+Error: TypeError: 'int' object is not callable
+  1 | x = 1; x()
+    |        ^
 ```
 
 **Références** :
 
-- CPython [co_linetable](https://docs.python.org/3/reference/datamodel.html#codeobject.co_linetable) -- même pattern de
+- CPython [co_linetable](https://docs.python.org/3/reference/datamodel.html#codeobject.co_linetable) - même pattern de
   table parallèle aux instructions
 
 > La VM logge la position source de chaque instruction. En exécution normale: rien à signaler. En erreur: ciblage
 > chirurgical.
 
-## Memory Guard
+## Periodic Checks
 
-La VM vérifie périodiquement le RSS du processus pour empêcher un script de consommer toute la RAM.
+La VM effectue des vérifications périodiques toutes les ~65536 instructions (bitwise AND sur le compteur, coût
+négligeable). Deux checks sont effectués à chaque intervalle :
 
-**Mécanisme** : toutes les 65536 instructions (bitwise AND, coût négligeable), lecture de `/proc/self/statm` sur Linux
-(~5 µs par check). Sur les autres plateformes, le guard est inactif (no-op).
+### Cooperative Interruption
+
+La VM expose un `interrupt_flag: Arc<AtomicBool>` accessible via `vm.interrupt_flag()`. Un thread externe (typiquement
+le handler Ctrl+C du REPL) peut positionner ce flag pour demander l'arrêt. La VM le consulte à chaque intervalle avec un
+`load(Relaxed)` et produit `VMError::Interrupted` si le flag est levé.
+
+### Memory Guard
+
+La VM vérifie le RSS du processus pour empêcher un script de consommer toute la RAM.
+
+**Mécanisme** : lecture de `/proc/self/statm` sur Linux (~5 µs par check). Sur les autres plateformes, le guard est
+inactif (no-op).
 
 **Limite par défaut** : 2048 MB. Configurable via `-o memory:SIZE` (en MB), config TOML (`memory_limit`), ou variable
 d'environnement (`CATNIP_OPTIMIZE=memory:SIZE`). `memory:0` désactive le guard.
@@ -230,6 +407,63 @@ Disable:  catnip -o memory:0
 
 **Implémentation** : `catnip_rs/src/vm/memory.rs` (lecture RSS), champs `memory_limit_bytes` et `instruction_count` dans
 la struct `VM`, variante `MemoryLimitExceeded` dans `VMError` (convertie en `PyMemoryError`).
+
+## String Formatting (F-strings)
+
+Les f-strings sont compilées en deux opcodes dédiés, alignés sur le design de CPython 3.12+ (`FORMAT_VALUE` +
+`BUILD_STRING`) :
+
+**FormatValue (84)** : formate une valeur avec conversion optionnelle et format spec.
+
+```
+... value [spec]  →  ... formatted_string
+```
+
+L'argument encode les flags : `(conversion << 1) | has_spec`
+
+| flags | signification                |
+| ----- | ---------------------------- |
+| 0     | `format(value, '')`          |
+| 1     | `format(value, spec)`        |
+| 2     | `format(str(value), '')`     |
+| 3     | `format(str(value), spec)`   |
+| 4     | `format(repr(value), '')`    |
+| 5     | `format(repr(value), spec)`  |
+| 6     | `format(ascii(value), '')`   |
+| 7     | `format(ascii(value), spec)` |
+
+**BuildString (85)** : concatène n strings en une seule allocation.
+
+```
+... s1 s2 ... sn  →  ... concatenated
+```
+
+**Pipeline** : le transformer émet `Op(Fstring, parts)` où chaque part est soit un `String` (texte), soit un
+`Tuple(expr, Int(conv), spec)` (interpolation). Le compiler traduit les textes en `LoadConst`, les interpolations en
+`compile(expr) + FormatValue(flags)`, et conclut par `BuildString(n)` si n > 1.
+
+**Correctness** : `FormatValue` appelle `format(value, spec)` (protocol `__format__`), pas `str(value)`. Ceci aligne le
+comportement sur Python : les types avec un `__format__` custom (datetime, Decimal, etc.) sont formatés correctement.
+
+**Références** :
+
+- CPython [FORMAT_VALUE](https://docs.python.org/3/library/dis.html#opcode-FORMAT_VALUE) - même design flags
+- CPython [BUILD_STRING](https://docs.python.org/3/library/dis.html#opcode-BUILD_STRING) - concaténation finale
+
+### Intrinsics
+
+**TypeOf (86)** : retourne le nom du type comme string. Pop 1 valeur, push 1 string. Pas d'argument.
+
+```
+... value  →  ... "type_name"
+```
+
+Le dispatch inspecte directement le tag NaN-boxed (O(1) pour les types natifs). Pour les struct instances, lookup du nom
+via `StructRegistry`. Pour les PyObjects, cascade `isinstance` sur les types courants (bool, int, float, str, list,
+tuple, dict, set, callable), fallback `"object"`.
+
+L'analyzer intercepte `typeof(expr)` et émet `IROpCode::TypeOf` au lieu d'un `Call` générique (même pattern que
+`breakpoint()` → `Breakpoint`).
 
 ## Performances Typiques
 

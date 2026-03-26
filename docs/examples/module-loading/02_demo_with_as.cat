@@ -1,19 +1,20 @@
-# Demo script using custom namespace name
-# Run with: catnip docs/examples/module-loading/02_demo_with_as.cat
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 02_demo_with_as.cat
+# Script de démo avec namespace personnalisé
 
-# Load module with custom alias
-h = import("./docs/examples/module-loading/03_host_module_example.py")
+# Charger le module avec un alias personnalisé
+h = import('host_module_example', protocol='py')
 
-# Use host module functions via custom namespace (h.function())
+# Utiliser les fonctions du module hôte via le namespace personnalisé (h.function())
 x = h.add(10, 5)
 y = h.multiply(x, 2)
 z = h.power(2, 8)
 
-# Call greet function
+# Appeler la fonction greet
 message = h.greet("Catnip")
 
-# Use Counter class
+# Utiliser la classe Counter
 counter = h.Counter(100)
 
-# Final result
-z
+# Résultat final
+z  # → 256

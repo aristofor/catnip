@@ -24,7 +24,9 @@ class Executor:
         :return: Result of the last statement
         """
         self.context.result = None
+        self.current_stmt = None
         for stmt in statements:
+            self.current_stmt = stmt
             if trace:
                 self.logger.debug(f"Executing: {stmt}")
             self.context.result = self.execute_statement(stmt)

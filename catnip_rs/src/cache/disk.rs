@@ -135,13 +135,7 @@ impl DiskCache {
 
     /// Store an entry in the cache.
     #[pyo3(signature = (key, value, metadata=None))]
-    fn set(
-        &mut self,
-        py: Python<'_>,
-        key: &CacheKey,
-        value: Py<PyAny>,
-        metadata: Option<Py<PyDict>>,
-    ) -> PyResult<()> {
+    fn set(&mut self, py: Python<'_>, key: &CacheKey, value: Py<PyAny>, metadata: Option<Py<PyDict>>) -> PyResult<()> {
         let key_str = key.to_string(py)?;
         let file_path = self.get_file_path(&key_str);
 
@@ -185,13 +179,12 @@ impl DiskCache {
         }
     }
 
-    /// Clear the entire cache.
+    /// Clear the entire cache (only files owned by this backend).
     fn clear(&mut self) -> PyResult<()> {
-        // Remove all files in the cache directory
         for entry in fs::read_dir(&self.directory)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() {
+            if path.is_file() && Self::is_owned_file(&path) {
                 fs::remove_file(path)?;
             }
         }
@@ -218,16 +211,10 @@ impl DiskCache {
         let (count, total_size) = self.get_cache_size()?;
         dict.set_item("size", count)?;
         dict.set_item("volume_bytes", total_size)?;
-        dict.set_item(
-            "volume_mb",
-            format!("{:.2}", total_size as f64 / (1024.0 * 1024.0)),
-        )?;
+        dict.set_item("volume_mb", format!("{:.2}", total_size as f64 / (1024.0 * 1024.0)))?;
 
         if let Some(max_size) = self.max_size_bytes {
-            dict.set_item(
-                "max_size_mb",
-                format!("{:.2}", max_size as f64 / (1024.0 * 1024.0)),
-            )?;
+            dict.set_item("max_size_mb", format!("{:.2}", max_size as f64 / (1024.0 * 1024.0)))?;
         } else {
             dict.set_item("max_size_mb", py.None())?;
         }
@@ -257,10 +244,7 @@ impl DiskCache {
     /// Prune expired entries and enforce size limit.
     fn prune(&mut self, _py: Python<'_>) -> PyResult<u64> {
         let mut removed_count = 0u64;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         // Collect all entries with metadata
         let mut entries: Vec<(PathBuf, EntryMetadata)> = Vec::new();

@@ -21,12 +21,7 @@ impl CatnipMethod {
     }
 
     /// Descriptor __get__: return BoundCatnipMethod when accessed on instance.
-    fn __get__<'py>(
-        &self,
-        py: Python<'py>,
-        obj: &Bound<'py, PyAny>,
-        _cls: &Bound<'py, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn __get__<'py>(&self, py: Python<'py>, obj: &Bound<'py, PyAny>, _cls: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if obj.is_none() {
             // Class-level access: return the raw function
             Ok(self.func.clone_ref(py))
@@ -46,7 +41,7 @@ impl CatnipMethod {
     }
 
     fn __repr__(&self) -> String {
-        format!("<CatnipMethod>")
+        "<CatnipMethod>".to_string()
     }
 }
 
@@ -84,6 +79,6 @@ impl BoundCatnipMethod {
     }
 
     fn __repr__(&self) -> String {
-        format!("<BoundCatnipMethod>")
+        "<BoundCatnipMethod>".to_string()
     }
 }

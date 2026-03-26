@@ -16,7 +16,7 @@ Guide complet pour embarquer Catnip comme moteur de scripting dans vos applicati
 
 ## Introduction
 
-Catnip est pensé pour être embarqué dans des applications Python. Le mode embedded sert à :
+Catnip est pensé pour être utilisé comme DSL dans des applications Python :
 
 **Avantages** :
 

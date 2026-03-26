@@ -7,19 +7,20 @@ from pathlib import Path
 import click
 
 
-@click.command("lint")
-@click.argument("files", nargs=-1, type=click.Path())
+@click.command('lint')
+@click.argument('files', nargs=-1, type=click.Path())
 @click.option(
-    "-l",
-    "--level",
-    type=click.Choice(["syntax", "style", "semantic", "all"]),
-    default="all",
+    '-l',
+    '--level',
+    type=click.Choice(['syntax', 'style', 'semantic', 'all']),
+    default='all',
     help="Analysis level (default: all)",
 )
-@click.option("--deep", is_flag=True, help="Enable deep IR analysis (opt-in)")
-@click.option("--stdin", is_flag=True, help="Read from stdin")
+@click.option('--deep', is_flag=True, help="Enable deep IR analysis (opt-in)")
+@click.option('--check-names', is_flag=True, help="Check for undefined names (E300, opt-in)")
+@click.option('--stdin', is_flag=True, help="Read from stdin")
 @click.pass_context
-def cmd_lint(ctx, files, level, deep, stdin):
+def cmd_lint(ctx, files, level, deep, check_names, stdin):
     """Full code analysis (syntax + style + semantic).
 
     \b
@@ -27,20 +28,21 @@ def cmd_lint(ctx, files, level, deep, stdin):
         catnip lint script.cat
         catnip lint --level syntax script.cat
         catnip lint -l style *.cat
+        catnip lint --check-names script.cat
         catnip lint --deep script.cat
         cat code.cat | catnip lint --stdin
     """
     from ...tools.linter import Severity, lint_code, lint_file
 
-    verbose = ctx.obj.get("verbose", False) if ctx.obj else False
-    no_color = ctx.obj.get("no_color", False) if ctx.obj else False
+    verbose = ctx.obj.get('verbose', False) if ctx.obj else False
+    no_color = ctx.obj.get('no_color', False) if ctx.obj else False
 
     # Collect files to lint
     file_list = []
     if stdin:
         file_list.append(None)  # Marker for stdin
     for f in files:
-        if f == "--":
+        if f == '--':
             if sys.stdin.isatty():
                 raise click.UsageError("'--' requires piped input")
             file_list.append(None)
@@ -51,9 +53,9 @@ def cmd_lint(ctx, files, level, deep, stdin):
         raise click.UsageError("Provide at least one FILE or use --stdin")
 
     # Configure checks
-    check_syntax = level in ("syntax", "all")
-    check_style = level in ("style", "all")
-    check_semantic = level in ("semantic", "all")
+    check_syntax = level in ('syntax', 'all')
+    check_style = level in ('style', 'all')
+    check_semantic = level in ('semantic', 'all')
     check_ir = deep
 
     exit_code = 0
@@ -66,13 +68,14 @@ def cmd_lint(ctx, files, level, deep, stdin):
             source = sys.stdin.read()
             result = lint_code(
                 source,
-                filename="<stdin>",
+                filename='<stdin>',
                 check_syntax=check_syntax,
                 check_style=check_style,
                 check_semantic=check_semantic,
                 check_ir=check_ir,
+                check_names=check_names,
             )
-            prefix = "<stdin>:"
+            prefix = '<stdin>:'
             all_diagnostics.extend(result.diagnostics)
             files_linted += 1
         else:
@@ -87,6 +90,7 @@ def cmd_lint(ctx, files, level, deep, stdin):
                 check_style=check_style,
                 check_semantic=check_semantic,
                 check_ir=check_ir,
+                check_names=check_names,
             )
             prefix = f"{file_path}:"
             all_diagnostics.extend(result.diagnostics)
@@ -96,10 +100,10 @@ def cmd_lint(ctx, files, level, deep, stdin):
         if result.diagnostics:
             for diag in result.diagnostics:
                 severity_color = {
-                    Severity.Error: "red",
-                    Severity.Warning: "yellow",
-                    Severity.Info: "blue",
-                    Severity.Hint: "cyan",
+                    Severity.Error: 'red',
+                    Severity.Warning: 'yellow',
+                    Severity.Info: 'blue',
+                    Severity.Hint: 'cyan',
                 }.get(diag.severity, None)
 
                 msg = f"{prefix}{diag}"

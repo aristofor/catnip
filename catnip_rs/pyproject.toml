@@ -7,6 +7,6 @@ build-backend = "maturin"
 
 [project]
 name = "catnip-rs"
-version = "0.0.6"
+version = "0.0.7"
 requires-python = ">=3.12"
 

@@ -145,7 +145,7 @@ class TestSetAttrInLoops(unittest.TestCase):
         """Struct field assignment in for loop."""
         c = Catnip()
         c.parse(
-            'struct Foo { x }\n'
+            'struct Foo { x; }\n'
             'objs = list(Foo(0), Foo(0), Foo(0))\n'
             'for obj in objs { obj.x = 42 }\n'
             'result = objs[2].x'
@@ -157,7 +157,7 @@ class TestSetAttrInLoops(unittest.TestCase):
         """Struct field assignment using loop variable."""
         c = Catnip()
         c.parse(
-            'struct Foo { x }\n'
+            'struct Foo { x; }\n'
             'objs = list(Foo(0), Foo(0), Foo(0))\n'
             'for (i, obj) in enumerate(objs) { obj.x = i * 10 }\n'
             'result = list(objs[0].x, objs[1].x, objs[2].x)'

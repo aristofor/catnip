@@ -192,12 +192,19 @@ impl InputState {
 
     /// Add a new line (Enter in multiline mode)
     pub fn new_line(&mut self) {
+        self.new_line_with_indent(0);
+    }
+
+    /// Add a new line with `spaces` leading spaces
+    pub fn new_line_with_indent(&mut self, spaces: usize) {
         let (row, col) = self.cursor;
         let rest = self.lines[row][col..].to_string();
         self.lines[row].truncate(col);
-        self.lines.insert(row + 1, rest);
+        let mut new = " ".repeat(spaces);
+        new.push_str(&rest);
+        self.lines.insert(row + 1, new);
         self.cursor.0 = row + 1;
-        self.cursor.1 = 0;
+        self.cursor.1 = spaces;
     }
 
     /// Full reset after submit
@@ -216,6 +223,10 @@ impl InputState {
 
     pub fn set_cursor_col(&mut self, col: usize) {
         self.cursor.1 = col;
+    }
+
+    pub fn set_cursor_row(&mut self, row: usize) {
+        self.cursor.0 = row;
     }
 
     // -- History navigation --
@@ -249,7 +260,7 @@ impl InputState {
     /// Navigate to the next entry (Down)
     pub fn history_down(&mut self, _history: &crate::history::History) {
         match self.history_index {
-            None => return, // Deja a l'input courant
+            None => (), // Deja a l'input courant
             Some(0) => {
                 // Restaurer l'input sauvegarde
                 self.history_index = None;
@@ -270,6 +281,12 @@ impl InputState {
                 }
             }
         }
+    }
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -377,5 +394,71 @@ mod tests {
         assert_eq!(input.cursor(), (0, 11)); // end
         input.move_cursor_word_left();
         assert_eq!(input.cursor(), (0, 6)); // before "world"
+    }
+
+    #[test]
+    fn test_delete_at_end_noop() {
+        let mut input = InputState::new();
+        input.insert_char('a');
+        input.insert_char('b');
+        // Cursor at end, delete forward should be noop (single line)
+        input.delete_char_at();
+        assert_eq!(input.full_text(), "ab");
+        assert_eq!(input.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn test_home_end() {
+        let mut input = InputState::new();
+        for ch in "abcde".chars() {
+            input.insert_char(ch);
+        }
+        input.move_cursor_home();
+        assert_eq!(input.cursor(), (0, 0));
+        input.move_cursor_end();
+        assert_eq!(input.cursor(), (0, 5));
+    }
+
+    #[test]
+    fn test_clear_line_and_retype() {
+        let mut input = InputState::new();
+        for ch in "hello".chars() {
+            input.insert_char(ch);
+        }
+        input.clear_line();
+        assert_eq!(input.current_line(), "");
+        assert_eq!(input.cursor(), (0, 0));
+        input.insert_char('x');
+        assert_eq!(input.full_text(), "x");
+    }
+
+    #[test]
+    fn test_multiline_new_line() {
+        let mut input = InputState::new();
+        input.insert_char('a');
+        input.new_line();
+        assert_eq!(input.cursor().0, 1); // row 1
+        input.insert_char('b');
+        input.new_line();
+        assert_eq!(input.cursor().0, 2); // row 2
+        input.insert_char('c');
+        assert_eq!(input.line_count(), 3);
+    }
+
+    #[test]
+    fn test_full_text_multiline() {
+        let mut input = InputState::new();
+        for ch in "line1".chars() {
+            input.insert_char(ch);
+        }
+        input.new_line();
+        for ch in "line2".chars() {
+            input.insert_char(ch);
+        }
+        input.new_line();
+        for ch in "line3".chars() {
+            input.insert_char(ch);
+        }
+        assert_eq!(input.full_text(), "line1\nline2\nline3");
     }
 }

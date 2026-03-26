@@ -43,9 +43,15 @@ analysis/CatnipCFGSSACorrectness.v
 analysis/CatnipCFGSSAProof.v
 
 vm/CatnipNanBoxProof.v
-vm/CatnipVMBase.v
+vm/CatnipVMOpCode.v
+vm/CatnipVMState.v
+vm/CatnipVMStackSafety.v
+vm/CatnipVMInvariants.v
+vm/CatnipVMExamples.v
 vm/CatnipVMFrame.v
 vm/CatnipVMProof.v
+vm/CatnipArithProof.v
+vm/CatnipPureFrameProof.v
 
 cache/CatnipCacheKey.v
 cache/CatnipCacheMemory.v

@@ -1,0 +1,147 @@
+#!/usr/bin/env catnip
+# Barres de progression avec tqdm
+# tqdm affiche une barre de progression sur n'importe quel itérable
+#
+# DEPS: tqdm
+
+tqdm   = import('tqdm')
+time   = import('time')
+random = import('random')
+
+random.seed(42)
+
+# Structs métier
+struct Record {
+    id; category; value
+
+    display(self) => { f"#{self.id} [{self.category}] {self.value}" }
+}
+
+struct BatchResult {
+    label; count; total; errors
+
+    display(self) => {
+        rate = if self.count > 0 { round(self.errors * 100 / self.count, 1) } else { 0 }
+        f"  {self.label} : {self.count}/{self.total} traités ({rate}% erreurs)"
+    }
+}
+
+# Génération de données
+categories = list("sensor", "log", "metric", "event")
+
+make_record = (i) => {
+    cat = categories[random.randint(0, len(categories) - 1)]
+    val = round(random.uniform(0, 100), 2)
+    Record(i, cat, val)
+}
+
+records = list()
+for i in range(200) {
+    records.append(make_record(i))
+}
+print(f"⇒ {len(records)} records générés")
+
+# Traitement avec barre de progression
+print()
+print("⇒ Traitement séquentiel")
+
+process = (record) => {
+    time.sleep(0.005)
+    match True {
+        _ if record.value > 95 => { 'critical' }
+        _ if record.value > 80 => { 'warning' }
+        _ if record.value < 5  => { 'anomaly' }
+        _                      => { 'ok' }
+    }
+}
+
+results = list()
+for r in tqdm.tqdm(records, desc="process", unit="rec") {
+    results.append(process(r))
+}
+
+# Classification des résultats
+print()
+print("⇒ Résultats")
+
+count_status = (status) => {
+    n = 0
+    for r in results {
+        if r == status { n = n + 1 }
+    }
+    n
+}
+
+statuses = list('ok', 'warning', 'critical', 'anomaly')
+for s in statuses {
+    n = count_status(s)
+    bar = "#" * int(n / 2)
+    print(f"  {s:>10} : {n:>3}  {bar}")
+}
+
+# Pipeline multi-étapes
+print()
+print("⇒ Pipeline multi-étapes")
+
+struct Stage {
+    name; fn
+
+    run(self, data) => {
+        out = list()
+        for item in tqdm.tqdm(data, desc=self.name, unit="rec", leave=False) {
+            out.append(self.fn(item))
+        }
+        out
+    }
+}
+
+normalize = (r) => {
+    time.sleep(0.002)
+    Record(r.id, r.category, round(r.value / 100, 4))
+}
+
+tag = (r) => {
+    time.sleep(0.002)
+    label = match True {
+        _ if r.value > 0.8 => { "high" }
+        _ if r.value > 0.2 => { "mid" }
+        _                  => { "low" }
+    }
+    Record(r.id, label, r.value)
+}
+
+pipeline = list(
+    Stage("normalize", normalize),
+    Stage("tag", tag),
+)
+
+data = records
+for stage in pipeline {
+    data = stage.run(data)
+}
+
+# Comptage par tag
+print()
+print("⇒ Distribution après pipeline")
+for label in list("high", "mid", "low") {
+    n = 0
+    for r in data {
+        if r.category == label { n = n + 1 }
+    }
+    print(f"  {label:>5} : {n}")
+}
+
+# Barre manuelle (tqdm.tqdm sans itérable)
+print()
+print("⇒ Barre manuelle")
+pbar = tqdm.tqdm(total=50, desc="upload", unit="chunk")
+i = 0
+while i < 50 {
+    time.sleep(0.01)
+    pbar.update(1)
+    i = i + 1
+}
+pbar.close()
+
+print()
+print("⇒ Terminé")

@@ -12,8 +12,5 @@ fn main() {
         .compile("tree-sitter-catnip");
 
     println!("cargo:rustc-link-lib=static=tree-sitter-catnip");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        std::env::var("OUT_DIR").unwrap()
-    );
+    println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
 }

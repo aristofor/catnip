@@ -16,8 +16,8 @@ def exec_catnip(code: str):
 def test_pragma_nd_batch_size_auto():
     """Test auto batch size calculation (default)."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_workers", "4")
+    pragma("nd_mode", ND.process)
+    pragma("nd_workers", 4)
     # Auto batch size (default 0)
 
     list(3, 4, 5, 6).[~~ (n, recur) => {
@@ -32,9 +32,9 @@ def test_pragma_nd_batch_size_auto():
 def test_pragma_nd_batch_size_explicit():
     """Test explicit batch size."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_workers", "4")
-    pragma("nd_batch_size", "2")  # Process 2 items per batch
+    pragma("nd_mode", ND.process)
+    pragma("nd_workers", 4)
+    pragma("nd_batch_size", 2)  # Process 2 items per batch
 
     list(3, 4, 5, 6, 7, 8).[~~ (n, recur) => {
         if n <= 1 { 1 }
@@ -48,9 +48,9 @@ def test_pragma_nd_batch_size_explicit():
 def test_pragma_nd_batch_size_large_collection():
     """Test batching with large collection."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_workers", "4")
-    pragma("nd_batch_size", "5")
+    pragma("nd_mode", ND.process)
+    pragma("nd_workers", 4)
+    pragma("nd_batch_size", 5)
 
     # Large collection: 20 items
     range(1, 21).[~~ (n, recur) => {
@@ -67,9 +67,9 @@ def test_pragma_nd_batch_size_large_collection():
 def test_nd_map_batching():
     """Test batching works with ND-map broadcast."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_workers", "4")
-    pragma("nd_batch_size", "3")
+    pragma("nd_mode", ND.process)
+    pragma("nd_workers", 4)
+    pragma("nd_batch_size", 3)
 
     list(-1, -2, -3, -4, -5, -6, -7, -8, -9).[~> abs]
     '''
@@ -80,9 +80,9 @@ def test_nd_map_batching():
 def test_batching_small_collection_no_batching():
     """Test that small collections skip batching overhead."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_workers", "8")  # More workers than items
-    pragma("nd_batch_size", "10")
+    pragma("nd_mode", ND.process)
+    pragma("nd_workers", 8)  # More workers than items
+    pragma("nd_batch_size", 10)
 
     # Only 4 items, less than n_workers*2 (16)
     # Should skip batching and use direct executor.map
@@ -93,10 +93,10 @@ def test_batching_small_collection_no_batching():
 
 
 def test_batching_shorthand_pragma():
-    """Test batch_size shorthand pragma."""
+    """Test nd_batch_size pragma (canonical form)."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("batch_size", "2")  # Shorthand
+    pragma("nd_mode", ND.process)
+    pragma("nd_batch_size", 2)
 
     list(1, 2, 3, 4, 5).[~> (x) => { x + 10 }]
     '''
@@ -107,9 +107,9 @@ def test_batching_shorthand_pragma():
 def test_batching_with_memoization():
     """Test batching combined with memoization."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_memoize", "on")
-    pragma("nd_batch_size", "3")
+    pragma("nd_mode", ND.process)
+    pragma("nd_memoize", True)
+    pragma("nd_batch_size", 3)
 
     # List with duplicates - memoization should help
     list(5, 6, 5, 7, 6, 8).[~~ (n, recur) => {
@@ -126,8 +126,8 @@ def test_batching_with_memoization():
 def test_batching_sequential_mode_ignored():
     """Test that batch_size is ignored in sequential mode."""
     code = '''
-    pragma("nd_mode", "sequential")
-    pragma("nd_batch_size", "100")  # Should be ignored
+    pragma("nd_mode", ND.sequential)
+    pragma("nd_batch_size", 100)  # Should be ignored
 
     list(1, 2, 3).[~> (x) => { x * 3 }]
     '''
@@ -138,8 +138,8 @@ def test_batching_sequential_mode_ignored():
 def test_batching_preserves_tuple_type():
     """Test that batching preserves tuple type."""
     code = '''
-    pragma("nd_mode", "process")
-    pragma("nd_batch_size", "2")
+    pragma("nd_mode", ND.process)
+    pragma("nd_batch_size", 2)
 
     tuple(3, 4, 5, 6).[~~ (n, recur) => {
         if n <= 1 { 1 }

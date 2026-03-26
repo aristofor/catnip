@@ -13,7 +13,7 @@ def _format_volume(stats: dict) -> str:
 
     Use MB for regular values, KB/bytes for tiny volumes that would render as 0.00 MB.
     """
-    volume_bytes = int(stats.get("volume_bytes", 0))
+    volume_bytes = int(stats.get('volume_bytes', 0))
     volume_mb = volume_bytes / BYTES_PER_MB
 
     if volume_bytes == 0:
@@ -31,13 +31,13 @@ def _load_disk_cache_limits():
 
     config = ConfigManager()
     config.load_file()
-    max_size_mb = config.get("cache_max_size_mb")
-    ttl_seconds = config.get("cache_ttl_seconds")
+    max_size_mb = config.get('cache_max_size_mb')
+    ttl_seconds = config.get('cache_ttl_seconds')
     max_size_bytes = int(max_size_mb * BYTES_PER_MB) if max_size_mb else None
     return max_size_bytes, ttl_seconds
 
 
-@click.group("cache")
+@click.group('cache')
 def cmd_cache():
     """Manage Catnip cache.
 
@@ -52,11 +52,11 @@ def cmd_cache():
     pass
 
 
-@cmd_cache.command("stats")
+@cmd_cache.command('stats')
 @click.option(
-    "--backend",
-    type=click.Choice(["disk", "memory"]),
-    default="disk",
+    '--backend',
+    type=click.Choice(['disk', 'memory']),
+    default='disk',
     help="Cache backend to inspect",
 )
 def cache_stats(backend):
@@ -67,7 +67,7 @@ def cache_stats(backend):
     from ...cachesys import DiskCache, MemoryCache
     from ...config import get_cache_dir
 
-    if backend == "disk":
+    if backend == 'disk':
         cache_dir = get_cache_dir()
         max_size_bytes, ttl_seconds = _load_disk_cache_limits()
 
@@ -108,9 +108,9 @@ def cache_stats(backend):
         click.echo(f"Hit rate:       {stats['hit_rate']}")
 
 
-@cmd_cache.command("prune")
+@cmd_cache.command('prune')
 @click.option(
-    "--dry-run",
+    '--dry-run',
     is_flag=True,
     help="Show what would be removed without actually deleting",
 )
@@ -157,13 +157,8 @@ def cache_prune(dry_run):
         click.echo(f"After:          {stats_after['size']} entries, {_format_volume(stats_after)}")
 
 
-@cmd_cache.command("clear")
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Skip confirmation prompt",
-)
-def cache_clear(force):
+@cmd_cache.command('clear')
+def cache_clear():
     """Clear all cache entries.
 
     WARNING: This permanently deletes all cached data.
@@ -175,14 +170,6 @@ def cache_clear(force):
     cache = DiskCache(directory=str(cache_dir))
 
     stats = cache.stats()
-
-    if not force:
-        click.echo(f"This will delete all {stats['size']} cache entries ({_format_volume(stats)})")
-        click.echo(f"Directory: {cache_dir}")
-        if not click.confirm("Are you sure?"):
-            click.echo("Aborted")
-            return
-
     cache.clear()
     click.echo("Cache cleared successfully")
     click.echo(f"Removed {stats['size']} entries ({_format_volume(stats)})")

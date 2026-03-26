@@ -1,26 +1,36 @@
 // FILE: catnip_repl/src/executor.rs
 //! Execution pipeline for REPL Phase 2b
 //!
-//! Pipeline: Source → Tree-sitter → IRPure → Semantic → Bytecode → VM
+//! Pipeline: Source → Tree-sitter → IR → Semantic → Bytecode → VM
 //!
 //! Uses the VM with bytecode compilation.
 
+use catnip_rs::constants::*;
 use catnip_rs::get_tree_sitter_language;
 use catnip_rs::ir;
+use catnip_rs::ir::IROpCode;
 use catnip_rs::parser::transform_pure;
-use catnip_rs::standalone::{convert, SemanticAnalyzer};
-use catnip_rs::vm::compiler::Compiler;
+use catnip_rs::pipeline::SemanticAnalyzer;
+use catnip_rs::pragma::{Pragma, PragmaContext, PragmaType};
 use catnip_rs::vm::VM;
+use catnip_rs::vm::core::VMError;
+use catnip_rs::vm::unified_compiler::UnifiedCompiler;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tree_sitter::Parser;
+
+const PARSE_FAILED_MESSAGE: &str = "Parse failed";
 
 /// REPL executor (VM-based)
 pub struct ReplExecutor {
     parser: Parser,
     semantic: SemanticAnalyzer,
     vm: VM,
-    compiler: Compiler,
     context: Option<Py<PyAny>>,
+    /// Pragma context, persists across evaluations
+    pragma_context: Option<Py<PragmaContext>>,
     /// Names of initial globals (builtins) to distinguish them from user variables
     initial_globals: std::collections::HashSet<String>,
 }
@@ -36,42 +46,58 @@ impl ReplExecutor {
 
         let semantic = SemanticAnalyzer::new();
         let vm = VM::new();
-        let compiler = Compiler::new();
 
         Ok(Self {
             parser,
             semantic,
             vm,
-            compiler,
             context: None,
+            pragma_context: None,
             initial_globals: std::collections::HashSet::new(),
         })
     }
 
-    /// Ensure Python context is initialized
+    /// Ensure Python context is initialized with config defaults (auto-modules, policies)
     fn ensure_context(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.context.is_none() {
-            let locals = pyo3::types::PyDict::new(py);
-            let context_module = py.import("catnip.context")?;
+            let context_module = py.import(PY_MOD_CONTEXT)?;
             let context_class = context_module.getattr("Context")?;
             let context = context_class.call0()?;
-            context.setattr("locals", locals)?;
 
             // Create and attach Registry for pattern matching
-            let registry_module = py.import("catnip._rs")?;
-            let registry_class = registry_module.getattr("Registry")?;
+            let rs_module = py.import(PY_MOD_RS)?;
+            let registry_class = rs_module.getattr("Registry")?;
             let registry = registry_class.call1((context.clone(),))?;
             context.setattr("_registry", registry)?;
 
-            // Snapshot initial globals (builtins) avant tout code utilisateur
+            // Load config defaults (file + env) and apply to context
+            let cm = rs_module.getattr("ConfigManager")?.call0()?;
+            cm.call_method0("load_file")?;
+            cm.call_method0("load_env")?;
+
+            // Apply module policy
+            let policy = cm.call_method0("get_module_policy")?;
+            if !policy.is_none() {
+                context.setattr("module_policy", policy)?;
+            }
+
+            // Load auto-import modules for repl mode
+            let auto_modules: Vec<String> = cm.call_method1("get_auto_modules", ("repl",))?.extract()?;
+            if !auto_modules.is_empty() {
+                let loader_module = py.import(PY_MOD_LOADER)?;
+                let loader_class = loader_module.getattr("ModuleLoader")?;
+                let loader = loader_class.call1((context.clone(),))?;
+                let modules_list = pyo3::types::PyList::new(py, &auto_modules)?;
+                loader.call_method1("load_modules", (modules_list,))?;
+            }
+
+            // Snapshot initial globals (builtins + auto-modules) avant tout code utilisateur
             if let Ok(globals) = context.getattr("globals") {
                 if let Ok(keys_obj) = globals.call_method0("keys") {
                     if let Ok(iter) = keys_obj.try_iter() {
-                        for key_result in iter {
-                            if let Ok(key_obj) = key_result {
-                                if let Ok(s) = key_obj.extract::<String>() {
-                                    self.initial_globals.insert(s);
-                                }
+                        for key_obj in iter.flatten() {
+                            if let Ok(s) = key_obj.extract::<String>() {
+                                self.initial_globals.insert(s);
                             }
                         }
                     }
@@ -80,7 +106,144 @@ impl ReplExecutor {
 
             self.context = Some(context.unbind());
         }
+
+        // Create PragmaContext if needed (persists across evaluations)
+        if self.pragma_context.is_none() {
+            self.pragma_context = Some(Py::new(py, PragmaContext::new(py))?);
+        }
+
         Ok(())
+    }
+
+    /// Get the VM interrupt flag for external signal handlers.
+    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        self.vm.interrupt_flag()
+    }
+
+    /// Get attributes for each user variable via Python dir()
+    pub fn get_variable_attrs(&self) -> std::collections::HashMap<String, Vec<String>> {
+        Python::attach(|py| {
+            let mut result = std::collections::HashMap::new();
+            let Some(ctx) = &self.context else {
+                return result;
+            };
+            let bound_ctx = ctx.bind(py);
+            let Ok(globals) = bound_ctx.getattr("globals") else {
+                return result;
+            };
+
+            let Ok(items) = globals.call_method0("items") else {
+                return result;
+            };
+            let Ok(iter) = items.try_iter() else {
+                return result;
+            };
+
+            let builtins = py.import("builtins").ok();
+
+            for item_result in iter {
+                let Ok(item) = item_result else { continue };
+                let Ok((name, value)): Result<(String, pyo3::Bound<'_, PyAny>), _> = item.extract() else {
+                    continue;
+                };
+                if self.initial_globals.contains(&name) || name.starts_with('_') {
+                    continue;
+                }
+
+                // Skip primitive types -- no useful attrs to complete
+                if let Some(ref b) = builtins {
+                    let int_t = b.getattr("int").unwrap();
+                    let float_t = b.getattr("float").unwrap();
+                    let bool_t = b.getattr("bool").unwrap();
+                    let is_prim = value.is_instance(&int_t).unwrap_or(false)
+                        || value.is_instance(&float_t).unwrap_or(false)
+                        || value.is_instance(&bool_t).unwrap_or(false);
+                    if is_prim {
+                        continue;
+                    }
+                }
+
+                let Ok(dir_list) = value.dir() else { continue };
+                let mut attrs = Vec::new();
+                for attr_obj in dir_list.iter() {
+                    let Ok(attr_name) = attr_obj.extract::<String>() else {
+                        continue;
+                    };
+                    if !attr_name.starts_with('_') {
+                        attrs.push(attr_name);
+                    }
+                }
+                if !attrs.is_empty() {
+                    result.insert(name, attrs);
+                }
+            }
+            result
+        })
+    }
+
+    /// Get user variables with type and truncated repr for `/context` display
+    pub fn get_context_display(&self) -> Vec<(String, String, String)> {
+        Python::attach(|py| {
+            let Some(ctx) = &self.context else {
+                return Vec::new();
+            };
+            let bound_ctx = ctx.bind(py);
+            let Ok(globals) = bound_ctx.getattr("globals") else {
+                return Vec::new();
+            };
+            let Ok(items) = globals.call_method0("items") else {
+                return Vec::new();
+            };
+            let Ok(iter) = items.try_iter() else {
+                return Vec::new();
+            };
+
+            let mut entries = Vec::new();
+            for item_result in iter {
+                let Ok(item) = item_result else { continue };
+                let Ok((name, value)): Result<(String, pyo3::Bound<'_, PyAny>), _> = item.extract() else {
+                    continue;
+                };
+                if self.initial_globals.contains(&name) || name.starts_with('_') {
+                    continue;
+                }
+                let typ = value
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|_| "?".to_string());
+                let repr = value
+                    .repr()
+                    .map(|r| {
+                        let s = r.to_string();
+                        if s.len() > 60 { format!("{}...", &s[..57]) } else { s }
+                    })
+                    .unwrap_or_else(|_| "?".to_string());
+                entries.push((name, typ, repr));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        })
+    }
+
+    /// Get detail for a single variable (for `/context <var>`)
+    pub fn get_variable_detail(&self, name: &str) -> Option<String> {
+        Python::attach(|py| {
+            let ctx = self.context.as_ref()?;
+            let bound_ctx = ctx.bind(py);
+            let globals = bound_ctx.getattr("globals").ok()?;
+            let value = globals.call_method1("get", (name, py.None())).ok()?;
+            if value.is_none() {
+                return None;
+            }
+            let typ = value
+                .get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            let repr = value.repr().map(|r| r.to_string()).unwrap_or_else(|_| "?".to_string());
+            Some(format!("{}: {} = {}", name, typ, repr))
+        })
     }
 
     /// Get user-defined variable names (exclut builtins et noms internes)
@@ -94,14 +257,11 @@ impl ReplExecutor {
                     if let Ok(keys_obj) = globals.call_method0("keys") {
                         let mut names = Vec::new();
                         if let Ok(iter) = keys_obj.try_iter() {
-                            for key_result in iter {
-                                if let Ok(key_obj) = key_result {
-                                    if let Ok(s) = key_obj.extract::<String>() {
-                                        // Exclure builtins et noms internes (_)
-                                        if !self.initial_globals.contains(&s) && !s.starts_with('_')
-                                        {
-                                            names.push(s);
-                                        }
+                            for key_obj in iter.flatten() {
+                                if let Ok(s) = key_obj.extract::<String>() {
+                                    // Exclure builtins et noms internes (_)
+                                    if !self.initial_globals.contains(&s) && !s.starts_with('_') {
+                                        names.push(s);
                                     }
                                 }
                             }
@@ -116,13 +276,10 @@ impl ReplExecutor {
                     if let Ok(keys_obj) = locals.call_method0("keys") {
                         let mut names = Vec::new();
                         if let Ok(iter) = keys_obj.try_iter() {
-                            for key_result in iter {
-                                if let Ok(key_obj) = key_result {
-                                    if let Ok(s) = key_obj.extract::<String>() {
-                                        if !self.initial_globals.contains(&s) && !s.starts_with('_')
-                                        {
-                                            names.push(s);
-                                        }
+                            for key_obj in iter.flatten() {
+                                if let Ok(s) = key_obj.extract::<String>() {
+                                    if !self.initial_globals.contains(&s) && !s.starts_with('_') {
+                                        names.push(s);
                                     }
                                 }
                             }
@@ -136,6 +293,92 @@ impl ReplExecutor {
         })
     }
 
+    /// Process a Pragma IR node: extract directive/value and apply to PragmaContext (Rust-native)
+    fn process_pragma(&self, py: Python, ir_node: &ir::IR) -> Result<(), String> {
+        let (args, kwargs) = match ir_node {
+            ir::IR::Op {
+                opcode: IROpCode::Pragma,
+                args,
+                kwargs,
+                ..
+            } => (args, kwargs),
+            _ => return Ok(()),
+        };
+
+        if args.len() < 2 {
+            return Err("pragma requires at least 2 arguments".into());
+        }
+
+        let directive = match &args[0] {
+            ir::IR::String(s) => s.clone(),
+            _ => return Err("pragma directive must be a string".into()),
+        };
+
+        let pragma_type = match PragmaType::from_directive(&directive.to_lowercase()) {
+            Some(pt) => pt,
+            None => {
+                let known = PragmaType::all_directives().join(", ");
+                return Err(format!("Unknown pragma directive: '{}'. Known: {}", directive, known));
+            }
+        };
+
+        let value = ir_value_to_pyobject(py, &args[1]);
+
+        let options = PyDict::new(py);
+        for (key, val) in kwargs {
+            options
+                .set_item(key, ir_value_to_pyobject(py, val))
+                .map_err(|e| format!("Failed to set pragma option: {}", e))?;
+        }
+
+        let pragma = Pragma::new(pragma_type, directive, value, options.unbind().into(), None);
+        let pragma_py = Py::new(py, pragma).map_err(|e| format!("Failed to create Pragma: {}", e))?;
+
+        let pragma_ctx = self.pragma_context.as_ref().unwrap();
+        pragma_ctx
+            .borrow_mut(py)
+            .add(py, pragma_py)
+            .map_err(|e| format!("{}", e.value(py)))?;
+
+        Ok(())
+    }
+
+    /// Apply pragma effects to the execution context
+    fn apply_pragma_effects(&self, py: Python) -> Result<(), String> {
+        let Some(ref ctx) = self.context else {
+            return Ok(());
+        };
+        let Some(ref pragma_ctx) = self.pragma_context else {
+            return Ok(());
+        };
+
+        let pragma = pragma_ctx.borrow(py);
+        let bound_ctx = ctx.bind(py);
+
+        macro_rules! set_attr {
+            ($name:expr, $val:expr) => {
+                bound_ctx
+                    .setattr($name, $val)
+                    .map_err(|e| format!("Failed to set {}: {}", $name, e))?;
+            };
+        }
+
+        set_attr!("tco_enabled", pragma.tco_enabled);
+        set_attr!("jit_enabled", pragma.jit_enabled);
+        set_attr!("jit_all", pragma.jit_all);
+        set_attr!("nd_mode", &pragma.nd_mode);
+        set_attr!("nd_workers", pragma.nd_workers);
+        set_attr!("nd_memoize", pragma.nd_memoize);
+        set_attr!("nd_batch_size", pragma.nd_batch_size);
+
+        // Init JIT subsystem if enabled
+        if pragma.jit_enabled {
+            let _ = bound_ctx.call_method0("_init_jit");
+        }
+
+        Ok(())
+    }
+
     /// Execute code through full pipeline (Parser → Semantic → VM) and return result
     /// Returns a string representation of the result for display
     pub fn execute(&mut self, code: &str) -> Result<(String, ValueKind), String> {
@@ -143,7 +386,7 @@ impl ReplExecutor {
         let tree = self
             .parser
             .parse(code, None)
-            .ok_or_else(|| "Parse failed".to_string())?;
+            .ok_or_else(|| PARSE_FAILED_MESSAGE.to_string())?;
 
         let root = tree.root_node();
 
@@ -152,7 +395,7 @@ impl ReplExecutor {
             return Err(error);
         }
 
-        // 2. Transform to IRPure
+        // 2. Transform to IR
         let ir = transform_pure(root, code)?;
 
         // 3. Semantic analysis (validation + optimizations)
@@ -165,28 +408,35 @@ impl ReplExecutor {
                 .map_err(|e| format!("Failed to initialize context: {}", e))?;
 
             // Set context in VM
-            self.vm
-                .set_context(self.context.as_ref().unwrap().clone_ref(py));
+            self.vm.set_context(self.context.as_ref().unwrap().clone_ref(py));
 
             // Handle List of statements
             let result = match &optimized_ir {
-                ir::IRPure::List(statements) if !statements.is_empty() => {
+                ir::IR::List(statements) if !statements.is_empty() => {
                     let mut last_result = catnip_rs::vm::Value::NIL;
+                    let mut pragmas_changed = false;
 
                     for stmt in statements {
-                        // Skip None/empty statements
-                        if matches!(stmt, ir::IRPure::None) {
+                        if matches!(stmt, ir::IR::None) {
                             continue;
                         }
 
-                        // Convert IRPure → Op
-                        let op = convert::irpure_to_op(py, stmt)
-                            .map_err(|e| format!("Conversion error: {}", e))?;
+                        // Intercept pragma directives before compilation
+                        if matches!(
+                            stmt,
+                            ir::IR::Op {
+                                opcode: IROpCode::Pragma,
+                                ..
+                            }
+                        ) {
+                            self.process_pragma(py, stmt)?;
+                            pragmas_changed = true;
+                            continue;
+                        }
 
-                        // Compile Op → Bytecode
-                        let code_object = self
-                            .compiler
-                            .compile(py, op.bind(py))
+                        let mut compiler = UnifiedCompiler::new();
+                        let code_object = compiler
+                            .compile_pure(py, stmt)
                             .map_err(|e| format!("Compilation error: {}", e))?;
 
                         // Execute bytecode
@@ -194,25 +444,39 @@ impl ReplExecutor {
                         last_result = self
                             .vm
                             .execute(py, std::sync::Arc::new(code_object), &args)
-                            .map_err(|e| format!("VM execution error: {:?}", e))?;
+                            .map_err(map_vm_error)?;
+                    }
+
+                    // Apply pragma effects after processing all statements
+                    if pragmas_changed {
+                        self.apply_pragma_effects(py)?;
                     }
 
                     last_result
                 }
-                _ => {
-                    // Single statement
-                    let op = convert::irpure_to_op(py, &optimized_ir)
-                        .map_err(|e| format!("Conversion error: {}", e))?;
+                other => {
+                    // Single statement: check if it's a pragma
+                    if matches!(
+                        other,
+                        ir::IR::Op {
+                            opcode: IROpCode::Pragma,
+                            ..
+                        }
+                    ) {
+                        self.process_pragma(py, other)?;
+                        self.apply_pragma_effects(py)?;
+                        return Ok((String::new(), ValueKind::None));
+                    }
 
-                    let code_object = self
-                        .compiler
-                        .compile(py, op.bind(py))
+                    let mut compiler = UnifiedCompiler::new();
+                    let code_object = compiler
+                        .compile_pure(py, &optimized_ir)
                         .map_err(|e| format!("Compilation error: {}", e))?;
 
                     let args: Vec<catnip_rs::vm::Value> = Vec::new();
                     self.vm
                         .execute(py, std::sync::Arc::new(code_object), &args)
-                        .map_err(|e| format!("VM execution error: {:?}", e))?
+                        .map_err(map_vm_error)?
                 }
             };
 
@@ -254,7 +518,7 @@ impl ReplExecutor {
         let tree = self
             .parser
             .parse(code, None)
-            .ok_or_else(|| "Parse failed".to_string())?;
+            .ok_or_else(|| PARSE_FAILED_MESSAGE.to_string())?;
 
         let root = tree.root_node();
 
@@ -263,7 +527,7 @@ impl ReplExecutor {
             return Err(error);
         }
 
-        // 2. Transform to IRPure
+        // 2. Transform to IR
         let ir = transform_pure(root, code)?;
 
         // 3. Semantic analysis (validation + optimizations)
@@ -282,63 +546,60 @@ impl ReplExecutor {
 
             // Handle List of statements
             match &optimized_ir {
-                ir::IRPure::List(statements) if !statements.is_empty() => {
+                ir::IR::List(statements) if !statements.is_empty() => {
                     output.push_str("=== Bytecode ===\n");
                     for (i, stmt) in statements.iter().enumerate() {
-                        if matches!(stmt, ir::IRPure::None) {
+                        if matches!(stmt, ir::IR::None) {
                             continue;
                         }
 
                         output.push_str(&format!("Statement #{}\n", i + 1));
 
-                        // Convert IRPure → Op
-                        let op = convert::irpure_to_op(py, stmt)
-                            .map_err(|e| format!("Conversion error: {}", e))?;
-
-                        // Compile Op → Bytecode
-                        let code_object = self
-                            .compiler
-                            .compile(py, op.bind(py))
+                        let mut compiler = UnifiedCompiler::new();
+                        let code_object = compiler
+                            .compile_pure(py, stmt)
                             .map_err(|e| format!("Compilation error: {}", e))?;
 
                         // Format bytecode with instructions
-                        output.push_str(&format!("Instructions:\n"));
+                        output.push_str("Instructions:\n");
                         for (i, instr) in code_object.instructions.iter().enumerate() {
                             output.push_str(&format!("  {:3}: {:?}\n", i, instr));
                         }
-                        output.push_str(&format!(
-                            "\nConstants: {} values\n",
-                            code_object.constants.len()
-                        ));
+                        output.push_str(&format!("\nConstants: {} values\n", code_object.constants.len()));
                         output.push_str(&format!("Names: {:?}\n\n", code_object.names));
                     }
                 }
                 _ => {
                     output.push_str("=== Bytecode ===\n");
-                    // Single statement
-                    let op = convert::irpure_to_op(py, &optimized_ir)
-                        .map_err(|e| format!("Conversion error: {}", e))?;
-
-                    let code_object = self
-                        .compiler
-                        .compile(py, op.bind(py))
+                    let mut compiler = UnifiedCompiler::new();
+                    let code_object = compiler
+                        .compile_pure(py, &optimized_ir)
                         .map_err(|e| format!("Compilation error: {}", e))?;
 
                     // Format bytecode with instructions
-                    output.push_str(&format!("Instructions:\n"));
+                    output.push_str("Instructions:\n");
                     for (i, instr) in code_object.instructions.iter().enumerate() {
                         output.push_str(&format!("  {:3}: {:?}\n", i, instr));
                     }
-                    output.push_str(&format!(
-                        "\nConstants: {} values\n",
-                        code_object.constants.len()
-                    ));
+                    output.push_str(&format!("\nConstants: {} values\n", code_object.constants.len()));
                     output.push_str(&format!("Names: {:?}\n", code_object.names));
                 }
             }
 
             Ok(output)
         })
+    }
+}
+
+/// Convert simple IR literal to PyObject (for pragma args)
+fn ir_value_to_pyobject(py: Python, ir: &ir::IR) -> Py<PyAny> {
+    match ir {
+        ir::IR::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
+        ir::IR::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
+        ir::IR::Int(i) => i.into_pyobject(py).unwrap().into_any().unbind(),
+        ir::IR::Float(f) => f.into_pyobject(py).unwrap().into_any().unbind(),
+        ir::IR::None => py.None(),
+        _ => py.None(),
     }
 }
 
@@ -349,12 +610,8 @@ fn store_last_result(py: Python, context: &Py<PyAny>, vm_value: catnip_rs::vm::V
     let bound_ctx = context.bind(py);
 
     // Convert VM Value to PyObject
-    let pyobj: Option<Py<PyAny>> = if let Some(ptr) = unsafe { vm_value.as_pyobj_ptr() } {
-        if !ptr.is_null() {
-            unsafe { Some(pyo3::Bound::from_borrowed_ptr(py, ptr).unbind()) }
-        } else {
-            None
-        }
+    let pyobj: Option<Py<PyAny>> = if let Some(obj) = vm_value.as_pyobject(py) {
+        Some(obj)
     } else if let Some(n) = vm_value.as_int() {
         Some(PyInt::new(py, n).into())
     } else if let Some(f) = vm_value.as_float() {
@@ -363,8 +620,11 @@ fn store_last_result(py: Python, context: &Py<PyAny>, vm_value: catnip_rs::vm::V
         Some(PyBool::new(py, b).to_owned().into())
     } else if vm_value.is_nil() {
         Some(py.None())
+    } else if vm_value.is_bigint() {
+        Some(vm_value.to_pyobject(py))
     } else {
-        None
+        // Preserve any remaining VM-native values instead of dropping to None.
+        Some(vm_value.to_pyobject(py))
     };
 
     // Store in globals under _
@@ -387,10 +647,7 @@ pub enum ValueKind {
 }
 
 /// Convert VM Value to display string + kind tag
-fn vm_value_to_display_string(
-    py: Python,
-    vm_value: catnip_rs::vm::Value,
-) -> Result<(String, ValueKind), String> {
+fn vm_value_to_display_string(py: Python, vm_value: catnip_rs::vm::Value) -> Result<(String, ValueKind), String> {
     // Try each type in order (NaN-boxed value)
     if vm_value.is_nil() {
         return Ok((String::new(), ValueKind::None));
@@ -411,44 +668,48 @@ fn vm_value_to_display_string(
     }
 
     if let Some(b) = vm_value.as_bool() {
-        return Ok((
-            if b { "True" } else { "False" }.to_string(),
-            ValueKind::Bool,
-        ));
+        return Ok((if b { "True" } else { "False" }.to_string(), ValueKind::Bool));
+    }
+
+    if vm_value.is_bigint() {
+        let py_obj = vm_value.to_pyobject(py);
+        let s = py_obj
+            .bind(py)
+            .str()
+            .map_err(|e| format!("Failed to format bigint: {}", e))?;
+        return Ok((s.to_string(), ValueKind::Int));
+    }
+
+    if vm_value.is_struct_instance() {
+        let py_obj = vm_value.to_pyobject(py);
+        let repr = py_obj
+            .bind(py)
+            .repr()
+            .map_err(|e| format!("Failed to get struct repr: {}", e))?;
+        return Ok((repr.to_string(), ValueKind::Object));
     }
 
     if vm_value.is_pyobj() {
-        // Get string representation from PyObject
-        if let Some(ptr) = unsafe { vm_value.as_pyobj_ptr() } {
-            if !ptr.is_null() {
-                unsafe {
-                    let bound = pyo3::Bound::from_borrowed_ptr(py, ptr);
+        let py_obj = vm_value.to_pyobject(py);
+        let bound = py_obj.bind(py);
 
-                    // Detect Python strings for distinct coloring
-                    let kind = if bound.is_instance_of::<pyo3::types::PyString>() {
-                        ValueKind::String
-                    } else {
-                        ValueKind::Object
-                    };
+        // Detect Python strings for distinct coloring
+        let kind = if bound.is_instance_of::<pyo3::types::PyString>() {
+            ValueKind::String
+        } else {
+            ValueKind::Object
+        };
 
-                    // Decimal → display with d suffix
-                    if let Ok(decimal_cls) = py.import("decimal").and_then(|m| m.getattr("Decimal"))
-                    {
-                        if bound.is_instance(&decimal_cls).unwrap_or(false) {
-                            let s = bound
-                                .str()
-                                .map_err(|e| format!("Failed to get str: {}", e))?;
-                            return Ok((format!("{}d", s), ValueKind::Float));
-                        }
-                    }
-
-                    let repr = bound
-                        .repr()
-                        .map_err(|e| format!("Failed to get repr: {}", e))?;
-                    return Ok((repr.to_string(), kind));
-                }
+        // Decimal -> display with d suffix
+        if let Ok(decimal_cls) = py.import("decimal").and_then(|m| m.getattr("Decimal")) {
+            if bound.is_instance(&decimal_cls).unwrap_or(false) {
+                let s = bound.str().map_err(|e| format!("Failed to get str: {}", e))?;
+                return Ok((format!("{}d", s), ValueKind::Float));
             }
         }
+
+        let repr = bound.repr().map_err(|e| format!("Failed to get repr: {}", e))?;
+        return Ok((repr.to_string(), kind));
     }
 
     // Fallback
@@ -458,11 +719,7 @@ fn vm_value_to_display_string(
 /// Find syntax error in tree
 fn find_syntax_error(node: &tree_sitter::Node, source: &str) -> Option<String> {
     if node.is_error() {
-        return Some(format_syntax_error_with_context(
-            node,
-            source,
-            "Syntax error",
-        ));
+        return Some(format_syntax_error_with_context(node, source, "Syntax error"));
     }
 
     if node.is_missing() {
@@ -485,11 +742,7 @@ fn find_syntax_error(node: &tree_sitter::Node, source: &str) -> Option<String> {
 }
 
 /// Format syntax error with context (shows line and column with visual pointer)
-fn format_syntax_error_with_context(
-    node: &tree_sitter::Node,
-    source: &str,
-    message: &str,
-) -> String {
+fn format_syntax_error_with_context(node: &tree_sitter::Node, source: &str, message: &str) -> String {
     let pos = node.start_position();
     let line_num = pos.row + 1;
     let col_num = pos.column + 1;
@@ -516,6 +769,15 @@ fn format_syntax_error_with_context(
     output
 }
 
+/// Convert VMError to string, with special format for Exit
+fn map_vm_error(e: VMError) -> String {
+    match e {
+        VMError::Exit(code) => format!("exit({})", code),
+        VMError::Interrupted => "KeyboardInterrupt".to_string(),
+        other => format!("{other}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +802,15 @@ mod tests {
 
         let (result, _) = executor.execute("2 + 3").unwrap();
         assert_eq!(result, "5");
+    }
+
+    #[test]
+    fn test_execute_bigint_display() {
+        let mut executor = ReplExecutor::new().unwrap();
+
+        let (result, kind) = executor.execute("2 ** 100").unwrap();
+        assert_eq!(result, "1267650600228229401496703205376");
+        assert_eq!(kind, ValueKind::Int);
     }
 
     #[test]
@@ -576,5 +847,19 @@ mod tests {
         let tree = executor.parser.parse("x = 10", None).unwrap();
         let ir = transform_pure(tree.root_node(), "x = 10").unwrap();
         eprintln!("=== IR for 'x = 10' ===\n{:#?}\n", ir);
+    }
+
+    #[test]
+    fn test_pragma_tco() {
+        let mut executor = ReplExecutor::new().unwrap();
+
+        // pragma should not error (Catnip uses True/False, not true/false)
+        let result = executor.execute("pragma(\"tco\", True)");
+        assert!(result.is_ok(), "pragma(\"tco\", True) failed: {:?}", result.err());
+
+        // Should return empty (no visible result)
+        let (text, kind) = result.unwrap();
+        assert_eq!(kind, ValueKind::None);
+        assert!(text.is_empty());
     }
 }

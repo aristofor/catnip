@@ -1,6 +1,6 @@
 # BROADCAST_RATIONALE
 
-Voir aussi : [BROADCAST_SPEC.md](./BROADCAST_SPEC.md) pour la syntaxe normative et la sémantique.
+Voir aussi : [BROADCAST_SPEC](BROADCAST_SPEC.md) pour la syntaxe normative et la sémantique.
 
 ## Pourquoi le Broadcasting ?
 
@@ -47,7 +47,7 @@ data.[list(True, False, True, False, False)]  # Masque: [3, 2]
 
 # Opérateurs ND
 data.[~> abs]    # ND-map: applique abs à chaque élément
-data.[~~ (n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]  # ND-recursion: factorielle
+data.[~~(n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]  # ND-recursion: factorielle
 ```
 
 > Achievement unlocked: Compréhension partielle du broadcasting.

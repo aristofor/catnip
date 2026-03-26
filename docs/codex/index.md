@@ -17,14 +17,17 @@ Pas de wrapper, pas de FFI : l'interopérabilité est native.
 
 ## Organisation
 
-| Dossier                            | Domaine                        | Exemples                                           |
-| ---------------------------------- | ------------------------------ | -------------------------------------------------- |
-| [files-formats/](files-formats/)   | Fichiers et formats de données | pathlib, regex, yaml, json, xml, jmespath, parquet |
-| [data-analytics/](data-analytics/) | Analyse de données             | numpy, duckdb, sqlalchemy, polars                  |
-| [web/](web/)                       | HTTP et APIs                   | httpx, selectolax                                  |
-| [images-media/](images-media/)     | Images et multimédia           | pillow                                             |
-| [geospatial/](geospatial/)         | Géospatial                     | haversine, rasterio, sentinel-2 (STAC)             |
-| [geometry/](geometry/)             | Géométrie                      | enveloppe convexe (Graham, Quickhull)              |
+| Dossier                              | Domaine                        | Exemples                                |
+| ------------------------------------ | ------------------------------ | --------------------------------------- |
+| [files-formats/](files-formats/)     | Fichiers et formats de données | regex, yaml, xml, jmespath, parquet     |
+| [data-analytics/](data-analytics/)   | Analyse de données             | numpy, duckdb, sqlalchemy, polars       |
+| [web/](web/)                         | HTTP et APIs                   | selectolax                              |
+| [images-media/](images-media/)       | Images et multimédia           | pillow                                  |
+| [geospatial/](geospatial/)           | Géospatial                     | haversine, rasterio, sentinel-2, folium |
+| [geometry/](geometry/)               | Géométrie                      | enveloppe convexe (Graham, Quickhull)   |
+| [visualization/](visualization/)     | Visualisation                  | hvplot                                  |
+| [symbolic-graphs/](symbolic-graphs/) | Calcul symbolique & graphes    | networkx                                |
+| [utils/](utils/)                     | Utilitaires                    | tqdm                                    |
 
 ## Exemples de base
 

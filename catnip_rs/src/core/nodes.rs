@@ -84,12 +84,7 @@ pub struct TailCall {
 impl TailCall {
     #[new]
     #[pyo3(signature = (func=None, args=None, kwargs=None))]
-    fn new(
-        py: Python<'_>,
-        func: Option<Py<PyAny>>,
-        args: Option<Py<PyAny>>,
-        kwargs: Option<Py<PyAny>>,
-    ) -> Self {
+    fn new(py: Python<'_>, func: Option<Py<PyAny>>, args: Option<Py<PyAny>>, kwargs: Option<Py<PyAny>>) -> Self {
         let func = func.unwrap_or_else(|| py.None());
         let args = args.unwrap_or_else(|| py.None());
         let kwargs = kwargs.unwrap_or_else(|| py.None());

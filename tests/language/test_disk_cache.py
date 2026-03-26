@@ -224,9 +224,9 @@ if __name__ == '__main__':
     pytest.main([__file__, '-v'])
 
 # Removed (CatnipCacheDisk.v, CatnipCacheMemory.v):
-# - test_disk_cache_creation_with_limits — trivially covered by creation
-# - test_get_nonexistent_key — trivial miss
-# - test_delete_nonexistent — trivial
-# - test_stats_empty_cache — empty_cache_zero_hits
-# - test_stats_with_data — mc_get_counter_total (analogous)
-# - test_hit_miss_counting — mc_get_hit_increments, mc_get_miss_increments (analogous)
+# - test_disk_cache_creation_with_limits - trivially covered by creation
+# - test_get_nonexistent_key - trivial miss
+# - test_delete_nonexistent - trivial
+# - test_stats_empty_cache - empty_cache_zero_hits
+# - test_stats_with_data - mc_get_counter_total (analogous)
+# - test_hit_miss_counting - mc_get_hit_increments, mc_get_miss_increments (analogous)

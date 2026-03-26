@@ -5,7 +5,7 @@ logging, exceptions, etc.) aux scripts Catnip.
 
 ## Philosophie
 
-Catnip est conçu pour être **embarqué** dans des applications Python. L'hôte peut exposer ses services (Redis, logging,
+Catnip est conçu comme **DSL embarqué** dans des applications Python. L'hôte peut exposer ses services (Redis, logging,
 etc.) via le `Context` pour que les scripts Catnip les utilisent de manière contrôlée.
 
 > Expose l'utile, garde le sas fermé.
@@ -208,7 +208,7 @@ ctx = Context(logger=logger)
 catnip = Catnip(context=ctx)
 
 # Le logger est utilisé par Catnip pour print(), warnings, etc.
-catnip.parse('print("hello")')
+catnip.parse('print("BORN TO SEGFAULT")')
 catnip.execute()
 ```
 

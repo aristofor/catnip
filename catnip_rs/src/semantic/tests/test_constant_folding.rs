@@ -8,6 +8,7 @@
 //! formally proved in proof/CatnipConstFoldProof.v and removed from here.
 
 use super::helpers::*;
+use crate::constants::*;
 use crate::ir::IROpCode;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -24,14 +25,9 @@ fn test_no_fold_with_variables() {
     // x + 2 should NOT fold (x is not a constant)
     Python::initialize();
     Python::attach(|py| {
-        let nodes_mod = py
-            .import("catnip.nodes")
-            .expect("Failed to import catnip.nodes");
+        let nodes_mod = py.import(PY_MOD_NODES).expect("Failed to import catnip.nodes");
         let ref_class = nodes_mod.getattr("Ref").expect("Failed to get Ref class");
-        let x = ref_class
-            .call1(("x",))
-            .expect("Failed to create Ref")
-            .unbind();
+        let x = ref_class.call1(("x",)).expect("Failed to create Ref").unbind();
 
         let two = literal(py, 2);
         let add = add_op(py, &x, &two);
@@ -85,11 +81,11 @@ fn test_does_not_fold_function_calls() {
 
 #[test]
 fn test_eq_with_call_object_not_folded() {
-    // EQ(Call(len, Ref(x)), 0) must NOT be folded — Call is not a constant
+    // EQ(Call(len, Ref(x)), 0) must NOT be folded - Call is not a constant
     Python::initialize();
     Python::attach(|py| {
         let call_class = py
-            .import("catnip.transformer")
+            .import(PY_MOD_TRANSFORMER)
             .expect("Failed to import")
             .getattr("Call")
             .expect("Failed to get Call");
@@ -128,10 +124,7 @@ fn test_division_by_zero_not_folded() {
         match result {
             Ok(node) => {
                 let is_div = has_opcode(py, &node, IROpCode::TrueDiv);
-                assert!(
-                    is_div,
-                    "Division by zero should not be folded at compile time"
-                );
+                assert!(is_div, "Division by zero should not be folded at compile time");
             }
             Err(e) => {
                 let err_str = e.to_string();
@@ -189,10 +182,7 @@ fn test_string_multiplication() {
 
         let result = run_constant_folding_pass(py, &mul).expect("ConstantFolding failed");
 
-        let result_str = result
-            .bind(py)
-            .extract::<String>()
-            .expect("Should be string");
+        let result_str = result.bind(py).extract::<String>().expect("Should be string");
         assert_eq!(
             result_str, "hellohellohello",
             "\"hello\" * 3 should fold to \"hellohellohello\""
@@ -212,11 +202,7 @@ fn test_float_arithmetic() {
         let result = run_constant_folding_pass(py, &add).expect("ConstantFolding failed");
 
         let val = result.bind(py).extract::<f64>().expect("Should be float");
-        assert!(
-            (val - 4.0).abs() < 1e-10,
-            "1.5 + 2.5 should fold to 4.0, got {}",
-            val
-        );
+        assert!((val - 4.0).abs() < 1e-10, "1.5 + 2.5 should fold to 4.0, got {}", val);
     });
 }
 

@@ -1,0 +1,108 @@
+#!/usr/bin/env catnip
+# Réseau social : centralité, rôles, communautés (NetworkX)
+# Graphe non orienté, 10 noeuds, métriques de centralité, plus court chemin
+#
+# Ref: https://en.wikipedia.org/wiki/Centrality
+
+nx = import('networkx')
+import('builtins', 'sorted')
+
+# Modèle de données
+
+struct Person { name; role; }
+
+struct NodeReport {
+    name; role; degree; betweenness; category;
+
+    display(self) => {
+        f"  {self.name} ({self.role}) : {self.betweenness} [{self.category}]"
+    }
+}
+
+# Classification par centralité (pattern matching sur seuils)
+classify = (betweenness, degree) => {
+    match True {
+        _ if betweenness > 0.3  => { "hub" }
+        _ if betweenness > 0.05 => { "bridge" }
+        _ if degree > 0.4       => { "connector" }
+        _                       => { "peripheral" }
+    }
+}
+
+# Construction du graphe
+
+persons = list(
+    Person("alice", "lead"),
+    Person("bob", "dev"),
+    Person("charlie", "dev"),
+    Person("diana", "design"),
+    Person("eve", "pm"),
+    Person("frank", "dev"),
+    Person("grace", "data"),
+    Person("hector", "ops"),
+    Person("iris", "dev"),
+    Person("jules", "qa"),
+)
+
+G = nx.Graph()
+
+for p in persons {
+    G.add_node(p.name, role=p.role)
+}
+
+# Arêtes : collaborations (topologie hub-spoke + sous-clusters)
+edges = list(
+    tuple("alice", "bob"), tuple("alice", "charlie"),
+    tuple("alice", "diana"), tuple("alice", "eve"),
+    tuple("alice", "grace"), tuple("bob", "charlie"),
+    tuple("bob", "frank"), tuple("bob", "iris"),
+    tuple("charlie", "frank"), tuple("charlie", "iris"),
+    tuple("diana", "eve"), tuple("eve", "hector"),
+    tuple("eve", "grace"), tuple("grace", "hector"),
+    tuple("frank", "jules"), tuple("iris", "jules"),
+)
+
+G.add_edges_from(edges)
+
+print(f"⇒ Réseau social ({len(persons)} personnes, {G.number_of_edges()} arêtes)")
+
+# Métriques de centralité
+
+deg = nx.degree_centrality(G)
+bet = nx.betweenness_centrality(G)
+
+# Broadcasting : construction des rapports depuis les métriques
+reports = persons.[(p) => {
+        NodeReport(
+            p.name, p.role,
+            round(deg[p.name], 3),
+            round(bet[p.name], 3),
+            classify(bet[p.name], deg[p.name]),
+        )
+    }]
+
+sorted_reports = sorted(reports, key=(r) => { -r.betweenness })
+
+print()
+print("⇒ Top 5 centralité (betweenness)")
+for r in sorted_reports[:5] {
+    print(r.display())
+}
+
+# Plus court chemin
+
+src  = "jules"
+dst  = "diana"
+path = nx.shortest_path(G, src, dst)
+
+print(f"\n⇒ Plus court chemin {src} → {dst}")
+print(f"  {' → '.join(path)} ({len(path) - 1} sauts)")
+
+# Communautés (Clauset-Newman-Moore greedy modularity)
+
+communities = nx.community.greedy_modularity_communities(G)
+
+print(f"\n⇒ Communautés détectées ({len(communities)})")
+for i in range(len(communities)) {
+    print(f"  Communauté {i + 1} : {', '.join(sorted(communities[i]))}")
+}

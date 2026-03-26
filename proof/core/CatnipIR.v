@@ -1,5 +1,5 @@
 (* FILE: proof/core/CatnipIR.v *)
-(* CatnipIR.v — Formal model of Catnip's Intermediate Representation
+(* CatnipIR.v - Formal model of Catnip's Intermediate Representation
  *
  * Source of truth:
  *   catnip_rs/src/ir/opcode.rs  (IROpCode, 59 opcodes, repr(u8) 1..59)
@@ -71,7 +71,7 @@ Proof. decide equality. Defined.
 
 
 (* ================================================================ *)
-(* C. IRPure — full IR node type                                      *)
+(* C. IRPure - full IR node type                                      *)
 (*                                                                    *)
 (* Float abstracted as Z (proofs reason about structure, not IEEE).    *)
 (* ================================================================ *)

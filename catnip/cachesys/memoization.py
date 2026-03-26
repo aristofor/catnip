@@ -9,6 +9,9 @@ Note: This is memoization (storing function results), not compilation caching.
 
 from typing import Any, Callable, Optional
 
+# Sentinel to distinguish cache miss from a cached None value
+_CACHE_MISS = object()
+
 from catnip._rs import CacheEntry, CacheKey, CacheType, MemoryCache
 
 from .base import CacheBackend
@@ -41,11 +44,11 @@ class Memoization:
         :return: Cached result or None if cache miss
         """
         if not self._enabled:
-            return None
+            return _CACHE_MISS
 
         key = self._make_key(func_name, args, kwargs)
         entry: Optional[CacheEntry] = self.backend.get(key)
-        return entry.value if entry else None
+        return entry.value if entry else _CACHE_MISS
 
     def set(self, func_name: str, args: tuple, kwargs: dict, result: Any) -> None:
         """
@@ -201,8 +204,11 @@ class CachedWrapper:
             {},
         )
 
+        # Cache miss: _CACHE_MISS (Python Memoization) or None (Rust Memoization)
+        is_miss = cached_result is _CACHE_MISS or cached_result is None
+
         # Validate cache if validator is provided
-        if cached_result is not None and self.validator is not None:
+        if not is_miss and self.validator is not None:
             if not self.validator(cached_result, *args, **kwargs):
                 # Cache invalid, delete and recalculate
                 self.cache.invalidate_key(
@@ -210,9 +216,9 @@ class CachedWrapper:
                     cache_key if isinstance(cache_key, tuple) else (cache_key,),
                     {},
                 )
-                cached_result = None
+                is_miss = True
 
-        if cached_result is not None:
+        if not is_miss:
             return cached_result
 
         # Cache miss: execute and store

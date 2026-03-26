@@ -5,8 +5,8 @@
 Flow: Rust (source of truth) → Python (generated)
 
 Generates:
-- catnip/semantic/opcode.py from src/ir/opcode.rs
-- catnip/vm/opcodes.py from src/vm/opcode.rs
+- catnip/semantic/opcode.py from catnip_core/src/ir/opcode.rs
+- catnip/vm/opcodes.py from catnip_core/src/vm/opcode.rs
 
 The Rust files define the opcodes with explicit values.
 Python files are generated with the same explicit values (no auto()).
@@ -84,6 +84,7 @@ SNAKE_CASE_OVERRIDES = {
     'JumpIfTrue': 'JUMP_IF_TRUE',
     'JumpIfFalseOrPop': 'JUMP_IF_FALSE_OR_POP',
     'JumpIfTrueOrPop': 'JUMP_IF_TRUE_OR_POP',
+    'JumpIfNotNoneOrPop': 'JUMP_IF_NOT_NONE_OR_POP',
     'UnpackSequence': 'UNPACK_SEQUENCE',
     'UnpackEx': 'UNPACK_EX',
     'LoadConst': 'LOAD_CONST',
@@ -295,12 +296,18 @@ def generate_vm_opcodes_py(opcodes: List[Tuple[str, int]], rust_path: str) -> st
         '    VMOp.GE: (2, 1),',
         '    VMOp.EQ: (2, 1),',
         '    VMOp.NE: (2, 1),',
+        '    VMOp.IN: (2, 1),',
+        '    VMOp.NOT_IN: (2, 1),',
+        '    VMOp.IS: (2, 1),',
+        '    VMOp.IS_NOT: (2, 1),',
         '    VMOp.NOT: (1, 1),',
+        '    VMOp.TO_BOOL: (1, 1),',
         '    VMOp.JUMP: (0, 0),',
         '    VMOp.JUMP_IF_FALSE: (1, 0),',
         '    VMOp.JUMP_IF_TRUE: (1, 0),',
         '    VMOp.JUMP_IF_FALSE_OR_POP: (1, 0),',
         '    VMOp.JUMP_IF_TRUE_OR_POP: (1, 0),',
+        '    VMOp.JUMP_IF_NOT_NONE_OR_POP: (1, 0),',
         '    VMOp.GET_ITER: (1, 1),',
         '    VMOp.FOR_ITER: (0, 1),',
         '    VMOp.FOR_RANGE_INT: (0, 0),',
@@ -341,6 +348,7 @@ def generate_vm_opcodes_py(opcodes: List[Tuple[str, int]], rust_path: str) -> st
         '    VMOp.CALL_METHOD: (-1, 1),',
         '    VMOp.MATCH_FAIL: (0, 0),',
         '    VMOp.MATCH_ASSIGN_PATTERN_VM: (1, 1),',
+        '    VMOp.EXIT: (-1, 0),',
         '}',
         '',
         '',
@@ -358,6 +366,7 @@ def generate_vm_opcodes_py(opcodes: List[Tuple[str, int]], rust_path: str) -> st
         '        VMOp.JUMP_IF_TRUE,',
         '        VMOp.JUMP_IF_FALSE_OR_POP,',
         '        VMOp.JUMP_IF_TRUE_OR_POP,',
+        '        VMOp.JUMP_IF_NOT_NONE_OR_POP,',
         '        VMOp.FOR_ITER,',
         '        VMOp.FOR_RANGE_INT,',
         '        VMOp.CALL,',
@@ -385,6 +394,7 @@ def generate_vm_opcodes_py(opcodes: List[Tuple[str, int]], rust_path: str) -> st
         '        VMOp.CALL_METHOD,',
         '        VMOp.MATCH_FAIL,',
         '        VMOp.MATCH_ASSIGN_PATTERN_VM,',
+        '        VMOp.EXIT,',
         '    }',
         ')',
         '',
@@ -409,26 +419,28 @@ def main():
     base_path = Path(__file__).parent
     catnip_path = base_path.parent / 'catnip'
 
-    # Parse IR opcodes from Rust
+    core_path = base_path.parent / 'catnip_core'
+
+    # Parse IR opcodes from Rust (source of truth in catnip_core)
     print("Parsing IR opcodes from Rust...")
-    ir_rust_path = base_path / 'src' / 'ir' / 'opcode.rs'
+    ir_rust_path = core_path / 'src' / 'ir' / 'opcode.rs'
     ir_opcodes = parse_rust_enum(ir_rust_path, 'IROpCode')
     print(f"  Found {len(ir_opcodes)} IR opcodes")
 
     # Generate Python IR opcodes
-    ir_py = generate_ir_opcode_py(ir_opcodes, 'catnip_rs/src/ir/opcode.rs')
+    ir_py = generate_ir_opcode_py(ir_opcodes, 'catnip_core/src/ir/opcode.rs')
     ir_output = catnip_path / 'semantic' / 'opcode.py'
     ir_output.write_text(ir_py)
     print(f"  Generated {ir_output}")
 
-    # Parse VM opcodes from Rust
+    # Parse VM opcodes from Rust (source of truth in catnip_core)
     print("Parsing VM opcodes from Rust...")
-    vm_rust_path = base_path / 'src' / 'vm' / 'opcode.rs'
+    vm_rust_path = core_path / 'src' / 'vm' / 'opcode.rs'
     vm_opcodes = parse_rust_enum(vm_rust_path, 'VMOpCode')
     print(f"  Found {len(vm_opcodes)} VM opcodes")
 
     # Generate Python VM opcodes
-    vm_py = generate_vm_opcodes_py(vm_opcodes, 'catnip_rs/src/vm/opcode.rs')
+    vm_py = generate_vm_opcodes_py(vm_opcodes, 'catnip_core/src/vm/opcode.rs')
     vm_output = catnip_path / 'vm' / 'opcodes.py'
     vm_output.write_text(vm_py)
     print(f"  Generated {vm_output}")

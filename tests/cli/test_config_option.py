@@ -114,8 +114,8 @@ class TestConfigOption:
             config_path = f.name
 
         try:
-            # Format avec indent custom
-            result = runner.invoke(main, ['--config', config_path, 'format', '--stdin'], input='{\nx=1\n}')
+            # Format avec indent custom (multi-stmt block to test indentation)
+            result = runner.invoke(main, ['--config', config_path, 'format', '--stdin'], input='{\nx=1\ny=2\n}')
             assert result.exit_code == 0
             # Vérifier indentation de 8 espaces
             assert '        x = 1' in result.output

@@ -17,13 +17,12 @@ fn block_node(py: Python, stmts: Vec<Py<PyAny>>) -> Py<PyAny> {
 
 /// Helper to run CSE pass on an IR node
 fn run_cse_pass(py: Python, ir: &Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Instantiate via Python to access the constructor
-    let cse_module = py.import("catnip._rs")?;
-    let cse_class = cse_module.getattr("CommonSubexpressionEliminationPass")?;
-    let pass_instance = cse_class.call0()?;
+    use crate::semantic::common_subexpression_elimination::CommonSubexpressionEliminationPass;
+    use crate::semantic::optimizer::OptimizationPass;
+
+    let pass = CommonSubexpressionEliminationPass::new();
     let ir_bound = ir.bind(py);
-    let result = pass_instance.call_method1("visit", (ir_bound,))?;
-    Ok(result.unbind())
+    pass.visit(py, ir_bound)
 }
 
 /// Helper to create a SET_LOCALS node (assignment)
@@ -60,7 +59,7 @@ fn count_cse_vars(py: Python, block: &Py<PyAny>) -> PyResult<usize> {
         let type_name_obj = stmt_type.name()?;
         let type_name = type_name_obj.to_str()?;
 
-        if type_name == "IR" {
+        if type_name == "IR" || type_name == "Op" {
             let ident: i32 = stmt.getattr("ident")?.extract()?;
             if ident == OpCode::SET_LOCALS as i32 {
                 let stmt_args = stmt.getattr("args")?;
@@ -112,17 +111,14 @@ fn test_cse_basic_duplicate() {
 
         // Check that CSE variables were created
         let cse_count = count_cse_vars(py, &optimized).expect("Failed to count CSE vars");
-        assert!(
-            cse_count >= 1,
-            "CSE should create at least one temporary for b * 2"
-        );
+        assert!(cse_count >= 1, "CSE should create at least one temporary for b * 2");
     });
 }
 
-// Removed: test_cse_multiple_duplicates — semantics proven by cse_replace_correct (CatnipStorePropProof.v:350),
+// Removed: test_cse_multiple_duplicates - semantics proven by cse_replace_correct (CatnipStorePropProof.v:350),
 // mechanics covered by test_cse_basic_duplicate + test_cse_complex_expression
 
-// Removed: test_cse_no_duplicate — no-op case proven by cse_same_key_same_value (CatnipCFGSSAProof.v:690)
+// Removed: test_cse_no_duplicate - no-op case proven by cse_same_key_same_value (CatnipCFGSSAProof.v:690)
 
 #[test]
 fn test_cse_complex_expression() {

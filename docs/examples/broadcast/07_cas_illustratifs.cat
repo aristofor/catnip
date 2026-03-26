@@ -1,5 +1,5 @@
-# check: no-check
-# Exemple 07 : Cas d'usage illustratifs
+#!/usr/bin/env catnip
+# Exemple : Cas d'usage illustratifs
 # Applications illustratives du broadcasting
 
 print("⇒ Analyse de données de ventes")
@@ -10,7 +10,7 @@ ventes = list(
     list(5, 30.0),
     list(15, 20.0),
     list(8, 35.0),
-    list(12, 28.0)
+    list(12, 28.0),
 )
 
 print("Ventes [quantité, prix]:")
@@ -36,7 +36,8 @@ print("\nTotaux:", totaux)
 total_general = sum(totaux)
 print("Total général:", total_general)
 
-print("\n⇒ Conversion de températures\n")
+print()
+print("⇒ Conversion de températures\n")
 
 # Celsius vers Fahrenheit: F = C * 9/5 + 32
 celsius = list(0, 10, 20, 25, 30, 37, 100)
@@ -47,7 +48,8 @@ etape1 = celsius.[* 1.8]
 fahrenheit = etape1.[+ 32]
 print("Températures en Fahrenheit:", fahrenheit)
 
-print("\n⇒ Calcul de statistiques\n")
+print()
+print("⇒ Calcul de statistiques\n")
 
 # Données brutes
 valeurs = list(12, 15, 18, 22, 25, 28, 30, 15, 20)
@@ -73,7 +75,8 @@ print("Variance:", variance)
 ecart_type = variance ** 0.5
 print("Écart-type:", ecart_type)
 
-print("\n⇒ Normalisation de scores\n")
+print()
+print("⇒ Normalisation de scores\n")
 
 # Scores bruts d'étudiants
 scores = list(45, 78, 92, 65, 88, 72, 55, 95)
@@ -94,7 +97,8 @@ for score in normalises {
     print(" ", round(score, 1))
 }
 
-print("\n⇒ Calcul de remises progressives\n")
+print()
+print("⇒ Calcul de remises progressives\n")
 
 # Prix de base
 prix = list(50, 100, 150, 200, 250)
@@ -112,7 +116,8 @@ print("Avec remise 20%:", remise_20)
 remise_30 = prix.[* 0.7]
 print("Avec remise 30%:", remise_30)
 
-print("\n⇒ Simulation de croissance\n")
+print()
+print("⇒ Simulation de croissance\n")
 
 # Capital initial
 capital = 1000

@@ -1,6 +1,7 @@
 // FILE: catnip_rs/src/vm/traits.rs
 //! Trait system: registration, stable topological linearization, conflict detection.
 
+use indexmap::IndexMap;
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
@@ -22,9 +23,9 @@ pub struct TraitDef {
     pub extends: Vec<String>,
     pub fields: Vec<TraitField>,
     /// Actual callables for each method (name -> PyObject)
-    pub method_bodies: HashMap<String, Py<PyAny>>,
+    pub method_bodies: IndexMap<String, Py<PyAny>>,
     /// Static methods (no self binding).
-    pub static_methods: HashMap<String, Py<PyAny>>,
+    pub static_methods: IndexMap<String, Py<PyAny>>,
     /// Abstract methods declared in this trait.
     pub abstract_methods: HashSet<MethodKey>,
 }
@@ -34,9 +35,9 @@ impl TraitDef {
         name: String,
         extends: Vec<String>,
         fields: Vec<TraitField>,
-        method_bodies: HashMap<String, Py<PyAny>>,
+        method_bodies: IndexMap<String, Py<PyAny>>,
         abstract_methods: HashSet<MethodKey>,
-        static_methods: HashMap<String, Py<PyAny>>,
+        static_methods: IndexMap<String, Py<PyAny>>,
     ) -> Self {
         Self {
             name,
@@ -57,9 +58,9 @@ pub struct ResolvedTraits {
     /// Merged fields from traits (in MRO order)
     pub fields: Vec<TraitField>,
     /// Merged methods from traits (name -> callable)
-    pub methods: HashMap<String, Py<PyAny>>,
+    pub methods: IndexMap<String, Py<PyAny>>,
     /// Merged static methods from traits (name -> callable)
-    pub static_methods: HashMap<String, Py<PyAny>>,
+    pub static_methods: IndexMap<String, Py<PyAny>>,
     /// Abstract methods from traits that remain unimplemented.
     pub abstract_methods: HashSet<MethodKey>,
 }
@@ -67,7 +68,7 @@ pub struct ResolvedTraits {
 /// Registry for trait definitions.
 #[pyclass]
 pub struct TraitRegistry {
-    traits: HashMap<String, TraitDef>,
+    traits: IndexMap<String, TraitDef>,
 }
 
 #[pymethods]
@@ -75,7 +76,7 @@ impl TraitRegistry {
     #[new]
     pub fn new() -> Self {
         Self {
-            traits: HashMap::new(),
+            traits: IndexMap::new(),
         }
     }
 
@@ -87,6 +88,10 @@ impl TraitRegistry {
     /// Get number of registered traits.
     pub fn len(&self) -> usize {
         self.traits.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.traits.is_empty()
     }
 }
 
@@ -123,10 +128,7 @@ impl TraitRegistry {
             return Ok(()); // dedupe
         }
         if visiting.contains(name) {
-            return Err(format!(
-                "Cycle detected in trait hierarchy involving '{}'",
-                name
-            ));
+            return Err(format!("Cycle detected in trait hierarchy involving '{}'", name));
         }
 
         let extends = if let Some(t) = self.traits.get(name) {
@@ -188,8 +190,8 @@ impl TraitRegistry {
 
         // Merge fields and methods in linearization order (last-wins)
         let mut merged_fields = Vec::new();
-        let mut merged_methods: HashMap<String, Py<PyAny>> = HashMap::new();
-        let mut merged_static: HashMap<String, Py<PyAny>> = HashMap::new();
+        let mut merged_methods: IndexMap<String, Py<PyAny>> = IndexMap::new();
+        let mut merged_static: IndexMap<String, Py<PyAny>> = IndexMap::new();
         let mut merged_abstract: HashSet<MethodKey> = HashSet::new();
         let mut method_source: HashMap<String, String> = HashMap::new();
         let mut static_source: HashMap<String, String> = HashMap::new();
@@ -237,13 +239,14 @@ impl TraitRegistry {
             // Merge static methods (last-wins with conflict detection)
             for (mname, callable) in &t.static_methods {
                 if let Some(prev_source) = static_source.get(mname) {
-                    if prev_source != trait_name && !struct_method_names.contains(mname) {
-                        if !self.is_ancestor(prev_source, trait_name) {
-                            return Err(format!(
-                                "Static method '{}' has conflicting definitions from traits '{}' and '{}'",
-                                mname, prev_source, trait_name
-                            ));
-                        }
+                    if prev_source != trait_name
+                        && !struct_method_names.contains(mname)
+                        && !self.is_ancestor(prev_source, trait_name)
+                    {
+                        return Err(format!(
+                            "Static method '{}' has conflicting definitions from traits '{}' and '{}'",
+                            mname, prev_source, trait_name
+                        ));
                     }
                 }
 
@@ -307,8 +310,8 @@ mod tests {
                     default: Value::NIL,
                 })
                 .collect(),
-            method_bodies: HashMap::new(),
-            static_methods: HashMap::new(),
+            method_bodies: IndexMap::new(),
+            static_methods: IndexMap::new(),
             abstract_methods: HashSet::new(),
         }
     }

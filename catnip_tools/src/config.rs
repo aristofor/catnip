@@ -4,6 +4,7 @@
 pub struct FormatConfig {
     pub indent_size: usize,
     pub line_length: usize,
+    pub align: bool,
 }
 
 impl Default for FormatConfig {
@@ -11,6 +12,7 @@ impl Default for FormatConfig {
         Self {
             indent_size: 4,
             line_length: 120,
+            align: true,
         }
     }
 }
@@ -22,6 +24,10 @@ pub struct LintConfig {
     pub check_style: bool,
     pub check_semantic: bool,
     pub check_ir: bool,
+    /// Check for undefined names (E300). Off by default because names
+    /// may come from `-m` imports, REPL context, or runtime config
+    /// that the static linter cannot see.
+    pub check_names: bool,
 }
 
 impl Default for LintConfig {
@@ -31,6 +37,7 @@ impl Default for LintConfig {
             check_style: true,
             check_semantic: true,
             check_ir: false,
+            check_names: false,
         }
     }
 }

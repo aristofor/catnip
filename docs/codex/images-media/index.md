@@ -18,7 +18,7 @@ Cas d'usage : preprocessing pour ML, génération de thumbnails, batch processin
 ## Exécution
 
 ```bash
-catnip -m PIL.Image -m PIL.ImageFilter -m PIL.ImageDraw -m PIL.ImageStat docs/codex/images-media/pillow_transforms.cat
+catnip docs/codex/images-media/pillow_transforms.cat
 ```
 
 ## Opérations Couvertes

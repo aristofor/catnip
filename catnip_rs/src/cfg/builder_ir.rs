@@ -90,12 +90,33 @@ impl IRCFGBuilder {
         let else_block = self.cfg.create_block("if_else");
         let merge_block = self.cfg.create_block("if_merge");
 
-        // Edge from current to then/else (conditional)
+        // Extract condition and store in current block, then add edges
         if let Some(current) = self.current_block {
-            self.cfg
-                .add_edge(current, then_block, EdgeType::ConditionalTrue);
-            self.cfg
-                .add_edge(current, else_block, EdgeType::ConditionalFalse);
+            Python::attach(|py| {
+                let args = op.get_args();
+                let args_bound = args.bind(py);
+                if let Ok(args_tuple) = args_bound.cast::<PyTuple>() {
+                    if let Ok(nested) = args_tuple.get_item(0) {
+                        if let Ok(nested_tuple) = nested.cast::<PyTuple>() {
+                            if let Ok(pair) = nested_tuple.get_item(0) {
+                                if let Ok(pair_tuple) = pair.cast::<PyTuple>() {
+                                    // pair[0] = condition
+                                    if let Ok(cond) = pair_tuple.get_item(0) {
+                                        if let Ok(cond_op) = cond.extract::<Op>() {
+                                            if let Some(block) = self.cfg.get_block_mut(current) {
+                                                block.set_condition(cond_op);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            self.cfg.add_edge(current, then_block, EdgeType::ConditionalTrue);
+            self.cfg.add_edge(current, else_block, EdgeType::ConditionalFalse);
         }
 
         // Process then branch: extract from nested tuple args[0][0][1]
@@ -104,21 +125,15 @@ impl IRCFGBuilder {
             let args = op.get_args();
             let args_bound = args.bind(py);
             if let Ok(args_tuple) = args_bound.cast::<PyTuple>() {
-                if args_tuple.len() >= 1 {
-                    // args[0] is ((condition, then_block),)
-                    if let Ok(nested) = args_tuple.get_item(0) {
-                        if let Ok(nested_tuple) = nested.cast::<PyTuple>() {
-                            if nested_tuple.len() >= 1 {
-                                // nested[0] is (condition, then_block)
-                                if let Ok(pair) = nested_tuple.get_item(0) {
-                                    if let Ok(pair_tuple) = pair.cast::<PyTuple>() {
-                                        if pair_tuple.len() >= 2 {
-                                            // pair[1] is then_block
-                                            if let Ok(then_op) = pair_tuple.get_item(1) {
-                                                if let Ok(op) = then_op.extract::<Op>() {
-                                                    self.process_node(op);
-                                                }
-                                            }
+                if let Ok(nested) = args_tuple.get_item(0) {
+                    if let Ok(nested_tuple) = nested.cast::<PyTuple>() {
+                        if let Ok(pair) = nested_tuple.get_item(0) {
+                            if let Ok(pair_tuple) = pair.cast::<PyTuple>() {
+                                if pair_tuple.len() >= 2 {
+                                    // pair[1] is then_block
+                                    if let Ok(then_op) = pair_tuple.get_item(1) {
+                                        if let Ok(op) = then_op.extract::<Op>() {
+                                            self.process_node(op);
                                         }
                                     }
                                 }
@@ -133,8 +148,7 @@ impl IRCFGBuilder {
         if let Some(current) = self.current_block {
             if let Some(block) = self.cfg.blocks.get(&current) {
                 if block.successors.is_empty() {
-                    self.cfg
-                        .add_edge(current, merge_block, EdgeType::Fallthrough);
+                    self.cfg.add_edge(current, merge_block, EdgeType::Fallthrough);
                 }
             }
         }
@@ -163,8 +177,7 @@ impl IRCFGBuilder {
         if let Some(current) = self.current_block {
             if let Some(block) = self.cfg.blocks.get(&current) {
                 if block.successors.is_empty() {
-                    self.cfg
-                        .add_edge(current, merge_block, EdgeType::Fallthrough);
+                    self.cfg.add_edge(current, merge_block, EdgeType::Fallthrough);
                 }
             }
         }
@@ -182,15 +195,29 @@ impl IRCFGBuilder {
             self.cfg.add_edge(current, header, EdgeType::Fallthrough);
         }
 
-        // Add WHILE to header
+        // Extract condition from args[0] and store in header block
+        Python::attach(|py| {
+            let args = op.get_args();
+            let args_bound = args.bind(py);
+            if let Ok(args_tuple) = args_bound.cast::<PyTuple>() {
+                if let Ok(cond) = args_tuple.get_item(0) {
+                    if let Ok(cond_op) = cond.extract::<Op>() {
+                        if let Some(block) = self.cfg.get_block_mut(header) {
+                            block.set_condition(cond_op);
+                        }
+                    }
+                }
+            }
+        });
+
+        // Add WHILE to header (for backward compat with other passes)
         if let Some(block) = self.cfg.get_block_mut(header) {
             block.add_instruction(op.clone());
         }
 
         // Edges from header
         self.cfg.add_edge(header, body, EdgeType::ConditionalTrue);
-        self.cfg
-            .add_edge(header, exit_block, EdgeType::ConditionalFalse);
+        self.cfg.add_edge(header, exit_block, EdgeType::ConditionalFalse);
 
         // Process body (simplified - extract from args requires Python GIL)
         self.break_targets.push(exit_block);
@@ -240,8 +267,7 @@ impl IRCFGBuilder {
         }
 
         self.cfg.add_edge(header, body, EdgeType::ConditionalTrue);
-        self.cfg
-            .add_edge(header, exit_block, EdgeType::ConditionalFalse);
+        self.cfg.add_edge(header, exit_block, EdgeType::ConditionalFalse);
 
         self.break_targets.push(exit_block);
         self.continue_targets.push(header);
@@ -342,8 +368,7 @@ impl IRCFGBuilder {
 
                                 // Edge from header to case
                                 if let Some(hdr) = header_block {
-                                    self.cfg
-                                        .add_edge(hdr, case_block, EdgeType::ConditionalTrue);
+                                    self.cfg.add_edge(hdr, case_block, EdgeType::ConditionalTrue);
                                 }
 
                                 // Process case body
@@ -363,11 +388,7 @@ impl IRCFGBuilder {
                                 if let Some(current) = self.current_block {
                                     if let Some(block) = self.cfg.blocks.get(&current) {
                                         if block.successors.is_empty() {
-                                            self.cfg.add_edge(
-                                                current,
-                                                merge_block,
-                                                EdgeType::Fallthrough,
-                                            );
+                                            self.cfg.add_edge(current, merge_block, EdgeType::Fallthrough);
                                         }
                                     }
                                 }
@@ -429,11 +450,7 @@ impl IRCFGBuilder {
 
 /// Build control flow graph from IR OpCode list.
 #[pyfunction]
-pub fn build_cfg_from_ir(
-    _py: Python<'_>,
-    ops: &Bound<'_, PyList>,
-    name: &str,
-) -> PyResult<PyControlFlowGraph> {
+pub fn build_cfg_from_ir(_py: Python<'_>, ops: &Bound<'_, PyList>, name: &str) -> PyResult<PyControlFlowGraph> {
     let mut op_vec = Vec::new();
     for item in ops.iter() {
         if let Ok(op) = item.extract::<Op>() {
@@ -454,13 +471,13 @@ mod tests {
     #[test]
     fn test_iropcodes_values() {
         // Verify IROpCode values match expected values for CFG construction
-        assert_eq!(IROpCode::OpIf as i32, 32);
-        assert_eq!(IROpCode::OpWhile as i32, 33);
-        assert_eq!(IROpCode::OpFor as i32, 34);
-        assert_eq!(IROpCode::OpMatch as i32, 35);
-        assert_eq!(IROpCode::OpBlock as i32, 36);
-        assert_eq!(IROpCode::OpReturn as i32, 37);
-        assert_eq!(IROpCode::OpBreak as i32, 38);
-        assert_eq!(IROpCode::OpContinue as i32, 39);
+        assert_eq!(IROpCode::OpIf as i32, 50);
+        assert_eq!(IROpCode::OpWhile as i32, 51);
+        assert_eq!(IROpCode::OpFor as i32, 52);
+        assert_eq!(IROpCode::OpMatch as i32, 53);
+        assert_eq!(IROpCode::OpBlock as i32, 54);
+        assert_eq!(IROpCode::OpReturn as i32, 55);
+        assert_eq!(IROpCode::OpBreak as i32, 56);
+        assert_eq!(IROpCode::OpContinue as i32, 57);
     }
 }

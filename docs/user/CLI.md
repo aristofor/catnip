@@ -29,19 +29,19 @@ catnip  # Lance REPL
 catnip transform_data.cat
 ```
 
-### Note importante : Embedded vs Standalone
+### Note importante : DSL vs Standalone
 
 **Si tu écris beaucoup de scripts Catnip standalone** → c'est souvent un signe que **Python sera plus adapté**.
 
-Catnip est avant tout un **moteur embedded** :
+Catnip est avant tout un **moteur DSL** :
 
-| Use Case                                      | Recommandation                                          |
-| --------------------------------------------- | ------------------------------------------------------- |
-| Règles métier modifiables par administrateurs | **Embedded** - Stockez scripts en DB, exécutez dans app |
-| Sandbox pour scripts utilisateur              | **Embedded** - Isolation + APIs exposées                |
-| Pipelines ETL configurables                   | **Embedded** - Workflows définis par utilisateurs       |
-| Script de traitement ponctuel                 | **Standalone possible**, mais Python souvent meilleur   |
-| Application complète en Catnip                | **Pas le bon outil** - Utilisez Python                  |
+| Use Case                                      | Recommandation                                        |
+| --------------------------------------------- | ----------------------------------------------------- |
+| Règles métier modifiables par administrateurs | **DSL** - Stockez scripts en DB, exécutez dans app    |
+| Sandbox pour scripts utilisateur              | **DSL** - Isolation + APIs exposées                   |
+| Pipelines ETL configurables                   | **DSL** - Workflows définis par utilisateurs          |
+| Script de traitement ponctuel                 | **Standalone possible**, mais Python souvent meilleur |
+| Application complète en Catnip                | **Pas le bon outil** - Utilisez Python                |
 
 **Règle empirique** : si ton script Catnip dépasse ~200 lignes ou demande des imports compliqués, il vaut mieux basculer
 sur Python et garder Catnip pour les parties configurables.
@@ -52,38 +52,45 @@ ______________________________________________________________________
 
 ## Modes d'Exécution
 
-### Runtime Rust Standalone (catnip-standalone)
+### Runtime Rust (catnip)
 
-Catnip fournit aussi un binaire Rust standalone qui embarque Python :
+Le binaire `catnip` est un runtime Rust avec Python embarqué (PyO3). Il sert de point d'entrée unique : l'exécution de
+scripts est traitée directement par la VM Rust, et les sous-commandes outils (format, lint, cache, etc.) sont déléguées
+au CLI Python.
 
 ```bash
-# Installation (depuis source uniquement)
-cd catnip
-make install-bins  # Installe catnip-standalone + catnip-repl
+# Exécution de scripts (Rust VM + JIT)
+catnip script.cat
+catnip -c "2 + 3"
+echo "x = 10; x * 2" | catnip --stdin
 
-# Utilisation (mêmes options que CLI Python)
-catnip-standalone script.cat
-catnip-standalone -c "2 + 3"
-echo "x = 10; x * 2" | catnip-standalone --stdin
-
-# Version
-catnip-standalone --version
+# Sous-commandes outils (déléguées au CLI Python)
+catnip format script.cat
+catnip lint src/
+catnip cache stats
+catnip config show
+catnip debug script.cat
 ```
+
+**Délégation** : au lancement, le binaire inspecte les arguments avant le parsing Clap. Si le premier argument
+positionnel est une sous-commande Python connue (`format`, `lint`, `cache`, `config`, `debug`, `repl`, `lsp`,
+`commands`, `plugins`, `module`, `completion`, `extensions`), l'invocation est déléguée au CLI Python
+(`catnip.cli:main`) via PyO3 embarqué. Sinon, Clap parse normalement pour l'exécution de scripts.
 
 **Caractéristiques** :
 
 - VM avec JIT
 - Startup rapide pour scripts
-- Pas de dépendance Python système
+- Accès à toutes les sous-commandes Python sans installation séparée
 
-**Note** : les binaires standalone ne sont pas inclus dans les wheels PyPI (manylinux) à cause des limites du Python
-statique. Ils sont disponibles via :
+**Note** : les binaires ne sont pas inclus dans les wheels PyPI (manylinux) à cause des limites du Python statique. Ils
+sont disponibles via :
 
 - Installation locale : `make install-bins`
 - GitHub releases : binaires précompilés par plateforme
-- Cargo : `cargo install --path catnip_rs --bin catnip-standalone --features embedded`
+- Cargo : `cargo install --path catnip_rs --bin catnip --features embedded`
 
-Voir `docs/user/STANDALONE.md` pour détails.
+Voir `docs/user/RUN.md` pour détails.
 
 ### REPL Interactif
 
@@ -201,7 +208,7 @@ Voir [Configuration](#config) pour le format du fichier.
 
 ### Options de Parsing
 
-#### `-p, --parsing LEVEL`
+#### `--parsing LEVEL`
 
 Niveau de parsing (0-3, défaut : 3) :
 
@@ -212,10 +219,10 @@ Niveau de parsing (0-3, défaut : 3) :
 
 ```bash
 # Afficher l'IR
-catnip -p 1 -c "2 + 3"
+catnip --parsing 1 -c "2 + 3"
 
 # Afficher l'IR optimisé
-catnip -p 2 script.cat
+catnip --parsing 2 script.cat
 ```
 
 **Note** : Cette option est principalement destinée au développement du langage et à l'inspection des résultats des
@@ -226,7 +233,8 @@ défaut `3`).
 
 #### `-o, --optimize OPT`
 
-Active des optimisations (peut être utilisé plusieurs fois) :
+Active des optimisations (peut être utilisé plusieurs fois). Les options non reconnues ou les valeurs invalides lèvent
+une erreur.
 
 **TCO (Tail-Call Optimization)** :
 
@@ -238,6 +246,15 @@ catnip -o tco:on script.cat
 # Désactive TCO
 catnip -o tco:off script.cat
 ```
+
+**JIT (Just-In-Time Compilation)** :
+
+```bash
+catnip -o jit script.cat          # Active JIT (hot-loop detection)
+catnip -o jit:off script.cat      # Désactive JIT
+```
+
+Les valeurs booléennes acceptées pour `tco` et `jit` : `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`.
 
 **Niveau d'optimisation** (défaut: `3` - optimisations complètes) :
 
@@ -272,33 +289,35 @@ catnip -m math script.cat
 # Plusieurs modules
 catnip -m math -m random script.cat
 # Dans le script : math.sqrt(16), random.random()
+
+# Alias : namespace renommé
+catnip -m math:m script.cat
+# Dans le script : m.sqrt(16)
+
+# Injection directe dans les globals (pas de namespace)
+catnip -m io:! script.cat
+# Dans le script : print("BORN TO SEGFAULT") (directement accessible)
 ```
 
-Pour des alias ou du chargement par chemin, utiliser le builtin `import()` dans le code :
+Par défaut, le module `io` est auto-chargé en mode wild en CLI et REPL (`print()` est disponible sans import). Les
+modules `-m` s'ajoutent aux modules auto-importés (définis dans `[modules].auto` du `catnip.toml` ou dans le profil de
+policy). La liste combinée est dédupliquée.
 
-<!-- check: no-check -->
+Voir `docs/user/MODULE_LOADING.md` pour les détails (suffixes, `import()`, policies).
 
-```catnip
-m = import("math")
-host = import("./host.py")
-tools = import("./tools.cat")
-```
+#### `--policy PROFILE`
 
-Voir `docs/user/MODULE_LOADING.md` pour les details.
-
-#### `--policy-file FILE --policy PROFILE`
-
-Charge une policy de modules depuis un fichier TOML externe avec un profil nommé :
+Sélectionne une policy de modules nommée depuis `[modules.policies.<name>]` dans `catnip.toml` :
 
 ```bash
-catnip --policy-file policies.toml --policy sandbox script.cat
-catnip --policy-file policies.toml --policy sandbox -c 'import("os")'
+catnip --policy sandbox script.cat
+catnip --policy sandbox -c 'import("os")'
 # => CatnipRuntimeError: module 'os' blocked by policy
 ```
 
-Les deux flags sont requis ensemble. La policy CLI prend priorité sur la section `[modules]` de `catnip.toml`.
+La policy CLI prend priorité sur la section `[modules]` de `catnip.toml`.
 
-Voir `docs/user/MODULE_LOADING.md` pour le format du fichier et l'API Python.
+Voir `docs/user/MODULE_LOADING.md` pour la configuration des policies.
 
 ### Options de Debug
 
@@ -320,13 +339,13 @@ Format de sortie pour les niveaux de parsing 1-2 :
 
 ```bash
 # Défaut : compact JSON (lisible, parseable)
-catnip -p 1 -c "2 + 3"
+catnip --parsing 1 -c "2 + 3"
 
 # JSON serde complet (pour analyse programmatique)
-catnip -p 1 --format json -c "2 + 3"
+catnip --parsing 1 --format json -c "2 + 3"
 
 # Ancien repr Python
-catnip -p 1 --format repr -c "2 + 3"
+catnip --parsing 1 --format repr -c "2 + 3"
 ```
 
 Le format compact (défaut) produit du JSON lisible et parseable :
@@ -362,7 +381,7 @@ Le format `json` expose la structure serde complète (tagged enums, tous les cha
 La sortie est du JSON valide dans les deux cas, utilisable par pipe :
 
 ```bash
-catnip -p 1 -c "2 + 3" | python -c "import sys,json; print(json.load(sys.stdin))"
+catnip --parsing 1 -c "2 + 3" | python -c "import sys,json; print(json.load(sys.stdin))"
 ```
 
 **Note** : `--format` n'affecte que les niveaux de parsing 1 et 2. Le niveau 0 (parse tree) utilise toujours le format
@@ -395,6 +414,18 @@ Désactive la sortie colorée :
 catnip --no-color script.cat
 ```
 
+#### `-q, --quiet`
+
+Supprime l'affichage du résultat final :
+
+```bash
+catnip -q script.cat
+catnip -q -c "2 + 3"          # rien affiché
+CATNIP_QUIET=1 catnip -c "42" # idem via env var
+```
+
+Les effets de bord (print, I/O) sont toujours exécutés, seul le résultat final est supprimé.
+
 #### `--no-cache`
 
 Désactive le cache disque de compilation (parsing et bytecode). Par défaut, le cache est **activé** et stocke les
@@ -419,18 +450,20 @@ TCO, etc.).
 
 | Variable          | Description                                         | Valeurs                                               |
 | ----------------- | --------------------------------------------------- | ----------------------------------------------------- |
+| `CATNIP_CONFIG`   | Chemin vers un fichier de configuration alternatif  | chemin vers un `catnip.toml`                          |
 | `CATNIP_CACHE`    | Active/désactive le cache disque                    | `off`, `false`, `0`, `no` pour désactiver             |
 | `CATNIP_OPTIMIZE` | Options d'optimisation (même syntaxe que `-o`)      | `jit`, `tco:off`, `level:2`, combinables avec virgule |
-| `CATNIP_EXECUTOR` | Mode d'exécution                                    | `vm` (défaut), `ast`                                  |
+| `CATNIP_EXECUTOR` | Mode d'exécution                                    | `vm` (défaut)                                         |
 | `CATNIP_PATH`     | Répertoires de recherche pour `import()` (noms nus) | chemins séparés par `:` (ajoutés après CWD)           |
 | `CATNIP_THEME`    | Thème de couleurs                                   | `auto` (défaut), `dark`, `light`                      |
+| `CATNIP_QUIET`    | Supprime l'affichage du résultat (comme `-q`)       | `1`, `true`, `on` pour activer                        |
 | `CATNIP_DEV`      | Compilation rapide (profil `fastdev`)               | `1` pour activer                                      |
 | `NO_COLOR`        | Désactive les couleurs (standard freedesktop.org)   | toute valeur non vide                                 |
 
 **Hiérarchie de priorité** (croissante) :
 
 ```
-défauts → catnip.toml → variables d'environnement → options CLI
+défauts → catnip.toml (ou CATNIP_CONFIG) → variables d'environnement → options CLI
 ```
 
 ```bash
@@ -453,35 +486,9 @@ catnip config show --debug
 | `XDG_CACHE_HOME`  | `~/.cache`       | Cache de compilation (`catnip/`)        |
 | `XDG_DATA_HOME`   | `~/.local/share` | Données persistantes (`catnip/`)        |
 
-### Mode d'Exécution
-
-#### `-x MODE`, `--executor MODE`
-
-Sélectionne le moteur d'exécution :
-
-- `vm` : Compilation bytecode + VM (**défaut**)
-- `ast` : Interprétation AST (pour debug ou compatibilité)
-
-```bash
-# Mode VM (défaut)
-catnip script.cat
-
-# Mode AST (interpréteur classique)
-catnip -x ast script.cat
-
-# Via variable d'environnement
-CATNIP_EXECUTOR=vm catnip script.cat   # Équivalent à -x vm
-CATNIP_EXECUTOR=ast catnip script.cat  # Équivalent à -x ast
-```
-
-**Performances** : Le mode VM compile le code en bytecode et l'exécute sur une VM à pile, éliminant l'overhead Python ↔
-VM.
-
-La VM est le mode d'exécution par défaut. Utiliser `-x ast` si besoin de l'interpréteur classique.
-
 ### Autres Options
 
-#### `--version`
+#### `-V, --version`
 
 Affiche la version de Catnip :
 
@@ -489,7 +496,16 @@ Affiche la version de Catnip :
 
 ```console
 $ catnip --version
-Catnip, version 0.0.6
+catnip 0.0.7
+```
+
+Avec `--full`, affiche aussi le commit et la date de build :
+
+```bash
+$ catnip --version --full
+Catnip 0.0.7
+  commit  a98f4a9
+  build   2026-03-14-10:23:45
 ```
 
 #### `--help`
@@ -500,67 +516,31 @@ Affiche l'aide :
 
 ```console
 $ catnip --help
-Usage: catnip [OPTIONS] COMMAND [ARGS]...
+Catnip runtime with embedded Python
 
-  Catnip - A sandboxed scripting language embedded in Python
-
-  Usage:
-    catnip                           # Interactive REPL (VM mode by default)
-    catnip script.cat                # Run a script file
-    catnip -c "2 + 3 * 4"           # Evaluate a command
-    catnip -x ast script.cat         # Use AST interpreter instead of VM
-    catnip --config my.toml script.cat  # Use custom config file
-
-  Environment:
-    CATNIP_OPTIMIZE       Optimizations (same as -o): jit,tco:off,level:2
-    CATNIP_EXECUTOR       Execution mode: vm, ast
-    CATNIP_THEME          Color theme: auto, dark, light
-    NO_COLOR              Disable colors (freedesktop.org standard)
-
-  Subcommands:
-    commands  List available commands (built-ins + plugins)
-    config    View/edit configuration
-    format    Format Catnip code
-    lint      Full code analysis
-    module    Inspect module access policies
-    plugins   Inspect registered plugins
-    repl      Start interactive REPL (explicit)
-
-Options:
-  -c, --command TEXT         Evaluate command and display result
-  -p, --parsing INTEGER      Parsing level: 0=tree, 1=IR, 2=exec IR, 3=run
-  -v, --verbose              Show detailed pipeline stages
-  --no-color                 Disable colored output
-  --no-cache                 Disable disk cache for parsing/bytecode
-  --config PATH              Use alternate config file instead of
-                             ~/.config/catnip/catnip.toml
-  -o, --optimize TEXT        Optimizations: tco[:on|off], level[:0-3],
-                             jit[:on|off], memory[:MB]
-  -m, --module TEXT          Load Python module as namespace (e.g., -m math,
-                             -m numpy)
-  -x, --executor [vm|ast]    Execution mode: vm=bytecode VM (default), ast=AST
-                             interpreter
-  --theme [auto|dark|light]  Color theme: auto=detect terminal background,
-                             dark, light
-  --format [text|json|repr]  Output format: text=compact JSON (default),
-                             json=verbose serde JSON, repr=Python repr
-  --policy-file PATH         TOML file with named module policies (requires
-                             --policy)
-  --policy TEXT              Policy profile name from --policy-file or
-                             catnip.toml [modules.profiles]
-  --version                  Show the version and exit.
-  -h, --help                 Show this message and exit.
+Usage: catnip [OPTIONS] [FILE] [COMMAND]
 
 Commands:
-  cache     Manage Catnip cache.
-  commands  List available commands (built-ins + plugins).
-  config    Manage Catnip configuration.
-  debug     Start an interactive debug session.
-  format    Format Catnip code files.
-  lint      Full code analysis (syntax + style + semantic).
-  module    Inspect module access policies.
-  plugins   List registered plugins and their status.
-  repl      Start the interactive REPL (default mode).
+  info   Show runtime information
+  bench  Benchmark a script (run N times)
+  help   Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [FILE]  Script file to execute
+
+Options:
+  -c, --command <CODE>                 Evaluate expression directly
+      --stdin                          Read from stdin
+  -v, --verbose                        Verbose output with execution statistics
+      --no-jit                         Disable JIT compiler (enabled by default)
+      --jit-threshold <JIT_THRESHOLD>  JIT threshold (number of iterations before compilation) [default: 100]
+  -q, --quiet                          Suppress result display
+  -b, --bench <N>                      Benchmark mode (run multiple times and show stats)
+  -h, --help                           Print help
+  -V, --version                        Print version
+
+Python subcommands: cache, commands, config, debug, format, lint, lsp, module, plugins, repl
+Run 'catnip <command> --help' for subcommand help.
 ```
 
 ## Sous-Commandes
@@ -608,6 +588,8 @@ catnip --config my-catnip.toml format script.cat
 - `--diff` : Afficher unified diff au lieu du code formaté
 - `--indent-size N` : Taille indentation (défaut: 4 ou depuis config)
 - `--line-length`, `-l N` : Longueur ligne max (défaut: 120 ou depuis config)
+- `--align` : Aligner les `=` (assignments), `=>` (match arms) et `#` (trailing comments) sur les groupes de lignes
+  consécutives
 
 **Configuration** : Section `[format]` dans `catnip.toml` :
 
@@ -615,6 +597,7 @@ catnip --config my-catnip.toml format script.cat
 [format]
 indent_size = 4
 line_length = 120
+align = false
 ```
 
 **Variables d'environnement :**
@@ -664,17 +647,20 @@ Liste les commandes disponibles (built-ins + plugins) :
 
 ```console
 $ catnip commands
-command   source   status  help
---------  -------  ------  ------------------------------------------
-cache     builtin  ok      Manage Catnip cache.
-commands  builtin  ok      List available commands (built-ins +...
-config    builtin  ok      Manage Catnip configuration.
-debug     builtin  ok      Start an interactive debug session.
-format    builtin  ok      Format Catnip code files.
-lint      builtin  ok      Full code analysis (syntax + style +...
-module    builtin  ok      Inspect module access policies.
-plugins   builtin  ok      List registered plugins and their status.
-repl      builtin  ok      Start the interactive REPL (default mode).
+command     source   status  help
+----------  -------  ------  ------------------------------------------
+cache       builtin  ok      Manage Catnip cache.
+commands    builtin  ok      List available commands (built-ins +...
+completion  builtin  ok      Generate shell completion script.
+config      builtin  ok      Manage Catnip configuration.
+debug       builtin  ok      Start an interactive debug session.
+extensions  builtin  ok      Manage compiled extensions.
+format      builtin  ok      Format Catnip code files.
+lint        builtin  ok      Full code analysis (syntax + style +...
+lsp         builtin  ok      Start Catnip LSP server.
+module      builtin  ok      Inspect module access policies.
+plugins     builtin  ok      List registered plugins and their status.
+repl        builtin  ok      Start the interactive REPL (default mode).
 ```
 
 ```bash
@@ -690,17 +676,20 @@ Inspecte les plugins CLI enregistrés :
 
 ```console
 $ catnip plugins --entrypoints
-plugin    source   status  entry_point
---------  -------  ------  -----------------------------------------
-cache     builtin  ok      catnip.cli.commands.cache:cmd_cache
-commands  builtin  ok      catnip.cli.commands.commands:cmd_commands
-config    builtin  ok      catnip.cli.commands.config:cmd_config
-debug     builtin  ok      catnip.cli.commands.debug:cmd_debug
-format    builtin  ok      catnip.cli.commands.format:cmd_format
-lint      builtin  ok      catnip.cli.commands.lint:cmd_lint
-module    builtin  ok      catnip.cli.commands.module:cmd_module
-plugins   builtin  ok      catnip.cli.commands.plugins:cmd_plugins
-repl      builtin  ok      catnip.cli.commands.repl:cmd_repl
+plugin      source   status  entry_point
+----------  -------  ------  ---------------------------------------------
+cache       builtin  ok      catnip.cli.commands.cache:cmd_cache
+commands    builtin  ok      catnip.cli.commands.commands:cmd_commands
+completion  builtin  ok      catnip.cli.commands.completion:cmd_completion
+config      builtin  ok      catnip.cli.commands.config:cmd_config
+debug       builtin  ok      catnip.cli.commands.debug:cmd_debug
+extensions  builtin  ok      catnip.cli.commands.extensions:cmd_extensions
+format      builtin  ok      catnip.cli.commands.format:cmd_format
+lint        builtin  ok      catnip.cli.commands.lint:cmd_lint
+lsp         builtin  ok      catnip.cli.commands.lsp:cmd_lsp
+module      builtin  ok      catnip.cli.commands.module:cmd_module
+plugins     builtin  ok      catnip.cli.commands.plugins:cmd_plugins
+repl        builtin  ok      catnip.cli.commands.repl:cmd_repl
 ```
 
 ```bash
@@ -771,6 +760,8 @@ tco = true
 theme = auto
 ```
 
+Si `[modules]` est configuré dans le `catnip.toml`, `config show` affiche les modules auto-importés et la policy active.
+
 <!-- doc-snapshot: cli/config-show-debug -->
 
 ```console
@@ -790,6 +781,7 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   tco: True  [default]
   theme: 'auto'  [default]
   --- format config ---
+  format.align: True  [default]
   format.indent_size: 4  [default]
   format.line_length: 120  [default]
 ```
@@ -822,8 +814,8 @@ indent_size = 4
 line_length = 120
 
 [diagnostics]
-log_weird_errors = true     # Crash reports sur disque (defaut: true)
-max_weird_logs = 50         # Nombre max de rapports (defaut: 50)
+log_weird_errors = true     # Crash reports sur disque (défaut: true)
+max_weird_logs = 50         # Nombre max de rapports (défaut: 50)
 ```
 
 Voir `catnip.toml.example` dans le dépôt pour un fichier exemple commenté.
@@ -864,6 +856,7 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   tco: True  [default]
   theme: 'auto'  [default]
   --- format config ---
+  format.align: True  [default]
   format.indent_size: 4  [default]
   format.line_length: 120  [default]
 ```
@@ -872,34 +865,58 @@ Sources possibles :
 
 - `default` : valeur par défaut hardcodée
 - `file` : fichier `catnip.toml`
-- `env` : variable d'environnement (`CATNIP_CACHE`, `CATNIP_OPTIMIZE`, `CATNIP_EXECUTOR`, `CATNIP_THEME`, `NO_COLOR`)
-- `cli` : option ligne de commande (`-o`, `-x`, `--theme`, `--no-color`)
+- `env` : variable d'environnement (`CATNIP_CACHE`, `CATNIP_OPTIMIZE`, `CATNIP_THEME`, `NO_COLOR`)
+- `cli` : option ligne de commande (`-o`, `--theme`, `--no-color`)
+
+### `lsp`
+
+Lance le serveur LSP (Language Server Protocol) pour l'intégration éditeur.
+
+```bash
+catnip lsp
+```
+
+Le serveur communique sur stdio (JSON-RPC) et expose :
+
+- **Diagnostics** : lint automatique à l'ouverture et à chaque modification
+- **Formatting** : formatage du document (`textDocument/formatting`)
+- **Rename** : renommage scope-aware via tree-sitter (`textDocument/rename`, `textDocument/prepareRename`)
+
+**Prérequis** : le binaire `catnip-lsp` doit être installé (`make install-bins`).
+
+**VSCode** : l'extension Catnip détecte automatiquement le binaire `catnip-lsp` dans le PATH. Si nécessaire, configurer
+le chemin vers `catnip` dans les settings :
+
+```json
+{
+  "catnip.path": "catnip"
+}
+```
 
 ### `module`
 
 Inspecte les policies d'accès aux modules.
 
 ```bash
-# Lister les profils dans un fichier de policies
-catnip module list-profiles policies.toml
+# Lister les profils nommés depuis catnip.toml
+catnip module list-profiles
 
 # Vérifier quels modules sont autorisés sous un profil
-catnip module check policies.toml sandbox os math json subprocess
+catnip module check sandbox os math json subprocess
 ```
 
 ```console
-$ catnip module list-profiles policies.toml
+$ catnip module list-profiles
   admin  (a69a9813)
   sandbox  (fd10df1f)
-  template  (3b2c7e04)
 
-$ catnip module check policies.toml sandbox os math json
+$ catnip module check sandbox os math json
   - os
   + math
   + json
 ```
 
-Voir `docs/user/MODULE_LOADING.md` pour le format du fichier de policies.
+Voir `docs/user/MODULE_LOADING.md` pour la configuration des policies.
 
 ### `cache`
 
@@ -920,9 +937,6 @@ catnip cache prune --dry-run
 
 # Supprimer tout le cache
 catnip cache clear
-
-# Sans confirmation
-catnip cache clear --force
 ```
 
 <!-- doc-snapshot: cli/cache-stats -->
@@ -932,8 +946,8 @@ $ catnip cache stats
 Disk Cache Statistics
 ==================================================
 Directory:      /home/ari/.cache/catnip
-Entries:        2
-Volume:         1.58 KB (1623 bytes)
+Entries:        213
+Volume:         1.78 MB (1871226 bytes)
 Max size:       100.00 MB
 TTL:            86400 seconds
 
@@ -1024,10 +1038,49 @@ catnip debug -b 3 -b 7 -b 15 script.cat
 | `vars`       | `v`      | Afficher les variables locales               |
 | `list`       | `l`      | Afficher le source autour de la position     |
 | `backtrace`  | `bt`     | Afficher la pile d'appels                    |
+| `repl`       |          | Sous-mode REPL dans le scope courant         |
 | `quit`       | `q`      | Arrêter l'exécution                          |
 | `help`       | `h`      | Aide                                         |
 
-Appuyer sur Entrée sans commande répète le dernier `step`.
+Appuyer sur Entrée sans commande répète le dernier `step`. La commande `repl` ouvre une session interactive persistante
+dans le scope du point d'arrêt (voir [Debugger](../tools/debug.md#sous-mode-repl)).
+
+### `completion`
+
+Genere un script de completion pour le shell courant. Les completions sont synchronisees automatiquement avec les
+sous-commandes, options et valeurs -- rien a maintenir manuellement.
+
+```bash
+# Bash
+eval "$(catnip completion bash)"
+
+# Zsh
+eval "$(catnip completion zsh)"
+
+# Fish
+catnip completion fish | source
+```
+
+**Installation persistante** :
+
+```bash
+# Bash
+catnip completion bash >> ~/.bashrc
+
+# Zsh
+catnip completion zsh >> ~/.zshrc
+
+# Fish
+catnip completion fish > ~/.config/fish/completions/catnip.fish
+```
+
+La completion couvre :
+
+- Sous-commandes (`format`, `lint`, `config`, etc.)
+- Options globales (`-o`, `-v`, `--theme`, etc.)
+- Valeurs d'options (`-o tco:on`, `--theme dark`, etc.)
+- Niveaux de parsing (`--parsing 0..3`)
+- Fichiers et dossiers (pour l'argument script positional)
 
 ## Plugins CLI
 
@@ -1103,20 +1156,20 @@ catnip -m math -m random script.cat
 # Utilisation : math.sqrt(16), random.random()
 ```
 
-Pour alias et chargement par chemin, utiliser `import()` dans le code :
+Pour alias et chargement par nom, utiliser `import()` dans le code :
 
 <!-- check: no-check -->
 
 ```catnip
 m = import("math")
-host = import("./host.py")
+host = import("host", protocol="py")
 ```
 
 ### Debugging
 
 ```bash
 # Afficher l'IR
-catnip -p 2 -c "x = 10; x * 2"
+catnip --parsing 2 -c "x = 10; x * 2"
 
 # Mode verbeux
 catnip -v script.cat
@@ -1140,7 +1193,7 @@ TypeError: 'int' object is not callable
 
 **Format** : `fichier:ligne:colonne: message` avec snippet source et caret pointant sur l'erreur.
 
-**Suggestions "Did you mean?"** : quand une variable ou un attribut struct est mal orthographie, Catnip suggere le nom
+**Suggestions "Did you mean?"** : quand une variable ou un attribut struct est mal orthographié, Catnip suggère le nom
 le plus proche :
 
 ```bash
@@ -1150,11 +1203,11 @@ Name 'factoral' is not defined
 ```
 
 ```bash
-$ catnip -c 'struct Config { name, value }; c = Config("a", 1); c.naem'
+$ catnip -c 'struct Config { name; value; }; c = Config("a", 1); c.naem'
 'Config' has no attribute 'naem'. Did you mean 'name'?
 ```
 
-Les mots-cles d'autres langages sont aussi detectes :
+Les mots-clés d'autres langages sont aussi détectés :
 
 ```bash
 $ catnip -c 'class Foo { x }'
@@ -1167,14 +1220,12 @@ Unexpected token 'class Foo' at line 1, column 1. Did you mean 'struct'?
 
 ```bash
 $ catnip -c 'f = (x) => { x / 0 }; g = (y) => { f(y) }; g(42)'
-Traceback (most recent call last):
-  File "<input>", in <lambda>
-RuntimeError: division by zero
+ZeroDivisionError: division by zero
   1 | f = (x) => { x / 0 }; g = (y) => { f(y) }; g(42)
     |              ^
 ```
 
-Le traceback montre la pile complète d'appels depuis le point d'erreur jusqu'à la racine.
+Le message inclut le snippet source avec un caret (`^`) pointant sur l'instruction fautive.
 
 ### Combinaisons Avancées
 
@@ -1194,15 +1245,17 @@ cat data.cat | catnip -o tco:on -v
 
 ```mermaid
 flowchart TD
-    A["Invocation catnip ..."] --> B{"Sous-commande connue ?<br/>(format/lint/repl/...) "}
-    B -->|Oui| C["Exécuter la sous-commande"]
-    B -->|Non| D{"Option -c présente ?"}
-    D -->|Oui| E["Évaluer expression inline"]
-    D -->|Non| F{"Entrée stdin pipée ?"}
-    F -->|Oui| G["Lire depuis stdin"]
-    F -->|Non| H{"Argument fichier présent ?"}
-    H -->|Oui| I["Fallback script (ou catnip -- fichier)"]
-    H -->|Non| J["Lancer REPL interactive"]
+    A["Invocation catnip ..."] --> B{"Pré-parse :<br/>sous-commande Python ?<br/>(format/lint/cache/...)"}
+    B -->|Oui| C["Délégation CLI Python<br/>(PyO3 embarqué)"]
+    B -->|Non| D{"Sous-commande Rust ?<br/>(info/bench)"}
+    D -->|Oui| E["Exécution Rust directe"]
+    D -->|Non| F{"Option -c présente ?"}
+    F -->|Oui| G["Évaluer expression inline"]
+    F -->|Non| H{"Entrée stdin pipée ?"}
+    H -->|Oui| I["Lire depuis stdin"]
+    H -->|Non| J{"Argument fichier présent ?"}
+    J -->|Oui| K["Exécuter script (VM Rust)"]
+    J -->|Non| L["Erreur : pas d'input"]
 ```
 
 L'ordre recommandé pour la clarté :
@@ -1215,14 +1268,14 @@ catnip [OPTIONS] [--] [SCRIPT|SUBCOMMAND]
 
 ```bash
 # Options avant le fichier
-catnip -o tco:on -v script.cat        # ✓ Recommandé
+catnip -o tco:on -v script.cat        # Recommandé
 
 # Séparateur pour lever l'ambiguïté
-catnip -o tco:on -- format.cat        # ✓ 'format.cat' est un fichier, pas une commande
+catnip -o tco:on -- format.cat        # 'format.cat' est un fichier, pas une commande
 
 # Fallback automatique
-catnip format.cat                     # ✗ Ambigu (fichier ou commande ?)
-catnip -- format.cat                  # ✓ Explicite : c'est un fichier
+catnip format.cat                     # Ambigu (fichier ou commande ?)
+catnip -- format.cat                  # Explicite : c'est un fichier
 ```
 
 ## Codes de Sortie

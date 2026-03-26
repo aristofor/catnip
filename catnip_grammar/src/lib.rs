@@ -1,6 +1,9 @@
 // FILE: catnip_grammar/src/lib.rs
 use tree_sitter::Language;
 
+pub mod node_kinds;
+pub mod symbols;
+
 extern "C" {
     fn tree_sitter_catnip() -> Language;
 }

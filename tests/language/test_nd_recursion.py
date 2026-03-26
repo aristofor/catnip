@@ -19,9 +19,9 @@ def exec_catnip(code):
 
 
 def parse_ir(code):
-    """Helper to get IR at level 1."""
+    """Helper to get IR at level 1 (before semantic analysis)."""
     c = Catnip()
-    return c.parse(code, 1)
+    return c.parse(code, semantic=False)
 
 
 class TestNDEmptyTopos:
@@ -80,8 +80,19 @@ class TestNDRecursion:
             }
             countdown
         """)
-        # Declaration form returns the lambda
+        # Declaration form returns a callable wrapper
         assert callable(result)
+
+    def test_nd_recursion_declaration_form_call(self):
+        """Declaration form can be called with a seed."""
+        result = exec_catnip("""
+            fact = ~~(n, recur) => {
+                if n <= 1 { 1 }
+                else { n * recur(n - 1) }
+            }
+            fact(5)
+        """)
+        assert result == 120
 
 
 class TestNDMap:
@@ -214,22 +225,19 @@ class TestNDTransformation:
         """~[] transforms to ND_EMPTY_TOPOS opcode."""
         ir = parse_ir("~[]")
         assert len(ir) == 1
-        from catnip.semantic.opcode import OpCode
-
-        assert ir[0].ident == OpCode.ND_EMPTY_TOPOS
+        assert ir[0].kind == "Op"
+        assert ir[0].opcode == "NdEmptyTopos"
 
     def test_nd_recursion_opcode(self):
         """~~ transforms to ND_RECURSION opcode."""
         ir = parse_ir("~~(0, (v, r) => { v })")
         assert len(ir) == 1
-        from catnip.semantic.opcode import OpCode
-
-        assert ir[0].ident == OpCode.ND_RECURSION
+        assert ir[0].kind == "Op"
+        assert ir[0].opcode == "NdRecursion"
 
     def test_nd_map_opcode(self):
         """~> transforms to ND_MAP opcode."""
         ir = parse_ir("~> abs")
         assert len(ir) == 1
-        from catnip.semantic.opcode import OpCode
-
-        assert ir[0].ident == OpCode.ND_MAP
+        assert ir[0].kind == "Op"
+        assert ir[0].opcode == "NdMap"

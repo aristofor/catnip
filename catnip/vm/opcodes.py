@@ -1,5 +1,5 @@
 # FILE: catnip/vm/opcodes.py
-# GENERATED FROM catnip_rs/src/vm/opcode.rs
+# GENERATED FROM catnip_core/src/vm/opcode.rs
 # Do not edit the enum manually. Run: python catnip_rs/gen_opcodes.py
 """
 VM opcodes and metadata.
@@ -47,50 +47,62 @@ class VMOp(IntEnum):
     NOP = 30
     BREAKPOINT = 31
     DIV = 32
-    LOAD_CONST = 33
-    LOAD_LOCAL = 34
-    STORE_LOCAL = 35
-    LOAD_SCOPE = 36
-    STORE_SCOPE = 37
-    LOAD_GLOBAL = 38
-    POP_TOP = 39
-    DUP_TOP = 40
-    ROT_TWO = 41
-    JUMP = 42
-    JUMP_IF_FALSE = 43
-    JUMP_IF_TRUE = 44
-    JUMP_IF_FALSE_OR_POP = 45
-    JUMP_IF_TRUE_OR_POP = 46
-    JUMP_IF_NONE = 47
-    GET_ITER = 48
-    FOR_ITER = 49
-    FOR_RANGE_INT = 50
-    FOR_RANGE_STEP = 51
-    CALL = 52
-    CALL_KW = 53
-    TAILCALL = 54
-    RETURN = 55
-    MAKE_FUNCTION = 56
-    CALL_METHOD = 57
-    BUILD_LIST = 58
-    BUILD_TUPLE = 59
-    BUILD_SET = 60
-    BUILD_DICT = 61
-    BUILD_SLICE = 62
-    PUSH_BLOCK = 63
-    POP_BLOCK = 64
-    BREAK = 65
-    CONTINUE = 66
-    MATCH_PATTERN = 67
-    BIND_MATCH = 68
-    MATCH_PATTERN_VM = 69
-    MATCH_ASSIGN_PATTERN_VM = 70
-    MATCH_FAIL = 71
-    UNPACK_SEQUENCE = 72
-    UNPACK_EX = 73
-    MAKE_STRUCT = 74
-    MAKE_TRAIT = 75
-    HALT = 76
+    IN = 33
+    NOT_IN = 34
+    IS = 35
+    IS_NOT = 36
+    TO_BOOL = 37
+    TYPE_OF = 38
+    LOAD_CONST = 39
+    LOAD_LOCAL = 40
+    STORE_LOCAL = 41
+    LOAD_SCOPE = 42
+    STORE_SCOPE = 43
+    LOAD_GLOBAL = 44
+    POP_TOP = 45
+    DUP_TOP = 46
+    ROT_TWO = 47
+    JUMP = 48
+    JUMP_IF_FALSE = 49
+    JUMP_IF_TRUE = 50
+    JUMP_IF_FALSE_OR_POP = 51
+    JUMP_IF_TRUE_OR_POP = 52
+    JUMP_IF_NONE = 53
+    JUMP_IF_NOT_NONE_OR_POP = 54
+    GET_ITER = 55
+    FOR_ITER = 56
+    FOR_RANGE_INT = 57
+    FOR_RANGE_STEP = 58
+    CALL = 59
+    CALL_KW = 60
+    CALL_METHOD = 61
+    TAILCALL = 62
+    RETURN = 63
+    MAKE_FUNCTION = 64
+    BUILD_LIST = 65
+    BUILD_TUPLE = 66
+    BUILD_SET = 67
+    BUILD_DICT = 68
+    BUILD_SLICE = 69
+    FORMAT_VALUE = 70
+    BUILD_STRING = 71
+    PUSH_BLOCK = 72
+    POP_BLOCK = 73
+    BREAK = 74
+    CONTINUE = 75
+    MATCH_PATTERN = 76
+    MATCH_PATTERN_VM = 77
+    MATCH_ASSIGN_PATTERN_VM = 78
+    BIND_MATCH = 79
+    MATCH_FAIL = 80
+    UNPACK_SEQUENCE = 81
+    UNPACK_EX = 82
+    MAKE_STRUCT = 83
+    MAKE_TRAIT = 84
+    HALT = 85
+    EXIT = 86
+    GLOBALS = 87
+    LOCALS = 88
 
 
 # Stack effect: (pops, pushes) for each opcode
@@ -126,12 +138,18 @@ STACK_EFFECT = {
     VMOp.GE: (2, 1),
     VMOp.EQ: (2, 1),
     VMOp.NE: (2, 1),
+    VMOp.IN: (2, 1),
+    VMOp.NOT_IN: (2, 1),
+    VMOp.IS: (2, 1),
+    VMOp.IS_NOT: (2, 1),
     VMOp.NOT: (1, 1),
+    VMOp.TO_BOOL: (1, 1),
     VMOp.JUMP: (0, 0),
     VMOp.JUMP_IF_FALSE: (1, 0),
     VMOp.JUMP_IF_TRUE: (1, 0),
     VMOp.JUMP_IF_FALSE_OR_POP: (1, 0),
     VMOp.JUMP_IF_TRUE_OR_POP: (1, 0),
+    VMOp.JUMP_IF_NOT_NONE_OR_POP: (1, 0),
     VMOp.GET_ITER: (1, 1),
     VMOp.FOR_ITER: (0, 1),
     VMOp.FOR_RANGE_INT: (0, 0),
@@ -172,6 +190,7 @@ STACK_EFFECT = {
     VMOp.CALL_METHOD: (-1, 1),
     VMOp.MATCH_FAIL: (0, 0),
     VMOp.MATCH_ASSIGN_PATTERN_VM: (1, 1),
+    VMOp.EXIT: (-1, 0),
 }
 
 
@@ -189,6 +208,7 @@ HAS_ARG = frozenset(
         VMOp.JUMP_IF_TRUE,
         VMOp.JUMP_IF_FALSE_OR_POP,
         VMOp.JUMP_IF_TRUE_OR_POP,
+        VMOp.JUMP_IF_NOT_NONE_OR_POP,
         VMOp.FOR_ITER,
         VMOp.FOR_RANGE_INT,
         VMOp.CALL,
@@ -216,6 +236,7 @@ HAS_ARG = frozenset(
         VMOp.CALL_METHOD,
         VMOp.MATCH_FAIL,
         VMOp.MATCH_ASSIGN_PATTERN_VM,
+        VMOp.EXIT,
     }
 )
 

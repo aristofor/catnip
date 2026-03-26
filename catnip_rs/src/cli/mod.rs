@@ -1,7 +1,7 @@
 // FILE: catnip_rs/src/cli/mod.rs
 //! Common CLI utilities for Catnip binaries.
 //!
-//! Shared between catnip-standalone and catnip-repl for:
+//! Shared between catnip and catnip-repl for:
 //! - Source code loading (file, -c, stdin)
 //! - Version/info display
 //! - Error handling
@@ -89,24 +89,16 @@ impl ExecutionStats {
         println!("Compile time: {:>8} μs", self.compile_time_us);
         println!("Execute time: {:>8} μs", self.execute_time_us);
         println!("Total time:   {:>8} μs", self.total_time_us);
-        println!(
-            "JIT enabled:  {}",
-            if self.jit_enabled { "yes" } else { "no" }
-        );
+        println!("JIT enabled:  {}", if self.jit_enabled { "yes" } else { "no" });
         if self.jit_enabled {
             println!("JIT compiles: {}", self.jit_compilations);
         }
     }
 }
 
-/// Format version string.
-pub fn version_string() -> String {
-    format!("Catnip v{} (Rust runtime)", env!("CARGO_PKG_VERSION"))
-}
-
 /// Print runtime information.
 pub fn print_runtime_info() {
-    println!("Catnip Standalone Runtime");
+    println!("Catnip Runtime");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Features:");
@@ -121,10 +113,10 @@ pub fn print_runtime_info() {
     println!("  - Mode: Release (LTO, optimized)");
     println!();
     println!("Usage:");
-    println!("  catnip-standalone script.cat");
-    println!("  catnip-standalone -c \"x = 10; x * 2\"");
-    println!("  echo \"2 + 3\" | catnip-standalone --stdin");
-    println!("  catnip-standalone bench script.cat  # Benchmark mode");
+    println!("  catnip script.cat");
+    println!("  catnip -c \"x = 10; x * 2\"");
+    println!("  echo \"2 + 3\" | catnip --stdin");
+    println!("  catnip bench script.cat  # Benchmark mode");
 }
 
 #[cfg(test)]

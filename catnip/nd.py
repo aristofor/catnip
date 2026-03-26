@@ -65,8 +65,8 @@ def _worker_init():
     Called once per worker process via ProcessPoolExecutor initializer.
     Sets up the global registry for lambda reconstruction.
     """
-    from .. import Catnip
-    from .._rs import set_global_registry
+    from catnip import Catnip
+    from catnip._rs import set_global_registry
 
     catnip = Catnip()
     set_global_registry(catnip.registry)
@@ -78,7 +78,7 @@ def _worker_execute_simple(seed, nd_lambda):
     Creates a local sequential scheduler and recur for the worker process.
     All recursion happens inline within this process.
     """
-    from .._rs import NDRecur, NDScheduler
+    from catnip._rs import NDRecur, NDScheduler
 
     local_scheduler = NDScheduler(n_workers=1, mode='sequential')
     local_recur = NDRecur(local_scheduler, nd_lambda, None, 'sequential')

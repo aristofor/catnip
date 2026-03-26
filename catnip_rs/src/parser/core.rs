@@ -14,12 +14,9 @@ impl TreeSitterParser {
     fn new() -> PyResult<Self> {
         let language = crate::get_tree_sitter_language();
         let mut parser = Parser::new();
-        parser.set_language(&language).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to set language: {}",
-                e
-            ))
-        })?;
+        parser
+            .set_language(&language)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set language: {}", e)))?;
         Ok(Self { parser })
     }
 
@@ -38,8 +35,7 @@ impl TreeSitterParser {
 
         // Level 0: return parse tree
         if level == 0 {
-            let tree_node =
-                crate::parser::tree_node::TreeNode::from_node(py, tree.root_node(), source)?;
+            let tree_node = crate::parser::tree_node::TreeNode::from_node(py, tree.root_node(), source)?;
             return Ok(tree_node.into_bound(py).into_any().unbind());
         }
 

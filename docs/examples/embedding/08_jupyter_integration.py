@@ -240,8 +240,7 @@ if __name__ == '__main__':
     print("⇒ Exemple 1 : Magic command de base")
     print()
 
-    print(
-        """
+    print("""
 Dans Jupyter, après avoir chargé l'extension :
 
     %load_ext jupyter_integration
@@ -254,15 +253,13 @@ Vous pouvez utiliser Catnip directement :
     # La variable est disponible en Python
     print(x)  # 10
     print(y)  # 20
-    """
-    )
+    """)
 
     print()
     print("⇒ Exemple 2 : Cellule Catnip avec calculs")
     print()
 
-    print(
-        """
+    print("""
     %%catnip
     # Fibonacci en Catnip
     fib = (n) => {
@@ -275,15 +272,13 @@ Vous pouvez utiliser Catnip directement :
     result
 
     # Output: 55
-    """
-    )
+    """)
 
     print()
     print("⇒ Exemple 3 : Partage d'état avec Python")
     print()
 
-    print(
-        """
+    print("""
 # Créer des données en Python
 import pandas as pd
 df = pd.DataFrame({
@@ -299,15 +294,13 @@ sum_a + sum_b
 
 # Résultat stocké dans variable Python 'col_sum'
 print(col_sum)  # 21
-    """
-    )
+    """)
 
     print()
     print("⇒ Exemple 4 : Charger un script externe")
     print()
 
-    print(
-        """
+    print("""
 # Créer un fichier utils.cat
 # factorial = (n) => { if n <= 1 { 1 } else { n * factorial(n-1) } }
 
@@ -317,15 +310,13 @@ print(col_sum)  # 21
 # Utiliser la fonction
 %catnip factorial(5)
 # Output: 120
-    """
-    )
+    """)
 
     print()
     print("⇒ Exemple 5 : Analyse de données interactive")
     print()
 
-    print(
-        """
+    print("""
 import numpy as np
 
 # Données NumPy
@@ -344,8 +335,7 @@ threshold
 # Python peut réutiliser ces variables
 print(f"Moyenne: {mean}")
 print(f"Seuil: {threshold}")
-    """
-    )
+    """)
 
     print()
     print("⇒ Simulation de session")

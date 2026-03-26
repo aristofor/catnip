@@ -4,6 +4,22 @@ Système de cache multi-niveaux, écrit en Rust, avec un protocole simple pour b
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    REQ["Requête (source, options)"] --> KEY["CacheKey (xxhash)"]
+    KEY --> CC["CatnipCache"]
+    CC --> MEM{"MemoryCache ?"}
+    MEM -->|Hit| RET["Retour immédiat"]
+    MEM -->|Miss| DISK{"DiskCache ?"}
+    DISK -->|Hit| FILL_MEM["Remplir MemoryCache"] --> RET
+    DISK -->|Miss| COMPILE["Compilation (parse/semantic/bytecode)"]
+    COMPILE --> STORE["Store MemoryCache + DiskCache"]
+    STORE --> RET
+
+    JIT["JIT trace/stencil"] -.->|Fichiers séparés| JITC["~/.cache/catnip/jit_v*/jit_nv*"]
+    DISK -.->|Fichiers séparés| DISKC["~/.cache/catnip/catnip_*"]
+```
+
 ### Composants Rust
 
 **`catnip_rs/src/cache/mod.rs`** - Types de base :
@@ -33,7 +49,7 @@ Système de cache multi-niveaux, écrit en Rust, avec un protocole simple pour b
 - `class CacheBackend(Protocol)` : interface pour backends custom Python
 - Méthodes requises : `get`, `set`, `delete`, `clear`, `exists`, `stats`
 
-**`catnip/cachesys/memoization.py`** - Wrapper legacy :
+**`catnip/cachesys/memoization.py`** - Wrapper Python :
 
 - `CachedWrapper` : utilisé par `context.py` pour le décorateur `@cached`
 
@@ -206,18 +222,18 @@ cache = CatnipCache(backend=redis_cache)
 
 Cache unifié pour les traces JIT et les stencils Cranelift, colocalisé avec le cache de compilation.
 
-**Module** : `catnip_rs/src/jit/trace_cache.rs`
+**Module** : `catnip_core/src/jit/trace_cache.rs`
 
 **Emplacement** : `~/.cache/catnip/` (fichiers plats, même répertoire que le DiskCache)
 
 **Fichiers** :
 
 - `jit_v{V}_{HASH}_{OFFSET}` -- traces (bincode), clé = FNV-1a du bytecode + offset de boucle
-- `jit_native_{SHA256}` -- stencils Cranelift (postcard), clé = hash du IR + triple ISA + flags CPU
+- `jit_nv{V}_{SHA256}` -- stencils Cranelift natifs, clé = hash du IR + triple ISA + flags CPU
 
-Les traces persistent les enregistrements JIT pour éliminer le warm-up (100+ itérations). Les stencils persistent le
-code machine non relocaté pour éliminer la recompilation Cranelift. L'invalidation se fait par version Catnip (traces)
-et par `VersionMarker` Cranelift (stencils).
+`V = VMOpCode::MAX + COMPILER_SALT` dans les deux cas. Les traces persistent les enregistrements JIT pour éliminer le
+warm-up (100+ itérations). Les stencils persistent le code machine non relocaté pour éliminer la recompilation
+Cranelift. L'invalidation se fait par version (les anciennes entrées sont nettoyées au démarrage).
 
 Les écritures sont atomiques (temp + rename), ce qui permet l'utilisation concurrente par les workers ND sans lock.
 

@@ -23,9 +23,9 @@ class TestForLoopScoping(unittest.TestCase):
         c.execute()
 
         # x should be updated (10 + 1 + 2 + 3 = 16)
-        self.assertEqual(c.context.globals["x"], 16)
+        self.assertEqual(c.context.globals['x'], 16)
         # i should not exist in globals
-        self.assertNotIn("i", c.context.globals)
+        self.assertNotIn('i', c.context.globals)
 
     def test_for_loop_modifies_parent_scope_variable(self):
         # A parent-scope variable can be updated from a for loop
@@ -37,7 +37,7 @@ class TestForLoopScoping(unittest.TestCase):
             }
         """)
         c.execute()
-        self.assertEqual(c.context.globals["total"], 15)
+        self.assertEqual(c.context.globals['total'], 15)
 
     def test_for_loop_variable_does_not_conflict(self):
         # Reusing a variable name after a for loop should not conflict
@@ -51,7 +51,7 @@ class TestForLoopScoping(unittest.TestCase):
         c.execute()
 
         # i should have the new value, not the loop's value
-        self.assertEqual(c.context.globals["i"], 100)
+        self.assertEqual(c.context.globals['i'], 100)
 
     def test_nested_for_loops_have_separate_scopes(self):
         # Nested for loops have separate scopes
@@ -67,10 +67,10 @@ class TestForLoopScoping(unittest.TestCase):
         c.execute()
 
         # result should contain [11, 21, 12, 22]
-        self.assertEqual(c.context.globals["result"], [11, 21, 12, 22])
+        self.assertEqual(c.context.globals['result'], [11, 21, 12, 22])
         # neither i nor j should be in globals
-        self.assertNotIn("i", c.context.globals)
-        self.assertNotIn("j", c.context.globals)
+        self.assertNotIn('i', c.context.globals)
+        self.assertNotIn('j', c.context.globals)
 
     def test_for_loop_with_same_variable_name_twice(self):
         # Two successive for loops with the same variable name
@@ -89,10 +89,10 @@ class TestForLoopScoping(unittest.TestCase):
         """)
         c.execute()
 
-        self.assertEqual(c.context.globals["sum1"], 6)
-        self.assertEqual(c.context.globals["sum2"], 60)
+        self.assertEqual(c.context.globals['sum1'], 6)
+        self.assertEqual(c.context.globals['sum2'], 60)
         # i should not be in globals
-        self.assertNotIn("i", c.context.globals)
+        self.assertNotIn('i', c.context.globals)
 
 
 if __name__ == "__main__":

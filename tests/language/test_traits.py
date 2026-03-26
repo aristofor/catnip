@@ -13,7 +13,7 @@ def test_trait_basic_method(cat):
 trait Greetable {
     greet(self) => { "hello" }
 }
-struct Person implements(Greetable) { name }
+struct Person implements(Greetable) { name; }
 Person("Alice").greet()
 """
     cat.parse(code)
@@ -25,7 +25,7 @@ def test_trait_method_accesses_self(cat):
 trait Describable {
     describe(self) => { self.label }
 }
-struct Widget implements(Describable) { label }
+struct Widget implements(Describable) { label; }
 Widget("btn").describe()
 """
     cat.parse(code)
@@ -164,7 +164,7 @@ trait Readable {
 trait Writable {
     write(self) => { "write" }
 }
-struct File implements(Readable, Writable) { path }
+struct File implements(Readable, Writable) { path; }
 f = File("/tmp")
 list(f.read(), f.write())
 """
@@ -178,7 +178,7 @@ list(f.read(), f.write())
 def test_trait_empty_body(cat):
     code = """
 trait Marker { }
-struct S implements(Marker) { x }
+struct S implements(Marker) { x; }
 S(42).x
 """
     cat.parse(code)

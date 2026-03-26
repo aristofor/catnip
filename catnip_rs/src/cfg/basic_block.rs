@@ -32,6 +32,8 @@ pub struct BasicBlock {
     pub immediate_dominator: Option<usize>,
     /// Blocks dominated by this block
     pub dominated: HashSet<usize>,
+    /// Branch condition (for blocks ending with conditional edges)
+    pub condition: Option<Op>,
 }
 
 impl BasicBlock {
@@ -47,11 +49,16 @@ impl BasicBlock {
             dominators: HashSet::new(),
             immediate_dominator: None,
             dominated: HashSet::new(),
+            condition: None,
         }
     }
 
     pub fn add_instruction(&mut self, op: Op) {
         self.instructions.push(op);
+    }
+
+    pub fn set_condition(&mut self, cond: Op) {
+        self.condition = Some(cond);
     }
 
     pub fn is_entry(&self) -> bool {

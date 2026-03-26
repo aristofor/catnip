@@ -103,18 +103,18 @@ class TestJitPragma:
     """Tests for pragma("jit", ...) directive."""
 
     def test_pragma_jit_on(self):
-        """pragma("jit", "on") enables JIT."""
+        """pragma("jit", True) enables JIT."""
         code = '''
-        pragma("jit", "on")
+        pragma("jit", True)
         f = (n) => { n + 1 }
         f(5)
         '''
         assert exec_catnip(code) == 6
 
     def test_pragma_jit_off(self):
-        """pragma("jit", "off") disables JIT."""
+        """pragma("jit", False) disables JIT."""
         code = '''
-        pragma("jit", "off")
+        pragma("jit", False)
         f = (n) => { n + 1 }
         f(5)
         '''

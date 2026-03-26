@@ -1,13 +1,15 @@
 // FILE: catnip_tools/src/tokenizer.rs
 use crate::token::Token;
+use catnip_grammar::node_kinds as NK;
 use tree_sitter::Node;
 
 /// Extract tokens from tree-sitter parse tree
 pub fn extract_tokens(node: Node, source: &str, tokens: &mut Vec<Token>) {
     let kind = node.kind();
 
-    // fstrings/bstrings: opaque token (don't decompose into children)
-    if kind == "fstring" || kind == "bstring" {
+    // Strings: opaque token (don't decompose into children)
+    // Triple-quoted strings have children (start/content/end) that must not be reformatted
+    if kind == NK::STRING || kind == NK::FSTRING || kind == NK::BSTRING {
         let value = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
         tokens.push(Token {
             type_: map_node_type(kind),
@@ -45,18 +47,18 @@ pub fn extract_tokens(node: Node, source: &str, tokens: &mut Vec<Token>) {
 /// Map tree-sitter node type to formatter token type
 pub fn map_node_type(kind: &str) -> String {
     match kind {
-        "identifier" => "NAME",
-        "integer" => "INT",
-        "float" => "FLOAT",
-        "decimal" => "DECIMAL",
-        "imaginary" => "IMAGINARY",
-        "string" => "STRING",
-        "fstring" => "FSTRING",
-        "bstring" => "BSTRING",
-        "comment" => "COMMENT",
-        "true" => "TRUE",
-        "false" => "FALSE",
-        "none" => "NONE",
+        NK::IDENTIFIER => "NAME",
+        NK::INTEGER => "INT",
+        NK::FLOAT => "FLOAT",
+        NK::DECIMAL => "DECIMAL",
+        NK::IMAGINARY => "IMAGINARY",
+        NK::STRING => "STRING",
+        NK::FSTRING => "FSTRING",
+        NK::BSTRING => "BSTRING",
+        NK::COMMENT => "COMMENT",
+        NK::TRUE => "TRUE",
+        NK::FALSE => "FALSE",
+        NK::NONE => "NONE",
         "(" => "LPAR",
         ")" => "RPAR",
         "{" => "LBRACE",

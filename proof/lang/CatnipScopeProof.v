@@ -1,5 +1,5 @@
 (* FILE: proof/lang/CatnipScopeProof.v *)
-(* CatnipScopeProof.v — Formal model of Catnip's scope resolution
+(* CatnipScopeProof.v - Formal model of Catnip's scope resolution
  *
  * Source of truth: catnip_rs/src/core/scope.rs
  *

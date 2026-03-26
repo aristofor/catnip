@@ -1,5 +1,5 @@
 (* FILE: proof/optim/CatnipStrengthRedProof.v *)
-(* Strength Reduction pass — algebraic identities.
+(* Strength Reduction pass - algebraic identities.
  *
  * Source: catnip_rs/src/semantic/strength_reduction.rs
  *
@@ -219,7 +219,7 @@ Theorem sr_add_zero_l_sem : forall x rho v,
   eval_expr (BinOp Add (Const 0) x) rho = Some v.
 Proof. intros x rho v Hx. simpl. rewrite Hx. reflexivity. Qed.
 
-(* Power rules — stated on reduced form since eval_expr does not model Pow *)
+(* Power rules - stated on reduced form since eval_expr does not model Pow *)
 Theorem sr_pow_two_sem : forall x rho v,
   eval_expr x rho = Some v ->
   eval_expr (strength_reduce (BinOp Pow x (Const 2))) rho = Some (v * v)%Z.
@@ -234,7 +234,7 @@ Theorem sr_pow_zero_sem : forall x rho,
   eval_expr (strength_reduce (BinOp Pow x (Const 0))) rho = Some 1%Z.
 Proof. reflexivity. Qed.
 
-(* Division by 1 — stated on reduced form (eval_expr does not model division) *)
+(* Division by 1 - stated on reduced form (eval_expr does not model division) *)
 Theorem sr_truediv_one_sem : forall x rho v,
   eval_expr x rho = Some v ->
   eval_expr (strength_reduce (BinOp TrueDiv x (Const 1))) rho = Some v.

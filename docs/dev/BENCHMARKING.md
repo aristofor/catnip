@@ -737,7 +737,7 @@ print(f"Toutes passes:   {avg_all:.2f}ms (gain: {avg_base/avg_all:.2f}x)")
 
 ## Exemples Complets
 
-Les benchmarks suivants ont ete deplacés (besoin de les réécrire pour refléter les conditions de prod)
+Les benchmarks suivants ont été déplacés (besoin de les réécrire pour refléter les conditions de prod)
 
 ## Recommandations
 
@@ -765,7 +765,7 @@ Les benchmarks suivants ont ete deplacés (besoin de les réécrire pour reflét
 
 1. **Équivalence sémantique** : Même algorithme, pas mêmes APIs
 1. **Warmup Python aussi** : JIT Python (si CPython 3.11+) nécessite warmup
-1. **Mesures identiques** : Même timer, même nombre iterations
+1. **Mesures identiques** : Même timer, même nombre d'itérations
 1. **Rapporter overhead** : Pourcentage ou ratio, pas juste temps absolu
 1. **Contexte réaliste** : Python excelle sur certains patterns (comprehensions, builtins)
 

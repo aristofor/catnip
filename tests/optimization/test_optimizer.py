@@ -13,7 +13,7 @@ import pytest
 from catnip import Catnip
 
 # Enable pytester fixture for meta-testing (testing pytest behavior)
-pytest_plugins = ["pytester"]
+pytest_plugins = ['pytester']
 
 # --- Fixtures for different optimization levels ---
 
@@ -32,7 +32,7 @@ def catnip_opt3():
     return Catnip(optimize=2)
 
 
-# Removed: TestStrengthReduction — sr_mul_one, sr_add_zero, sr_pow_one (CatnipOptimProof.v)
+# Removed: TestStrengthReduction - sr_mul_one, sr_add_zero, sr_pow_one (CatnipOptimProof.v)
 # Each identity formally proved; runtime covered by TestOptimizerPipeline
 
 
@@ -40,9 +40,9 @@ class TestDeadCodeElimination:
     """Tests for dead code elimination.
 
     Removed (proven in CatnipOptimProof.v + covered by language tests):
-    - test_if_true_constant  — dce_if_true  (line 595)
-    - test_if_false_no_else  — dce_if_false (line 599)
-    - test_while_false_never_executes — dce_while_false (line 603)
+    - test_if_true_constant  - dce_if_true  (line 595)
+    - test_if_false_no_else  - dce_if_false (line 599)
+    - test_while_false_never_executes - dce_while_false (line 603)
     """
 
     @pytest.fixture
@@ -175,7 +175,7 @@ class TestOptimizerPipeline:
         assert result == 3
 
 
-# Removed: TestChainedComparisons (7 tests) — chained_compare_semantics (CatnipExprProof.v)
+# Removed: TestChainedComparisons (7 tests) - chained_compare_semantics (CatnipExprProof.v)
 # Constant folding proved in CatnipConstFoldProof.v; runtime covered by TestComparisons in test_treesitter_parser.py
 
 

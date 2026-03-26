@@ -1,4 +1,5 @@
-# Exemple 01 : Broadcasting de base
+#!/usr/bin/env catnip
+# Exemple : Broadcasting de base
 # Opérations arithmétiques simples sur des listes
 
 print("⇒ Broadcasting de base")
@@ -22,7 +23,8 @@ print("Nombres * 3:", resultat)
 resultat = nombres.[/ 2]
 print("Nombres / 2:", resultat)
 
-print("\n⇒ Broadcasting avec deux listes\n")
+print()
+print("⇒ Broadcasting avec deux listes\n")
 
 # Addition de deux listes
 a = list(1, 2, 3)
@@ -37,7 +39,8 @@ print("a + b:", resultat)
 resultat = a.[* b]
 print("a * b:", resultat)
 
-print("\n⇒ Enchaînement d'opérations\n")
+print()
+print("⇒ Enchaînement d'opérations\n")
 
 # Chaîner plusieurs opérations
 nombres = list(1, 2, 3, 4, 5)
@@ -51,7 +54,8 @@ print("(nombres * 2) + 10:", resultat)
 resultat = nombres.[+ 1].[* 3].[- 5]
 print("((nombres + 1) * 3) - 5:", resultat)
 
-print("\n⇒ Types mixtes\n")
+print()
+print("⇒ Types mixtes\n")
 
 # Broadcasting avec floats
 floats = list(1.5, 2.5, 3.5)

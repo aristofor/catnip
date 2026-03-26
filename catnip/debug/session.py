@@ -1,10 +1,10 @@
 # FILE: catnip/debug/session.py
-"""Debug session: thin Python wrapper around RustDebugSession."""
+"""Debug session: thin Python wrapper around DebugSession."""
 
 import enum
 from dataclasses import dataclass
 
-from .._rs import RustDebugSession
+from .._rs import DebugSession as _RsDebugSession
 
 
 class DebugAction(enum.IntEnum):
@@ -20,11 +20,11 @@ class DebugAction(enum.IntEnum):
 class DebugState(enum.Enum):
     """Session lifecycle states."""
 
-    IDLE = "idle"
-    RUNNING = "running"
-    PAUSED = "paused"
-    FINISHED = "finished"
-    ERROR = "error"
+    IDLE = 'idle'
+    RUNNING = 'running'
+    PAUSED = 'paused'
+    FINISHED = 'finished'
+    ERROR = 'error'
 
 
 @dataclass
@@ -66,14 +66,14 @@ class DebugSession:
     """
     Manages a debug session between the VM and a debugger frontend.
 
-    Delegates to RustDebugSession for channel-based communication.
+    Delegates to DebugSession for channel-based communication.
     Preserves the existing Python API for tests and MCP.
     """
 
     def __init__(self, catnip_instance, source_text):
         self.catnip = catnip_instance
         self.source_text = source_text
-        self._rust_session = RustDebugSession(source_text)
+        self._rust_session = _RsDebugSession(source_text)
         self._state = DebugState.IDLE
         self._last_pause = None
         self._breakpoints = set()
@@ -90,12 +90,18 @@ class DebugSession:
     def add_breakpoint(self, line: int):
         """Add a breakpoint at a line number (1-indexed)."""
         self._breakpoints.add(line)
-        self._rust_session.add_breakpoint(line)
+        if self._state in (DebugState.RUNNING, DebugState.PAUSED):
+            self._rust_session.add_runtime_breakpoint(line)
+        else:
+            self._rust_session.add_breakpoint(line)
 
     def remove_breakpoint(self, line: int):
         """Remove a breakpoint at a line number."""
         self._breakpoints.discard(line)
-        self._rust_session.remove_breakpoint(line)
+        if self._state in (DebugState.RUNNING, DebugState.PAUSED):
+            self._rust_session.remove_runtime_breakpoint(line)
+        else:
+            self._rust_session.remove_breakpoint(line)
 
     def start(self, blocking=True):
         """
@@ -155,7 +161,7 @@ class DebugSession:
             line, col, locals_repr, snippet, call_stack, start_byte, locals_py = data
 
             # Build locals dict from the actual Python dict
-            locals_dict = dict(locals_py) if locals_py else {}
+            locals_dict = dict(locals_py) if locals_py else dict()
 
             info = PauseInfo(
                 line=line,
@@ -171,7 +177,7 @@ class DebugSession:
 
         elif event_type == 'finished':
             self._state = DebugState.FINISHED
-            # data is a repr string — try to parse if simple
+            # data is a repr string - try to parse if simple
             return ('finished', data)
 
         elif event_type == 'error':

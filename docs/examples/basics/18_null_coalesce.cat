@@ -1,0 +1,22 @@
+#!/usr/bin/env catnip
+# Nil-coalescing operator (??)
+# Retourne la valeur si non-None, sinon le RHS
+
+# Basique
+42 ?? 0            # → 42
+None ?? 0          # → 0
+None ?? None ?? 3  # → 3
+
+# Teste None uniquement, pas la truthiness
+0 ?? 99      # → 0
+False ?? 99  # → False
+
+# and/or retournent des booleens
+"ok" and 42       # → True
+0 or "fallback"   # → True
+False and "nope"  # → False
+
+# Trois niveaux de selection :
+# - and/or : logique pure (bool)
+# - ?? : nil-check (valeur)
+# - if/else : truthiness (contrôle de flux)

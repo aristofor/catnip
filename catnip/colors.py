@@ -50,61 +50,61 @@ class Colors:
     """ANSI color codes for terminal support."""
 
     # Basic styles
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    ITALIC = "\033[3m"
-    UNDERLINE = "\033[4m"
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    ITALIC = '\033[3m'
+    UNDERLINE = '\033[4m'
 
     # Standard foreground colors (kept for direct use)
-    BLACK = "\033[30m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
 
     # Bright foreground colors
-    BRIGHT_BLACK = "\033[90m"
-    BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
-    BRIGHT_YELLOW = "\033[93m"
-    BRIGHT_BLUE = "\033[94m"
-    BRIGHT_MAGENTA = "\033[95m"
-    BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
+    BRIGHT_BLACK = '\033[90m'
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_WHITE = '\033[97m'
 
     # Background colors
-    BG_BLACK = "\033[40m"
-    BG_RED = "\033[41m"
-    BG_GREEN = "\033[42m"
-    BG_YELLOW = "\033[43m"
-    BG_BLUE = "\033[44m"
-    BG_MAGENTA = "\033[45m"
-    BG_CYAN = "\033[46m"
-    BG_WHITE = "\033[47m"
+    BG_BLACK = '\033[40m'
+    BG_RED = '\033[41m'
+    BG_GREEN = '\033[42m'
+    BG_YELLOW = '\033[43m'
+    BG_BLUE = '\033[44m'
+    BG_MAGENTA = '\033[45m'
+    BG_CYAN = '\033[46m'
+    BG_WHITE = '\033[47m'
 
     @staticmethod
     def fg_256(color_code):
         """Set foreground color using 256-color palette (0-255)."""
-        return f"\033[38;5;{color_code}m"
+        return f'\033[38;5;{color_code}m'
 
     @staticmethod
     def bg_256(color_code):
         """Set background color using 256-color palette (0-255)."""
-        return f"\033[48;5;{color_code}m"
+        return f'\033[48;5;{color_code}m'
 
     @staticmethod
     def rgb(r, g, b):
         """Set foreground color using true RGB (0-255 each)."""
-        return f"\033[38;2;{r};{g};{b}m"
+        return f'\033[38;2;{r};{g};{b}m'
 
     @staticmethod
     def bg_rgb(r, g, b):
         """Set background color using true RGB (0-255 each)."""
-        return f"\033[48;2;{r};{g};{b}m"
+        return f'\033[48;2;{r};{g};{b}m'
 
 
 class Theme:
@@ -169,7 +169,7 @@ class Theme:
     @classmethod
     def set_theme(cls, name):
         """Switch base and accent colors to dark or light palette."""
-        if name == "dark":
+        if name == 'dark':
             cls.OPERATOR = DARK_OPERATOR
             cls.IDENTIFIER = DARK_FOREGROUND
             cls.COMMENT = DARK_COMMENT
@@ -179,7 +179,7 @@ class Theme:
             cls.STRING = ACCENT_DARK_STRING
             cls.BUILTIN = ACCENT_DARK_BUILTIN
             cls.CONSTANT = ACCENT_DARK_CONSTANT
-        elif name == "light":
+        elif name == 'light':
             cls.OPERATOR = LIGHT_OPERATOR
             cls.IDENTIFIER = LIGHT_FOREGROUND
             cls.COMMENT = LIGHT_COMMENT
@@ -240,10 +240,11 @@ def print_stage(stage_name, content, stage_color):
         return
 
     # Box drawing characters
-    top = f"{colorize('╭─', Theme.BOX_LIGHT)} {colorize(stage_name, stage_color)} {colorize('─' * (60 - len(stage_name)), Theme.BOX_LIGHT)}"
+    sep = colorize('─' * (60 - len(stage_name)), Theme.BOX_LIGHT)
+    top = f"{colorize('╭─', Theme.BOX_LIGHT)} {colorize(stage_name, stage_color)} {sep}"
 
     print(top)
-    for line in str(content).split("\n"):
+    for line in str(content).split('\n'):
         print(f"{colorize('│', Theme.BOX_LIGHT)} {line}")
 
 
@@ -274,14 +275,16 @@ def print_exception(exception):
             else:
                 print("Traceback (most recent call last):")
             for frame in exception.traceback.frames:
-                line_info = f", line {frame.line}" if hasattr(frame, 'line') and frame.line else ""
+                line_info = f", line {frame.line}" if hasattr(frame, 'line') and frame.line else ''
                 print(f'  File "{frame.filename}"{line_info}, in {frame.name}')
 
         # Print error type and message
+        # Use str(exception) which includes location from _format_message()
+        msg = str(exception)
         if Theme.enabled:
-            print(f"{Theme.ERROR}{error_type}:{Colors.RESET} {exception.message}")
+            print(f"{Theme.ERROR}{error_type}:{Colors.RESET} {msg}")
         else:
-            print(f"{error_type}: {exception.message}")
+            print(f"{error_type}: {msg}")
 
         # Print code snippet if available
         if exception.context:

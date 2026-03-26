@@ -1,11 +1,25 @@
 # BROADCAST_RUNTIME
 
-Voir aussi : [BROADCAST_SPEC.md](./BROADCAST_SPEC.md) pour la sémantique, et [BROADCAST_GUIDE.md](./BROADCAST_GUIDE.md)
-pour les exemples d'usage.
+Voir aussi : [BROADCAST_SPEC](BROADCAST_SPEC.md) pour la sémantique, et [BROADCAST_GUIDE](BROADCAST_GUIDE.md) pour les
+exemples d'usage.
 
 ## Implémentation
 
 ### Détection Automatique de Type et d'Opération
+
+```mermaid
+flowchart TD
+    BC["target.[op]"] --> EVAL["Évaluer target"]
+    EVAL --> MASK{"Opérande = masque booléen ?"}
+    MASK -->|Oui| FILTER_MASK["filter_by_mask()"]
+    MASK -->|Non| FILT{"Flag is_filter ?"}
+    FILT -->|Oui| FILTER_COND["filter_conditional()"]
+    FILT -->|Non| MAP["broadcast_map()"]
+
+    MAP --> HOMO{"Liste homogène numérique ?"}
+    HOMO -->|Oui| SIMD["Fast path Rust SIMD"]
+    HOMO -->|Non| PY["Chemin Python standard"]
+```
 
 Le système détecte automatiquement :
 
@@ -154,11 +168,11 @@ list(1, "a", 3).[+ 1]         # -> chemin Python standard (TypeError sur "a")
 Le broadcasting accepte **tout callable**, y compris les fonctions à effets de bord. Les fonctions suivantes du contexte
 fonctionnent techniquement dans un broadcast mais n'ont pas de sémantique de transformation :
 
-- `import` -- charge des modules, modifie le contexte
-- `jit` -- wrapper de compilation JIT
-- `pure` -- décorateur de marquage
-- `cached` -- wrapper de memoization
-- `debug` -- introspection
+- `import` - charge des modules, modifie le contexte
+- `jit` - wrapper de compilation JIT
+- `pure` - décorateur de marquage
+- `cached` - wrapper de memoization
+- `debug` - introspection
 
 ```catnip
 # Fonctionne, mais ce n'est pas du data flow

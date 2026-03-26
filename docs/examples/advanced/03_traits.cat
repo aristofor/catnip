@@ -1,0 +1,156 @@
+#!/usr/bin/env catnip
+# Exemple : Traits
+
+print("⇒ Trait basique avec méthode")
+
+trait Printable {
+    repr(self) => { "printable" }
+}
+
+struct Tag implements(Printable) { name }
+
+t = Tag("hello")
+print("t.repr() =", t.repr())
+
+print()
+print("⇒ Méthode de trait accede a self")
+
+trait HasArea {
+    area(self) => { self.w * self.h }
+}
+
+struct Rect implements(HasArea) { w; h; }
+
+r = Rect(3, 4)
+print("Rect(3, 4).area() =", r.area())
+
+print()
+print("⇒ Heritage de trait (extends)")
+
+trait Named {
+    name(self) => { "anonymous" }
+}
+
+trait Greeter extends(Named) {
+    greet(self) => { "hello" }
+}
+
+struct Bot implements(Greeter) {
+    label
+    name(self) => { self.label }
+}
+
+b = Bot("R2")
+print("Bot('R2').greet() =", b.greet())
+print("Bot('R2').name() =", b.name())
+
+print()
+print("⇒ Override de méthode par le struct")
+
+trait DefaultValue {
+    value(self) => { 10 }
+}
+
+struct Custom implements(DefaultValue) {
+    x
+    value(self) => { self.x * 2 }
+}
+
+print("Custom(7).value() =", Custom(7).value())
+
+print()
+print("⇒ Plusieurs traits sans conflit")
+
+trait Movable {
+    move(self) => { "moving" }
+}
+
+trait Drawable {
+    draw(self) => { "drawing" }
+}
+
+struct Sprite implements(Movable, Drawable) { id }
+
+s = Sprite(1)
+print("s.move() =", s.move())
+print("s.draw() =", s.draw())
+
+print()
+print("⇒ Conflit resolu par override")
+
+trait X { f(self) => { 1 } }
+trait Y { f(self) => { 2 } }
+
+struct Resolved implements(X, Y) {
+    f(self) => { 3 }
+}
+
+print("Resolved().f() =", Resolved().f())
+
+print()
+print("⇒ Diamond (dedupe silencieux)")
+
+trait Base { m(self) => { 0 } }
+trait Left extends(Base) {}
+trait Right extends(Base) {}
+
+struct Diamond implements(Left, Right) {}
+
+print("Diamond().m() =", Diamond().m())
+
+print()
+print("⇒ Trait avec corps vide")
+
+trait Marker {}
+
+struct Tagged implements(Marker) { label }
+
+print("Tagged('ok') =", Tagged("ok"))
+
+print()
+print("⇒ Abstract methods dans les traits")
+
+trait Serializable {
+    @abstract
+    serialize(self)
+    to_json(self) => { "{" + self.serialize() + "}" }
+}
+
+struct Config implements(Serializable) {
+    key; value;
+    serialize(self) => { f"{self.key}: {self.value}" }
+}
+
+cfg = Config('debug', True)
+print("cfg.serialize() =", cfg.serialize())
+print("cfg.to_json() =", cfg.to_json())
+
+print()
+print("⇒ Static methods dans les traits")
+
+trait Factory {
+    @static
+    create() => { "default" }
+}
+
+struct Widget implements(Factory) { v }
+
+print("Widget.create() =", Widget.create())
+
+print()
+print("⇒ Abstract static dans un trait")
+
+trait Buildable {
+    @abstract
+    @static
+    build()
+}
+
+struct Thing implements(Buildable) {
+    x
+
+    @static
+    build() => { Thing(99) }
+}
+
+print("Thing.build().x =", Thing.build().x)

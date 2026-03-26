@@ -3,10 +3,11 @@
 //!
 //! Scope provides O(1) variable lookup with push/pop semantics.
 
+use indexmap::IndexMap;
 use pyo3::exceptions::PyNameError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Flat scope with O(1) lookup and push/pop frame support.
 ///
@@ -16,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 #[pyclass(name = "Scope", module = "catnip._rs")]
 pub struct Scope {
     /// All symbols in current scope chain (flat)
-    symbols: HashMap<String, Py<PyAny>>,
+    symbols: IndexMap<String, Py<PyAny>>,
     /// Stack of names introduced at each frame level
     frame_names: Vec<HashSet<String>>,
     /// Previous values for shadowed variables (for restore on pop)
@@ -34,9 +35,9 @@ impl Scope {
     /// Create a new empty scope.
     #[new]
     #[pyo3(signature = (symbols=None))]
-    fn new(py: Python<'_>, symbols: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Self> {
+    pub fn new(py: Python<'_>, symbols: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Self> {
         let mut scope = Self {
-            symbols: HashMap::new(),
+            symbols: IndexMap::new(),
             frame_names: vec![HashSet::new()],
             shadow_stack: vec![Vec::new()],
             modified_names: vec![HashSet::new()],
@@ -55,7 +56,7 @@ impl Scope {
     }
 
     /// Push a new frame (entering a function/block).
-    fn push_frame(&mut self) {
+    pub fn push_frame(&mut self) {
         self.frame_names.push(HashSet::new());
         self.shadow_stack.push(Vec::new());
         self.modified_names.push(HashSet::new());
@@ -66,7 +67,7 @@ impl Scope {
     /// Pop a frame (exiting a function/block).
     ///
     /// Removes all names introduced in this frame and restores shadowed values.
-    fn pop_frame(&mut self) {
+    pub fn pop_frame(&mut self) {
         if self.frame_names.len() <= 1 {
             return; // Don't pop the global frame
         }
@@ -74,7 +75,7 @@ impl Scope {
         // Remove names introduced in this frame
         if let Some(names) = self.frame_names.pop() {
             for name in names {
-                self.symbols.remove(&name);
+                self.symbols.swap_remove(&name);
             }
         }
 
@@ -86,7 +87,7 @@ impl Scope {
                         self.symbols.insert(name, v);
                     }
                     None => {
-                        self.symbols.remove(&name);
+                        self.symbols.swap_remove(&name);
                     }
                 }
             }
@@ -107,13 +108,13 @@ impl Scope {
         self.symbols
             .get(name)
             .map(|v| v.clone_ref(py))
-            .ok_or_else(|| PyNameError::new_err(format!("name '{}' is not defined", name)))
+            .ok_or_else(|| PyNameError::new_err(catnip_core::constants::format_name_error(name)))
     }
 
     /// Set a symbol in the current frame.
     ///
     /// If the symbol exists in an outer frame, it shadows the outer value.
-    fn set(&mut self, py: Python<'_>, name: String, value: Py<PyAny>) {
+    pub fn set(&mut self, py: Python<'_>, name: String, value: Py<PyAny>) {
         let current_frame = self.frame_names.len() - 1;
 
         // Check if this name was NOT introduced in current frame
@@ -135,7 +136,7 @@ impl Scope {
     /// This mimics the Catnip/Python scoping rule where assignment to an
     /// existing variable updates it in place rather than shadowing.
     fn set_existing(&mut self, name: String, value: Py<PyAny>) -> bool {
-        if let std::collections::hash_map::Entry::Occupied(mut e) = self.symbols.entry(name) {
+        if let indexmap::map::Entry::Occupied(mut e) = self.symbols.entry(name) {
             e.insert(value);
             true
         } else {
@@ -167,7 +168,7 @@ impl Scope {
     }
 
     /// Get current frame depth.
-    fn depth(&self) -> usize {
+    pub fn depth(&self) -> usize {
         self.frame_names.len()
     }
 
@@ -175,7 +176,7 @@ impl Scope {
     ///
     /// Returns a dict of all current symbols. The closure can use this
     /// to restore captured variables when called.
-    fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.symbols {
             dict.set_item(k, v)?;
@@ -188,7 +189,7 @@ impl Scope {
     /// The captured dict contains variables that should be available
     /// in this frame (from the closure's creation context).
     /// The dict is stored for later sync_to_captures() call.
-    fn push_frame_with_captures(
+    pub fn push_frame_with_captures(
         &mut self,
         py: Python<'_>,
         captured: &Bound<'_, pyo3::types::PyDict>,
@@ -208,11 +209,7 @@ impl Scope {
     /// Sync modified variables back to the captured dict before pop.
     ///
     /// Call this before pop_frame() to persist closure state.
-    fn sync_to_captures(
-        &self,
-        py: Python<'_>,
-        captured: &Bound<'_, pyo3::types::PyDict>,
-    ) -> PyResult<()> {
+    pub fn sync_to_captures(&self, py: Python<'_>, captured: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
         // Sync ALL captured variables back to the closure_scope dict.
         // Variables in closure_scope are intentional captures and must always
         // propagate. The shadow/restore mechanism in _set/find_isolating_frame
@@ -354,9 +351,7 @@ impl Scope {
                             .iter()
                             .map(|(name, opt_value)| {
                                 let tuple_val = match opt_value {
-                                    Some(v) => {
-                                        (name.clone(), v.clone_ref(py)).into_pyobject(py).unwrap()
-                                    }
+                                    Some(v) => (name.clone(), v.clone_ref(py)).into_pyobject(py).unwrap(),
                                     None => (name.clone(), py.None()).into_pyobject(py).unwrap(),
                                 };
                                 tuple_val
@@ -393,11 +388,7 @@ impl Scope {
     }
 
     /// Pickle support: restore state from serialization.
-    fn __setstate__(
-        &mut self,
-        _py: Python<'_>,
-        state: &Bound<'_, pyo3::types::PyAny>,
-    ) -> PyResult<()> {
+    fn __setstate__(&mut self, _py: Python<'_>, state: &Bound<'_, pyo3::types::PyAny>) -> PyResult<()> {
         let dict: &Bound<'_, pyo3::types::PyDict> = state.cast()?;
 
         // Restore symbols
@@ -502,16 +493,6 @@ impl Scope {
         }
     }
 
-    /// Internal: get mutable reference to symbols (for VM use).
-    pub fn symbols_mut(&mut self) -> &mut HashMap<String, Py<PyAny>> {
-        &mut self.symbols
-    }
-
-    /// Internal: get reference to symbols (for VM use).
-    pub fn symbols(&self) -> &HashMap<String, Py<PyAny>> {
-        &self.symbols
-    }
-
     /// Public version of _set for Rust callers (Catnip scoping semantics).
     ///
     /// If the symbol exists anywhere, update it in place.
@@ -551,38 +532,17 @@ mod tests {
     fn scope_push_pop_restores() {
         Python::attach(|py| {
             let mut scope = Scope::new(py, None).unwrap();
-            scope.set(
-                py,
-                "a".to_string(),
-                1i64.into_pyobject(py).unwrap().into_any().unbind(),
-            );
+            scope.set(py, "a".to_string(), 1i64.into_pyobject(py).unwrap().into_any().unbind());
 
             scope.push_frame();
-            scope.set(
-                py,
-                "a".to_string(),
-                2i64.into_pyobject(py).unwrap().into_any().unbind(),
-            );
-            scope.set(
-                py,
-                "b".to_string(),
-                3i64.into_pyobject(py).unwrap().into_any().unbind(),
-            );
+            scope.set(py, "a".to_string(), 2i64.into_pyobject(py).unwrap().into_any().unbind());
+            scope.set(py, "b".to_string(), 3i64.into_pyobject(py).unwrap().into_any().unbind());
 
-            assert_eq!(
-                scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-                2
-            );
-            assert_eq!(
-                scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(),
-                3
-            );
+            assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 2);
+            assert_eq!(scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(), 3);
 
             scope.pop_frame();
-            assert_eq!(
-                scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-                1
-            );
+            assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 1);
             assert!(scope.get(py, "b").is_none());
         });
     }
@@ -597,14 +557,8 @@ mod tests {
                 10i64.into_pyobject(py).unwrap().into_any().unbind(),
             );
 
-            assert!(scope.set_existing(
-                "x".to_string(),
-                20i64.into_pyobject(py).unwrap().into_any().unbind()
-            ));
-            assert_eq!(
-                scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(),
-                20
-            );
+            assert!(scope.set_existing("x".to_string(), 20i64.into_pyobject(py).unwrap().into_any().unbind()));
+            assert_eq!(scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(), 20);
             assert!(!scope.set_existing(
                 "missing".to_string(),
                 30i64.into_pyobject(py).unwrap().into_any().unbind()
@@ -626,11 +580,7 @@ fn scope_parent_lookup() {
         scope.push_frame();
         // Variable parent accessible depuis child scope
         assert_eq!(
-            scope
-                .resolve(py, "parent_var")
-                .unwrap()
-                .extract::<i64>(py)
-                .unwrap(),
+            scope.resolve(py, "parent_var").unwrap().extract::<i64>(py).unwrap(),
             100
         );
     });
@@ -655,17 +605,11 @@ fn scope_shadowing() {
         );
 
         // Child scope voit sa propre valeur
-        assert_eq!(
-            scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(),
-            20
-        );
+        assert_eq!(scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(), 20);
 
         scope.pop_frame();
         // Parent scope voit sa valeur originale
-        assert_eq!(
-            scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(),
-            10
-        );
+        assert_eq!(scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(), 10);
     });
 }
 
@@ -676,60 +620,30 @@ fn scope_nested_three_levels() {
         let mut scope = Scope::new(py, None).unwrap();
 
         // Level 0
-        scope.set(
-            py,
-            "a".to_string(),
-            1i64.into_pyobject(py).unwrap().into_any().unbind(),
-        );
+        scope.set(py, "a".to_string(), 1i64.into_pyobject(py).unwrap().into_any().unbind());
 
         // Level 1
         scope.push_frame();
-        scope.set(
-            py,
-            "b".to_string(),
-            2i64.into_pyobject(py).unwrap().into_any().unbind(),
-        );
+        scope.set(py, "b".to_string(), 2i64.into_pyobject(py).unwrap().into_any().unbind());
 
         // Level 2
         scope.push_frame();
-        scope.set(
-            py,
-            "c".to_string(),
-            3i64.into_pyobject(py).unwrap().into_any().unbind(),
-        );
+        scope.set(py, "c".to_string(), 3i64.into_pyobject(py).unwrap().into_any().unbind());
 
         // Toutes les variables accessibles depuis level 2
-        assert_eq!(
-            scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-            1
-        );
-        assert_eq!(
-            scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(),
-            2
-        );
-        assert_eq!(
-            scope.resolve(py, "c").unwrap().extract::<i64>(py).unwrap(),
-            3
-        );
+        assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 1);
+        assert_eq!(scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(), 2);
+        assert_eq!(scope.resolve(py, "c").unwrap().extract::<i64>(py).unwrap(), 3);
 
         // Pop level 2
         scope.pop_frame();
-        assert_eq!(
-            scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-            1
-        );
-        assert_eq!(
-            scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(),
-            2
-        );
+        assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 1);
+        assert_eq!(scope.resolve(py, "b").unwrap().extract::<i64>(py).unwrap(), 2);
         assert!(scope.get(py, "c").is_none());
 
         // Pop level 1
         scope.pop_frame();
-        assert_eq!(
-            scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-            1
-        );
+        assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 1);
         assert!(scope.get(py, "b").is_none());
         assert!(scope.get(py, "c").is_none());
     });
@@ -787,22 +701,13 @@ fn scope_set_existing_in_parent() {
 
         scope.push_frame();
         // Update parent variable depuis child
-        assert!(scope.set_existing(
-            "x".to_string(),
-            99i64.into_pyobject(py).unwrap().into_any().unbind()
-        ));
+        assert!(scope.set_existing("x".to_string(), 99i64.into_pyobject(py).unwrap().into_any().unbind()));
 
-        assert_eq!(
-            scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(),
-            99
-        );
+        assert_eq!(scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(), 99);
 
         scope.pop_frame();
         // Parent voit la modification
-        assert_eq!(
-            scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(),
-            99
-        );
+        assert_eq!(scope.resolve(py, "x").unwrap().extract::<i64>(py).unwrap(), 99);
     });
 }
 
@@ -818,14 +723,7 @@ fn scope_shadowing_no_leak() {
             "local_only".to_string(),
             42i64.into_pyobject(py).unwrap().into_any().unbind(),
         );
-        assert_eq!(
-            scope
-                .resolve(py, "local_only")
-                .unwrap()
-                .extract::<i64>(py)
-                .unwrap(),
-            42
-        );
+        assert_eq!(scope.resolve(py, "local_only").unwrap().extract::<i64>(py).unwrap(), 42);
 
         scope.pop_frame();
         // Variable disparaît après pop
@@ -881,11 +779,7 @@ fn scope_set_catnip_shadows_parent_variable() {
         scope.set(
             py,
             "a".to_string(),
-            vec![1i64, 2i64]
-                .into_pyobject(py)
-                .unwrap()
-                .into_any()
-                .unbind(),
+            vec![1i64, 2i64].into_pyobject(py).unwrap().into_any().unbind(),
         );
 
         // Frame 1 (lambda avec param a) - isolated function frame
@@ -894,11 +788,7 @@ fn scope_set_catnip_shadows_parent_variable() {
         scope._set_param(
             py,
             "a".to_string(),
-            vec![10i64, 20i64]
-                .into_pyobject(py)
-                .unwrap()
-                .into_any()
-                .unbind(),
+            vec![10i64, 20i64].into_pyobject(py).unwrap().into_any().unbind(),
         );
 
         // Frame 2 (fonction interne qui utilise _set pour a = calcul) - isolated
@@ -911,27 +801,16 @@ fn scope_set_catnip_shadows_parent_variable() {
         );
 
         // Frame 2 voit 999
-        assert_eq!(
-            scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(),
-            999
-        );
+        assert_eq!(scope.resolve(py, "a").unwrap().extract::<i64>(py).unwrap(), 999);
 
         // Pop frame 2 : restaure a du frame 1
         scope.pop_frame();
-        let a_val: Vec<i64> = scope
-            .resolve(py, "a")
-            .unwrap()
-            .extract::<Vec<i64>>(py)
-            .unwrap();
+        let a_val: Vec<i64> = scope.resolve(py, "a").unwrap().extract::<Vec<i64>>(py).unwrap();
         assert_eq!(a_val, vec![10, 20]);
 
         // Pop frame 1 : restaure a du frame 0
         scope.pop_frame();
-        let a_val: Vec<i64> = scope
-            .resolve(py, "a")
-            .unwrap()
-            .extract::<Vec<i64>>(py)
-            .unwrap();
+        let a_val: Vec<i64> = scope.resolve(py, "a").unwrap().extract::<Vec<i64>>(py).unwrap();
         assert_eq!(a_val, vec![1, 2]);
     });
 }

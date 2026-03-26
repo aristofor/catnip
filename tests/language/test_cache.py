@@ -45,10 +45,10 @@ class TestCacheEntry:
 
     def test_cache_entry_creation(self):
         """Verify creation of a basic entry."""
-        entry = CacheEntry(key="test_key", value={"some": "data"}, cache_type=CacheType.AST)
+        entry = CacheEntry(key='test_key', value={'some': 'data'}, cache_type=CacheType.AST)
 
-        assert entry.key == "test_key"
-        assert entry.value == {"some": "data"}
+        assert entry.key == 'test_key'
+        assert entry.value == {'some': 'data'}
         assert entry.cache_type == CacheType.AST
         assert entry.metadata == {}
 
@@ -70,7 +70,7 @@ class TestMemoryCache:
         """Verify set et get basiques."""
         cache = MemoryCache()
         key = CacheKey(content="x = 1", cache_type=CacheType.AST)
-        value = {"ast": "tree"}
+        value = {'ast': 'tree'}
 
         cache.set(key, value)
         entry = cache.get(key)
@@ -84,7 +84,7 @@ class TestMemoryCache:
         cache = MemoryCache()
         key = CacheKey(content="x = 1", cache_type=CacheType.AST)
 
-        cache.set(key, "value")
+        cache.set(key, 'value')
         assert cache.exists(key)
 
         result = cache.delete(key)
@@ -189,11 +189,11 @@ class TestMemoryCache:
 
         # Valeur complexe
         complex_value = {
-            "ast": {
-                "type": "assign",
-                "left": "x",
-                "right": 1,
-                "children": [{"type": "literal", "value": 1}],
+            'ast': {
+                'type': 'assign',
+                'left': 'x',
+                'right': 1,
+                'children': [{'type': 'literal', 'value': 1}],
             }
         }
 
@@ -201,27 +201,27 @@ class TestMemoryCache:
         entry = cache.get(key)
 
         assert entry.value == complex_value
-        assert entry.value["ast"]["children"][0]["value"] == 1
+        assert entry.value['ast']['children'][0]['value'] == 1
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 # Removed (CatnipCacheMemory.v):
-# - test_cache_key_same_content_same_key — mc_set_preserves_unique (key determinism)
-# - test_cache_key_different_content_different_key — mc_set_preserves_unique (key uniqueness)
-# - test_cache_key_different_type_different_key — mc_set_preserves_unique
-# - test_cache_key_tco_option — redundant with different_options
-# - test_cache_key_uses_xxhash — format detail, redundant with to_string_basic
-# - test_cache_key_with_bytecode_content — redundant with to_string_basic
-# - test_cache_key_includes_catnip_signature — key determinism, redundant
-# - test_cache_entry_with_metadata — trivially covered by creation
-# - test_cache_entry_metadata_default — trivially covered by creation
-# - test_memory_cache_creation_with_max_size — trivially covered by creation
-# - test_get_nonexistent_key — trivial miss
-# - test_set_with_metadata — trivially covered by set_and_get
-# - test_exists — trivially covered by set_and_get
-# - test_delete_nonexistent — trivial
-# - test_stats_empty_cache — empty_cache_zero_hits
-# - test_stats_with_data — mc_get_counter_total, mc_get_hit_increments
-# - test_hit_miss_counting — mc_get_hit_increments, mc_get_miss_increments
+# - test_cache_key_same_content_same_key - mc_set_preserves_unique (key determinism)
+# - test_cache_key_different_content_different_key - mc_set_preserves_unique (key uniqueness)
+# - test_cache_key_different_type_different_key - mc_set_preserves_unique
+# - test_cache_key_tco_option - redundant with different_options
+# - test_cache_key_uses_xxhash - format detail, redundant with to_string_basic
+# - test_cache_key_with_bytecode_content - redundant with to_string_basic
+# - test_cache_key_includes_catnip_signature - key determinism, redundant
+# - test_cache_entry_with_metadata - trivially covered by creation
+# - test_cache_entry_metadata_default - trivially covered by creation
+# - test_memory_cache_creation_with_max_size - trivially covered by creation
+# - test_get_nonexistent_key - trivial miss
+# - test_set_with_metadata - trivially covered by set_and_get
+# - test_exists - trivially covered by set_and_get
+# - test_delete_nonexistent - trivial
+# - test_stats_empty_cache - empty_cache_zero_hits
+# - test_stats_with_data - mc_get_counter_total, mc_get_hit_increments
+# - test_hit_miss_counting - mc_get_hit_increments, mc_get_miss_increments

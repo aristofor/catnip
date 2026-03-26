@@ -1,0 +1,70 @@
+#!/usr/bin/env catnip
+# Générateur de rapport de données
+
+struct Product {
+    name;
+    quantity;
+    price;
+
+    revenue(self) => { self.quantity * self.price }
+}
+
+struct SalesReport {
+    products
+
+    total_items(self) => { fold(self.products, 0, (acc, p) => { acc + p.quantity }) }
+
+    total_revenue(self) => { fold(self.products, 0, (acc, p) => { acc + p.revenue() }) }
+
+    avg_price(self) => { self.total_revenue() / self.total_items() }
+
+    best_seller(self) => {
+        reduce(self.products, (best, p) => { if p.revenue() > best.revenue() { p } else { best } })
+    }
+}
+
+# Données de ventes (en production, charger depuis DB/CSV)
+report = SalesReport(list(
+        Product('Laptop', 5, 1000d),
+        Product('Mouse', 50, 20d),
+        Product('Keyboard', 30, 80d),
+        Product('Monitor', 10, 300d),
+    ))
+
+# Générer rapport
+print("═══════════════════════════════")
+print("   RAPPORT DE VENTES")
+print("═══════════════════════════════")
+print()
+print("Résumé")
+print("------")
+print(f"Total produits : {len(report.products)}")
+print(f"Total articles vendus : {report.total_items()}")
+print(f"Revenu total : {report.total_revenue()}€")
+print(f"Prix moyen : {report.avg_price()}€")
+print()
+
+best = report.best_seller()
+print("Top produit")
+print("-----------")
+print(f"Produit : {best.name}")
+print(f"Quantité : {best.quantity}")
+print(f"Prix unitaire : {best.price}€")
+print(f"Revenu : {best.revenue()}€")
+print()
+print("Détails par produit")
+print("-------------------")
+
+for p in report.products {
+    print()
+    print(f"{p.name} :")
+    print(f"  Quantité : {p.quantity}")
+    print(f"  Prix : {p.price}€")
+    print(f"  Revenu : {p.revenue()}€")
+}
+
+print()
+print("═══════════════════════════════")
+
+# Retourner revenu total
+report.total_revenue()  # → 11400

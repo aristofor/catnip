@@ -1,5 +1,5 @@
-# check: no-check
-# Exemple 05 : Structures imbriquées
+#!/usr/bin/env catnip
+# Exemple : Structures imbriquées
 # Broadcasting sur des listes de listes
 
 print("⇒ Broadcasting sur listes imbriquées")
@@ -25,7 +25,8 @@ for ligne in resultat {
     print(" ", ligne)
 }
 
-print("\n⇒ Broadcasting avec vecteurs\n")
+print()
+print("⇒ Broadcasting avec vecteurs\n")
 
 # Ajouter un vecteur à chaque ligne
 vecteur = list(10, 20, 30)
@@ -36,7 +37,8 @@ for ligne in resultat {
     print(" ", ligne)
 }
 
-print("\n⇒ Opérations en chaîne\n")
+print()
+print("⇒ Opérations en chaîne\n")
 
 # ((matrice * 2) + 1) / 3
 print("((matrice * 2) + 1) / 3:")
@@ -45,7 +47,8 @@ for ligne in resultat {
     print(" ", ligne)
 }
 
-print("\n⇒ Listes de tuples/listes\n")
+print()
+print("⇒ Listes de tuples/listes\n")
 
 # Coordonnées (x, y)
 points = list(list(0, 0), list(1, 2), list(3, 4), list(5, 6))
@@ -69,14 +72,15 @@ for point in zoomes {
     print(" ", point)
 }
 
-print("\n⇒ Données tabulaires\n")
+print()
+print("⇒ Données tabulaires\n")
 
 # Table de données [id, valeur, quantité)
 donnees = list(
     list(1, 100, 5),
     list(2, 200, 3),
     list(3, 150, 7),
-    list(4, 250, 2)
+    list(4, 250, 2),
 )
 
 print("Données brutes:")

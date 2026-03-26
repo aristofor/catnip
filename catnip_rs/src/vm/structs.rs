@@ -9,9 +9,23 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type StructTypeId = u32;
+
+pub struct StructParents {
+    pub implements: Vec<String>,
+    pub mro: Vec<String>,
+    pub parent_names: Vec<String>,
+}
+
+pub struct StructMethods {
+    pub instance: IndexMap<String, Py<PyAny>>,
+    pub statics: IndexMap<String, Py<PyAny>>,
+    pub abstract_methods: HashSet<MethodKey>,
+}
 
 /// Discriminant for method dispatch (instance vs static).
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -41,12 +55,12 @@ pub struct StructType {
     pub name: String,
     pub fields: Vec<StructField>,
     /// Raw VMFunction callables keyed by method name.
-    pub methods: HashMap<String, Py<PyAny>>,
+    pub methods: IndexMap<String, Py<PyAny>>,
     /// Static methods callable on type and instances (no self binding).
-    pub static_methods: HashMap<String, Py<PyAny>>,
+    pub static_methods: IndexMap<String, Py<PyAny>>,
     /// List of trait names this struct implements.
     pub implements: Vec<String>,
-    /// Method resolution order (MRO) — includes struct parents and traits.
+    /// Method resolution order (MRO) - includes struct parents and traits.
     pub mro: Vec<String>,
     /// Direct parent struct names (from extends).
     pub parent_names: Vec<String>,
@@ -77,10 +91,7 @@ impl std::fmt::Debug for StructType {
             .field("name", &self.name)
             .field("fields", &self.fields)
             .field("methods", &format!("<{} methods>", self.methods.len()))
-            .field(
-                "static_methods",
-                &format!("<{} static>", self.static_methods.len()),
-            )
+            .field("static_methods", &format!("<{} static>", self.static_methods.len()))
             .field("implements", &self.implements)
             .field("mro", &self.mro)
             .finish()
@@ -94,6 +105,16 @@ pub struct StructInstance {
     pub fields: Vec<Value>,
 }
 
+/// Slot wrapper for refcount tracking in StructRegistry.
+/// refcount uses AtomicU32 so incref can take &self (needed when accessing
+/// the registry through the *const thread-local while to_pyobject recurses)
+/// and satisfies Send+Sync required by PyO3 #[pyclass].
+#[derive(Debug)]
+struct InstanceSlot {
+    instance: StructInstance,
+    refcount: AtomicU32,
+}
+
 /// Python-visible proxy for struct instances returned by to_pyobject.
 #[pyclass(module = "catnip._rs", name = "CatnipStruct")]
 pub struct CatnipStructProxy {
@@ -101,9 +122,9 @@ pub struct CatnipStructProxy {
     pub field_names: Vec<String>,
     pub field_values: Vec<Py<PyAny>>,
     /// Raw VMFunction callables (not yet bound).
-    pub methods: HashMap<String, Py<PyAny>>,
+    pub methods: IndexMap<String, Py<PyAny>>,
     /// Static methods (no self binding).
-    pub static_methods: HashMap<String, Py<PyAny>>,
+    pub static_methods: IndexMap<String, Py<PyAny>>,
     /// Back-reference to the CatnipStructType (AST mode). None for VM-created proxies.
     pub struct_type: Option<Py<CatnipStructType>>,
     /// VM struct instance index for round-trip through Python collections.
@@ -113,6 +134,13 @@ pub struct CatnipStructProxy {
 
 #[pymethods]
 impl CatnipStructProxy {
+    /// Release the registry refcount when the Python proxy is GC'd.
+    fn __del__(&mut self) {
+        if let Some(idx) = self.native_instance_idx.take() {
+            super::value::struct_registry_release(idx);
+        }
+    }
+
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         // Check fields first
         for (i, fname) in self.field_names.iter().enumerate() {
@@ -122,17 +150,17 @@ impl CatnipStructProxy {
         }
         // Then methods - create BoundCatnipMethod on the fly
         if let Some(func) = self.methods.get(name) {
+            // Incref for the cloned proxy (its __del__ will decref)
+            if let Some(idx) = self.native_instance_idx {
+                super::value::struct_registry_incref(idx);
+            }
             let instance: Py<PyAny> = Py::new(
                 py,
                 CatnipStructProxy {
                     type_name: self.type_name.clone(),
                     field_names: self.field_names.clone(),
                     field_values: self.field_values.iter().map(|v| v.clone_ref(py)).collect(),
-                    methods: self
-                        .methods
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-                        .collect(),
+                    methods: self.methods.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect(),
                     static_methods: self
                         .static_methods
                         .iter()
@@ -149,7 +177,7 @@ impl CatnipStructProxy {
                     func: func.clone_ref(py),
                     instance,
                     super_source_type: None,
-                    native_instance_idx: None,
+                    native_instance_idx: self.native_instance_idx,
                 },
             )?;
             return Ok(bound.into_any());
@@ -192,6 +220,13 @@ impl CatnipStructProxy {
         Err(pyo3::exceptions::PyAttributeError::new_err(msg))
     }
 
+    fn __dir__(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.field_names.clone();
+        names.extend(self.methods.keys().cloned());
+        names.extend(self.static_methods.keys().cloned());
+        names
+    }
+
     fn __str__(&self, py: Python<'_>) -> String {
         self.__repr__(py)
     }
@@ -202,22 +237,14 @@ impl CatnipStructProxy {
             .iter()
             .zip(&self.field_values)
             .map(|(n, v)| {
-                let repr = v
-                    .bind(py)
-                    .repr()
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|_| "?".into());
+                let repr = v.bind(py).repr().map(|r| r.to_string()).unwrap_or_else(|_| "?".into());
                 format!("{n}={repr}")
             })
             .collect();
         format!("{}({})", self.type_name, fields.join(", "))
     }
 
-    fn __richcmp__(
-        slf: Bound<'_, Self>,
-        other: Bound<'_, PyAny>,
-        op: pyo3::pyclass::CompareOp,
-    ) -> PyResult<Py<PyAny>> {
+    fn __richcmp__(slf: Bound<'_, Self>, other: Bound<'_, PyAny>, op: pyo3::pyclass::CompareOp) -> PyResult<Py<PyAny>> {
         use pyo3::pyclass::CompareOp;
         let py = slf.py();
         let method_name = match op {
@@ -230,7 +257,7 @@ impl CatnipStructProxy {
         };
         let result = Self::dispatch_binop(&slf, py, method_name, &other);
         match result {
-            Ok(val) if val.bind(py).is(&py.NotImplemented()) => {
+            Ok(val) if val.bind(py).is(py.NotImplemented()) => {
                 // No method defined -- structural fallback for eq/ne
                 match op {
                     CompareOp::Eq => Self::structural_eq(&slf, py, &other),
@@ -363,6 +390,20 @@ impl CatnipStructProxy {
     fn __rrshift__(slf: Bound<'_, Self>, other: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Self::dispatch_rbinop(&slf, slf.py(), "op_rshift", &other)
     }
+
+    // --- Membership ---
+
+    fn __contains__(slf: Bound<'_, Self>, item: Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = slf.py();
+        let result = Self::dispatch_binop(&slf, py, "op_in", &item)?;
+        if result.bind(py).is(py.NotImplemented()) {
+            return Err(PyTypeError::new_err(format!(
+                "argument of type '{}' is not iterable",
+                slf.borrow().type_name
+            )));
+        }
+        result.bind(py).is_truthy()
+    }
 }
 
 impl CatnipStructProxy {
@@ -387,9 +428,8 @@ impl CatnipStructProxy {
     }
 
     /// Dispatch a reverse binary operator: call op_* with (self, other).
-    /// The struct stays as `self` (first arg), the foreign value as `rhs`.
-    /// For commutative ops (+, *) this is semantically correct.
-    /// For non-commutative ops (-, /) the user's method must handle the swap.
+    /// `other` is the left-hand operand. For non-commutative ops the user's
+    /// op_* method receives (self, other) and must handle the reversed order.
     /// Returns NotImplemented if the method doesn't exist (Python protocol).
     fn dispatch_rbinop(
         slf: &Bound<'_, Self>,
@@ -402,6 +442,7 @@ impl CatnipStructProxy {
             r.methods.get(op_name).map(|f| f.clone_ref(py))
         };
         if let Some(func) = func {
+            // (self, other) where other is the left-hand value
             let args = PyTuple::new(py, [slf.as_any(), other.as_any()])?;
             func.call(py, &args, None)
         } else {
@@ -411,11 +452,7 @@ impl CatnipStructProxy {
 
     /// Dispatch a unary operator to the corresponding op_* method.
     /// Raises TypeError if the method doesn't exist.
-    fn dispatch_unaryop(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        op_name: &str,
-    ) -> PyResult<Py<PyAny>> {
+    fn dispatch_unaryop(slf: &Bound<'_, Self>, py: Python<'_>, op_name: &str) -> PyResult<Py<PyAny>> {
         let func = {
             let r = slf.borrow();
             r.methods.get(op_name).map(|f| f.clone_ref(py))
@@ -432,70 +469,32 @@ impl CatnipStructProxy {
     }
 
     /// Structural equality: same type + all fields equal.
-    fn structural_eq(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        other: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn structural_eq(slf: &Bound<'_, Self>, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(other_struct) = other.cast::<CatnipStructProxy>() {
             let self_ref = slf.borrow();
             let other_ref = other_struct.borrow();
             if self_ref.type_name != other_ref.type_name {
-                return Ok(false
-                    .into_pyobject(py)
-                    .unwrap()
-                    .to_owned()
-                    .into_any()
-                    .unbind());
+                return Ok(false.into_pyobject(py).unwrap().to_owned().into_any().unbind());
             }
             if self_ref.field_values.len() != other_ref.field_values.len() {
-                return Ok(false
-                    .into_pyobject(py)
-                    .unwrap()
-                    .to_owned()
-                    .into_any()
-                    .unbind());
+                return Ok(false.into_pyobject(py).unwrap().to_owned().into_any().unbind());
             }
             for (a, b) in self_ref.field_values.iter().zip(&other_ref.field_values) {
                 if !a.bind(py).eq(b.bind(py))? {
-                    return Ok(false
-                        .into_pyobject(py)
-                        .unwrap()
-                        .to_owned()
-                        .into_any()
-                        .unbind());
+                    return Ok(false.into_pyobject(py).unwrap().to_owned().into_any().unbind());
                 }
             }
-            Ok(true
-                .into_pyobject(py)
-                .unwrap()
-                .to_owned()
-                .into_any()
-                .unbind())
+            Ok(true.into_pyobject(py).unwrap().to_owned().into_any().unbind())
         } else {
-            Ok(false
-                .into_pyobject(py)
-                .unwrap()
-                .to_owned()
-                .into_any()
-                .unbind())
+            Ok(false.into_pyobject(py).unwrap().to_owned().into_any().unbind())
         }
     }
 
     /// Structural inequality: negation of structural_eq.
-    fn structural_ne(
-        slf: &Bound<'_, Self>,
-        py: Python<'_>,
-        other: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn structural_ne(slf: &Bound<'_, Self>, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let eq_result = Self::structural_eq(slf, py, other)?;
         let is_eq: bool = eq_result.extract(py)?;
-        Ok((!is_eq)
-            .into_pyobject(py)
-            .unwrap()
-            .to_owned()
-            .into_any()
-            .unbind())
+        Ok((!is_eq).into_pyobject(py).unwrap().to_owned().into_any().unbind())
     }
 }
 
@@ -509,10 +508,10 @@ pub struct CatnipStructType {
     pub field_names: Vec<String>,
     /// None = required field, Some(value) = default value
     pub field_defaults: Vec<Option<Py<PyAny>>>,
-    /// Method callables keyed by name (raw VMFunction/RustLambda)
-    pub methods: HashMap<String, Py<PyAny>>,
+    /// Method callables keyed by name (raw VMFunction/Lambda)
+    pub methods: IndexMap<String, Py<PyAny>>,
     /// Static methods (no self binding, callable on type and instances).
-    pub static_methods: HashMap<String, Py<PyAny>>,
+    pub static_methods: IndexMap<String, Py<PyAny>>,
     /// Post-constructor init function (if defined)
     pub init_fn: Option<Py<PyAny>>,
     /// Direct parent struct names (from extends).
@@ -536,11 +535,7 @@ impl CatnipStructType {
 
         // Guard: cannot instantiate struct with unresolved abstract methods
         if !this.abstract_methods.is_empty() {
-            let names: Vec<&str> = this
-                .abstract_methods
-                .iter()
-                .map(|k| k.name.as_str())
-                .collect();
+            let names: Vec<&str> = this.abstract_methods.iter().map(|k| k.name.as_str()).collect();
             return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "Cannot instantiate '{}': unresolved abstract method(s): {}",
                 this.name,
@@ -559,27 +554,23 @@ impl CatnipStructType {
         }
 
         // Build field values: positional args first, then kwargs, then defaults
-        let mut field_values: Vec<Option<Py<PyAny>>> = (0..n_fields).map(|_| None).collect();
+        let mut field_values: Vec<Option<Py<PyAny>>> = std::iter::repeat_with(|| None).take(n_fields).collect();
 
         // Apply positional args
-        for i in 0..n_args {
-            field_values[i] = Some(args.get_item(i)?.unbind());
+        for (i, slot) in field_values.iter_mut().enumerate().take(n_args) {
+            *slot = Some(args.get_item(i)?.unbind());
         }
 
         // Apply kwargs
         if let Some(kw) = kwargs {
             for (key, value) in kw.iter() {
                 let key_str: String = key.extract()?;
-                let idx = this
-                    .field_names
-                    .iter()
-                    .position(|n| n == &key_str)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyTypeError::new_err(format!(
-                            "{}() got unexpected keyword argument '{}'",
-                            this.name, key_str
-                        ))
-                    })?;
+                let idx = this.field_names.iter().position(|n| n == &key_str).ok_or_else(|| {
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "{}() got unexpected keyword argument '{}'",
+                        this.name, key_str
+                    ))
+                })?;
                 if field_values[idx].is_some() {
                     return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                         "{}() got multiple values for argument '{}'",
@@ -591,10 +582,10 @@ impl CatnipStructType {
         }
 
         // Apply defaults for missing fields
-        for i in 0..n_fields {
-            if field_values[i].is_none() {
-                if let Some(ref default) = this.field_defaults[i] {
-                    field_values[i] = Some(default.clone_ref(py));
+        for (slot, default) in field_values.iter_mut().zip(this.field_defaults.iter()) {
+            if slot.is_none() {
+                if let Some(default) = default {
+                    *slot = Some(default.clone_ref(py));
                 }
             }
         }
@@ -614,12 +605,9 @@ impl CatnipStructType {
         }
 
         // Clone methods and type info while borrow is active
-        let methods: HashMap<String, Py<PyAny>> = this
-            .methods
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect();
-        let static_methods: HashMap<String, Py<PyAny>> = this
+        let methods: IndexMap<String, Py<PyAny>> =
+            this.methods.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect();
+        let static_methods: IndexMap<String, Py<PyAny>> = this
             .static_methods
             .iter()
             .map(|(k, v)| (k.clone(), v.clone_ref(py)))
@@ -643,6 +631,7 @@ impl CatnipStructType {
             },
         )?;
 
+        // init_fn is called by the registry (AST) or VM dispatch, not here
         Ok(proxy.into_any())
     }
 
@@ -657,6 +646,10 @@ impl CatnipStructType {
             None => format!("<struct '{}'> has no attribute '{name}'", self.name),
         };
         Err(pyo3::exceptions::PyAttributeError::new_err(msg))
+    }
+
+    fn __dir__(&self) -> Vec<String> {
+        self.static_methods.keys().cloned().collect()
     }
 
     fn __repr__(&self) -> String {
@@ -674,7 +667,7 @@ impl CatnipStructType {
 #[pyclass(module = "catnip._rs", name = "SuperProxy")]
 pub struct SuperProxy {
     /// Parent methods (unbound VMFunction callables).
-    pub methods: HashMap<String, Py<PyAny>>,
+    pub methods: IndexMap<String, Py<PyAny>>,
     /// The current instance (to bind as self).
     pub instance: Py<PyAny>,
     /// Maps method name → source type name in the MRO (for cooperative super chain).
@@ -711,10 +704,11 @@ impl SuperProxy {
     }
 }
 
-/// Append-only registry for struct types and instances.
+/// Registry for struct types and instances with refcount-based slot recycling.
 pub struct StructRegistry {
     types: Vec<StructType>,
-    instances: Vec<StructInstance>,
+    instances: Vec<Option<InstanceSlot>>,
+    free_list: Vec<u32>,
 }
 
 impl StructRegistry {
@@ -722,7 +716,43 @@ impl StructRegistry {
         Self {
             types: Vec::new(),
             instances: Vec::new(),
+            free_list: Vec::new(),
         }
+    }
+
+    /// Clone types and instances from a parent registry (for nested VM calls).
+    pub fn clone_from_parent(&mut self, py: pyo3::Python<'_>, parent: &StructRegistry) {
+        self.types = parent
+            .types
+            .iter()
+            .map(|t| StructType {
+                id: t.id,
+                name: t.name.clone(),
+                fields: t.fields.clone(),
+                methods: t.methods.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect(),
+                static_methods: t
+                    .static_methods
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+                    .collect(),
+                implements: t.implements.clone(),
+                mro: t.mro.clone(),
+                parent_names: t.parent_names.clone(),
+                abstract_methods: t.abstract_methods.clone(),
+            })
+            .collect();
+        // Clone live instances preserving refcounts (child is an independent snapshot)
+        self.instances = parent
+            .instances
+            .iter()
+            .map(|slot| {
+                slot.as_ref().map(|s| InstanceSlot {
+                    instance: s.instance.clone(),
+                    refcount: AtomicU32::new(s.refcount.load(Ordering::Relaxed)),
+                })
+            })
+            .collect();
+        self.free_list = parent.free_list.clone();
     }
 
     /// Register a new struct type. Returns its unique id.
@@ -730,19 +760,23 @@ impl StructRegistry {
         &mut self,
         name: String,
         fields: Vec<StructField>,
-        methods: HashMap<String, Py<PyAny>>,
+        methods: IndexMap<String, Py<PyAny>>,
         implements: Vec<String>,
         mro: Vec<String>,
     ) -> StructTypeId {
         self.register_type_with_parents(
             name,
             fields,
-            methods,
-            implements,
-            mro,
-            Vec::new(),
-            HashSet::new(),
-            HashMap::new(),
+            StructMethods {
+                instance: methods,
+                statics: IndexMap::new(),
+                abstract_methods: HashSet::new(),
+            },
+            StructParents {
+                implements,
+                mro,
+                parent_names: Vec::new(),
+            },
         )
     }
 
@@ -751,24 +785,20 @@ impl StructRegistry {
         &mut self,
         name: String,
         fields: Vec<StructField>,
-        methods: HashMap<String, Py<PyAny>>,
-        implements: Vec<String>,
-        mro: Vec<String>,
-        parent_names: Vec<String>,
-        abstract_methods: HashSet<MethodKey>,
-        static_methods: HashMap<String, Py<PyAny>>,
+        methods: StructMethods,
+        parents: StructParents,
     ) -> StructTypeId {
         let id = self.types.len() as StructTypeId;
         self.types.push(StructType {
             id,
             name,
             fields,
-            methods,
-            static_methods,
-            implements,
-            mro,
-            parent_names,
-            abstract_methods,
+            methods: methods.instance,
+            static_methods: methods.statics,
+            implements: parents.implements,
+            mro: parents.mro,
+            parent_names: parents.parent_names,
+            abstract_methods: methods.abstract_methods,
         });
         id
     }
@@ -784,53 +814,94 @@ impl StructRegistry {
         self.types.iter().rev().find(|t| t.name == name)
     }
 
-    /// Create an instance. Returns its index in the instance pool.
+    /// Create an instance (refcount = 1). Reuses freed slots when available.
     pub fn create_instance(&mut self, type_id: StructTypeId, field_values: Vec<Value>) -> u32 {
-        let idx = self.instances.len() as u32;
-        self.instances.push(StructInstance {
-            type_id,
-            fields: field_values,
-        });
-        idx
+        let slot = InstanceSlot {
+            instance: StructInstance {
+                type_id,
+                fields: field_values,
+            },
+            refcount: AtomicU32::new(1),
+        };
+        if let Some(idx) = self.free_list.pop() {
+            self.instances[idx as usize] = Some(slot);
+            idx
+        } else {
+            let idx = self.instances.len() as u32;
+            self.instances.push(Some(slot));
+            idx
+        }
+    }
+
+    /// Increment the handle refcount (Value was duplicated).
+    /// Takes &self (not &mut) thanks to AtomicU32, avoiding aliasing with thread-local access.
+    #[inline]
+    pub fn incref(&self, idx: u32) {
+        let slot = self.instances[idx as usize]
+            .as_ref()
+            .expect("StructRegistry: dead handle on incref");
+        slot.refcount.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement the handle refcount. Returns the instance fields if freed (for cascade cleanup).
+    #[inline]
+    pub fn decref(&mut self, idx: u32) -> Option<Vec<Value>> {
+        let rc = {
+            let slot = self.instances[idx as usize]
+                .as_ref()
+                .expect("StructRegistry: dead handle on decref");
+            slot.refcount.fetch_sub(1, Ordering::Relaxed) - 1
+        };
+        if rc == 0 {
+            let freed = self.instances[idx as usize].take().unwrap();
+            self.free_list.push(idx);
+            Some(freed.instance.fields)
+        } else {
+            None
+        }
     }
 
     pub fn get_instance(&self, idx: u32) -> Option<&StructInstance> {
-        self.instances.get(idx as usize)
+        self.instances
+            .get(idx as usize)
+            .and_then(|s| s.as_ref())
+            .map(|s| &s.instance)
     }
 
     pub fn get_instance_mut(&mut self, idx: u32) -> Option<&mut StructInstance> {
-        self.instances.get_mut(idx as usize)
+        self.instances
+            .get_mut(idx as usize)
+            .and_then(|s| s.as_mut())
+            .map(|s| &mut s.instance)
     }
 
     /// Convert a native struct instance to a CatnipStructProxy Python object.
+    /// Increfs the slot: the proxy owns a refcount, released by CatnipStructProxy::__del__.
     pub fn instance_to_pyobject(&self, py: Python<'_>, idx: u32) -> PyResult<Py<PyAny>> {
-        let inst = self.get_instance(idx).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("struct instance #{idx} not found"))
-        })?;
+        let inst = self
+            .get_instance(idx)
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(format!("struct instance #{idx} not found")))?;
         let ty = self.get_type(inst.type_id).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "struct type #{} not found",
-                inst.type_id
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("struct type #{} not found", inst.type_id))
         })?;
 
         let field_names: Vec<String> = ty.fields.iter().map(|f| f.name.clone()).collect();
         let field_values: Vec<Py<PyAny>> = inst.fields.iter().map(|v| v.to_pyobject(py)).collect();
-        let methods: HashMap<String, Py<PyAny>> = ty
-            .methods
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect();
-        let static_methods: HashMap<String, Py<PyAny>> = ty
+        let methods: IndexMap<String, Py<PyAny>> =
+            ty.methods.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect();
+        let static_methods: IndexMap<String, Py<PyAny>> = ty
             .static_methods
             .iter()
             .map(|(k, v)| (k.clone(), v.clone_ref(py)))
             .collect();
+        let type_name = ty.name.clone();
+        // inst/ty borrows ended (NLL) -- all data cloned above
+        self.incref(idx);
 
         let proxy = Py::new(
             py,
             CatnipStructProxy {
-                type_name: ty.name.clone(),
+                type_name,
                 field_names,
                 field_values,
                 methods,
@@ -840,6 +911,28 @@ impl StructRegistry {
             },
         )?;
         Ok(proxy.into_any())
+    }
+}
+
+impl Default for StructRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cascade-decref fields of a freed struct instance.
+/// Each field that is itself a struct gets decremented recursively.
+/// Non-struct heap types (BigInt, PyObj) are decremented via Value::decref().
+pub fn cascade_decref_fields(registry: &mut StructRegistry, fields: Vec<Value>) {
+    for f in fields {
+        if f.is_struct_instance() {
+            let idx = f.as_struct_instance_idx().unwrap();
+            if let Some(sub_fields) = registry.decref(idx) {
+                cascade_decref_fields(registry, sub_fields);
+            }
+        } else {
+            f.decref();
+        }
     }
 }
 
@@ -864,7 +957,7 @@ mod tests {
                     default: Value::NIL,
                 },
             ],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],               // implements
             vec!["Point".into()], // mro
         );
@@ -893,7 +986,7 @@ mod tests {
                     default: Value::NIL,
                 },
             ],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],               // implements
             vec!["Point".into()], // mro
         );
@@ -921,7 +1014,7 @@ mod tests {
                     default: Value::NIL,
                 },
             ],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],              // implements
             vec!["Pair".into()], // mro
         );
@@ -945,7 +1038,7 @@ mod tests {
                 has_default: false,
                 default: Value::NIL,
             }],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],           // implements
             vec!["A".into()], // mro
         );
@@ -956,7 +1049,7 @@ mod tests {
                 has_default: false,
                 default: Value::NIL,
             }],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],           // implements
             vec!["B".into()], // mro
         );
@@ -987,7 +1080,7 @@ mod tests {
                     default: Value::from_int(1),
                 },
             ],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],                // implements
             vec!["Config".into()], // mro
         );
@@ -1021,7 +1114,7 @@ mod tests {
                     default: Value::NIL,
                 },
             ],
-            HashMap::new(),
+            IndexMap::new(),
             vec![],             // implements
             vec!["RGB".into()], // mro
         );
@@ -1030,5 +1123,119 @@ mod tests {
         assert_eq!(ty.field_index("g"), Some(1));
         assert_eq!(ty.field_index("b"), Some(2));
         assert_eq!(ty.field_index("a"), None);
+    }
+
+    // --- Refcount + free-list tests ---
+
+    fn make_point_type(reg: &mut StructRegistry) -> StructTypeId {
+        reg.register_type(
+            "Point".into(),
+            vec![
+                StructField {
+                    name: "x".into(),
+                    has_default: false,
+                    default: Value::NIL,
+                },
+                StructField {
+                    name: "y".into(),
+                    has_default: false,
+                    default: Value::NIL,
+                },
+            ],
+            IndexMap::new(),
+            vec![],
+            vec!["Point".into()],
+        )
+    }
+
+    #[test]
+    fn test_create_and_free() {
+        let mut reg = StructRegistry::new();
+        let tid = make_point_type(&mut reg);
+        let idx = reg.create_instance(tid, vec![Value::from_int(1), Value::from_int(2)]);
+
+        // Instance is alive
+        assert!(reg.get_instance(idx).is_some());
+
+        // Decref -> freed, returns fields
+        let fields = reg.decref(idx);
+        assert!(fields.is_some());
+        let fields = fields.unwrap();
+        assert_eq!(fields[0].as_int(), Some(1));
+        assert_eq!(fields[1].as_int(), Some(2));
+
+        // Slot is now dead
+        assert!(reg.get_instance(idx).is_none());
+        assert_eq!(reg.free_list, vec![idx]);
+    }
+
+    #[test]
+    fn test_incref_decref() {
+        let mut reg = StructRegistry::new();
+        let tid = make_point_type(&mut reg);
+        let idx = reg.create_instance(tid, vec![Value::from_int(10), Value::from_int(20)]);
+
+        // Incref (rc=2)
+        reg.incref(idx);
+
+        // First decref (rc=1) -> still alive
+        assert!(reg.decref(idx).is_none());
+        assert!(reg.get_instance(idx).is_some());
+
+        // Second decref (rc=0) -> freed
+        assert!(reg.decref(idx).is_some());
+        assert!(reg.get_instance(idx).is_none());
+    }
+
+    #[test]
+    fn test_free_list_reuse() {
+        let mut reg = StructRegistry::new();
+        let tid = make_point_type(&mut reg);
+
+        let idx0 = reg.create_instance(tid, vec![Value::from_int(0), Value::from_int(0)]);
+        let idx1 = reg.create_instance(tid, vec![Value::from_int(1), Value::from_int(1)]);
+        let idx2 = reg.create_instance(tid, vec![Value::from_int(2), Value::from_int(2)]);
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(idx2, 2);
+
+        // Free the middle slot
+        reg.decref(idx1);
+        assert!(reg.get_instance(idx1).is_none());
+
+        // New instance reuses slot 1
+        let idx3 = reg.create_instance(tid, vec![Value::from_int(3), Value::from_int(3)]);
+        assert_eq!(idx3, idx1);
+        assert_eq!(reg.get_instance(idx3).unwrap().fields[0].as_int(), Some(3));
+
+        // Slots 0 and 2 are still alive
+        assert_eq!(reg.get_instance(idx0).unwrap().fields[0].as_int(), Some(0));
+        assert_eq!(reg.get_instance(idx2).unwrap().fields[0].as_int(), Some(2));
+    }
+
+    #[test]
+    fn test_cascade_decref() {
+        let mut reg = StructRegistry::new();
+        let tid = make_point_type(&mut reg);
+
+        // Create inner struct
+        let inner_idx = reg.create_instance(tid, vec![Value::from_int(1), Value::from_int(2)]);
+        let inner_val = Value::from_struct_instance(inner_idx);
+
+        // Create outer struct holding inner as a field
+        let outer_idx = reg.create_instance(tid, vec![inner_val, Value::from_int(0)]);
+
+        // Decref outer -> fields returned for cascade
+        let fields = reg.decref(outer_idx).unwrap();
+        assert!(reg.get_instance(outer_idx).is_none());
+
+        // Inner is still alive (refcount not yet touched)
+        assert!(reg.get_instance(inner_idx).is_some());
+
+        // Cascade the fields
+        cascade_decref_fields(&mut reg, fields);
+
+        // Now inner is freed too
+        assert!(reg.get_instance(inner_idx).is_none());
     }
 }

@@ -12,10 +12,11 @@
 pub mod analysis;
 pub mod basic_block;
 pub mod builder_ir;
-pub mod edge;
 pub mod graph;
+
+// Re-exported from catnip_core
+pub use catnip_core::cfg::edge;
 pub mod optimization;
-pub mod reconstruction;
 pub mod region;
 pub mod ssa;
 pub mod ssa_builder;
@@ -42,14 +43,8 @@ pub fn register_module(py: Python<'_>, parent_module: &Bound<'_, PyModule>) -> P
     let cfg_module = PyModule::new(py, "cfg")?;
 
     cfg_module.add_class::<graph::PyControlFlowGraph>()?;
-    cfg_module.add_function(wrap_pyfunction!(
-        builder_ir::build_cfg_from_ir,
-        &cfg_module
-    )?)?;
-    cfg_module.add_function(wrap_pyfunction!(
-        region::py_reconstruct_from_cfg,
-        &cfg_module
-    )?)?;
+    cfg_module.add_function(wrap_pyfunction!(builder_ir::build_cfg_from_ir, &cfg_module)?)?;
+    cfg_module.add_function(wrap_pyfunction!(region::py_reconstruct_from_cfg, &cfg_module)?)?;
 
     parent_module.add_submodule(&cfg_module)?;
     Ok(())

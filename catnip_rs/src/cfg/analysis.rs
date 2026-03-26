@@ -43,10 +43,7 @@ pub fn compute_dominators(cfg: &mut ControlFlowGraph) {
                 for &pred_edge_id in &block.predecessors {
                     if let Some(edge) = cfg.edges.get(pred_edge_id) {
                         if let Some(pred_block) = cfg.blocks.get(&edge.source) {
-                            new_doms = new_doms
-                                .intersection(&pred_block.dominators)
-                                .copied()
-                                .collect();
+                            new_doms = new_doms.intersection(&pred_block.dominators).copied().collect();
                         }
                     }
                 }
@@ -96,12 +93,7 @@ fn compute_immediate_dominators(cfg: &mut ControlFlowGraph) {
         let mut candidates: Vec<_> = dominators.iter().filter(|&&d| d != id).copied().collect();
 
         // Sort candidates by dominator set size (smaller = closer to id)
-        candidates.sort_by_key(|&cand| {
-            cfg.blocks
-                .get(&cand)
-                .map(|b| b.dominators.len())
-                .unwrap_or(0)
-        });
+        candidates.sort_by_key(|&cand| cfg.blocks.get(&cand).map(|b| b.dominators.len()).unwrap_or(0));
 
         // The candidate with the largest dominator set that still dominates id is the idom
         // Actually, we want the one that is dominated by all others
@@ -155,9 +147,7 @@ pub fn detect_loops(cfg: &ControlFlowGraph) -> Vec<(usize, HashSet<usize>)> {
                     if let Some(block) = cfg.blocks.get(&block_id) {
                         for &pred_edge_id in &block.predecessors {
                             if let Some(pred_edge) = cfg.edges.get(pred_edge_id) {
-                                if pred_edge.source != header
-                                    && loop_blocks.insert(pred_edge.source)
-                                {
+                                if pred_edge.source != header && loop_blocks.insert(pred_edge.source) {
                                     queue.push_back(pred_edge.source);
                                 }
                             }
@@ -326,7 +316,7 @@ mod tests {
         compute_dominators(&mut cfg);
         let df = compute_dominance_frontiers(&cfg);
 
-        for (_, frontier) in &df {
+        for frontier in df.values() {
             assert!(frontier.is_empty());
         }
     }

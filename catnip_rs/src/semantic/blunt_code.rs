@@ -14,7 +14,7 @@
 //! - Constant conditions: if True {...} → {...}
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, default_visit_op, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir, default_visit_op};
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
@@ -62,7 +62,7 @@ impl OptimizationPass for BluntCodePass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -166,9 +166,7 @@ impl BluntCodePass {
                         };
                         let new_args = PyTuple::new(py, &[left.unbind()])?;
                         let empty_dict = py.import("builtins")?.getattr("dict")?.call0()?;
-                        return node_type
-                            .call1((not_ident, new_args, empty_dict))
-                            .map(|n| n.unbind());
+                        return node_type.call1((not_ident, new_args, empty_dict)).map(|n| n.unbind());
                     }
                     // False == x → not x
                     if is_python_false(py, &left)? {
@@ -179,9 +177,7 @@ impl BluntCodePass {
                         };
                         let new_args = PyTuple::new(py, &[right.unbind()])?;
                         let empty_dict = py.import("builtins")?.getattr("dict")?.call0()?;
-                        return node_type
-                            .call1((not_ident, new_args, empty_dict))
-                            .map(|n| n.unbind());
+                        return node_type.call1((not_ident, new_args, empty_dict)).map(|n| n.unbind());
                     }
                 }
             }
@@ -352,8 +348,7 @@ impl BluntCodePass {
                 if args_tuple.len() >= 1 {
                     let first_arg = args_tuple.get_item(0)?;
                     // Check if it's a list or tuple with branches
-                    if first_arg.is_instance_of::<PyList>() || first_arg.is_instance_of::<PyTuple>()
-                    {
+                    if first_arg.is_instance_of::<PyList>() || first_arg.is_instance_of::<PyTuple>() {
                         if let Ok(branches_iter) = first_arg.try_iter() {
                             if let Some(Ok(first_branch)) = branches_iter.into_iter().next() {
                                 // first_branch should be a (condition, then_body) tuple
@@ -389,13 +384,7 @@ impl BluntCodePass {
     }
 
     /// Check if ident matches opcode or any of the string operations
-    fn is_op(
-        &self,
-        _py: Python<'_>,
-        ident: &Bound<'_, PyAny>,
-        opcode: OpCode,
-        str_ops: &[&str],
-    ) -> PyResult<bool> {
+    fn is_op(&self, _py: Python<'_>, ident: &Bound<'_, PyAny>, opcode: OpCode, str_ops: &[&str]) -> PyResult<bool> {
         // Try int first
         if let Ok(int_val) = ident.extract::<i32>() {
             return Ok(int_val == opcode as i32);

@@ -1,5 +1,5 @@
 // FILE: catnip_rs/src/bin/bench_bigint_ops.rs
-//! Micro-benchmark for VM BigInt arithmetic operations.
+//! Micro-benchmark for VM BigInt arithmetic operations (rug/GMP backend).
 //!
 //! Run with:
 //!   cargo run -p catnip_rs --bin bench_bigint_ops --no-default-features --features embedded --release -- [iters]
@@ -12,7 +12,7 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(200_000);
 
-    println!("VM BigInt ops micro-bench");
+    println!("VM BigInt ops micro-bench (rug/GMP)");
     println!("iterations: {iterations}\n");
 
     reset_vm_fallback_stats();

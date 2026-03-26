@@ -297,8 +297,7 @@ if __name__ == '__main__':
     print()
     print("⇒ Use Case Flask : Route avec script utilisateur")
     print()
-    print(
-        """
+    print("""
 # Exemple d'intégration dans Flask:
 
 from flask import Flask, request, jsonify
@@ -326,5 +325,4 @@ def trigger_workflow(user_id):
 
 if __name__ == '__main__':
     app.run(debug=True)
-    """
-    )
+    """)

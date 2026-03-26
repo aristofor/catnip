@@ -1,38 +1,30 @@
 // FILE: catnip_rs/tests/common/mod.rs
-//! Common utilities for standalone binary integration tests.
+//! Common utilities for catnip binary integration tests.
 
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-/// Path to the standalone binary
-pub fn standalone_binary() -> PathBuf {
-    // Dans un workspace Cargo, le binaire est dans target/ du workspace root
-    // CARGO_MANIFEST_DIR pointe vers catnip_rs/, on remonte d'un niveau
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // Remonter au workspace root
-    path.push("target");
-
-    // Détecter le mode (release ou debug) selon PROFILE
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-
-    path.push(profile);
-    path.push("catnip-standalone");
+/// Path to the catnip binary
+pub fn run_binary() -> PathBuf {
+    // Use the binary built by cargo test (handles --target-dir correctly)
+    let mut path = std::env::current_exe().expect("Failed to get current exe path");
+    // current_exe = target/<dir>/deps/test_binary-hash
+    // binary     = target/<dir>/catnip
+    path.pop(); // remove test binary name
+    path.pop(); // remove "deps"
+    path.push("catnip");
     path
 }
 
-/// Execute code with the standalone binary
+/// Execute code with the catnip binary
 pub fn run_code(code: &str) -> Output {
-    Command::new(standalone_binary())
+    Command::new(run_binary())
         .arg("-c")
         .arg(code)
         .output()
-        .expect("Failed to execute catnip-standalone")
+        .expect("Failed to execute catnip")
 }
 
 /// Execute code and expect success
@@ -80,10 +72,10 @@ mod tests {
 
     #[test]
     fn test_binary_exists() {
-        let path = standalone_binary();
+        let path = run_binary();
         assert!(
             path.exists(),
-            "Standalone binary not found at {:?}. Run 'cargo build --release --bin catnip-standalone'",
+            "catnip binary not found at {:?}. Run 'cargo build --release --bin catnip'",
             path
         );
     }

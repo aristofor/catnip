@@ -7,25 +7,28 @@ import pytest
 from catnip import Catnip
 
 
-@pytest.fixture
-def catnip():
-    return Catnip()
+def parse_ops(code):
+    """Parse code and return Op nodes for CFG analysis."""
+    c = Catnip()
+    c.parse(code)
+    ops = c._pipeline.prepared_ir_to_op()
+    return ops if isinstance(ops, list) else [ops]
 
 
-def test_eliminate_dead_code(catnip):
+def test_eliminate_dead_code():
     """Test dead code elimination."""
     # All blocks reachable - no dead code
-    ir = catnip.parse('x = 1; y = 2')
+    ir = parse_ops('x = 1; y = 2')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'test')
 
     dead = cfg.eliminate_dead_code()
     assert dead == 0  # No dead blocks
 
 
-def test_merge_sequential_blocks(catnip):
+def test_merge_sequential_blocks():
     """Test merging sequential blocks."""
     # Simple sequence should not be merged if they're separate statements
-    ir = catnip.parse('x = 1; y = 2; z = 3')
+    ir = parse_ops('x = 1; y = 2; z = 3')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'linear')
 
     before = cfg.num_blocks
@@ -35,14 +38,14 @@ def test_merge_sequential_blocks(catnip):
     assert cfg.num_blocks <= before
 
 
-def test_remove_empty_blocks_while(catnip):
+def test_remove_empty_blocks_while():
     """Test removing empty blocks in while loop."""
     code = '''
 while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'while')
 
     before = cfg.num_blocks
@@ -53,7 +56,7 @@ while x < 10 {
     assert cfg.num_blocks <= before
 
 
-def test_remove_empty_blocks_if(catnip):
+def test_remove_empty_blocks_if():
     """Test removing empty blocks in if/else."""
     code = '''
 if x {
@@ -62,7 +65,7 @@ if x {
     y = 2
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'if')
 
     before = cfg.num_blocks
@@ -73,10 +76,10 @@ if x {
     assert cfg.num_blocks <= before
 
 
-def test_eliminate_constant_branches_same_target(catnip):
+def test_eliminate_constant_branches_same_target():
     """Test eliminating branches where both paths go to same target."""
     # Simple if - no constant branches in normal code
-    ir = catnip.parse('if x { y = 1 }')
+    ir = parse_ops('if x { y = 1 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'test')
 
     # Test the API exists
@@ -84,7 +87,7 @@ def test_eliminate_constant_branches_same_target(catnip):
     assert result >= 0  # May or may not find constant branches
 
 
-def test_optimize_full_pipeline(catnip):
+def test_optimize_full_pipeline():
     """Test full optimization pipeline."""
     code = '''
 x = 0
@@ -95,7 +98,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'complex')
 
     before_blocks = cfg.num_blocks
@@ -112,7 +115,7 @@ while x < 10 {
     assert cfg.num_edges <= before_edges
 
 
-def test_optimize_nested_loops(catnip):
+def test_optimize_nested_loops():
     """Test optimization on nested loops."""
     code = '''
 while x < 10 {
@@ -122,7 +125,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'nested')
 
     before = cfg.num_blocks
@@ -131,7 +134,7 @@ while x < 10 {
     assert cfg.num_blocks <= before
 
 
-def test_optimize_with_break(catnip):
+def test_optimize_with_break():
     """Test optimization with break statement."""
     code = '''
 while x < 10 {
@@ -141,7 +144,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'break')
 
     before = cfg.num_blocks
@@ -151,7 +154,7 @@ while x < 10 {
     assert cfg.num_blocks <= before
 
 
-def test_optimize_preserves_semantics(catnip):
+def test_optimize_preserves_semantics():
     """Test that optimization preserves CFG semantics."""
     code = '''
 if x > 0 {
@@ -161,7 +164,7 @@ if x > 0 {
 }
 z = y + 1
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'test')
 
     # Get reachable blocks before
@@ -175,14 +178,14 @@ z = y + 1
     assert len(after_reachable) > 0
 
 
-def test_optimize_idempotent(catnip):
+def test_optimize_idempotent():
     """Test that running optimize twice gives same result."""
     code = '''
 while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'loop')
 
     # First optimization
@@ -200,10 +203,10 @@ while x < 10 {
     assert cfg.num_edges == edges_after_first
 
 
-def test_individual_optimizations(catnip):
+def test_individual_optimizations():
     """Test that individual optimizations can be called separately."""
     code = 'while x { y = 1 }'
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'test')
 
     # Should be able to call each optimization

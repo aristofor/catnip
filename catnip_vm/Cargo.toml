@@ -1,0 +1,16 @@
+[package]
+name = "catnip_vm"
+version.workspace = true
+edition.workspace = true
+description = "Pure Rust VM for Catnip (no PyO3)"
+
+[lib]
+name = "catnip_vm"
+crate-type = ["rlib"]
+
+[dependencies]
+catnip_core = { path = "../catnip_core" }
+catnip_grammar = { path = "../catnip_grammar" }
+tree-sitter = { workspace = true }
+indexmap = { version = "2.13", features = ["serde"] }
+rug = "1"

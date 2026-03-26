@@ -5,6 +5,7 @@
 //! debugging. Works in both Python (via PyO3) and standalone Rust contexts.
 
 use crate::config::{get_config_path, get_state_dir};
+use crate::constants::parse_bool_value;
 use pyo3::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -13,8 +14,10 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-const MAX_WEIRD_LOGS_DEFAULT: usize = 50;
+use crate::constants::WEIRD_LOG_MAX_DEFAULT;
 const SCHEMA_VERSION: u32 = 1;
+
+type PyTracebackFrame = (Option<String>, Option<String>, Option<u32>);
 
 /// Location context for the error.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -108,11 +111,7 @@ fn log_weird_error_inner(report: &WeirdReport) -> Result<(), Box<dyn std::error:
         .filter(|c| c.is_ascii_digit())
         .take(14)
         .collect::<String>();
-    let filename = format!(
-        "weird_{}_{}.json",
-        format_timestamp_slug(&ts_slug),
-        rand_hex
-    );
+    let filename = format!("weird_{}_{}.json", format_timestamp_slug(&ts_slug), rand_hex);
 
     let data = serde_json::to_string_pretty(report)?;
 
@@ -125,7 +124,7 @@ fn log_weird_error_inner(report: &WeirdReport) -> Result<(), Box<dyn std::error:
     }
     fs::rename(&tmp_path, weird_dir.join(&filename))?;
 
-    rotate_logs(&weird_dir, MAX_WEIRD_LOGS_DEFAULT);
+    rotate_logs(&weird_dir, WEIRD_LOG_MAX_DEFAULT);
 
     Ok(())
 }
@@ -134,7 +133,7 @@ fn log_weird_error_inner(report: &WeirdReport) -> Result<(), Box<dyn std::error:
 fn is_logging_enabled() -> bool {
     // 1. Env var
     if let Ok(val) = env::var("CATNIP_WEIRD_LOG") {
-        return matches!(val.to_lowercase().as_str(), "on" | "true" | "1" | "yes");
+        return parse_bool_value(&val.to_lowercase()).unwrap_or(false);
     }
 
     // 2. TOML config
@@ -169,8 +168,7 @@ fn rotate_logs(dir: &PathBuf, max_files: usize) {
         .map(|e| e.path())
         .filter(|p| {
             p.extension().is_some_and(|ext| ext == "json")
-                && p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("weird_"))
+                && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("weird_"))
         })
         .collect();
 
@@ -188,9 +186,7 @@ fn rotate_logs(dir: &PathBuf, max_files: usize) {
 fn now_iso8601() -> String {
     // Use std::time for a portable timestamp without extra deps
     use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = duration.as_secs();
 
     // Convert to UTC datetime components
@@ -277,7 +273,7 @@ pub fn log_weird_error_py(
     line: Option<u32>,
     column: Option<u32>,
     context: Option<String>,
-    traceback_frames: Option<Vec<(Option<String>, Option<String>, Option<u32>)>>,
+    traceback_frames: Option<Vec<PyTracebackFrame>>,
     python_traceback: Option<String>,
     python_version: Option<String>,
 ) {
@@ -397,8 +393,12 @@ mod tests {
         assert!(json.contains("\"cause\":\"vm\""));
     }
 
+    // Env-var tests must be serialized: they share process-wide state.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_logging_disabled_via_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { env::set_var("CATNIP_WEIRD_LOG", "off") };
         assert!(!is_logging_enabled());
         unsafe { env::remove_var("CATNIP_WEIRD_LOG") };
@@ -406,6 +406,7 @@ mod tests {
 
     #[test]
     fn test_logging_enabled_via_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { env::set_var("CATNIP_WEIRD_LOG", "on") };
         assert!(is_logging_enabled());
         unsafe { env::remove_var("CATNIP_WEIRD_LOG") };
@@ -413,6 +414,7 @@ mod tests {
 
     #[test]
     fn test_logging_default_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { env::remove_var("CATNIP_WEIRD_LOG") };
         // Without TOML config, default is true
         assert!(is_logging_enabled());

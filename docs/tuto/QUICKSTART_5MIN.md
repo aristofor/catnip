@@ -149,7 +149,7 @@ match tuple(1, tuple(2, 3)) {
 ### Struct patterns
 
 ```catnip
-struct Point { x, y }
+struct Point { x; y; }
 
 match Point(0, 5) {
     Point{x, y} if x == 0 => { "axe Y" }
@@ -180,7 +180,7 @@ def double(x):
 
 ```catnip
 # Dans le script :
-tools = import("./tools.py")
+tools = import("tools", protocol="py")
 result = tools.double(21)
 ```
 

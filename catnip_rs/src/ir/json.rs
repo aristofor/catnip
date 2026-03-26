@@ -3,82 +3,81 @@
 //!
 //! Exposes IR JSON serialization to Python scripts.
 
-use super::pure::IRPure;
+use super::pure::IR;
+use indexmap::IndexMap;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
-use std::collections::HashMap;
 
-/// Convert a Python object (Op or IR) to Rust IRPure
-pub fn python_to_ir_pure(py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IRPure> {
+/// Convert a Python object (Op or IR) to Rust IR
+pub fn python_to_ir_pure(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IR> {
+    // Fast path: already a PyIRNode
+    if let Ok(node) = obj.cast::<super::pyclass::PyIRNode>() {
+        return Ok(node.borrow().inner.clone());
+    }
+
     // Essayer d'extraire comme Int (avant bool car bool peut être extrait comme int)
     if obj.is_instance_of::<pyo3::types::PyInt>() {
         if let Ok(val) = obj.extract::<i64>() {
-            return Ok(IRPure::Int(val));
+            return Ok(IR::Int(val));
         }
     }
 
     // Essayer d'extraire comme Float
     if obj.is_instance_of::<pyo3::types::PyFloat>() {
         if let Ok(val) = obj.extract::<f64>() {
-            return Ok(IRPure::Float(val));
+            return Ok(IR::Float(val));
         }
     }
 
     // Essayer d'extraire comme Bool
     if obj.is_instance_of::<pyo3::types::PyBool>() {
         if let Ok(val) = obj.extract::<bool>() {
-            return Ok(IRPure::Bool(val));
+            return Ok(IR::Bool(val));
         }
     }
 
     // Essayer d'extraire comme String
     if obj.is_instance_of::<pyo3::types::PyString>() {
         if let Ok(val) = obj.extract::<String>() {
-            return Ok(IRPure::String(val));
+            return Ok(IR::String(val));
         }
     }
 
     // Essayer d'extraire comme Bytes
     if obj.is_instance_of::<pyo3::types::PyBytes>() {
         if let Ok(val) = obj.extract::<Vec<u8>>() {
-            return Ok(IRPure::Bytes(val));
+            return Ok(IR::Bytes(val));
         }
     }
 
     // Vérifier None
     if obj.is_none() {
-        return Ok(IRPure::None);
+        return Ok(IR::None);
     }
 
     // Essayer d'extraire comme Tuple (avant de gérer comme objet IR)
     if let Ok(tuple) = obj.cast::<PyTuple>() {
-        let items: Result<Vec<_>, _> = tuple
-            .iter()
-            .map(|item| python_to_ir_pure(py, &item))
-            .collect();
-        return Ok(IRPure::Tuple(items?));
+        let items: Result<Vec<_>, _> = tuple.iter().map(|item| python_to_ir_pure(_py, &item)).collect();
+        return Ok(IR::Tuple(items?));
     }
 
     // Essayer d'extraire comme List
     if let Ok(list) = obj.cast::<PyList>() {
-        let items: Result<Vec<_>, _> = list
-            .iter()
-            .map(|item| python_to_ir_pure(py, &item))
-            .collect();
-        return Ok(IRPure::List(items?));
+        let items: Result<Vec<_>, _> = list.iter().map(|item| python_to_ir_pure(_py, &item)).collect();
+        return Ok(IR::List(items?));
     }
 
-    // Round-trip: slice() Python → IRPure::Slice
+    // Round-trip: slice() Python → IR::Slice
     if let Ok(type_name) = obj.get_type().name() {
         if type_name == "slice" {
             let start = obj.getattr("start")?;
             let stop = obj.getattr("stop")?;
             let step = obj.getattr("step")?;
-            return Ok(IRPure::Slice {
-                start: Box::new(python_to_ir_pure(py, &start)?),
-                stop: Box::new(python_to_ir_pure(py, &stop)?),
-                step: Box::new(python_to_ir_pure(py, &step)?),
+            return Ok(IR::Slice {
+                start: Box::new(python_to_ir_pure(_py, &start)?),
+                stop: Box::new(python_to_ir_pure(_py, &stop)?),
+                step: Box::new(python_to_ir_pure(_py, &step)?),
             });
         }
     }
@@ -91,14 +90,14 @@ pub fn python_to_ir_pure(py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IRPure>
             if let Some(opcode) = super::opcode::IROpCode::from_u8(opcode_val) {
                 // Extraire args (tuple ou list)
                 let args_obj = obj.getattr("args")?;
-                let args: Vec<IRPure> = if let Ok(tuple) = args_obj.cast::<PyTuple>() {
+                let args: Vec<IR> = if let Ok(tuple) = args_obj.cast::<PyTuple>() {
                     tuple
                         .iter()
-                        .map(|arg| python_to_ir_pure(py, &arg))
+                        .map(|arg| python_to_ir_pure(_py, &arg))
                         .collect::<Result<Vec<_>, _>>()?
                 } else if let Ok(list) = args_obj.cast::<PyList>() {
                     list.iter()
-                        .map(|arg| python_to_ir_pure(py, &arg))
+                        .map(|arg| python_to_ir_pure(_py, &arg))
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
                     vec![]
@@ -106,11 +105,11 @@ pub fn python_to_ir_pure(py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IRPure>
 
                 // Extraire kwargs
                 let kwargs_obj = obj.getattr("kwargs")?;
-                let mut kwargs = HashMap::new();
+                let mut kwargs = IndexMap::new();
                 if let Ok(dict) = kwargs_obj.cast::<PyDict>() {
                     for (k, v) in dict.iter() {
                         let key = k.extract::<String>()?;
-                        let val = python_to_ir_pure(py, &v)?;
+                        let val = python_to_ir_pure(_py, &v)?;
                         kwargs.insert(key, val);
                     }
                 }
@@ -130,7 +129,7 @@ pub fn python_to_ir_pure(py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IRPure>
                     .and_then(|x| x.extract::<usize>().ok())
                     .unwrap_or(0);
 
-                return Ok(IRPure::Op {
+                return Ok(IR::Op {
                     opcode,
                     args,
                     kwargs,
@@ -147,26 +146,20 @@ pub fn python_to_ir_pure(py: Python, obj: &Bound<'_, PyAny>) -> PyResult<IRPure>
         let type_str = type_name.str()?.to_string();
         if type_str.contains("Identifier") {
             if let Ok(name) = obj.getattr("name") {
-                return Ok(IRPure::Identifier(name.extract::<String>()?));
+                return Ok(IR::Identifier(name.extract::<String>()?));
             }
         }
         if type_str.contains("Ref") {
             if let Ok(ident) = obj.getattr("ident") {
-                let sb: isize = obj
-                    .getattr("start_byte")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(-1);
-                let eb: isize = obj
-                    .getattr("end_byte")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(-1);
-                return Ok(IRPure::Ref(ident.extract::<String>()?, sb, eb));
+                let sb: isize = obj.getattr("start_byte").and_then(|v| v.extract()).unwrap_or(-1);
+                let eb: isize = obj.getattr("end_byte").and_then(|v| v.extract()).unwrap_or(-1);
+                return Ok(IR::Ref(ident.extract::<String>()?, sb, eb));
             }
         }
     }
 
     Err(PyValueError::new_err(format!(
-        "Cannot convert Python object to IRPure: {:?}",
+        "Cannot convert Python object to IR: {:?}",
         obj
     )))
 }
@@ -201,14 +194,11 @@ pub fn ir_to_json_compact_pretty(py: Python, obj: &Bound<'_, PyAny>) -> PyResult
     Ok(ir.to_compact_json_pretty())
 }
 
-/// Convert JSON to Python IR (returns a Python dict)
+/// Convert JSON to Python IR (Op nodes)
 #[pyfunction]
-pub fn ir_from_json(_py: Python, json: &str) -> PyResult<String> {
-    // Pour l'instant, on retourne juste le JSON validé
-    // La conversion complète JSON -> IRPure -> Python nécessiterait plus de travail
-    IRPure::from_json(json)
-        .map_err(|e| PyValueError::new_err(format!("JSON deserialization error: {}", e)))?;
-    Ok(json.to_string())
+pub fn ir_from_json(py: Python, json: &str) -> PyResult<Py<PyAny>> {
+    let ir = IR::from_json(json).map_err(|e| PyValueError::new_err(format!("JSON deserialization error: {}", e)))?;
+    super::ir_pure_to_python(py, ir)
 }
 
 /// Register the module in PyO3

@@ -43,20 +43,21 @@ catnip debug -c "x = 10; y = x * 2; y + 1" -b 1
 
 Au point d'arrêt, le prompt `(catnip-dbg:L5) >` attend une commande :
 
-| Commande     | Alias    | Description                                  |
-| ------------ | -------- | -------------------------------------------- |
-| `continue`   | `c`      | Reprendre jusqu'au prochain breakpoint       |
-| `step`       | `s`      | Pas à pas (entre dans les appels)            |
-| `next`       | `n`      | Pas à pas (saute les appels)                 |
-| `out`        | `o`      | Sort de la fonction courante                 |
-| `break N`    | `b N`    | Ajouter un breakpoint à la ligne N           |
-| `rbreak N`   | `rb N`   | Retirer un breakpoint                        |
-| `print EXPR` | `p EXPR` | Évaluer une expression dans le scope courant |
-| `vars`       | `v`      | Afficher les variables locales               |
-| `list`       | `l`      | Afficher le source autour de la position     |
-| `backtrace`  | `bt`     | Afficher la pile d'appels                    |
-| `quit`       | `q`      | Arrêter l'exécution                          |
-| `help`       | `h`      | Aide                                         |
+| Commande     | Alias    | Description                                    |
+| ------------ | -------- | ---------------------------------------------- |
+| `continue`   | `c`      | Reprendre jusqu'au prochain breakpoint         |
+| `step`       | `s`      | Pas à pas (entre dans les appels)              |
+| `next`       | `n`      | Pas à pas (saute les appels)                   |
+| `out`        | `o`      | Sort de la fonction courante                   |
+| `break N`    | `b N`    | Ajouter un breakpoint à la ligne N             |
+| `rbreak N`   | `rb N`   | Retirer un breakpoint                          |
+| `print EXPR` | `p EXPR` | Évaluer une expression dans le scope courant   |
+| `vars`       | `v`      | Afficher les variables locales                 |
+| `list`       | `l`      | Afficher le source autour de la position       |
+| `backtrace`  | `bt`     | Afficher la pile d'appels                      |
+| `repl`       |          | Entrer en sous-mode REPL dans le scope courant |
+| `quit`       | `q`      | Arrêter l'exécution                            |
+| `help`       | `h`      | Aide                                           |
 
 Appuyer sur Entrée sans commande répète le dernier `step`.
 
@@ -89,6 +90,40 @@ Paused at line 3, col 5
 (catnip-dbg:L3) > c
 Execution finished. Result: 120
 ```
+
+### Sous-mode REPL
+
+La commande `repl` ouvre un sous-mode interactif dans le scope du frame en pause. Les variables du programme et les
+locales du point d'arrêt sont disponibles, et les nouvelles définitions persistent entre les expressions.
+
+Toutes les commandes debug sont disponibles dans le REPL : `v`, `l`, `bt`, `b N`, `rb N`, `h`. Les commandes de
+mouvement (`c`, `s`, `n`, `o`) reprennent l'exécution directement depuis le REPL sans repasser par le prompt debug.
+Toute entrée non reconnue comme commande est évaluée comme expression Catnip.
+
+```bash
+(catnip-dbg:L3) > repl
+Entering REPL (type /exit or empty line to return to debugger)
+(repl:L3) => n
+  5
+(repl:L3) => y = n * 2
+(repl:L3) => y + 1
+  11
+(repl:L3) => v
+  n = 5
+  y = 10
+(repl:L3) => bt
+  #0 factorial at line 3
+  #1 <module> at line 5
+(repl:L3) => c
+Paused at line 3, col 5
+```
+
+Le sous-mode supporte la saisie multiline (brackets, opérateurs de continuation). `print EXPR` (`p EXPR`) évalue une
+expression avec préfixe `= ` ; les entrées non reconnues sont évaluées directement. `/exit` ou ligne vide quitte le
+REPL.
+
+> En REPL, les commandes courtes (`v`, `l`, `b`) sont prioritaires sur les noms de variables identiques. Pour évaluer
+> une variable `v`, taper `p v`.
 
 ## Breakpoints dans le code
 
@@ -187,8 +222,8 @@ Les sessions MCP sont indépendantes : chaque `debug_start` crée une nouvelle s
 ```mermaid
 sequenceDiagram
     participant CLI as CLI / MCP
-    participant DS as DebugSession (Python wrapper)
-    participant RS as RustDebugSession
+    participant DS as DebugSession<br/>(Python wrapper)
+    participant RS as DebugSession<br/>(Rust)
     participant VM as VM Thread
 
     CLI->>DS: start(blocking=False)
@@ -196,13 +231,13 @@ sequenceDiagram
     RS->>VM: std::thread::spawn
     VM->>VM: execute bytecode...
     VM->>RS: DebugCallback.__call__(byte, locals, stack)
-    Note over RS: event_tx.send(Paused)
+    Note over RS: event_tx.send<br/>(Paused)
     RS->>DS: wait_for_event() via event_rx
     DS->>CLI: ('paused', PauseInfo)
     CLI->>CLI: display pause / inspect
     CLI->>DS: send_command(STEP_INTO)
     DS->>RS: command_tx.send(StepInto)
-    Note over VM: py.detach() pendant recv
+    Note over VM: py.detach()<br/>pendant recv
     RS->>VM: return DebugAction::StepInto
     VM->>VM: execute next instruction...
 ```
@@ -252,7 +287,8 @@ La VM travaille en byte offsets (positions dans le source UTF-8). Le `SourceMap`
 1. **Timeout** : si la console ne répond pas, le callback attend 5 tentatives de 60 secondes (total 300s) avant de
    continuer automatiquement
 
-1. **VM uniquement** : le debugger nécessite le mode VM (défaut). Le mode AST (`-x ast`) n'est pas supporté
+1. **VM uniquement** : le debugger nécessite le mode VM (défaut). Le mode est forcé automatiquement au démarrage de la
+   session et restauré à la fin
 
 > Le debugger a une patience de 300 secondes. Passé ce délai, il considère que le développeur a abandonné et reprend
 > l'exécution de son propre chef. C'est le seul logiciel qui croit en l'autonomie du code plus que l'utilisateur.

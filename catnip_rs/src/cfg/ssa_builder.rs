@@ -41,7 +41,6 @@ fn extract_refs_inner(py: Python<'_>, obj: &Bound<'_, PyAny>, refs: &mut Vec<Str
         for item in tuple.iter() {
             extract_refs_inner(py, &item, refs);
         }
-        return;
     }
 
     // Literals (int, float, str, bool, None) → ignore
@@ -133,9 +132,8 @@ impl SSABuilder {
         };
 
         // Snapshot initial_defs (reaching defs at block entry, before any instruction)
-        if let Some(info) = ssa.blocks.get(&block_id) {
-            let snapshot = info.current_defs.clone();
-            ssa.blocks.get_mut(&block_id).unwrap().initial_defs = snapshot;
+        if let Some(info) = ssa.blocks.get_mut(&block_id) {
+            info.initial_defs = info.current_defs.clone();
         }
 
         for (instr_idx, op) in block.instructions.iter().enumerate() {
@@ -213,7 +211,7 @@ impl SSABuilder {
                     Vec::new()
                 }
             } else {
-                extract_refs(py, &args_bound)
+                extract_refs(py, args_bound)
             };
 
             // Resolve each Ref name to its reaching SSA definition
@@ -247,12 +245,7 @@ impl SSABuilder {
     }
 
     /// DFS for postorder computation.
-    fn dfs_postorder(
-        cfg: &ControlFlowGraph,
-        block: usize,
-        visited: &mut HashSet<usize>,
-        postorder: &mut Vec<usize>,
-    ) {
+    fn dfs_postorder(cfg: &ControlFlowGraph, block: usize, visited: &mut HashSet<usize>, postorder: &mut Vec<usize>) {
         if !visited.insert(block) {
             return;
         }

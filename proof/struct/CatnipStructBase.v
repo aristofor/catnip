@@ -1,5 +1,5 @@
 (* FILE: proof/struct/CatnipStructBase.v *)
-(* CatnipStructBase.v — Core definitions, field access, method resolution.
+(* CatnipStructBase.v - Core definitions, field access, method resolution.
  *
  * Source of truth:
  *   catnip_rs/src/vm/structs.rs   (StructType, StructInstance, SuperProxy)

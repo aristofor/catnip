@@ -1,9 +1,17 @@
+#!/usr/bin/env catnip
 # Requêtage JSON avec JMESPath
 # JMESPath est un langage de requête pour JSON (utilisé par AWS CLI)
-#
-# Exécuter: catnip -m jmespath jmespath_query.cat
 
-jmespath = import("jmespath")
+jmespath = import('jmespath')
+
+# Struct pour encapsuler une requête nommée
+
+struct Query {
+    label; expr;
+    run(self, data) => { jmespath.search(self.expr, data) }
+}
+
+show = (label, result) => { print(f"  {label} : {result}") }
 
 # Données de test (réponse API d'exemple)
 
@@ -44,73 +52,90 @@ data = dict(
 # Accès simple
 
 print("⇒ Accès simple")
-print("  metadata.total:", jmespath.search("metadata.total", data))
-print("  metadata.page:", jmespath.search("metadata.page", data))
+simple_queries = list(
+    Query("metadata.total", "metadata.total"),
+    Query("metadata.page", "metadata.page"),
+)
+simple_queries.[(q) => { show(q.label, q.run(data)) }]
 
 # Accès aux listes
 
-print("\n⇒ Accès aux listes")
-print("  Premier user:", jmespath.search("users[0].name", data))
-print("  Dernier user:", jmespath.search("users[-1].name", data))
+print()
+print("⇒ Accès aux listes")
+list_queries = list(
+    Query("Premier user", "users[0].name"),
+    Query("Dernier user", "users[-1].name"),
+)
+list_queries.[(q) => { show(q.label, q.run(data)) }]
 
 # Projection (extraire un champ de chaque élément)
 
-print("\n⇒ Projection")
-names = jmespath.search("users[*].name", data)
-print("  Tous les noms:", names)
-
-emails = jmespath.search("users[*].email", data)
-print("  Tous les emails:", emails)
+print()
+print("⇒ Projection")
+proj_queries = list(
+    Query("Tous les noms", "users[*].name"),
+    Query("Tous les emails", "users[*].email"),
+)
+proj_queries.[(q) => { show(q.label, q.run(data)) }]
 
 # Filtrage
 
-print("\n⇒ Filtrage")
-admins = jmespath.search("users[?role=='admin'].name", data)
-print("  Admins:", admins)
+print()
+print("⇒ Filtrage")
+filter_queries = list(
+    Query("Admins", "users[?role=='admin'].name"),
+    Query("Users actifs", "users[?active==`true`].name"),
+)
+filter_queries.[(q) => { show(q.label, q.run(data)) }]
 
-active = jmespath.search("users[?active==`true`].name", data)
-print("  Users actifs:", active)
-
-devs = jmespath.search("users[?role=='developer']", data)
-print("  Developers:", len(devs))
+devs = Query("Developers", "users[?role=='developer']").run(data)
+show("Developers (count)", len(devs))
 
 # Projection multiple (dict construit à la volée)
 
-print("\n⇒ Projection multiple (sélection de champs)")
-subset = jmespath.search("users[*].{nom: name, mail: email}", data)
+print()
+print("⇒ Projection multiple (sélection de champs)")
+subset = Query("Subset", "users[*].{nom: name, mail: email}").run(data)
 print("  Subset:")
 for u in subset {
-    print("    ", u)
+    print(f"     {u}")
 }
-
 print("  Exemple premier élément:")
-print("    nom:", subset[0]["nom"])
-print("    mail:", subset[0]["mail"])
+show("nom", subset[0]['nom'])
+show("mail", subset[0]['mail'])
 
 # Flatten (aplatir les listes)
 
-print("\n⇒ Flatten")
-all_projects = jmespath.search("users[*].projects[]", data)
-print("  Tous les projets (avec doublons):", all_projects)
+print()
+print("⇒ Flatten")
+all_projects = Query("Projets", "users[*].projects[]").run(data)
+show("Tous les projets (avec doublons)", all_projects)
 
-# Fonctions
+# Fonctions JMESPath
 
-print("\n⇒ Fonctions JMESPath")
-print("  Nombre d'users:", jmespath.search("length(users)", data))
-print("  Premier nom (sort):", jmespath.search("sort(users[*].name)[0]", data))
-print("  Dernier nom (sort):", jmespath.search("sort(users[*].name)[-1]", data))
+print()
+print("⇒ Fonctions JMESPath")
+fn_queries = list(
+    Query("Nombre d'users", "length(users)"),
+    Query("Premier nom (sort)", "sort(users[*].name)[0]"),
+    Query("Dernier nom (sort)", "sort(users[*].name)[-1]"),
+)
+fn_queries.[(q) => { show(q.label, q.run(data)) }]
 
 # Conditions complexes
 
-print("\n⇒ Conditions complexes")
-beta_users = jmespath.search("users[?contains(projects, 'beta')].name", data)
-print("  Users sur projet beta:", beta_users)
+print()
+print("⇒ Conditions complexes")
+beta_users = Query("Users sur projet beta", "users[?contains(projects, 'beta')].name").run(data)
+show("Users sur projet beta", beta_users)
 
 # Dict imbriqué dans le résultat
 
-print("\n⇒ Dict imbriqué (retour structuré)")
-summary = jmespath.search("{meta: metadata, admins: users[?role=='admin'].name, total_users: length(users)}", data)
-print("  Résumé:", summary)
+print()
+print("⇒ Dict imbriqué (retour structuré)")
+summary = Query("Résumé",
+    "{meta: metadata, admins: users[?role=='admin'].name, total_users: length(users)}").run(data)
+show("Résumé", summary)
 
 # Exemple: réponse API paginée
 
@@ -127,25 +152,25 @@ api_response = dict(
     )
 )
 
-print("\n⇒ Exemple API e-commerce")
-in_stock = jmespath.search("items[?stock > `0`].sku", api_response)
-print("  SKUs en stock:", in_stock)
+print()
+print("⇒ Exemple API e-commerce")
+ecom_queries = list(Query("SKUs en stock", "items[?stock > `0`].sku"),
+    Query("Produits > 50 EUR", "items[?price > `50`].{sku: sku, prix: price}"))
+ecom_queries.[(q) => { show(q.label, q.run(api_response)) }]
 
-expensive = jmespath.search("items[?price > `50`].{sku: sku, prix: price}", api_response)
-print("  Produits > 50€:", expensive)
+# Min/Max avec sort
 
-# Max/min avec sort
-
-print("\n⇒ Min/Max")
-cheapest = jmespath.search("sort_by(items, &price)[0]", api_response)
-print("  Moins cher:", cheapest["sku"], "-", cheapest["price"], "€")
-
-most_expensive = jmespath.search("sort_by(items, &price)[-1]", api_response)
-print("  Plus cher:", most_expensive["sku"], "-", most_expensive["price"], "€")
+print()
+print("⇒ Min/Max")
+cheapest = Query("Moins cher", "sort_by(items, &price)[0]").run(api_response)
+most_expensive = Query("Plus cher", "sort_by(items, &price)[-1]").run(api_response)
+show("Moins cher", f"{cheapest['sku']} - {cheapest['price']} EUR")
+show("Plus cher", f"{most_expensive['sku']} - {most_expensive['price']} EUR")
 
 # Compilation pour performance
 
-print("\n⇒ Expression compilée")
+print()
+print("⇒ Expression compilée")
 expr = jmespath.compile("users[?active].name")
 result = expr.search(data)
-print("  Résultat:", result)
+show("Résultat", result)

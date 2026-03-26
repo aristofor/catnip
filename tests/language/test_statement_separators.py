@@ -17,50 +17,50 @@ class TestStatementSeparators(unittest.TestCase):
         c = Catnip()
         c.parse("x = 10\ny = 20")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["y"], 20)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['y'], 20)
 
     def test_semicolon_separator(self):
         """Semicolon separates two statements."""
         c = Catnip()
         c.parse("x = 10; y = 20")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["y"], 20)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['y'], 20)
 
     def test_mixed_separators(self):
         """Mix of newlines and semicolons."""
         c = Catnip()
         c.parse("a = 1; b = 2\nc = 3; d = 4")
         c.execute()
-        self.assertEqual(c.context.globals["a"], 1)
-        self.assertEqual(c.context.globals["b"], 2)
-        self.assertEqual(c.context.globals["c"], 3)
-        self.assertEqual(c.context.globals["d"], 4)
+        self.assertEqual(c.context.globals['a'], 1)
+        self.assertEqual(c.context.globals['b'], 2)
+        self.assertEqual(c.context.globals['c'], 3)
+        self.assertEqual(c.context.globals['d'], 4)
 
     def test_multiple_newlines(self):
         """Multiple consecutive newlines are ignored."""
         c = Catnip()
         c.parse("x = 10\n\n\ny = 20")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["y"], 20)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['y'], 20)
 
     def test_trailing_semicolon(self):
         """Point-virgule final optionnel."""
         c = Catnip()
         c.parse("x = 10; y = 20;")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["y"], 20)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['y'], 20)
 
     def test_semicolon_without_space(self):
         """Point-virgule fonctionne sans espace."""
         c = Catnip()
         c.parse("x=10;y=20")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["y"], 20)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['y'], 20)
 
 
 class TestMultilineExpressions(unittest.TestCase):
@@ -76,7 +76,7 @@ x = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
+        self.assertEqual(c.context.globals['x'], 10)
 
     def test_multiline_arithmetic_no_leading_newline(self):
         """Arithmetic expression without a newline before the first operand."""
@@ -86,7 +86,7 @@ x = (1 + 2 +
      3 + 4)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
+        self.assertEqual(c.context.globals['x'], 10)
 
     def test_multiline_complex_expression(self):
         """Complex expression with multiple operators."""
@@ -99,7 +99,7 @@ result = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 10 * 2 + 5 - 3 / 2)
+        self.assertEqual(c.context.globals['result'], 10 * 2 + 5 - 3 / 2)
 
     def test_multiline_boolean_expression(self):
         """Multiline boolean expression."""
@@ -113,7 +113,7 @@ peut_conduire = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["peut_conduire"], True)
+        self.assertEqual(c.context.globals['peut_conduire'], True)
 
     def test_multiline_comparison_chain(self):
         """Multiline chained comparisons."""
@@ -126,7 +126,7 @@ valid = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["valid"], True)
+        self.assertEqual(c.context.globals['valid'], True)
 
     def test_nested_parentheses(self):
         """Nested parentheses with newlines."""
@@ -138,7 +138,7 @@ result = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 21)
+        self.assertEqual(c.context.globals['result'], 21)
 
 
 class TestMultilineFunctionCalls(unittest.TestCase):
@@ -154,7 +154,7 @@ result = max(10,
     5)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 30)
+        self.assertEqual(c.context.globals['result'], 30)
 
     def test_multiline_function_call_with_kwargs(self):
         """Multiline call with named arguments."""
@@ -168,7 +168,7 @@ result = make_dict(a=1,
     c=3)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], {"a": 1, "b": 2, "c": 3})
+        self.assertEqual(c.context.globals['result'], {'a': 1, 'b': 2, 'c': 3})
 
     def test_multiline_nested_calls(self):
         """Multiline nested calls."""
@@ -178,7 +178,7 @@ result = max(min(10, 20),
     min(30, 40))
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 30)
+        self.assertEqual(c.context.globals['result'], 30)
 
     def test_multiline_chained_calls(self):
         """Chained calls with newlines."""
@@ -189,7 +189,7 @@ result = text.upper().replace("HELLO",
     "GOODBYE")
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], "GOODBYE WORLD")
+        self.assertEqual(c.context.globals['result'], "GOODBYE WORLD")
 
 
 class TestMultilineLambdas(unittest.TestCase):
@@ -207,7 +207,7 @@ f = (a,
 result = f(1, 2, 3)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 6)
+        self.assertEqual(c.context.globals['result'], 6)
 
     def test_multiline_lambda_with_defaults(self):
         """Lambda with multiline default values."""
@@ -221,7 +221,7 @@ f = (x,
 result = f(5)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 35)
+        self.assertEqual(c.context.globals['result'], 35)
 
     def test_multiline_lambda_variadic(self):
         """Lambda variadique multiligne."""
@@ -238,7 +238,7 @@ f = (first,
 result = f(1, 2, 3, 4)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], [1, 2, 3, 4])
+        self.assertEqual(c.context.globals['result'], [1, 2, 3, 4])
 
 
 class TestMultilineControlFlow(unittest.TestCase):
@@ -261,7 +261,7 @@ if (
 }
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], True)
+        self.assertEqual(c.context.globals['result'], True)
 
     def test_multiline_while_condition(self):
         """Condition while multiligne."""
@@ -278,8 +278,8 @@ while (
 }
 """)
         c.execute()
-        self.assertEqual(c.context.globals["x"], 10)
-        self.assertEqual(c.context.globals["count"], 5)
+        self.assertEqual(c.context.globals['x'], 10)
+        self.assertEqual(c.context.globals['count'], 5)
 
 
 class TestEdgeCases(unittest.TestCase):
@@ -292,7 +292,7 @@ class TestEdgeCases(unittest.TestCase):
         # but still valid for lambdas
         c.parse("f = () => { 42 }; result = f()")
         c.execute()
-        self.assertEqual(c.context.globals["result"], 42)
+        self.assertEqual(c.context.globals['result'], 42)
 
     def test_deeply_nested_multiline(self):
         """Deeply nested multiline expressions."""
@@ -307,7 +307,7 @@ result = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], (1 + 2) * (3 + 4 * (5 - 2)))
+        self.assertEqual(c.context.globals['result'], (1 + 2) * (3 + 4 * (5 - 2)))
 
     def test_multiline_with_comments(self):
         """Expressions multilignes avec commentaires."""
@@ -320,14 +320,14 @@ result = (
 )
 """)
         c.execute()
-        self.assertEqual(c.context.globals["result"], 6)
+        self.assertEqual(c.context.globals['result'], 6)
 
     def test_single_line_in_parentheses(self):
         """Single-line expression in parentheses."""
         c = Catnip()
         c.parse("x = (1 + 2 + 3)")
         c.execute()
-        self.assertEqual(c.context.globals["x"], 6)
+        self.assertEqual(c.context.globals['x'], 6)
 
     def test_newline_before_operator(self):
         """Newline before an operator (inside parentheses)."""
@@ -338,7 +338,7 @@ x = (1
     + 3)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["x"], 6)
+        self.assertEqual(c.context.globals['x'], 6)
 
     def test_newline_after_operator(self):
         """Newline after an operator (inside parentheses)."""
@@ -349,7 +349,7 @@ x = (1 +
     3)
 """)
         c.execute()
-        self.assertEqual(c.context.globals["x"], 6)
+        self.assertEqual(c.context.globals['x'], 6)
 
 
 if __name__ == "__main__":

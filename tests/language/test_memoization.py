@@ -66,9 +66,9 @@ def test_function_cache_stats():
     cache = Memoization()
 
     stats = cache.stats()
-    assert "size" in stats
-    assert "hits" in stats
-    assert "misses" in stats
+    assert 'size' in stats
+    assert 'hits' in stats
+    assert 'misses' in stats
 
 
 def test_cached_builtin_basic():
@@ -184,11 +184,11 @@ def test_cache_stats_builtin():
     cat.parse(code)
     stats = cat.execute()
 
-    assert "size" in stats
-    assert "hits" in stats
-    assert "misses" in stats
-    assert stats["hits"] >= 1  # At least one hit
-    assert stats["misses"] >= 2  # At least two misses
+    assert 'size' in stats
+    assert 'hits' in stats
+    assert 'misses' in stats
+    assert stats['hits'] >= 1  # At least one hit
+    assert stats['misses'] >= 2  # At least two misses
 
 
 def test_cache_enable_disable():

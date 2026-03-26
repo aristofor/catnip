@@ -1,13 +1,5 @@
 # Control Flow
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 ## Structures de contrôle
 
 ### Blocs
@@ -300,7 +292,8 @@ for num in numbers {
         break  # Trouve le premier > 50 (non multiple de 10)
     }
 }
-# result = 55
+
+result  # → 55
 ```
 
 **Notes importantes** :

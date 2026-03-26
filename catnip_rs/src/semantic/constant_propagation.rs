@@ -9,8 +9,9 @@
 //! Uses RefCell for interior mutability (state accumulates during traversal).
 //! Does not eliminate the original assignment (that's dead code elimination).
 
+use super::extract_var_name;
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -29,6 +30,12 @@ impl ConstantPropagationPass {
         ConstantPropagationPass {
             constants: RwLock::new(HashMap::new()),
         }
+    }
+}
+
+impl Default for ConstantPropagationPass {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -62,11 +69,13 @@ impl OptimizationPass for ConstantPropagationPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
         // Track constant assignments: SET_LOCALS x = <constant>
+        // If a variable is reassigned to a non-constant value, invalidate the
+        // previous mapping to avoid propagating stale values.
         let ident = visited_bound.getattr("ident")?;
         if let Ok(opcode_int) = ident.extract::<i32>() {
             if let Some(opcode) = OpCode::from_i32(opcode_int) {
@@ -74,10 +83,12 @@ impl OptimizationPass for ConstantPropagationPass {
                     let args = visited_bound.getattr("args")?;
                     let args_tuple = args.cast::<PyTuple>()?;
                     if args_tuple.len() >= 2 {
-                        if let Ok(name) = args_tuple.get_item(0)?.extract::<String>() {
+                        if let Some(name) = extract_var_name(&args_tuple.get_item(0)?) {
                             let value = args_tuple.get_item(1)?;
                             if self.is_constant(py, &value)? {
                                 self.constants.write().unwrap().insert(name, value.unbind());
+                            } else {
+                                self.constants.write().unwrap().remove(&name);
                             }
                         }
                     }
@@ -106,8 +117,7 @@ impl OptimizationPass for ConstantPropagationPass {
 
 impl ConstantPropagationPass {
     /// Check if a value is a constant (not Ref, IR, Op, Identifier)
-    #[allow(dead_code)]
-    fn is_constant(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn is_constant(&self, _py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         let obj_type = obj.get_type();
         let type_name_obj = obj_type.name()?;
         let type_name = type_name_obj.to_str()?;
@@ -125,7 +135,7 @@ impl ConstantPropagationPass {
         if obj.is_instance_of::<pyo3::types::PyList>() || obj.is_instance_of::<PyTuple>() {
             for item in obj.try_iter()? {
                 let item = item?;
-                if !self.is_constant(py, &item)? {
+                if !self.is_constant(_py, &item)? {
                     return Ok(false);
                 }
             }

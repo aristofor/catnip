@@ -39,9 +39,7 @@ fn matches_rule(module_name: &str, rule: &str) -> bool {
         module_name.starts_with(prefix) && module_name.as_bytes().get(prefix.len()) == Some(&b'.')
     } else {
         // Exact: match module itself + all sub-modules
-        module_name == rule
-            || (module_name.starts_with(rule)
-                && module_name.as_bytes().get(rule.len()) == Some(&b'.'))
+        module_name == rule || (module_name.starts_with(rule) && module_name.as_bytes().get(rule.len()) == Some(&b'.'))
     }
 }
 
@@ -60,11 +58,7 @@ fn compute_hash(default_action: PolicyAction, allow: &[String], deny: &[String])
 
 impl ModulePolicy {
     /// Rust-side constructor for use from config parsing.
-    pub fn create(
-        default_action: &str,
-        mut allow: Vec<String>,
-        mut deny: Vec<String>,
-    ) -> Result<Self, String> {
+    pub fn create(default_action: &str, mut allow: Vec<String>, mut deny: Vec<String>) -> Result<Self, String> {
         let action = match default_action {
             "allow" => PolicyAction::Allow,
             "deny" => PolicyAction::Deny,
@@ -152,43 +146,30 @@ impl ModulePolicy {
     /// ```
     #[staticmethod]
     fn from_file(path: PathBuf, profile: &str) -> PyResult<Self> {
-        let content = fs::read_to_string(&path).map_err(|e| {
-            pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {}", path.display(), e))
-        })?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {}", path.display(), e)))?;
         let data: toml::Table = toml::from_str(&content).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid TOML in {}: {}",
+            pyo3::exceptions::PyValueError::new_err(format!("invalid TOML in {}: {}", path.display(), e))
+        })?;
+        let section = data.get(profile).and_then(|v| v.as_table()).ok_or_else(|| {
+            let available: Vec<&String> = data.keys().filter(|k| data[*k].is_table()).collect();
+            pyo3::exceptions::PyKeyError::new_err(format!(
+                "profile '{}' not found in {} (available: {:?})",
+                profile,
                 path.display(),
-                e
+                available,
             ))
         })?;
-        let section = data
-            .get(profile)
-            .and_then(|v| v.as_table())
-            .ok_or_else(|| {
-                let available: Vec<&String> = data.keys().filter(|k| data[*k].is_table()).collect();
-                pyo3::exceptions::PyKeyError::new_err(format!(
-                    "profile '{}' not found in {} (available: {:?})",
-                    profile,
-                    path.display(),
-                    available,
-                ))
-            })?;
-        parse_profile(section).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        parse_profile(section).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     /// List available profile names in a policy file.
     #[staticmethod]
     fn list_profiles(path: PathBuf) -> PyResult<Vec<String>> {
-        let content = fs::read_to_string(&path).map_err(|e| {
-            pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {}", path.display(), e))
-        })?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {}", path.display(), e)))?;
         let data: toml::Table = toml::from_str(&content).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid TOML in {}: {}",
-                path.display(),
-                e
-            ))
+            pyo3::exceptions::PyValueError::new_err(format!("invalid TOML in {}: {}", path.display(), e))
         })?;
         let mut profiles: Vec<String> = data
             .iter()
@@ -200,41 +181,43 @@ impl ModulePolicy {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "ModulePolicy(default={}, allow={:?}, deny={:?})",
-            match self.default_action {
-                PolicyAction::Allow => "allow",
-                PolicyAction::Deny => "deny",
-            },
-            self.allow_rules,
-            self.deny_rules,
-        )
+        format!("ModulePolicy({})", self.summary())
+    }
+
+    fn summary(&self) -> String {
+        ModulePolicy::_summary(self)
+    }
+}
+
+impl ModulePolicy {
+    pub fn _summary(&self) -> String {
+        let action = match self.default_action {
+            PolicyAction::Allow => "allow",
+            PolicyAction::Deny => "deny",
+        };
+        let mut parts = vec![format!("default={}", action)];
+        if !self.allow_rules.is_empty() {
+            parts.push(format!("allow={:?}", self.allow_rules));
+        }
+        if !self.deny_rules.is_empty() {
+            parts.push(format!("deny={:?}", self.deny_rules));
+        }
+        parts.join(", ")
     }
 }
 
 /// Parse a policy profile from a TOML table (reused by config and from_file).
 pub fn parse_profile(table: &toml::Table) -> Result<ModulePolicy, String> {
-    let default_action = table
-        .get("policy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("allow");
+    let default_action = table.get("policy").and_then(|v| v.as_str()).unwrap_or("allow");
     let allow: Vec<String> = table
         .get("allow")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let deny: Vec<String> = table
         .get("deny")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     ModulePolicy::create(default_action, allow, deny)
 }
@@ -329,16 +312,8 @@ mod tests {
 
     #[test]
     fn test_hash_stable() {
-        let h1 = compute_hash(
-            PolicyAction::Deny,
-            &["math".to_string()],
-            &["os".to_string()],
-        );
-        let h2 = compute_hash(
-            PolicyAction::Deny,
-            &["math".to_string()],
-            &["os".to_string()],
-        );
+        let h1 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
+        let h2 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 16);
     }
@@ -367,16 +342,21 @@ mod tests {
 
     #[test]
     fn test_hash_changes() {
-        let h1 = compute_hash(
-            PolicyAction::Deny,
-            &["math".to_string()],
-            &["os".to_string()],
-        );
-        let h2 = compute_hash(
-            PolicyAction::Allow,
-            &["math".to_string()],
-            &["os".to_string()],
-        );
+        let h1 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
+        let h2 = compute_hash(PolicyAction::Allow, &["math".to_string()], &["os".to_string()]);
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_parse_profile_ignores_extra_keys() {
+        let toml_str = r#"
+            policy = "deny"
+            allow = ["math", "io"]
+        "#;
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        let policy = parse_profile(&table).unwrap();
+        assert!(policy.check("math"));
+        assert!(policy.check("io"));
+        assert!(!policy.check("os"));
     }
 }

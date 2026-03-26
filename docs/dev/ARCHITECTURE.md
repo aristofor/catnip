@@ -24,7 +24,7 @@ Catnip utilise une architecture hybride, pour garder l'ergonomie côté Python e
 
 [PyO3](https://pyo3.rs/) sert de pont propre entre Python et Rust :
 
-- Interopérabilité zero-cost (pas de sérialisation)
+- Interopérabilité zéro-cost (pas de sérialisation)
 - Memory safety garantie par Rust
 - Intégration directe avec l'API Python
 - Utilisé par projet production (Ruff, Polars, tiktoken)
@@ -34,18 +34,28 @@ Catnip utilise une architecture hybride, pour garder l'ergonomie côté Python e
 - [PyO3 User Guide](https://pyo3.rs/)
 - [Extending Python with Rust](https://www.youtube.com/watch?v=jmP_i3C_O4Y) (PyCon 2023)
 
-## Pipeline de Compilation
+## Pipeline d'Execution
 
-Catnip transforme le code source en résultat exécutable via un pipeline en 4 étapes :
+En mode VM (défaut), `Catnip` délègue l'exécution à `Pipeline`, un pipeline Rust complet :
 
 ```mermaid
 flowchart LR
-    SRC["Source"] --> P["Parsing"]
-    P -- "Parse tree (CST)" --> T["Transformation"]
-    T -- "IR" --> S["Semantic"]
-    S -- "Op" --> E["Execution"]
-    E --> R["Result"]
+    SRC["Source"] --> SP["Pipeline (Rust)"]
+    SP -- "IR" --> SA["SemanticAnalyzer"]
+    SA -- "IR optimisé" --> UC["UnifiedCompiler"]
+    UC -- "Bytecode" --> VM["VM"]
+    VM --> R["Result"]
 ```
+
+Le pipeline utilise un pattern **prepare/execute** : `parse()` appelle `prepare(source)` qui fait parse + semantic et
+stocke l'IR optimisé. `execute()` appelle `execute_prepared()` qui compile et exécute depuis l'IR stocké (pas de
+re-parse). Un seul chemin de parsing.
+
+`parse()` expose les PyIRNode via `get_prepared_ir_nodes()` (wrappers lecture seule). Les PyIRNode servent à `-p 1/2` et
+au MCP `parse_catnip`.
+
+`PyIRNode` (`catnip_rs/src/ir/pyclass.rs`) wrappe `IR` pour inspection Python : getters en lecture seule (`opcode`,
+`args`, `kwargs`, `value`, `name`...) et serialisation JSON native (`to_json()`).
 
 ### 1. Parsing : Tree-sitter
 
@@ -76,7 +86,8 @@ Le transformer convertit l'arbre de syntaxe en IR (Intermediate Representation) 
 
 - Sortie brute du parser, pas encore optimisée
 - Utilise l'enum `IROpCode`
-- Type `IRPure` (Rust) sans dépendance PyO3 pour pipeline standalone
+- Type `IR` (Rust) sans dépendance PyO3 pour pipeline standalone
+- `PyIRNode` wrappe `IR` pour inspection Python (getters, `to_json()`)
 
 72+ transformateurs en Rust pur, wrapper PyO3 pour le bridge Python. Couvrent tout le langage :
 
@@ -96,7 +107,7 @@ L'analyse sémantique transforme l'IR en Op exécutable :
 - Résolution des identifiants
 - Détection des tail calls (TCO)
 - Application des pragmas
-- Optimisations (6 passes)
+- Optimisations (10 passes)
 
 **Optimisations** (optionnel, contrôlé par niveau 0-3) :
 
@@ -122,18 +133,23 @@ flowchart TD
     IR --> CFG["1. Construction CFG<br/>BasicBlocks + edges"]
     CFG --> DOM["2. Analyse dominance<br/>Dominator tree, boucles"]
     DOM --> SSA["3. Construction SSA<br/>SSA values, phi-nodes"]
-    SSA --> PASSES["4. Passes SSA<br/>CSE, LICM, GVN, DSE"]
+    SSA --> PASSES["4. Passes SSA<br/>CSE, LICM, GVN, IV detect, DSE"]
     PASSES --> DESTR["5. Destruction SSA<br/>SetLocals explicites"]
-    DESTR --> OPT["6. Optimisations CFG<br/>Dead blocks, merging"]
-    OPT --> RECON["7. Reconstruction IR<br/>Op nodes optimisés"]
+    DESTR --> IVSR["6. IV Strength Reduction<br/>Induction variables"]
+    IVSR --> OPT["7. Optimisations CFG<br/>Dead blocks, merging"]
+    OPT --> RECON["8. Reconstruction IR<br/>Op nodes optimisés"]
 ```
 
-**Passes SSA** (4 passes inter-blocs) :
+**Passes SSA** (5 passes inter-blocs) :
 
 1. **CSE inter-blocs** - Élimine expressions redondantes entre blocs dominants
 1. **LICM** - Hoist les calculs invariants hors des boucles
 1. **GVN** - Global Value Numbering, détecte équivalences entre expressions
+1. **IV detection** - Détecte les variables d'induction dans les boucles (utilise les infos SSA)
 1. **DSE globale** - Élimine les SetLocals dont le résultat n'est jamais lu
+
+**Post-SSA** : après destruction SSA, **IV strength reduction** transforme les multiplications d'induction en additions
+incrémentales.
 
 **Construction SSA** : utilise l'algorithme de
 [Braun et al. (2013)](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf), en un seul passage RPO (reverse
@@ -145,22 +161,20 @@ phi-nodes aux jonctions sont convertis en SetLocals explicites lors de la destru
 > L'SSA garantit que chaque variable n'est assignée qu'une seule fois. Ce qui est pratique pour l'optimiseur, mais
 > existentiellement perturbant pour les variables qui se pensaient réassignables.
 
-### 4. Execution : Deux modes
+### 4. Execution
 
-Catnip supporte deux modes d'exécution :
+`Pipeline.prepare()` stocke l'IR optimisé. `execute_prepared()` compile et exécute depuis l'IR stocké (pas de re-parse).
+Voir [VM](VM.md) pour details.
 
-**VM Bytecode** (défaut) :
+**Mode AST** (interne, non documenté utilisateur) : `parse()` convertit l'IR en Op nodes via `prepared_ir_to_op()`.
+`execute()` interprète les Op directement via Registry (`exec_stmt()`). Accessible via `-x ast` ou
+`CATNIP_EXECUTOR=ast`. Sert d'oracle indépendant : un test qui passe en AST et échoue en VM isole un bug de compilation
+ou de dispatch VM. Code derrière le feature flag `ast-executor` en Rust.
 
-- Compile Op → bytecode → VM stack-based
-- NaN-boxing pour représentation compacte
-- JIT Cranelift pour hot loops/functions
-- Voir [VM](VM.md) pour détails
-
-**AST Interpretation** (fallback) :
-
-- Interprète Op directement via Registry
-- Dispatch O(1) en Rust
-- Utilisé pour debug et tests
+**Mode standalone** (`--executor standalone`) : `CatnipStandalone` (`catnip/compat.py`) utilise les memes classes PyO3
+que le mode DSL (`PragmaContext`, `CatnipRuntime`, `_ImportWrapper`, `Memoization`). Couvre 100% du langage Catnip. Les
+seules differences sont les couches d'adaptation de l'API d'embedding Python (`@pass_context`, `Catnip(context=ctx)`,
+broadcast purity tracking) qui ne concernent pas les scripts `.cat`.
 
 ## Concepts Clés
 
@@ -179,7 +193,7 @@ parsing, semantic et exécution.
 
 ### Scope : Variables O(1)
 
-La gestion des scopes utilise un **HashMap plat** en Rust, plutôt qu'une chaîne de scopes parents :
+La gestion des scopes utilise un **IndexMap plat** en Rust, plutôt qu'une chaîne de scopes parents :
 
 **Approche classique** (O(n) lookup) :
 
@@ -191,7 +205,7 @@ Recherche d'une variable = remonter la chaîne jusqu'à trouver
 
 **Approche Catnip** (O(1) lookup) :
 
-- Un seul HashMap contenant toutes les variables
+- Un seul IndexMap contenant toutes les variables (ordre d'insertion préservé)
 - Tracking par frame pour savoir quoi nettoyer au pop
 - Shadow stack pour gérer le masquage de variables
 
@@ -261,27 +275,28 @@ flowchart TD
 ```
 
 **Line table** : le `CodeObject` contient un vecteur parallèle aux instructions qui mappe chaque instruction vers son
-`start_byte`. La VM maintient `last_src_byte` (mis a jour a chaque instruction) et une pile d'appels avec nom de
+`start_byte`. La VM maintient `last_src_byte` (mis à jour à chaque instruction) et une pile d'appels avec nom de
 fonction et position source.
 
-**Capture lazy** : quand une erreur se produit, la VM utilise `last_src_byte` (toujours a jour, meme si le frame est
-depile pendant la propagation), snapshote le call stack, puis le bridge Python convertit `start_byte` en ligne/colonne
-et enrichit l'exception avec un extrait.
+**Capture lazy** : quand une erreur se produit, la VM utilise `last_src_byte` (toujours à jour, même si le frame est
+dépilé pendant la propagation), snapshote le call stack, puis le bridge Python convertit `start_byte` en ligne/colonne
+et enrichit l'exception avec un extrait. Le `call_stack` complet (liste de `(func_name, line)`) est attaché à
+l'exception via `exc.call_stack` pour le traceback.
 
-**Suggestions "Did you mean?"** : trois niveaux de suggestions automatiques basees sur la distance de
+**Suggestions "Did you mean?"** : trois niveaux de suggestions automatiques basées sur la distance de
 Damerau-Levenshtein (`catnip_tools/src/suggest.rs`) :
 
-- **Variables** : `NameError` collecte locals + globals et suggere les noms proches
-- **Attributs struct** : `AttributeError` sur fields/methods suggere l'attribut le plus similaire
-- **Attributs Python** : `AttributeError` sur objets Python utilise `dir()` + Damerau-Levenshtein pour suggerer
+- **Variables** : `NameError` collecte locals + globals et suggère les noms proches
+- **Attributs struct** : `AttributeError` sur fields/methods suggère l'attribut le plus similaire
+- **Attributs Python** : `AttributeError` sur objets Python utilise `dir()` + Damerau-Levenshtein pour suggérer
   (`"hello".uper()` -> `upper`)
-- **Keywords syntaxe** : tokens inconnus sont compares aux keywords Catnip + aliases cross-langage (`class` -> `struct`,
+- **Keywords syntaxe** : tokens inconnus sont comparés aux keywords Catnip + aliases cross-langage (`class` -> `struct`,
   `switch` -> `match`)
 
-Les erreurs semantiques (unknown opcode, unknown pragma) incluent la position source via `start_byte` enrichi par
+Les erreurs sémantiques (unknown opcode, unknown pragma) incluent la position source via `start_byte` enrichi par
 SourceMap dans le pipeline.
 
-**Resultat** : messages d'erreur avec traceback complet et suggestions :
+**Résultat** : messages d'erreur avec traceback complet et suggestions :
 
 ```
 File '<input>', line 1, column 1: Name 'factoral' is not defined
@@ -290,7 +305,27 @@ File '<input>', line 1, column 1: Name 'factoral' is not defined
     | ^
 ```
 
-**Details** : voir [VM](VM.md) pour l'architecture.
+**Détails** : voir [VM](VM.md) pour l'architecture.
+
+### Module Loading : Résolution Statique
+
+Le loader (`catnip/loader.py`) résout les imports par nom avec une liste de recherche **fixée au démarrage** :
+caller_dir -> CWD -> CATNIP_PATH. Le code ne peut pas modifier cette liste à l'exécution.
+
+**Choix de design : pas de `sys.path`**
+
+Catnip n'a délibérément pas d'équivalent mutable de `sys.path`. Un search path mutable est un état global implicite qui
+crée des dépendances d'ordre entre modules (A modifie le path, B en dépend sans le savoir). Ça rend le résultat d'un
+`import("x")` non-déterministe par rapport à l'ordre d'exécution - exactement le genre de couplage qu'on veut éviter.
+
+La résolution statique garantit que `import("x")` produit toujours le même résultat pour un (fichier, environnement)
+donné, sans dépendre de l'historique d'exécution. CATNIP_PATH couvre le cas d'usage "ajouter des répertoires" sans
+mutation runtime.
+
+**Protocoles et packages** : le préfixe `py:`/`cat:`/`rs:` force un backend ; `lib.toml` dans un répertoire le déclare
+comme package avec entry point et exports filtrés.
+
+**Détails** : voir [MODULE_LOADING](../user/MODULE_LOADING.md).
 
 ## Debugger
 
@@ -300,8 +335,8 @@ Le debugger connecte la VM Rust à un frontend (console Rust ou MCP Python) via 
 
 ```mermaid
 sequenceDiagram
-    participant VM as VM (thread background)
-    participant CB as DebugCallback (Rust)
+    participant VM as VM<br/>(thread background)
+    participant CB as DebugCallback<br/>(Rust)
     participant FE as Frontend
 
     VM->>CB: hit breakpoint<br/>invoke_debug_callback
@@ -324,7 +359,7 @@ source. Le `DebugCallback` Rust construit un `PauseEvent`, l'envoie via `event_t
 `command_rx.recv_timeout(60s)` (auto-continue après 5 min).
 
 **Composants** : logique pure dans `catnip_tools`, channels et GIL dans `catnip_rs/debug`, wrapper Python dans
-`catnip/debug`, 6 tools MCP.
+`catnip/debug`, 6 tools MCP dans `catnip_mcp/` (Rust) et `catnip_mcp_py/` (Python).
 
 ### Step modes
 
@@ -357,13 +392,18 @@ Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ
 
 ## Où Trouver le Code
 
-| Dossier           | Contenu                                   |
-| ----------------- | ----------------------------------------- |
-| `catnip/`         | API Python, intégration                   |
-| `catnip_rs/`      | Runtime Rust (parser, semantic, VM, JIT)  |
-| `catnip_grammar/` | Grammaire Tree-sitter                     |
-| `catnip_tools/`   | Outils Rust (formatter, linter, debugger) |
-| `proof/`          | Preuves Coq                               |
+| Dossier           | Contenu                                                                                       |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `catnip/`         | API Python, intégration                                                                       |
+| `catnip_core/`    | Coeur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, freeze, constants)                   |
+| `catnip_vm/`      | VM pure Rust sans PyO3 (Value NaN-boxed, collections, structs/traits, PureHost, PureCompiler) |
+| `catnip_rs/`      | Bindings PyO3 + runtime (parser, semantic, VM, PyIRNode)                                      |
+| `catnip_libs/`    | Standard library (specs TOML + implémentations Rust par module)                               |
+| `catnip_grammar/` | Grammaire Tree-sitter                                                                         |
+| `catnip_tools/`   | Outils Rust (formatter, linter, debugger)                                                     |
+| `catnip_lsp/`     | Serveur LSP Rust (diagnostics, formatting, rename)                                            |
+| `catnip_mcp/`     | Serveur MCP pur Rust (rmcp, stdio, 10 tools, 4 resource templates)                            |
+| `proof/`          | Preuves Coq                                                                                   |
 
 ## Workflow de Développement
 
@@ -372,7 +412,7 @@ Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ
 uv pip install -e .
 
 # Tests rapides Rust (~5s)
-make rust-test-fast
+make test-rust-fast
 
 # Tests complets Python (~25s)
 make test

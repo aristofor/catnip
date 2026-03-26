@@ -8,9 +8,9 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use _rs::vm::Value;
-use num_bigint::BigInt;
 use pyo3::prelude::*;
 use pyo3::types::PyInt;
+use rug::Integer;
 
 fn measure<F>(iters: usize, mut f: F) -> Duration
 where
@@ -37,7 +37,7 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100_000);
 
-    println!("BigInt conversion micro-bench");
+    println!("BigInt (rug/GMP) conversion micro-bench");
     println!("iterations: {iters}\n");
 
     Python::attach(|py| {
@@ -48,8 +48,13 @@ fn main() {
         for bits in [128_u32, 512_u32, 2048_u32] {
             println!("== {}-bit integer ==", bits);
 
-            let n: BigInt = (BigInt::from(1_u8) << bits) + BigInt::from(123_456_789_u64);
-            let py_n = (&n).into_pyobject(py).expect("BigInt -> PyInt").unbind();
+            let n: Integer = (Integer::from(1_u8) << bits) + Integer::from(123_456_789_u64);
+            let py_n: Py<PyAny> = {
+                let v = Value::from_bigint(n.clone());
+                let obj = v.to_pyobject(py);
+                v.decref();
+                obj
+            };
             let py_int = py_n.bind(py).cast::<PyInt>().expect("cast PyInt");
 
             // Warm-up
@@ -73,14 +78,9 @@ fn main() {
 
             // from_pyobject: old path (string roundtrip parse)
             let t_from_string = measure(iters, || {
-                let s: String = py_n
-                    .bind(py)
-                    .str()
-                    .expect("str")
-                    .extract()
-                    .expect("extract str");
-                let parsed = s.parse::<BigInt>().expect("parse BigInt");
-                black_box(parsed);
+                let s: String = py_n.bind(py).str().expect("str").extract().expect("extract str");
+                let parsed: Integer = s.parse().expect("parse Integer");
+                black_box(&parsed);
             });
 
             // to_pyobject: current native path via Value::to_pyobject
@@ -105,10 +105,7 @@ fn main() {
 
             let from_speedup = t_from_string.as_secs_f64() / t_from_native.as_secs_f64();
             let to_speedup = t_to_string.as_secs_f64() / t_to_native.as_secs_f64();
-            println!(
-                "speedup: from x{:.2}, to x{:.2}\n",
-                from_speedup, to_speedup
-            );
+            println!("speedup: from x{:.2}, to x{:.2}\n", from_speedup, to_speedup);
 
             // Keep cast in scope/use to avoid optimizer deleting assumptions.
             black_box(py_int.as_ptr());

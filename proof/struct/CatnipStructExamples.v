@@ -1,5 +1,5 @@
 (* FILE: proof/struct/CatnipStructExamples.v *)
-(* CatnipStructExamples.v — Concrete examples for struct/trait system. *)
+(* CatnipStructExamples.v - Concrete examples for struct/trait system. *)
 
 From Coq Require Import List ZArith Bool String.
 Import ListNotations.
@@ -27,7 +27,7 @@ Definition mk_instance_method (n : string) (id : nat) : MethodEntry :=
 Definition mk_static_method (n : string) (id : nat) : MethodEntry :=
   mkMethod n MkStatic id.
 
-(* Example: struct Point { x, y } *)
+(* Example: struct Point { x; y; } *)
 Definition point_fields : FieldList :=
   [mk_field "x"; mk_field "y"].
 
@@ -74,7 +74,7 @@ Example ex_static_found :
   = ResStatic (mk_static_method "zero" 2).
 Proof. reflexivity. Qed.
 
-(* Example: single inheritance — Child(Base) *)
+(* Example: single inheritance - Child(Base) *)
 Definition base_type : StructType :=
   mkStructType 0 "Base" [mk_field "a"]
     [mk_instance_method "show" 10] [] [] ["Base"] [] [].
@@ -100,7 +100,7 @@ Example ex_child_mro :
   st_mro child_type = ["Child"; "Base"].
 Proof. reflexivity. Qed.
 
-(* Example: multiple inheritance — D(B, C) diamond *)
+(* Example: multiple inheritance - D(B, C) diamond *)
 Definition diamond_D : StructType :=
   mkStructType 4 "D" [mk_field "x"; mk_field "y"; mk_field "z"; mk_field "w"]
     [] [] ["B"; "C"] ["D"; "B"; "C"; "A"] [] [].
@@ -126,7 +126,7 @@ Example ex_cannot_construct_three :
   can_construct point_fields 3 = false.
 Proof. reflexivity. Qed.
 
-(* Example with defaults: struct Config { host, port = 8080 } *)
+(* Example with defaults: struct Config { host; port = 8080; } *)
 Definition config_fields : FieldList :=
   [mk_field "host"; mk_field_default "port"].
 

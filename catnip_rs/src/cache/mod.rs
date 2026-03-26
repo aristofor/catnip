@@ -12,6 +12,7 @@ mod backend;
 mod disk;
 mod memoization;
 
+use crate::constants::*;
 use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -151,7 +152,7 @@ impl CacheKey {
     /// Generate a unique cache key with xxhash.
     fn to_string(&self, py: Python<'_>) -> PyResult<String> {
         // Import version info from Python
-        let version_module = py.import("catnip._version")?;
+        let version_module = py.import(PY_MOD_VERSION)?;
         let lang_id: String = version_module.getattr("__lang_id__")?.extract()?;
         let version: String = version_module.getattr("__version__")?.extract()?;
 
@@ -179,11 +180,7 @@ impl CacheKey {
         let compute_signature = utils_module.getattr("compute_signature")?;
         let hash_value: String = compute_signature.call1((combined,))?.extract()?;
 
-        Ok(format!(
-            "catnip:{}:{}",
-            self.cache_type.__str__(),
-            hash_value
-        ))
+        Ok(format!("catnip:{}:{}", self.cache_type.__str__(), hash_value))
     }
 
     fn __repr__(&self) -> String {
@@ -214,13 +211,7 @@ pub struct CacheEntry {
 impl CacheEntry {
     #[new]
     #[pyo3(signature = (key, value, cache_type, metadata=None))]
-    fn new(
-        py: Python<'_>,
-        key: String,
-        value: Py<PyAny>,
-        cache_type: CacheType,
-        metadata: Option<Py<PyDict>>,
-    ) -> Self {
+    fn new(py: Python<'_>, key: String, value: Py<PyAny>, cache_type: CacheType, metadata: Option<Py<PyDict>>) -> Self {
         let metadata = metadata.unwrap_or_else(|| PyDict::new(py).into());
         Self {
             key,
@@ -283,13 +274,7 @@ impl MemoryCache {
 
     /// Store an entry in the cache.
     #[pyo3(signature = (key, value, metadata=None))]
-    fn set(
-        &mut self,
-        py: Python<'_>,
-        key: &CacheKey,
-        value: Py<PyAny>,
-        metadata: Option<Py<PyDict>>,
-    ) -> PyResult<()> {
+    fn set(&mut self, py: Python<'_>, key: &CacheKey, value: Py<PyAny>, metadata: Option<Py<PyDict>>) -> PyResult<()> {
         let key_str = key.to_string(py)?;
 
         // If max_size is defined, check limit

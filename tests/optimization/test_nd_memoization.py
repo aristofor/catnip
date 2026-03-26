@@ -28,7 +28,7 @@ class TestNDMemoization:
         Enable memoization via pragma.
         """
         code = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
 
         ~~(10, (n, recur) => {
             if n <= 1 { 1 }
@@ -44,7 +44,7 @@ class TestNDMemoization:
         Disable memoization via pragma.
         """
         code = """
-        pragma("nd_memoize", "off")
+        pragma("nd_memoize", False)
 
         ~~(10, (n, recur) => {
             if n <= 1 { 1 }
@@ -63,7 +63,7 @@ class TestNDMemoization:
         With memoization, fib(20) needs 20 calls (one per unique value).
         """
         code = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
 
         ~~(20, (n, recur) => {
             if n <= 1 { n }
@@ -81,7 +81,7 @@ class TestNDMemoization:
         Compare fib(20) with and without memoization.
         """
         code_with_memoize = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
         ~~(20, (n, recur) => {
             if n <= 1 { n }
             else { recur(n - 1) + recur(n - 2) }
@@ -89,7 +89,7 @@ class TestNDMemoization:
         """
 
         code_without_memoize = """
-        pragma("nd_memoize", "off")
+        pragma("nd_memoize", False)
         ~~(20, (n, recur) => {
             if n <= 1 { n }
             else { recur(n - 1) + recur(n - 2) }
@@ -120,7 +120,7 @@ class TestNDMemoization:
         Compute factorials on multiple values, some redundant.
         """
         code = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
 
         list(5, 3, 5, 4, 3).[~~ (n, recur) => {
             if n <= 1 { 1 }
@@ -142,7 +142,7 @@ class TestNDMemoization:
 
         for n in test_values:
             code_with = f"""
-            pragma("nd_memoize", "on")
+            pragma("nd_memoize", True)
             ~~({n}, (n, recur) => {{
                 if n <= 1 {{ 1 }}
                 else {{ n * recur(n - 1) }}
@@ -150,7 +150,7 @@ class TestNDMemoization:
             """
 
             code_without = f"""
-            pragma("nd_memoize", "off")
+            pragma("nd_memoize", False)
             ~~({n}, (n, recur) => {{
                 if n <= 1 {{ 1 }}
                 else {{ n * recur(n - 1) }}
@@ -169,7 +169,7 @@ class TestNDMemoizationEdgeCases:
     def test_memoization_with_zero(self):
         """Memoization with n=0."""
         code = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
         ~~(0, (n, recur) => { n })
         """
         result = exec_catnip(code)
@@ -178,7 +178,7 @@ class TestNDMemoizationEdgeCases:
     def test_memoization_with_one(self):
         """Memoization with n=1."""
         code = """
-        pragma("nd_memoize", "on")
+        pragma("nd_memoize", True)
         ~~(1, (n, recur) => { n })
         """
         result = exec_catnip(code)
@@ -191,9 +191,9 @@ class TestNDMemoizationEdgeCases:
         Memoization should work even in parallel mode.
         """
         code = """
-        pragma("nd_mode", "process")
-        pragma("nd_workers", "4")
-        pragma("nd_memoize", "on")
+        pragma("nd_mode", ND.process)
+        pragma("nd_workers", 4)
+        pragma("nd_memoize", True)
 
         list(5, 3, 5, 4).[~~ (n, recur) => {
             if n <= 1 { 1 }

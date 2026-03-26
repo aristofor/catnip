@@ -1,5 +1,5 @@
 (* FILE: proof/analysis/CatnipDominanceProof.v *)
-(* CatnipDominanceProof.v — CFG dominance analysis correctness
+(* CatnipDominanceProof.v - CFG dominance analysis correctness
  *
  * Source of truth:
  *   catnip_rs/src/cfg/analysis.rs   (compute_dominators, idom, frontiers)

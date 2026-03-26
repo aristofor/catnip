@@ -220,8 +220,8 @@ class TestPatternMatchInheritance:
     def test_child_matched_by_own_pattern(self, cat):
         """Child struct matched by its own type pattern."""
         code = """
-        struct Shape { sides }
-        struct Square extends(Shape) { size }
+        struct Shape { sides; }
+        struct Square extends(Shape) { size; }
         s = Square(4, 10)
         match s {
             Square{sides, size} => { sides * size }
@@ -234,9 +234,9 @@ class TestPatternMatchInheritance:
     def test_match_multiple_struct_types(self, cat):
         """Dispatch on struct type in match arms."""
         code = """
-        struct Animal { name }
-        struct Dog extends(Animal) { breed }
-        struct Cat extends(Animal) { color }
+        struct Animal { name; }
+        struct Dog extends(Animal) { breed; }
+        struct Cat extends(Animal) { color; }
         classify = (a) => {
             match a {
                 Dog{name, breed} => { name + " the " + breed }
@@ -252,8 +252,8 @@ class TestPatternMatchInheritance:
     def test_struct_pattern_with_guard_on_inherited_field(self, cat):
         """Guard accesses field inherited from parent."""
         code = """
-        struct Shape { sides }
-        struct Polygon extends(Shape) { name }
+        struct Shape { sides; }
+        struct Polygon extends(Shape) { name; }
         match Polygon(3, "triangle") {
             Polygon{sides, name} if sides == 3 => { name }
             _ => { "other" }
@@ -275,7 +275,7 @@ class TestSuperEdgeCases:
         """Super.init called through inheritance chain."""
         code = """
         struct A {
-            trace = ""
+            trace = "";
             init(self) => { self.trace = self.trace + "A" }
         }
         struct B extends(A) {
@@ -414,7 +414,7 @@ class TestNoneEdgeCases:
 
     def test_none_as_struct_field(self, cat):
         code = """
-        struct Config { value = None }
+        struct Config { value = None; }
         c = Config()
         c.value == None
         """
@@ -486,7 +486,7 @@ class TestMatchEdgeCases:
     def test_match_struct_guard_on_captured_field(self, cat):
         """Guard references captured struct fields."""
         code = """
-        struct Point { x, y }
+        struct Point { x; y; }
         match Point(3, 4) {
             Point{x, y} if x * x + y * y == 25 => { "on circle r=5" }
             _ => { "elsewhere" }
@@ -531,7 +531,7 @@ class TestStructEdgeCases2:
     def test_self_referential_struct(self, cat):
         """Struct field pointing to another instance of same type."""
         code = """
-        struct Node { value, next = None }
+        struct Node { value; next = None; }
         a = Node(1)
         b = Node(2, a)
         b.next.value
@@ -542,8 +542,8 @@ class TestStructEdgeCases2:
     def test_struct_equality_nested(self, cat):
         """Deep structural equality with nested structs."""
         code = """
-        struct Point { x, y }
-        struct Line { start, end }
+        struct Point { x; y; }
+        struct Line { start; end; }
         l1 = Line(Point(0, 0), Point(1, 1))
         l2 = Line(Point(0, 0), Point(1, 1))
         l3 = Line(Point(0, 0), Point(2, 2))
@@ -556,7 +556,7 @@ class TestStructEdgeCases2:
         """Method returning self enables chaining."""
         code = """
         struct Builder {
-            items
+            items;
             add(self, item) => {
                 self.items = self.items + list(item)
                 self
@@ -570,7 +570,7 @@ class TestStructEdgeCases2:
     def test_operator_overload_in_child(self, cat):
         """Child struct defines operator, parent doesn't."""
         code = """
-        struct Base { x }
+        struct Base { x; }
         struct Child extends(Base) {
             op +(self, rhs) => { Child(self.x + rhs.x) }
         }
@@ -612,7 +612,7 @@ class TestTCOInteractions:
         """Recursive struct method with enough depth to blow stack without TCO."""
         code = """
         struct Counter {
-            n
+            n;
             count_down(self) => {
                 if self.n <= 0 { 0 }
                 else { Counter(self.n - 1).count_down() }
@@ -653,7 +653,7 @@ class TestBroadcastEdgeCases:
         """Broadcast * on structs that overload *."""
         code = """
         struct Num {
-            val
+            val;
             op *(self, rhs) => { Num(self.val * rhs) }
         }
         result = list(Num(1), Num(2), Num(3)).[* 10]
@@ -719,7 +719,7 @@ class TestTraitInteractions:
             height(self) => { self.h }
             area(self) => { self.width() * self.height() }
         }
-        struct Rect implements(Measurable) { w, h }
+        struct Rect implements(Measurable) { w; h; }
         Rect(3, 4).area()
         """
         cat.parse(code)
@@ -734,7 +734,7 @@ class TestTraitInteractions:
             display(self) => { "[" + self.format() + "]" }
         }
         struct Item implements(Formattable) {
-            name
+            name;
             format(self) => { self.name }
         }
         Item("test").display()
@@ -749,7 +749,7 @@ class TestTraitInteractions:
             is_valid(self) => { self.x > 0 }
         }
         struct PositiveNumber implements(Validatable) {
-            x
+            x;
             init(self) => {
                 if not self.is_valid() {
                     self.x = 0
@@ -774,7 +774,7 @@ class TestOperatorOverloadInteractions:
         """Custom == used in match guard."""
         code = """
         struct Version {
-            major, minor
+            major; minor;
             op ==(self, rhs) => { self.major == rhs.major and self.minor == rhs.minor }
         }
         v = Version(1, 0)
@@ -791,7 +791,7 @@ class TestOperatorOverloadInteractions:
         """Operator overload handling both struct and scalar rhs."""
         code = """
         struct Vec2 {
-            x, y
+            x; y;
             op +(self, rhs) => {
                 match rhs {
                     Vec2{x, y} => { Vec2(self.x + x, self.y + y) }
@@ -818,7 +818,7 @@ class TestFStringInteractions:
 
     def test_fstring_struct_field(self, cat):
         code = """
-        struct Point { x, y }
+        struct Point { x; y; }
         p = Point(3, 4)
         f"({p.x}, {p.y})"
         """
@@ -871,7 +871,7 @@ class TestVariadicMethods:
     def test_variadic_method(self, cat):
         code = """
         struct Logger {
-            prefix
+            prefix;
             log(self, *args) => {
                 result = self.prefix
                 for arg in args {
@@ -961,8 +961,8 @@ class TestProductionPatterns:
     def test_accumulate_with_match_and_struct(self, cat):
         """Process a list of mixed types using match."""
         code = """
-        struct Ok { value }
-        struct Err { msg }
+        struct Ok { value; }
+        struct Err { msg; }
         results = list(Ok(1), Err("fail"), Ok(3), Ok(4), Err("oops"))
         total = 0
         errors = 0
@@ -980,7 +980,7 @@ class TestProductionPatterns:
     def test_recursive_data_structure_processing(self, cat):
         """Process a linked list recursively."""
         code = """
-        struct Node { value, next = None }
+        struct Node { value; next = None; }
         sum_list = (node) => {
             if node == None { 0 }
             else { node.value + sum_list(node.next) }
@@ -994,8 +994,8 @@ class TestProductionPatterns:
     def test_struct_factory_pattern(self, cat):
         """Function that creates different struct types."""
         code = """
-        struct Circle { radius }
-        struct Square { side }
+        struct Circle { radius; }
+        struct Square { side; }
         make_shape = (kind, size) => {
             match kind {
                 "circle" => { Circle(size) }
@@ -1013,7 +1013,7 @@ class TestProductionPatterns:
         """Pass a method reference around."""
         code = """
         struct Transformer {
-            factor
+            factor;
             transform(self, x) => { x * self.factor }
         }
         t = Transformer(3)
@@ -1128,9 +1128,9 @@ class TestFilthyEdgeCases:
         cat.parse(code)
         with pytest.raises((CatnipTypeError, CatnipRuntimeError)):
             cat.execute()
-        assert cat.context.globals["a"] == 111
-        assert cat.context.globals["b"] == 222
-        assert cat.context.globals["c"] == 333
+        assert cat.context.globals['a'] == 111
+        assert cat.context.globals['b'] == 222
+        assert cat.context.globals['c'] == 333
 
     def test_failed_guard_does_not_leak_capture_to_outer_scope(self, cat):
         """Captured vars in a failed guard arm must not mutate outer binding."""
@@ -1156,4 +1156,4 @@ class TestFilthyEdgeCases:
         cat.parse(code)
         with pytest.raises((CatnipTypeError, CatnipRuntimeError)):
             cat.execute()
-        assert cat.context.globals["total"] == 3
+        assert cat.context.globals['total'] == 3

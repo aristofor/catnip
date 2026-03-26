@@ -1,118 +1,178 @@
+#!/usr/bin/env catnip
 # Pattern matching avec les expressions régulières (re)
 # Le module re permet de rechercher et extraire des motifs dans du texte
-#
-# Exécuter: catnip -m re regex_patterns.cat
 
-re = import("re")
+re = import('re')
 
-# Données de test (logs simplifiés)
+# Modélisation des patterns et des logs
 
-log1 = "2024-03-15 10:23:45 INFO User alice from 192.168.1.100"
-log2 = "2024-03-15 10:24:12 ERROR Connection timeout"
-log3 = "2024-03-15 10:25:01 WARN Memory at 85%"
-log4 = "2024-03-15 10:26:33 INFO User bob from 10.0.0.42"
-log5 = "2024-03-15 10:27:55 ERROR Database deadlock"
-log_lines = list(log1, log2, log3, log4, log5)
+struct Pattern {
+    name; regex;
+
+    apply(self, text) => { re.findall(self.regex, text) }
+
+    display(self) => { f"Pattern({self.name})" }
+}
+
+struct LogEntry {
+    date; time; level; message; source;
+
+    display(self) => { f"[{self.level}] {self.date} {self.time} - {self.message}" }
+}
+
+# Patterns réutilisables
+
+log_pattern = Pattern("log", "(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}) (\\w+) (.+)")
+ip_pattern = Pattern("ip", "(?P<user>\\w+) from (?P<ip>[\\d.]+)")
+email_pattern = Pattern("email", "[\\w.-]+@[\\w.-]+\\.\\w{2,}")
+kv_pattern = Pattern("kv", "(\\w+)=(\\w+)")
+
+# Données de test
+
+log_lines = list(
+    "2024-03-15 10:23:45 INFO User alice from 192.168.1.100",
+    "2024-03-15 10:24:12 ERROR Connection timeout",
+    "2024-03-15 10:25:01 WARN Memory at 85%",
+    "2024-03-15 10:26:33 INFO User bob from 10.0.0.42",
+    "2024-03-15 10:27:55 ERROR Database deadlock",
+)
 
 emails = list("alice@example.com", "bob@company.co.uk", "invalid", "test@sub.org")
 
+# Parsing structuré des logs
+
+parse_log = (line) => {
+    m = re.search(log_pattern.regex, line)
+    if m {
+        # Source = tout après le level, on extrait l'IP si présente
+        ip_match = re.search("from ([\\d.]+)", m.group(4))
+        source = if ip_match { ip_match.group(1) } else { None }
+        LogEntry(m.group(1), m.group(2), m.group(3), m.group(4), source)
+    } else {
+        None
+    }
+}
+
+print("⇒ Parsing structuré des logs")
+entries = log_lines.[(line) => { parse_log(line) }]
+for e in entries {
+    if e != None {
+        print(f"  {e}")
+    }
+}
+
+# Classification par niveau avec match
+
+print()
+print("⇒ Classification par niveau (match)")
+classify = (entry) => {
+    match entry.level {
+        'ERROR' => { f"  [CRITICAL] {entry.message}" }
+        'WARN'  => { f"  [ALERTE]   {entry.message}" }
+        'INFO'  => { f"  [OK]       {entry.message}" }
+        _       => { f"  [?]        {entry.message}" }
+    }
+}
+
+for e in entries {
+    if e != None {
+        print(classify(e))
+    }
+}
+
 # Recherche simple
 
+print()
 print("⇒ Recherche simple (search)")
 for line in log_lines {
     m = re.search("ERROR", line)
     if m {
-        print("  Erreur trouvée:", line)
+        print(f"  Erreur trouvée: {line}")
     }
 }
 
-# Extraction avec groupes
+# Extraction avec groupes nommés
 
-print("\n⇒ Extraction de dates et niveaux (groupes)")
-pattern = "(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}) (\\w+)"
+print()
+print("⇒ Groupes nommés (IPs)")
 for line in log_lines {
-    m = re.search(pattern, line)
+    m = re.search(ip_pattern.regex, line)
     if m {
-        print("  Date:", m.group(1), "| Level:", m.group(3))
+        print(f"  User: {m.group('user')} | IP: {m.group('ip')}")
     }
 }
 
-# Groupes nommés
+# Validation d'emails via broadcasting
 
-print("\n⇒ Groupes nommés")
-ip_pattern = "(?P<user>\\w+) from (?P<ip>[\\d.]+)"
-for line in log_lines {
-    m = re.search(ip_pattern, line)
-    if m {
-        print("  User:", m.group("user"), "| IP:", m.group("ip"))
-    }
-}
-
-# Validation d'emails
-
-print("\n⇒ Validation d'emails")
-email_pattern = "^[\\w.-]+@[\\w.-]+\\.\\w{2,}$"
-for email in emails {
-    if re.match(email_pattern, email) {
-        print("  [OK]", email)
+print()
+print("⇒ Validation d'emails")
+validate = (email) => {
+    if re.match("^[\\w.-]+@[\\w.-]+\\.\\w{2,}$", email) {
+        f"  [OK] {email}"
     } else {
-        print("  [KO]", email)
+        f"  [KO] {email}"
     }
 }
+emails.[(e) => { print(validate(e)) }]
 
-# findall: toutes les correspondances
+# findall via Pattern.apply
 
+print()
+print("⇒ Extraction de tous les emails (findall)")
 text = "Contacts: alice@a.com, bob@b.org, charlie@c.net"
-
-print("\n⇒ Extraction de tous les emails (findall)")
-found = re.findall("[\\w.-]+@[\\w.-]+\\.\\w+", text)
+found = email_pattern.apply(text)
 for email in found {
-    print("  -", email)
+    print(f"  - {email}")
 }
 
 # Substitution (sub)
 
-print("\n⇒ Anonymisation d'IPs (sub)")
-for line in log_lines {
-    anonymized = re.sub("\\d+\\.\\d+\\.\\d+\\.\\d+", "XXX.XXX.XXX.XXX", line)
-    if anonymized.find("XXX") >= 0 {
-        print("  ", anonymized)
+print()
+print("⇒ Anonymisation d'IPs (sub)")
+anonymize = (line) => { re.sub("\\d+\\.\\d+\\.\\d+\\.\\d+", "XXX.XXX.XXX.XXX", line) }
+anonymized = log_lines.[(line) => { anonymize(line) }]
+for line in anonymized {
+    if line.find("XXX") >= 0 {
+        print(f"  {line}")
     }
 }
 
 # Split avec pattern
 
+print()
+print("⇒ Split avec plusieurs séparateurs")
 data = "pomme;orange,banane;kiwi,mangue"
-
-print("\n⇒ Split avec plusieurs séparateurs")
 fruits = re.split("[;,]", data)
 for fruit in fruits {
-    print("  -", fruit)
+    print(f"  - {fruit}")
 }
 
-# Compilation de pattern
+# Pattern compilé
 
-print("\n⇒ Pattern compilé (performance)")
+print()
+print("⇒ Pattern compilé (performance)")
 error_re = re.compile("ERROR\\s+(.+)$")
 for line in log_lines {
     m = error_re.search(line)
     if m {
-        print("  Message:", m.group(1))
+        print(f"  Message: {m.group(1)}")
     }
 }
 
 # Flags: case insensitive
 
-print("\n⇒ Recherche insensible à la casse")
+print()
+print("⇒ Recherche insensible à la casse")
 text_mixed = "Python PYTHON python PyThOn"
 matches = re.findall("python", text_mixed, re.IGNORECASE)
-print("  Trouvés:", len(matches), "occurrences")
+print(f"  Trouvés: {len(matches)} occurrences")
 
-# Extraction de structure
+# Extraction clé=valeur via Pattern.apply
 
-print("\n⇒ Parsing de clé=valeur")
+print()
+print("⇒ Parsing de clé=valeur")
 config = "host=localhost port=5432 user=admin"
-pairs = re.findall("(\\w+)=(\\w+)", config)
+pairs = kv_pattern.apply(config)
 for pair in pairs {
-    print("  ", pair[0], "=>", pair[1])
+    print(f"  {pair[0]} => {pair[1]}")
 }

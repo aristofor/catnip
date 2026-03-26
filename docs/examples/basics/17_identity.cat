@@ -1,0 +1,35 @@
+#!/usr/bin/env catnip
+# Identity operators: is / is not
+
+# is
+
+None is None
+# → True
+
+True is True
+# → True
+
+x = None
+x is None
+# → True
+
+# is not
+
+42 is not None
+# → True
+
+None is not True
+# → True
+
+# usage in control flow
+
+find_value = (x) => {
+    if x is None {
+        "no value"
+    } else {
+        "has value"
+    }
+}
+
+find_value(None)  # → 'no value'
+find_value(42)    # → 'has value'

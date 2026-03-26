@@ -1,5 +1,5 @@
 // FILE: catnip_rs/src/ir/to_python.rs
-//! Conversion IRPure → Python objects
+//! Conversion IR → Python objects
 //!
 //! Allows using pure_transforms (Rust) while maintaining
 //! compatibility with the existing Python API.
@@ -8,66 +8,67 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use super::opcode::IROpCode;
-use super::pure::{BroadcastType, IRPure};
+use super::pure::{BroadcastType, IR};
+use crate::constants::*;
 
 /// Cache for Python module imports
 struct PythonCache<'py> {
     nodes_module: Bound<'py, PyAny>,
-    transformer_module: Bound<'py, PyAny>,
+    rs_module: Bound<'py, PyAny>,
     builtins: Bound<'py, PyAny>,
 }
 
 impl<'py> PythonCache<'py> {
     fn new(py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
-            nodes_module: py.import("catnip.nodes")?.as_any().clone(),
-            transformer_module: py.import("catnip.transformer")?.as_any().clone(),
+            nodes_module: py.import(PY_MOD_NODES)?.as_any().clone(),
+            rs_module: py.import("catnip._rs")?.as_any().clone(),
             builtins: py.import("builtins")?.as_any().clone(),
         })
     }
 }
 
-/// Convert IRPure → Python object compatible with the legacy IR
-pub fn ir_pure_to_python(py: Python, ir: IRPure) -> PyResult<Py<PyAny>> {
+/// Convert IR → Python object compatible with the legacy IR
+pub fn ir_pure_to_python(py: Python, ir: IR) -> PyResult<Py<PyAny>> {
     let cache = PythonCache::new(py)?;
     ir_pure_to_python_impl(py, ir, &cache)
 }
 
 /// Internal implementation with cache
-fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResult<Py<PyAny>> {
+fn ir_pure_to_python_impl(py: Python, ir: IR, cache: &PythonCache) -> PyResult<Py<PyAny>> {
     match ir {
         // Scalaires primitifs
-        IRPure::Int(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
-        IRPure::Float(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
-        IRPure::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
-        IRPure::Bytes(v) => Ok(PyBytes::new(py, &v).into_any().unbind()),
-        IRPure::Bool(b) => Ok(b.into_pyobject(py)?.as_any().clone().unbind()),
-        IRPure::None => Ok(py.None()),
-        IRPure::Decimal(s) => {
+        IR::Int(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
+        IR::Float(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
+        IR::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        IR::Bytes(v) => Ok(PyBytes::new(py, &v).into_any().unbind()),
+        IR::Bool(b) => Ok(b.into_pyobject(py)?.as_any().clone().unbind()),
+        IR::None => Ok(py.None()),
+        IR::Decimal(s) => {
             let decimal_mod = py.import("decimal")?;
             let decimal_cls = decimal_mod.getattr("Decimal")?;
             Ok(decimal_cls.call1((s,))?.unbind())
         }
-        IRPure::Imaginary(s) => {
-            let imag: f64 = s.parse().map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid imaginary: {}", e))
-            })?;
+        IR::Imaginary(s) => {
+            let imag: f64 = s
+                .parse()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid imaginary: {}", e)))?;
             let builtins = py.import("builtins")?;
             let complex_cls = builtins.getattr("complex")?;
             Ok(complex_cls.call1((0.0, imag))?.unbind())
         }
 
         // Identifier → retourner string directement (sera wrappé par le transformer Python)
-        IRPure::Identifier(name) => Ok(name.into_pyobject(py)?.into_any().unbind()),
+        IR::Identifier(name) => Ok(name.into_pyobject(py)?.into_any().unbind()),
 
         // Ref → créer un objet Ref Python
-        IRPure::Ref(name, start_byte, end_byte) => {
+        IR::Ref(name, start_byte, end_byte) => {
             let ref_class = cache.nodes_module.getattr("Ref")?;
             Ok(ref_class.call1((name, start_byte, end_byte))?.unbind())
         }
 
         // Program (top-level sequence) → PyList
-        IRPure::Program(items) => {
+        IR::Program(items) => {
             let py_items: Vec<_> = items
                 .into_iter()
                 .map(|i| ir_pure_to_python_impl(py, i, cache))
@@ -76,7 +77,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // List
-        IRPure::List(items) => {
+        IR::List(items) => {
             let py_items: Vec<_> = items
                 .into_iter()
                 .map(|i| ir_pure_to_python_impl(py, i, cache))
@@ -85,7 +86,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // Tuple
-        IRPure::Tuple(items) => {
+        IR::Tuple(items) => {
             let py_items: Vec<_> = items
                 .into_iter()
                 .map(|i| ir_pure_to_python_impl(py, i, cache))
@@ -94,7 +95,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // Dict
-        IRPure::Dict(pairs) => {
+        IR::Dict(pairs) => {
             let dict = PyDict::new(py);
             for (key, value) in pairs {
                 let py_key = ir_pure_to_python_impl(py, key, cache)?;
@@ -105,7 +106,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // Set
-        IRPure::Set(items) => {
+        IR::Set(items) => {
             let py_items: Vec<_> = items
                 .into_iter()
                 .map(|i| ir_pure_to_python_impl(py, i, cache))
@@ -115,7 +116,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // Op node → créer un objet IR Python
-        IRPure::Op {
+        IR::Op {
             opcode,
             args,
             kwargs,
@@ -123,8 +124,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
             start_byte,
             end_byte,
         } => {
-            // Use cached IR class (from transformer module)
-            let op_class = cache.transformer_module.getattr("IR")?;
+            let op_class = cache.nodes_module.getattr("Op")?;
 
             // Convert args
             let py_args: Vec<_> = args
@@ -142,8 +142,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
             let opcode_int = opcode as u8 as i32; // Convert to i32 for Python
             let py_args_tuple = PyTuple::new(py, &py_args)?;
 
-            let op_obj =
-                op_class.call1((opcode_int, py_args_tuple, py_kwargs, start_byte, end_byte))?;
+            let op_obj = op_class.call1((opcode_int, py_args_tuple, py_kwargs, start_byte, end_byte))?;
 
             // Set tail attribute
             op_obj.setattr("tail", tail)?;
@@ -151,54 +150,55 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
             Ok(op_obj.unbind())
         }
 
-        // Call → créer un objet Call
-        IRPure::Call {
+        // Call → créer un Op(CALL, [func, *args], kwargs)
+        // Flatten comme le fait l'analyseur sémantique (visit_call)
+        IR::Call {
             func,
             args,
             kwargs,
             start_byte,
             end_byte,
+            ..
         } => {
             let py_func = ir_pure_to_python_impl(py, *func, cache)?;
 
-            let py_args: Vec<_> = args
-                .into_iter()
-                .map(|a| ir_pure_to_python_impl(py, a, cache))
-                .collect::<PyResult<_>>()?;
-            let py_args_tuple = PyTuple::new(py, &py_args)?;
+            // Flatten: [func, arg1, arg2, ...] comme Op(CALL)
+            let mut all_args = vec![py_func];
+            for a in args {
+                all_args.push(ir_pure_to_python_impl(py, a, cache)?);
+            }
+            let py_args_tuple = PyTuple::new(py, &all_args)?;
 
             let py_kwargs = PyDict::new(py);
             for (k, v) in kwargs {
                 py_kwargs.set_item(k, ir_pure_to_python_impl(py, v, cache)?)?;
             }
 
-            // Create Call object with source positions
-            let call_class = cache.transformer_module.getattr("Call")?;
-            let call_obj = call_class.call1((py_func, py_args_tuple, py_kwargs))?;
-            call_obj.setattr("start_byte", start_byte as isize)?;
-            call_obj.setattr("end_byte", end_byte as isize)?;
+            let opcode_int = IROpCode::Call as u8 as i32;
+            let op_class = cache.rs_module.getattr("Op")?;
+            let op_obj = op_class.call1((opcode_int, py_args_tuple, py_kwargs, start_byte, end_byte))?;
 
-            Ok(call_obj.unbind())
+            Ok(op_obj.unbind())
         }
 
         // Pattern variants
-        IRPure::PatternLiteral(value) => {
+        IR::PatternLiteral(value) => {
             let pattern_class = cache.nodes_module.getattr("PatternLiteral")?;
             let py_value = ir_pure_to_python_impl(py, *value, cache)?;
             Ok(pattern_class.call1((py_value,))?.unbind())
         }
 
-        IRPure::PatternVar(name) => {
+        IR::PatternVar(name) => {
             let pattern_class = cache.nodes_module.getattr("PatternVar")?;
             Ok(pattern_class.call1((name,))?.unbind())
         }
 
-        IRPure::PatternWildcard => {
+        IR::PatternWildcard => {
             let pattern_class = cache.nodes_module.getattr("PatternWildcard")?;
             Ok(pattern_class.call0()?.unbind())
         }
 
-        IRPure::PatternOr(patterns) => {
+        IR::PatternOr(patterns) => {
             let pattern_class = cache.nodes_module.getattr("PatternOr")?;
             let py_patterns: Vec<_> = patterns
                 .into_iter()
@@ -208,7 +208,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
             Ok(pattern_class.call1((patterns_tuple,))?.unbind())
         }
 
-        IRPure::PatternTuple(patterns) => {
+        IR::PatternTuple(patterns) => {
             let pattern_class = cache.nodes_module.getattr("PatternTuple")?;
             let py_patterns: Vec<_> = patterns
                 .into_iter()
@@ -219,28 +219,26 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
         }
 
         // Slice → Op(SLICE, start, stop, step) so Ref nodes get resolved
-        IRPure::Slice { start, stop, step } => {
-            let op_class = cache.transformer_module.getattr("IR")?;
+        IR::Slice { start, stop, step } => {
+            let op_class = cache.nodes_module.getattr("Op")?;
             let py_start = ir_pure_to_python_impl(py, *start, cache)?;
             let py_stop = ir_pure_to_python_impl(py, *stop, cache)?;
             let py_step = ir_pure_to_python_impl(py, *step, cache)?;
             let opcode_int = IROpCode::Slice as u8 as i32;
             let py_args = PyTuple::new(py, &[py_start, py_stop, py_step])?;
             let kwargs = PyDict::new(py);
-            Ok(op_class
-                .call1((opcode_int, py_args, kwargs, 0usize, 0usize))?
-                .unbind())
+            Ok(op_class.call1((opcode_int, py_args, kwargs, 0usize, 0usize))?.unbind())
         }
 
         // Struct pattern
-        IRPure::PatternStruct { name, fields } => {
+        IR::PatternStruct { name, fields } => {
             let pattern_class = cache.nodes_module.getattr("PatternStruct")?;
             let fields_list = PyList::new(py, &fields)?;
             Ok(pattern_class.call1((name, fields_list))?.unbind())
         }
 
         // Broadcast
-        IRPure::Broadcast {
+        IR::Broadcast {
             target,
             operator,
             operand,
@@ -271,8 +269,7 @@ fn ir_pure_to_python_impl(py: Python, ir: IRPure, cache: &PythonCache) -> PyResu
             let is_filter = matches!(broadcast_type, BroadcastType::If);
 
             // Create Broadcast(target, operator, operand, is_filter)
-            let broadcast_obj =
-                broadcast_class.call1((py_target, py_operator, py_operand, is_filter))?;
+            let broadcast_obj = broadcast_class.call1((py_target, py_operator, py_operand, is_filter))?;
 
             Ok(broadcast_obj.unbind())
         }

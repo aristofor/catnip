@@ -1,31 +1,103 @@
 // FILE: catnip_rs/src/vm/value.rs
 //! NaN-boxed value representation for the Catnip VM.
 //!
-//! IEEE 754 quiet NaN with 48-bit payload:
-//! [Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:3][Payload:48]
-//!   63        62-52            51     50-48    47-0
+//! IEEE 754 quiet NaN with 47-bit payload:
+//! [Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:4][Payload:47]
+//!   63        62-52            51     50-47    46-0
 //!
-//! Tags:
-//!   0b000 = SmallInt (48-bit signed: -2^47 to 2^47-1)
-//!   0b001 = Bool (0=false, 1=true)
-//!   0b010 = Nil/None
-//!   0b011 = Symbol (interned string index)
-//!   0b100 = PyObject* (48-bit pointer)
+//! Tags (4 bits, 16 slots):
+//!
+//!   Immediates (no heap allocation):
+//!   0b0000 =  0  SmallInt   47-bit signed integer
+//!   0b0001 =  1  Bool       0=false, 1=true
+//!   0b0010 =  2  Nil        Python None
+//!   0b0011 =  3  Symbol     interned string index (u32)
+//!
+//!   Heap references (indirection via table or pointer):
+//!   0b0100 =  4  PyObject   ObjectTable handle (u32)
+//!   0b0101 =  5  Struct     StructRegistry index (u32)
+//!   0b0110 =  6  BigInt     Arc<GmpInt> pointer
+//!   0b0111 =  7  VMFunc     FunctionTable index (u32)
+//!
+//!   Reserved:
+//!   0b1000 =  8  (available)
+//!   0b1001 =  9  (available)
+//!   0b1010 = 10  (available)
+//!   0b1011 = 11  (available)
+//!   0b1100 = 12  (available)
+//!   0b1101 = 13  (available)
+//!   0b1110 = 14  (available)
+//!   0b1111 = 15  (available)
 //!
 //! Regular floats are stored directly. Detection via quiet NaN pattern.
 
-use super::structs::{CatnipStructProxy, StructRegistry};
-use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
+use super::frame::{CodeObject, NativeClosureScope, PyCodeObject, VMFunction};
+use super::structs::{CatnipStructProxy, StructRegistry, cascade_decref_fields};
+use catnip_core::nanbox::{
+    CANON_NAN, PAYLOAD_MASK, QNAN_BASE, SMALLINT_MAX, SMALLINT_MIN, SMALLINT_SIGN_BIT, SMALLINT_SIGN_EXT, TAG_BIGINT,
+    TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SHIFT, TAG_SMALLINT, TAG_SYMBOL, TAG_VMFUNC,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt};
+use rug::Integer;
 use std::cell::Cell;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------------
+// GmpInt -- Sync wrapper for rug::Integer
+// ---------------------------------------------------------------------------
+
+/// Wrapper around `rug::Integer` that implements `Sync`.
+///
+/// `rug::Integer` is `Send` but not `Sync` (GMP limitation). Since all access
+/// happens under the GIL (single-threaded), sharing via `Arc` is safe.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct GmpInt(pub Integer);
+
+// SAFETY: All access to GmpInt is serialized by the GIL. The underlying GMP
+// memory is never accessed concurrently from multiple threads.
+unsafe impl Sync for GmpInt {}
+
+impl std::ops::Deref for GmpInt {
+    type Target = Integer;
+    #[inline]
+    fn deref(&self) -> &Integer {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for GmpInt {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Integer {
+        &mut self.0
+    }
+}
+
+impl fmt::Debug for GmpInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for GmpInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 thread_local! {
     static STRUCT_REGISTRY: Cell<*const StructRegistry> = const { Cell::new(std::ptr::null()) };
 }
+
+/// Global ObjectTable shared across all threads.
+///
+/// Unlike StructRegistry (per-VM, thread-local), Python objects are global to
+/// the interpreter. Handles must remain valid when Values cross thread
+/// boundaries (e.g. ND recursion workers).  Under the GIL the Mutex is never
+/// contended, so the lock is a single uncontended CAS (essentially free).
+static OBJECT_TABLE: Mutex<ObjectTable> = Mutex::new(ObjectTable::new_const());
 
 /// Install a pointer to the active StructRegistry for the current thread.
 ///
@@ -57,32 +129,201 @@ pub fn restore_struct_registry(ptr: *const StructRegistry) {
     STRUCT_REGISTRY.with(|cell| cell.set(ptr));
 }
 
-/// Quiet NaN base pattern: exponent all 1s + quiet bit
-const QNAN_BASE: u64 = 0x7FF8_0000_0000_0000;
+/// Incref a struct instance via the thread-local registry.
+/// No-op if registry is not installed.
+pub fn struct_registry_incref(idx: u32) {
+    STRUCT_REGISTRY.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let registry = unsafe { &*ptr };
+            registry.incref(idx);
+        }
+    });
+}
 
-/// Mask for tag bits (3 bits at position 48-50)
-const TAG_MASK: u64 = 0x0007_0000_0000_0000;
+/// Decref a struct instance via the thread-local registry, cascade-freeing fields if needed.
+/// No-op if registry is not installed.
+pub fn struct_registry_release(idx: u32) {
+    STRUCT_REGISTRY.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            // Safe: original pointer comes from &mut self.struct_registry in execute()
+            let registry = unsafe { &mut *(ptr as *mut StructRegistry) };
+            if let Some(fields) = registry.decref(idx) {
+                cascade_decref_fields(registry, fields);
+            }
+        }
+    });
+}
 
-/// Mask for payload (48 bits)
-const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+// ---------------------------------------------------------------------------
+// ObjectTable -- indirection layer for TAG_PYOBJ handles
+// ---------------------------------------------------------------------------
 
-/// Sign bit for negative small ints (bit 47 extended to full i64)
-const SMALLINT_SIGN_BIT: u64 = 0x0000_8000_0000_0000;
-const SMALLINT_SIGN_EXT: u64 = 0xFFFF_0000_0000_0000;
+struct ObjSlot {
+    obj: Py<PyAny>,
+    refcount: u32,
+}
 
-/// Tag values
-const TAG_SMALLINT: u64 = 0x0000_0000_0000_0000; // 0b000
-const TAG_BOOL: u64 = 0x0001_0000_0000_0000; // 0b001
-const TAG_NIL: u64 = 0x0002_0000_0000_0000; // 0b010
-const TAG_SYMBOL: u64 = 0x0003_0000_0000_0000; // 0b011
-const TAG_PYOBJ: u64 = 0x0004_0000_0000_0000; // 0b100
-const TAG_STRUCT: u64 = 0x0005_0000_0000_0000; // 0b101
-const TAG_BIGINT: u64 = 0x0006_0000_0000_0000; // 0b110
-const TAG_INVALID: u64 = 0x0007_0000_0000_0000; // 0b111
+/// Table mapping u32 handles to `Py<PyAny>` objects.
+/// Replaces raw `*mut ffi::PyObject` pointers in NaN-boxed payloads with
+/// safe, opaque indices -- same pattern as StructRegistry for TAG_STRUCT.
+pub struct ObjectTable {
+    slots: Vec<Option<ObjSlot>>,
+    free_list: Vec<u32>,
+}
 
-/// Max/min values for small int (48-bit signed)
-const SMALLINT_MAX: i64 = (1_i64 << 47) - 1;
-const SMALLINT_MIN: i64 = -(1_i64 << 47);
+impl ObjectTable {
+    pub fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free_list: Vec::new(),
+        }
+    }
+
+    /// Const constructor for static initialization.
+    const fn new_const() -> Self {
+        Self {
+            slots: Vec::new(),
+            free_list: Vec::new(),
+        }
+    }
+
+    /// Insert a `Py<PyAny>` and return its handle.
+    pub fn insert(&mut self, obj: Py<PyAny>) -> u32 {
+        if let Some(idx) = self.free_list.pop() {
+            self.slots[idx as usize] = Some(ObjSlot { obj, refcount: 1 });
+            idx
+        } else {
+            let idx = self.slots.len() as u32;
+            self.slots.push(Some(ObjSlot { obj, refcount: 1 }));
+            idx
+        }
+    }
+
+    /// Get a reference to the stored `Py<PyAny>`.
+    #[inline]
+    pub fn get(&self, idx: u32) -> &Py<PyAny> {
+        &self.slots[idx as usize].as_ref().expect("ObjectTable: dead handle").obj
+    }
+
+    /// Increment the handle refcount (Value was duplicated).
+    #[inline]
+    pub fn clone_handle(&mut self, idx: u32) {
+        let slot = self.slots[idx as usize].as_mut().expect("ObjectTable: dead handle");
+        slot.refcount += 1;
+    }
+
+    /// Decrement the handle refcount; drop `Py<PyAny>` when it reaches 0.
+    #[inline]
+    pub fn release_handle(&mut self, idx: u32) {
+        let slot = self.slots[idx as usize].as_mut().expect("ObjectTable: dead handle");
+        slot.refcount -= 1;
+        if slot.refcount == 0 {
+            self.slots[idx as usize] = None;
+            self.free_list.push(idx);
+        }
+    }
+
+    /// Clone the `Py<PyAny>` (Python refcount bump) for handing to Python.
+    #[inline]
+    pub fn clone_ref(&self, py: Python<'_>, idx: u32) -> Py<PyAny> {
+        self.get(idx).clone_ref(py)
+    }
+}
+
+impl Default for ObjectTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Access the global ObjectTable mutably.
+///
+/// Under the GIL the Mutex is never contended; `lock()` is a single
+/// uncontended CAS (essentially free on Linux/futex).
+#[inline]
+fn with_object_table<R>(f: impl FnOnce(&mut ObjectTable) -> R) -> R {
+    f(&mut OBJECT_TABLE.lock().unwrap())
+}
+
+/// Read-only access to the global ObjectTable.
+#[inline]
+fn with_object_table_ref<R>(f: impl FnOnce(&ObjectTable) -> R) -> R {
+    f(&OBJECT_TABLE.lock().unwrap())
+}
+
+// ---------------------------------------------------------------------------
+// FunctionTable -- grow-only table for TAG_VMFUNC handles
+// ---------------------------------------------------------------------------
+
+/// A VM function slot: code + closure. Slots are never freed.
+pub struct FuncSlot {
+    pub code: Arc<CodeObject>,
+    pub closure: Option<NativeClosureScope>,
+    pub code_py: Py<PyCodeObject>,
+    pub context: Option<Py<PyAny>>,
+}
+
+/// Table mapping u32 indices to VM function data.
+/// Grow-only: functions are typically long-lived (defined once, called many
+/// times), so slots are never freed. No refcounting needed.
+pub struct FunctionTable {
+    pub slots: Vec<FuncSlot>,
+}
+
+impl FunctionTable {
+    pub fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
+
+    /// Insert a function and return its index.
+    pub fn insert(&mut self, slot: FuncSlot) -> u32 {
+        let idx = self.slots.len() as u32;
+        self.slots.push(slot);
+        idx
+    }
+
+    /// Get a function slot by index.
+    #[inline]
+    pub fn get(&self, idx: u32) -> Option<&FuncSlot> {
+        self.slots.get(idx as usize)
+    }
+}
+
+impl Default for FunctionTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+thread_local! {
+    static FUNC_TABLE: Cell<*const FunctionTable> = const { Cell::new(std::ptr::null()) };
+}
+
+/// Install a pointer to the active FunctionTable for the current thread.
+pub fn set_func_table(ptr: *const FunctionTable) {
+    FUNC_TABLE.with(|cell| cell.set(ptr));
+}
+
+/// Clear the thread-local FunctionTable pointer.
+pub fn clear_func_table() {
+    FUNC_TABLE.with(|cell| cell.set(std::ptr::null()));
+}
+
+/// Save the current FunctionTable pointer (for reentrant VM calls).
+pub fn save_func_table() -> *const FunctionTable {
+    FUNC_TABLE.with(|cell| cell.get())
+}
+
+/// Restore a previously saved FunctionTable pointer.
+pub fn restore_func_table(ptr: *const FunctionTable) {
+    FUNC_TABLE.with(|cell| cell.set(ptr));
+}
+
+// PyO3-specific tags (catnip_rs only)
+const TAG_PYOBJ: u64 = 4 << TAG_SHIFT;
+const TAG_STRUCT: u64 = 5 << TAG_SHIFT;
 
 /// NaN-boxed value. Fits in 8 bytes.
 #[derive(Clone, Copy)]
@@ -99,20 +340,22 @@ impl Value {
     /// Boolean false
     pub const FALSE: Value = Value(QNAN_BASE | TAG_BOOL);
 
-    /// Debug canary for uninitialized slots (tag 0b111).
-    /// In debug builds, accessing this value panics instead of silently returning NIL.
-    pub const INVALID: Value = Value(QNAN_BASE | TAG_INVALID);
+    /// Debug canary for uninitialized slots.
+    /// Uses TAG_VMFUNC with all payload bits set (impossible u32 index).
+    pub const INVALID: Value = Value(QNAN_BASE | TAG_VMFUNC | PAYLOAD_MASK);
 
     // --- Constructors ---
 
-    /// Create a float value. NaN floats become canonical NaN.
+    /// Create a float value. NaN floats use a signaling NaN sentinel
+    /// to avoid collision with the quiet NaN tagging scheme.
     #[inline]
     pub fn from_float(f: f64) -> Self {
         let bits = f.to_bits();
-        // Check if it's a NaN that would conflict with our tagging
+        // Any quiet NaN (bits 62-52 all 1s + quiet bit 51) would collide with
+        // our tagged value space. Redirect to CANON_NAN (a signaling NaN whose
+        // quiet bit is 0, so is_float() returns true).
         if (bits & 0x7FF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
-            // It's a quiet NaN - return canonical NaN to avoid confusion
-            Value(f64::NAN.to_bits())
+            Value(CANON_NAN)
         } else {
             Value(bits)
         }
@@ -129,6 +372,12 @@ impl Value {
         Value(QNAN_BASE | TAG_SMALLINT | payload)
     }
 
+    /// Safe creation from any i64. Uses SmallInt when in range, BigInt otherwise.
+    #[inline]
+    pub fn from_i64(i: i64) -> Self {
+        Self::try_from_int(i).unwrap_or_else(|| Self::from_bigint(Integer::from(i)))
+    }
+
     /// Try to create a small integer. Returns None if out of range.
     #[inline]
     pub fn try_from_int(i: i64) -> Option<Self> {
@@ -142,11 +391,7 @@ impl Value {
     /// Create a boolean value.
     #[inline]
     pub fn from_bool(b: bool) -> Self {
-        if b {
-            Self::TRUE
-        } else {
-            Self::FALSE
-        }
+        if b { Self::TRUE } else { Self::FALSE }
     }
 
     /// Create a symbol value (interned string index).
@@ -155,20 +400,27 @@ impl Value {
         Value(QNAN_BASE | TAG_SYMBOL | (idx as u64))
     }
 
-    /// Create a PyObject* value. The pointer must fit in 48 bits.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the PyObject is kept alive and the pointer
-    /// fits within a 48-bit address space.
+    /// Create a TAG_PYOBJ value from an ObjectTable handle.
     #[inline]
-    pub unsafe fn from_pyobj_ptr(ptr: *mut pyo3::ffi::PyObject) -> Self {
-        let addr = ptr as u64;
-        debug_assert!(
-            addr & !PAYLOAD_MASK == 0,
-            "pointer exceeds 48-bit address space"
-        );
-        Value(QNAN_BASE | TAG_PYOBJ | (addr & PAYLOAD_MASK))
+    pub fn from_obj_handle(handle: u32) -> Self {
+        Value(QNAN_BASE | TAG_PYOBJ | (handle as u64))
+    }
+
+    /// Extract the ObjectTable handle. Returns None if not a PyObject.
+    #[inline]
+    pub fn as_obj_handle(self) -> Option<u32> {
+        if self.is_pyobj() {
+            Some((self.0 & PAYLOAD_MASK) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Insert an owned `Py<PyAny>` into the ObjectTable and return a Value.
+    #[inline]
+    pub fn from_owned_pyobject(obj: Py<PyAny>) -> Self {
+        let handle = with_object_table(|table| table.insert(obj));
+        Self::from_obj_handle(handle)
     }
 
     /// Create a struct instance value from its index in the StructRegistry.
@@ -177,21 +429,27 @@ impl Value {
         Value(QNAN_BASE | TAG_STRUCT | (idx as u64))
     }
 
-    /// Create a BigInt value from an Arc<BigInt> pointer.
+    /// Create a VM function value from its index in the FunctionTable.
     #[inline]
-    pub fn from_bigint(n: BigInt) -> Self {
-        let arc = Arc::new(n);
+    pub fn from_vmfunc(idx: u32) -> Self {
+        Value(QNAN_BASE | TAG_VMFUNC | (idx as u64))
+    }
+
+    /// Create a BigInt value from an Arc<GmpInt> pointer.
+    #[inline]
+    pub fn from_bigint(n: Integer) -> Self {
+        let arc = Arc::new(GmpInt(n));
         let ptr = Arc::into_raw(arc) as u64;
         debug_assert!(
             ptr & !PAYLOAD_MASK == 0,
-            "BigInt Arc pointer exceeds 48-bit address space"
+            "BigInt Arc pointer exceeds 47-bit address space"
         );
         Value(QNAN_BASE | TAG_BIGINT | (ptr & PAYLOAD_MASK))
     }
 
     /// Create a BigInt or demote to SmallInt if it fits.
     #[inline]
-    pub fn from_bigint_or_demote(n: BigInt) -> Self {
+    pub fn from_bigint_or_demote(n: Integer) -> Self {
         if let Some(i) = n.to_i64() {
             if let Some(v) = Self::try_from_int(i) {
                 return v;
@@ -263,17 +521,23 @@ impl Value {
         (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_BIGINT)
     }
 
+    /// Check if this is a native VM function.
+    #[inline]
+    pub fn is_vmfunc(self) -> bool {
+        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_VMFUNC)
+    }
+
     /// Check if this is the INVALID canary (debug-only sentinel for uninitialized slots).
     #[inline]
     pub fn is_invalid(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_INVALID)
+        self.0 == Self::INVALID.0
     }
 
     /// True if this value uses a native VM tag that would lose fidelity
     /// through a Python round-trip (Value -> PyObject -> Value).
     #[inline]
     pub fn has_native_tag(self) -> bool {
-        self.is_struct_instance() || self.is_bigint()
+        self.is_struct_instance() || self.is_bigint() || self.is_vmfunc()
     }
 
     // --- Extractors ---
@@ -308,11 +572,7 @@ impl Value {
     /// Extract as boolean. Returns None if not a boolean.
     #[inline]
     pub fn as_bool(self) -> Option<bool> {
-        if self.is_bool() {
-            Some((self.0 & 1) != 0)
-        } else {
-            None
-        }
+        if self.is_bool() { Some((self.0 & 1) != 0) } else { None }
     }
 
     /// Extract as symbol index. Returns None if not a symbol.
@@ -325,16 +585,12 @@ impl Value {
         }
     }
 
-    /// Extract as PyObject pointer. Returns None if not a PyObject.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure the original PyObject is still alive before
-    /// dereferencing the returned pointer.
+    /// Retrieve the `Py<PyAny>` from the ObjectTable (clone_ref for Python).
     #[inline]
-    pub unsafe fn as_pyobj_ptr(self) -> Option<*mut pyo3::ffi::PyObject> {
+    pub fn as_pyobject(self, py: Python<'_>) -> Option<Py<PyAny>> {
         if self.is_pyobj() {
-            Some((self.0 & PAYLOAD_MASK) as *mut pyo3::ffi::PyObject)
+            let handle = (self.0 & PAYLOAD_MASK) as u32;
+            Some(with_object_table_ref(|table| table.clone_ref(py, handle)))
         } else {
             None
         }
@@ -350,33 +606,41 @@ impl Value {
         }
     }
 
-    /// Borrow the BigInt behind the Arc without cloning.
+    /// Extract VM function table index.
+    #[inline]
+    pub fn as_vmfunc_idx(self) -> u32 {
+        debug_assert!(self.is_vmfunc() && !self.is_invalid());
+        (self.0 & PAYLOAD_MASK) as u32
+    }
+
+    /// Borrow the Integer behind the Arc without cloning.
     ///
     /// # Safety
     ///
     /// Caller must ensure the Arc is still alive (not yet decremented to 0).
     #[inline]
-    pub unsafe fn as_bigint_ref(&self) -> Option<&BigInt> {
+    pub unsafe fn as_bigint_ref(&self) -> Option<&Integer> {
         if self.is_bigint() {
-            let ptr = (self.0 & PAYLOAD_MASK) as *const BigInt;
-            Some(&*ptr)
+            let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            Some(&(*ptr).0)
         } else {
             None
         }
     }
 
-    /// Increment refcount for reference-counted values (BigInt Arc, PyObject).
-    /// Must be called when duplicating a Value (e.g. DupTop).
+    /// Increment refcount for reference-counted values (BigInt Arc, PyObject handle, Struct instance).
+    /// Must be called when duplicating a Value (e.g. DupTop, StoreScope to globals).
     #[inline]
     pub fn clone_refcount(self) {
         if self.is_bigint() {
-            let ptr = (self.0 & PAYLOAD_MASK) as *const BigInt;
+            let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
             unsafe { Arc::increment_strong_count(ptr) };
         } else if self.is_pyobj() {
-            unsafe {
-                let ptr = self.as_pyobj_ptr().unwrap();
-                pyo3::ffi::Py_IncRef(ptr);
-            }
+            let handle = (self.0 & PAYLOAD_MASK) as u32;
+            with_object_table(|table| table.clone_handle(handle));
+        } else if self.is_struct_instance() {
+            let idx = self.as_struct_instance_idx().unwrap();
+            struct_registry_incref(idx);
         }
     }
 
@@ -385,7 +649,7 @@ impl Value {
     #[inline]
     pub fn clone_refcount_bigint(self) {
         if self.is_bigint() {
-            let ptr = (self.0 & PAYLOAD_MASK) as *const BigInt;
+            let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
             unsafe { Arc::increment_strong_count(ptr) };
         }
     }
@@ -408,7 +672,7 @@ impl Value {
             f != 0.0
         } else if self.is_bigint() {
             // SAFETY: value is alive (we just checked the tag)
-            unsafe { !self.as_bigint_ref().unwrap().is_zero() }
+            unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
         } else if self.is_struct_instance() {
             true
         } else {
@@ -432,14 +696,33 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             f != 0.0
         } else if self.is_bigint() {
-            unsafe { !self.as_bigint_ref().unwrap().is_zero() }
-        } else if self.is_struct_instance() {
+            unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
+        } else if self.is_struct_instance() || self.is_vmfunc() {
             true
         } else {
             // PyObject - delegate to Python's __bool__()
             let obj = self.to_pyobject(py);
             obj.bind(py).is_truthy().unwrap_or(true)
         }
+    }
+
+    /// Python `is` identity test.
+    ///
+    /// Immediate types (int, bool, nil, struct) compare by bits.
+    /// PyObjects compare by Python object identity (`a is b`).
+    #[inline]
+    pub fn is_identical(self, py: pyo3::Python<'_>, other: Value) -> bool {
+        // Fast path: identical bits = identical value
+        if self.0 == other.0 {
+            return true;
+        }
+        // PyObject identity: different handles may alias the same Python object
+        if self.is_pyobj() && other.is_pyobj() {
+            let a = self.to_pyobject(py);
+            let b = other.to_pyobject(py);
+            return a.bind(py).is(b.bind(py));
+        }
+        false
     }
 
     /// Raw bits for debugging.
@@ -450,6 +733,59 @@ impl Value {
 }
 
 // --- PyO3 conversions ---
+
+/// Convert a rug::Integer to a Python int via GMP digit export.
+fn integer_to_pyobject(py: Python<'_>, n: &Integer) -> Py<PyAny> {
+    if let Some(i) = n.to_i64() {
+        return i.into_pyobject(py).unwrap().unbind().into_any();
+    }
+    // Export absolute value as little-endian bytes
+    let is_neg = n.cmp0() == std::cmp::Ordering::Less;
+    let abs_n;
+    let src = if is_neg {
+        abs_n = Integer::from(-n);
+        &abs_n
+    } else {
+        n
+    };
+    let digits = src.to_digits::<u8>(rug::integer::Order::Lsf);
+    let bytes = pyo3::types::PyBytes::new(py, &digits);
+    let int_type = py.get_type::<PyInt>();
+    let py_int = int_type
+        .call_method("from_bytes", (bytes, "little"), None)
+        .expect("int.from_bytes failed");
+    if is_neg {
+        let neg = py_int.neg().expect("negation failed");
+        neg.unbind()
+    } else {
+        py_int.unbind()
+    }
+}
+
+/// Convert a Python int to a rug::Integer via bytes.
+fn pyobject_to_integer(obj: &Bound<'_, PyAny>) -> PyResult<Integer> {
+    // Fast path: fits in i64
+    if let Ok(val) = obj.extract::<i64>() {
+        return Ok(Integer::from(val));
+    }
+    // Slow path: big int via bytes (unsigned abs + separate sign)
+    let py = obj.py();
+    let bit_length: usize = obj.call_method0("bit_length")?.extract()?;
+    let byte_length = bit_length.div_ceil(8);
+    // Get absolute value bytes (unsigned, little-endian)
+    let abs_obj = obj.call_method0("__abs__")?;
+    let kwargs = pyo3::types::PyDict::new(py);
+    kwargs.set_item("signed", false)?;
+    let bytes_obj = abs_obj.call_method("to_bytes", (byte_length, "little"), Some(&kwargs))?;
+    let bytes: &[u8] = bytes_obj.extract()?;
+    let mut result = Integer::from_digits(bytes, rug::integer::Order::Lsf);
+    // Restore sign
+    let is_neg = obj.lt(0)?;
+    if is_neg {
+        result = -result;
+    }
+    Ok(result)
+}
 
 impl Value {
     /// Convert a Python object to a Value.
@@ -463,20 +799,19 @@ impl Value {
             return Ok(Value::from_bool(b.is_true()));
         }
 
-        if let Ok(i) = obj.cast::<PyInt>() {
+        if let Ok(_i) = obj.cast::<PyInt>() {
             // Try to extract as i64
-            if let Ok(val) = i.extract::<i64>() {
+            if let Ok(val) = obj.extract::<i64>() {
                 if let Some(v) = Value::try_from_int(val) {
                     return Ok(v);
                 }
                 // Fits i64 but not SmallInt -> BigInt
-                return Ok(Value::from_bigint(BigInt::from(val)));
+                return Ok(Value::from_bigint(Integer::from(val)));
             }
-            // Overflow i64 -> extract as BigInt through PyLong native conversion.
-            if let Ok(n) = i.extract::<BigInt>() {
+            // Overflow i64 -> extract via bytes
+            if let Ok(n) = pyobject_to_integer(obj) {
                 return Ok(Value::from_bigint_or_demote(n));
             }
-            // Fall through to PyObject as last resort
         }
 
         if let Ok(f) = obj.cast::<PyFloat>() {
@@ -484,41 +819,54 @@ impl Value {
             return Ok(Value::from_float(val));
         }
 
-        // Recognize CatnipStructProxy → restore native TAG_STRUCT for VM round-trip.
-        // This handles structs stored in Python collections (list, tuple) and extracted
-        // back during iteration: the proxy carries the original instance index.
-        // Only convert if the CURRENT struct registry owns this index (a nested VM
-        // call via Python would have a different registry).
+        // Recognize VMFunction -> restore native TAG_VMFUNC for VM round-trip.
+        if let Ok(vmfunc) = obj.cast::<VMFunction>() {
+            if let Some(idx) = vmfunc.borrow().func_table_idx {
+                let is_owned = FUNC_TABLE.with(|cell| {
+                    let ptr = cell.get();
+                    if ptr.is_null() {
+                        return false;
+                    }
+                    let table = unsafe { &*ptr };
+                    (idx as usize) < table.slots.len()
+                });
+                if is_owned {
+                    return Ok(Value::from_vmfunc(idx));
+                }
+            }
+        }
+
+        // Recognize CatnipStructProxy -> restore native TAG_STRUCT for VM round-trip.
         if let Ok(proxy) = obj.cast::<CatnipStructProxy>() {
             if let Some(idx) = proxy.borrow().native_instance_idx {
-                let is_owned = STRUCT_REGISTRY.with(|cell| {
+                let restored = STRUCT_REGISTRY.with(|cell| {
                     let ptr = cell.get();
                     if ptr.is_null() {
                         return false;
                     }
                     let registry = unsafe { &*ptr };
-                    registry.get_instance(idx).is_some()
+                    if registry.get_instance(idx).is_some() {
+                        registry.incref(idx);
+                        true
+                    } else {
+                        false
+                    }
                 });
-                if is_owned {
+                if restored {
                     return Ok(Value::from_struct_instance(idx));
                 }
             }
         }
 
-        // Store as PyObject pointer
-        // SAFETY: We increment refcount and the Value is tied to this execution
-        let ptr = obj.as_ptr();
-        unsafe {
-            pyo3::ffi::Py_IncRef(ptr);
-            Ok(Value::from_pyobj_ptr(ptr))
-        }
+        // Store as handle in ObjectTable
+        Ok(Value::from_owned_pyobject(obj.clone().unbind()))
     }
 
     /// Convert a Value back to a Python object.
     pub fn to_pyobject(self, py: Python<'_>) -> Py<PyAny> {
         debug_assert!(
             !self.is_invalid(),
-            "to_pyobject called on INVALID canary value — uninitialized slot or stack corruption"
+            "to_pyobject called on INVALID canary value - uninitialized slot or stack corruption"
         );
         if self.is_nil() {
             py.None()
@@ -529,37 +877,43 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             f.into_pyobject(py).unwrap().unbind().into_any()
         } else if self.is_bigint() {
-            // BigInt -> Python int via native PyLong conversion.
-            unsafe { self.as_bigint_ref().unwrap() }
-                .into_pyobject(py)
-                .unwrap()
-                .unbind()
-                .into_any()
+            let n = unsafe { self.as_bigint_ref().unwrap() };
+            integer_to_pyobject(py, n)
         } else if self.is_struct_instance() {
             let idx = self.as_struct_instance_idx().unwrap();
             STRUCT_REGISTRY.with(|cell| {
                 let ptr = cell.get();
-                assert!(
-                    !ptr.is_null(),
-                    "to_pyobject on struct: no StructRegistry installed"
-                );
-                // SAFETY: The VM installs a valid pointer before execution and
-                // clears it after. The registry is owned by the VM and lives
-                // for the entire execution. Single-threaded (GIL).
+                if ptr.is_null() {
+                    return py.None();
+                }
                 let registry = unsafe { &*ptr };
-                registry.instance_to_pyobject(py, idx).unwrap_or_else(|_| {
-                    panic!(
-                        "struct instance #{idx} not found in StructRegistry — \
-                         likely a TAG_STRUCT leaked into a child VM closure"
-                    )
-                })
+                registry.instance_to_pyobject(py, idx).unwrap_or_else(|_| py.None())
             })
         } else if self.is_pyobj() {
-            // SAFETY: We trust the pointer is valid
-            unsafe {
-                let ptr = self.as_pyobj_ptr().unwrap();
-                pyo3::Bound::from_borrowed_ptr(py, ptr).unbind()
-            }
+            let handle = (self.0 & PAYLOAD_MASK) as u32;
+            with_object_table_ref(|table| table.clone_ref(py, handle))
+        } else if self.is_vmfunc() {
+            let idx = (self.0 & PAYLOAD_MASK) as u32;
+            FUNC_TABLE.with(|cell| {
+                let ptr = cell.get();
+                if ptr.is_null() {
+                    return py.None();
+                }
+                let table = unsafe { &*ptr };
+                match table.get(idx) {
+                    Some(slot) => {
+                        let mut func = VMFunction::create_native(
+                            py,
+                            slot.code_py.clone_ref(py),
+                            slot.closure.clone(),
+                            slot.context.as_ref().map(|c| c.clone_ref(py)),
+                        );
+                        func.func_table_idx = Some(idx);
+                        Py::new(py, func).unwrap().into_any()
+                    }
+                    None => py.None(),
+                }
+            })
         } else {
             // Symbol - for now return as int
             let idx = self.as_symbol().unwrap_or(0);
@@ -571,12 +925,10 @@ impl Value {
     /// Call when value is no longer needed.
     pub fn decref(self) {
         if self.is_pyobj() {
-            unsafe {
-                let ptr = self.as_pyobj_ptr().unwrap();
-                pyo3::ffi::Py_DecRef(ptr);
-            }
+            let handle = (self.0 & PAYLOAD_MASK) as u32;
+            with_object_table(|table| table.release_handle(handle));
         } else if self.is_bigint() {
-            let ptr = (self.0 & PAYLOAD_MASK) as *const BigInt;
+            let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
             unsafe { Arc::decrement_strong_count(ptr) };
         }
     }
@@ -587,7 +939,7 @@ impl Value {
     #[inline]
     pub fn decref_bigint(self) {
         if self.is_bigint() {
-            let ptr = (self.0 & PAYLOAD_MASK) as *const BigInt;
+            let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
             unsafe { Arc::decrement_strong_count(ptr) };
         }
     }
@@ -611,9 +963,11 @@ impl fmt::Debug for Value {
         } else if let Some(idx) = self.as_struct_instance_idx() {
             write!(f, "struct#{}", idx)
         } else if self.is_pyobj() {
-            write!(f, "pyobj@{:x}", self.0 & PAYLOAD_MASK)
+            write!(f, "pyobj#{}", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_invalid() {
             write!(f, "INVALID(canary)")
+        } else if self.is_vmfunc() {
+            write!(f, "vmfunc#{}", (self.0 & PAYLOAD_MASK) as u32)
         } else {
             write!(f, "???({:#x})", self.0)
         }
@@ -668,9 +1022,10 @@ mod tests {
 
     #[test]
     fn test_float() {
-        let v = Value::from_float(3.14);
+        let expected = std::f64::consts::PI;
+        let v = Value::from_float(expected);
         assert!(v.is_float());
-        assert!((v.as_float().unwrap() - 3.14).abs() < 1e-10);
+        assert!((v.as_float().unwrap() - expected).abs() < 1e-10);
 
         let v = Value::from_float(-0.0);
         assert!(v.is_float());
@@ -703,6 +1058,18 @@ mod tests {
         assert!(Value::from_int(-1).is_truthy());
         assert!(!Value::from_float(0.0).is_truthy());
         assert!(Value::from_float(0.1).is_truthy());
+    }
+
+    #[test]
+    fn test_nan_not_zero() {
+        // Regression: f64::NAN.to_bits() == QNAN_BASE == SmallInt(0).
+        // from_float(NaN) must produce a value that is_float() and is_nan(),
+        // not SmallInt(0).
+        let v = Value::from_float(f64::NAN);
+        assert!(v.is_float(), "NaN must be detected as float, not tagged value");
+        assert!(!v.is_int(), "NaN must not be detected as int");
+        let f = v.as_float().unwrap();
+        assert!(f.is_nan(), "NaN round-trip must preserve NaN");
     }
 
     #[test]
@@ -742,25 +1109,16 @@ mod tests {
         assert_eq!(std::mem::size_of::<Value>(), 8);
     }
 
-    // Removed: test_bigint_roundtrip — bigint_roundtrip (CatnipNanBoxProof.v)
-    // Pointer round-trip; runtime covered by test_bigint_to_pyobject_huge_int_roundtrip
-
-    // Removed: test_bigint_demote — demotion_preserves_value, needs_bigint_true_iff_not_small (CatnipNanBoxProof.v)
-    // SmallInt/BigInt classification; runtime covered by test_bigint_to_pyobject_huge_int_roundtrip
-
     #[test]
     fn test_bigint_truthy() {
-        let zero = Value::from_bigint(BigInt::from(0));
+        let zero = Value::from_bigint(Integer::from(0));
         assert!(!zero.is_truthy());
         zero.decref();
 
-        let nonzero = Value::from_bigint(BigInt::from(999));
+        let nonzero = Value::from_bigint(Integer::from(999));
         assert!(nonzero.is_truthy());
         nonzero.decref();
     }
-
-    // Removed: test_bigint_equality — encode_injective (CatnipNanBoxProof.v)
-    // Value equality; runtime covered by test_bigint_to_pyobject_huge_int_roundtrip
 
     #[test]
     fn test_invalid_tag() {
@@ -791,10 +1149,10 @@ mod tests {
 
     #[test]
     fn test_bigint_clone_refcount() {
-        let v = Value::from_bigint(BigInt::from(42));
+        let v = Value::from_bigint(Integer::from(42));
         v.clone_refcount(); // refcount = 2
         v.decref(); // refcount = 1
-                    // v still usable
+        // v still usable
         assert!(v.is_bigint());
         v.decref(); // refcount = 0, freed
     }
@@ -806,10 +1164,8 @@ mod tests {
             let huge = huge.unwrap();
             let v = Value::from_pyobject(py, &huge).unwrap();
             assert!(v.is_bigint());
-            assert_eq!(
-                unsafe { v.as_bigint_ref().unwrap() },
-                &((BigInt::from(1_u8) << 512) + BigInt::from(123_456_789_u64))
-            );
+            let expected = (Integer::from(1_u8) << 512_u32) + Integer::from(123_456_789_u64);
+            assert_eq!(unsafe { v.as_bigint_ref().unwrap() }, &expected);
             v.decref();
         });
     }
@@ -817,7 +1173,7 @@ mod tests {
     #[test]
     fn test_bigint_to_pyobject_huge_int_roundtrip() {
         Python::attach(|py| {
-            let n: BigInt = (BigInt::from(1_u8) << 600_u32) - BigInt::from(7_u8);
+            let n: Integer = (Integer::from(1_u8) << 600_u32) - Integer::from(7_u8);
             let v = Value::from_bigint(n.clone());
             let py_obj = v.to_pyobject(py);
             let back = Value::from_pyobject(py, py_obj.bind(py)).unwrap();

@@ -30,7 +30,6 @@ fn main() {
 #[allow(dead_code)]
 struct VisualToml {
     prompts: Prompts,
-    box_: Option<BTreeMap<String, String>>,
     ui: BTreeMap<String, RawColor>,
     accent: Accent,
     base: Base,
@@ -87,16 +86,9 @@ fn parse_oklch(s: &str) -> (f64, f64, f64) {
         .unwrap_or_else(|| panic!("Invalid oklch format: {s}"));
     let parts: Vec<f64> = inner
         .split_whitespace()
-        .map(|p| {
-            p.parse()
-                .unwrap_or_else(|_| panic!("Invalid number in oklch: {p}"))
-        })
+        .map(|p| p.parse().unwrap_or_else(|_| panic!("Invalid number in oklch: {p}")))
         .collect();
-    assert!(
-        parts.len() == 3,
-        "oklch needs 3 values, got {}: {s}",
-        parts.len()
-    );
+    assert!(parts.len() == 3, "oklch needs 3 values, got {}: {s}", parts.len());
     (parts[0], parts[1], parts[2])
 }
 
@@ -113,11 +105,7 @@ impl RawColor {
                     italic: false,
                 }
             }
-            RawColor::Table {
-                color,
-                bold,
-                italic,
-            } => {
+            RawColor::Table { color, bold, italic } => {
                 let (l, c, h) = parse_oklch(color);
                 ColorEntry {
                     l,
@@ -175,9 +163,7 @@ fn hex_u32(entry: &ColorEntry) -> u32 {
 fn generate_theme() {
     let toml_str = fs::read_to_string("visual.toml").expect("Failed to read visual.toml");
 
-    // toml crate maps "box" key normally (no keyword conflict like Rust)
-    let toml_str_fixed = toml_str.replace("[box]", "[box_]");
-    let data: VisualToml = toml::from_str(&toml_str_fixed).expect("Failed to parse visual.toml");
+    let data: VisualToml = toml::from_str(&toml_str).expect("Failed to parse visual.toml");
 
     let ui = resolve_map(&data.ui);
     let accent_dark = resolve_map(&data.accent.dark);
@@ -188,21 +174,12 @@ fn generate_theme() {
     let mut out = String::new();
 
     writeln!(out, "// GENERATED FROM visual.toml - do not edit").unwrap();
-    writeln!(
-        out,
-        "// Run: make compile (build.rs regenerates automatically)"
-    )
-    .unwrap();
+    writeln!(out, "// Run: make compile (build.rs regenerates automatically)").unwrap();
     writeln!(out).unwrap();
 
     // Prompts
     writeln!(out, "/// Prompt principal (ligne normale)").unwrap();
-    writeln!(
-        out,
-        "pub const REPL_PROMPT_MAIN: &str = {:?};",
-        data.prompts.main
-    )
-    .unwrap();
+    writeln!(out, "pub const REPL_PROMPT_MAIN: &str = {:?};", data.prompts.main).unwrap();
     writeln!(out).unwrap();
     writeln!(out, "/// Prompt de continuation (multiline)").unwrap();
     writeln!(
@@ -212,17 +189,6 @@ fn generate_theme() {
     )
     .unwrap();
     writeln!(out).unwrap();
-
-    // Box drawing
-    if let Some(ref box_chars) = data.box_ {
-        writeln!(out, "pub mod box_drawing {{").unwrap();
-        for (key, val) in box_chars {
-            let const_name = key.to_uppercase();
-            writeln!(out, "    pub const {}: &str = {:?};", const_name, val).unwrap();
-        }
-        writeln!(out, "}}").unwrap();
-        writeln!(out).unwrap();
-    }
 
     // UI colors (ANSI escape sequences)
     writeln!(out, "pub mod colors {{").unwrap();
@@ -262,18 +228,8 @@ fn generate_theme() {
     for (toml_key, rust_prefix) in &accent_map {
         if let Some(entry) = accent_dark.get(*toml_key) {
             let hex = hex_u32(entry);
-            writeln!(
-                out,
-                "    pub const {}_COLOR: u32 = 0x{:06X};",
-                rust_prefix, hex
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    pub const {}_BOLD: bool = {};",
-                rust_prefix, entry.bold
-            )
-            .unwrap();
+            writeln!(out, "    pub const {}_COLOR: u32 = 0x{:06X};", rust_prefix, hex).unwrap();
+            writeln!(out, "    pub const {}_BOLD: bool = {};", rust_prefix, entry.bold).unwrap();
         }
     }
     writeln!(out).unwrap();
@@ -287,12 +243,7 @@ fn generate_theme() {
     for (toml_key, rust_name) in &base_dark_map {
         if let Some(entry) = base_dark.get(*toml_key) {
             let hex = hex_u32(entry);
-            writeln!(
-                out,
-                "    pub const {}_COLOR: u32 = 0x{:06X};",
-                rust_name, hex
-            )
-            .unwrap();
+            writeln!(out, "    pub const {}_COLOR: u32 = 0x{:06X};", rust_name, hex).unwrap();
         }
     }
     writeln!(out, "}}").unwrap();
@@ -303,30 +254,15 @@ fn generate_theme() {
     for (toml_key, rust_prefix) in &accent_map {
         if let Some(entry) = accent_light.get(*toml_key) {
             let hex = hex_u32(entry);
-            writeln!(
-                out,
-                "    pub const {}_COLOR: u32 = 0x{:06X};",
-                rust_prefix, hex
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    pub const {}_BOLD: bool = {};",
-                rust_prefix, entry.bold
-            )
-            .unwrap();
+            writeln!(out, "    pub const {}_COLOR: u32 = 0x{:06X};", rust_prefix, hex).unwrap();
+            writeln!(out, "    pub const {}_BOLD: bool = {};", rust_prefix, entry.bold).unwrap();
         }
     }
     writeln!(out).unwrap();
     for (toml_key, rust_name) in &base_dark_map {
         if let Some(entry) = base_light.get(*toml_key) {
             let hex = hex_u32(entry);
-            writeln!(
-                out,
-                "    pub const {}_COLOR: u32 = 0x{:06X};",
-                rust_name, hex
-            )
-            .unwrap();
+            writeln!(out, "    pub const {}_COLOR: u32 = 0x{:06X};", rust_name, hex).unwrap();
         }
     }
     // Light background/foreground
@@ -374,9 +310,8 @@ fn link_python() {
         }
     }
 
-    let output = output.expect(
-        "Failed to run python3-config. Install python3-dev package or ensure python3-config is in PATH"
-    );
+    let output =
+        output.expect("Failed to run python3-config. Install python3-dev package or ensure python3-config is in PATH");
 
     let ldflags = String::from_utf8_lossy(&output.stdout);
 

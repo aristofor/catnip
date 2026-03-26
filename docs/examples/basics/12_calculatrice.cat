@@ -1,0 +1,24 @@
+#!/usr/bin/env catnip
+# Calculatrice simple
+
+calculer = (operation, a, b) => {
+    match operation {
+        '+' => { a + b }
+        '-' => { a - b }
+        '*' => { a * b }
+        '/' => {
+            match b {
+                0 => { print("Erreur: division par zéro"); None }
+                _ => { a / b }
+            }
+        }
+        op => {
+            print("Opération inconnue:", op)
+            None
+        }
+    }
+}
+
+resultat = calculer('+', 10, 5)  # 15
+resultat = calculer('*', 7, 6)   # 42
+resultat = calculer('/', 10, 0)  # Erreur: division par zéro

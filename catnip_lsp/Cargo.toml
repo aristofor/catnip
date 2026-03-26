@@ -1,0 +1,16 @@
+[package]
+name = "catnip_lsp"
+version.workspace = true
+edition.workspace = true
+description = "LSP server for Catnip language"
+
+[[bin]]
+name = "catnip-lsp"
+path = "src/main.rs"
+
+[dependencies]
+catnip_tools = { path = "../catnip_tools" }
+catnip_grammar = { path = "../catnip_grammar" }
+tree-sitter = { workspace = true }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt", "io-std", "macros"] }

@@ -284,7 +284,7 @@ class TestTailCallOptimization(unittest.TestCase):
         catnip = Catnip()
 
         code = catnip.parse("""
-            pragma("tco", "enable")
+            pragma("tco", True)
 
             countdown = (n) => {
                 if n <= 0 {
@@ -305,7 +305,7 @@ class TestTailCallOptimization(unittest.TestCase):
         catnip = Catnip()
 
         code = catnip.parse("""
-            pragma("tco", "disable")
+            pragma("tco", False)
 
             countdown = (n) => {
                 if n <= 0 {
@@ -333,7 +333,7 @@ class TestTailCallOptimization(unittest.TestCase):
             sys.setrecursionlimit(100)
 
             code = catnip.parse("""
-                pragma("tco", "enable")
+                pragma("tco", True)
 
                 deep = (n, acc=0) => {
                     if n <= 0 {
@@ -411,7 +411,7 @@ class TestTailCallEdgeCases(unittest.TestCase):
         catnip = Catnip()
 
         code = catnip.parse("""
-            pragma("tco", "enable")
+            pragma("tco", True)
 
             ping = (n) => {
                 if n <= 0 {
@@ -460,7 +460,7 @@ class TestTailCallEdgeCases(unittest.TestCase):
         result = catnip.execute()
         self.assertEqual(result, True)  # 1000 is even
 
-    # Removed: test_mutual_recursion_is_odd_deep — trampoline_fuel_monotone (CatnipFunctionProof.v)
+    # Removed: test_mutual_recursion_is_odd_deep - trampoline_fuel_monotone (CatnipFunctionProof.v)
     # proves depth-independent correctness; test_mutual_recursion_is_even_deep covers same pattern
 
     def test_lambda_tail_recursive(self):

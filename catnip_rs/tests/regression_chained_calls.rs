@@ -65,10 +65,7 @@ fn test_chained_calls_multiple_params() {
 #[test]
 fn test_chained_calls_nested_in_expression() {
     // Appels chaînés comme partie d'une expression plus large
-    assert_output(
-        "f = (a) => { (b) => { a + b } }; result = f(5)(3) * 2; result",
-        "16",
-    );
+    assert_output("f = (a) => { (b) => { a + b } }; result = f(5)(3) * 2; result", "16");
 }
 
 #[test]
@@ -83,10 +80,7 @@ fn test_chained_calls_as_function_arg() {
 #[test]
 fn test_chained_calls_3_levels() {
     // 3 niveaux d'appels chaînés: f(a)(b)(c)
-    assert_output(
-        "f = (a) => { (b) => { (c) => { a + b + c } } }; f(1)(2)(3)",
-        "6",
-    );
+    assert_output("f = (a) => { (b) => { (c) => { a + b + c } } }; f(1)(2)(3)", "6");
 }
 
 #[test]

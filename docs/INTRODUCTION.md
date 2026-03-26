@@ -25,9 +25,9 @@ Catnip propose trois modes d'utilisation, **avec l'embedding comme cas d'usage p
 Dans cette doc, la majorité des exemples sont des scripts CLI à des fins pédagogiques (reproductibilité et lisibilité),
 même si l'usage cible en production reste l'embedding.
 
-### Embedded (Mode DSL)
+### Mode DSL
 
-Catnip est avant tout un **moteur embedded**. Intégrez-le dans votre application Python pour :
+Catnip est avant tout un **moteur DSL** (embedded dans une application Python). Intégrez-le pour :
 
 - Permettre aux utilisateurs de définir des règles métier sans recompilation
 - Créer des DSL personnalisés (validation, ETL, workflows)
@@ -51,13 +51,13 @@ Catnip pour un cas où Python serait plus adapté.
 
 ### REPL (Exploration)
 
-REPL interactif pour :
+REPL interactive pour :
 
 - Explorer la syntaxe Catnip
 - Débugger des scripts
 - Calculs rapides
 
-**Note** : le REPL est un outil de développement, pas un mode d'usage principal.
+**Note** : la REPL est un outil de développement, pas un mode d'usage principal.
 
 ______________________________________________________________________
 
@@ -183,16 +183,16 @@ Voir [Broadcasting](lang/BROADCAST.md) pour la syntaxe et les détails.
 <!-- check: no-check -->
 
 ```catnip
-factorial = ~~ (n, recur) => {
+factorial = ~~(n, recur) => {
     if n <= 1 { 1 }
     else { n * recur(n - 1) }
 }
 
 factorial(5)
-# ⇒ 120
+# → 120
 ```
 
-`~~` encapsule une lambda récursive. Le runtime choisit le mode d'exécution (séquentiel ou parallèle) -- pas de `async`,
+`~~` encapsule une lambda récursive. Le runtime choisit le mode d'exécution (séquentiel ou parallèle) - pas de `async`,
 pas de `await`, pas de callback. Le code reste une expression pure. Le nombre de fils d'exécution et de processeurs est
 ajustable sans modifier le code source. 🐙
 
@@ -245,7 +245,7 @@ Des directives internes permettent d'ajuster le comportement du moteur sans chan
 ```catnip
 pragma("tco", True)                 # activer/désactiver TCO
 pd = import("pandas")               # exposer un module Python (pur ou binaire)
-tools = import("./tools.cat")      # charger un module Catnip local
+tools = import("tools")             # charger un module Catnip local
 ```
 
 L'API reste stable, l'exécution reste configurable.

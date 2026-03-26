@@ -53,9 +53,7 @@ impl StatefulWidget for CompletionPopup {
             let is_selected = idx == state.selected;
 
             let base_style = if is_selected {
-                Style::default()
-                    .bg(Color::Rgb(60, 60, 80))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().bg(Color::Rgb(60, 60, 80)).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -81,11 +79,7 @@ impl StatefulWidget for CompletionPopup {
                 Span::styled(text_display, base_style),
                 Span::styled(
                     format!(" {}", cat),
-                    if is_selected {
-                        base_style
-                    } else {
-                        category_style
-                    },
+                    if is_selected { base_style } else { category_style },
                 ),
             ]);
 

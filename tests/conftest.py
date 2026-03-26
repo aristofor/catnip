@@ -16,16 +16,16 @@ from catnip import Catnip
 def pytest_addoption(parser):
     """Add custom command-line options."""
     # Get default from env var
-    default = os.environ.get("CATNIP_EXECUTOR", "vm").lower()
-    if default not in {"vm", "ast"}:
-        default = "vm"
+    default = os.environ.get('CATNIP_EXECUTOR', 'vm').lower()
+    if default not in {'vm', 'ast'}:
+        default = 'vm'
 
     parser.addoption(
-        "--executor",
-        action="store",
+        '--executor',
+        action='store',
         default=default,
-        choices=["vm", "ast"],
-        help="Execution mode: vm (default), ast",
+        choices=['vm', 'ast', 'standalone'],
+        help="Execution mode: vm (default), ast, standalone",
     )
 
 
@@ -36,63 +36,85 @@ def pytest_configure(config):
     """Register custom markers and propagate executor mode."""
     # Propagate --executor option to environment variable
     # so tests creating Catnip() directly also see the mode
-    executor = config.getoption("--executor", default=None)
+    executor = config.getoption('--executor', default=None)
     if executor:
-        os.environ["CATNIP_EXECUTOR"] = executor
+        os.environ['CATNIP_EXECUTOR'] = executor
+
+    # Monkey-patch Catnip → CatnipStandalone when in standalone mode
+    if executor == 'standalone':
+        import catnip
+        from catnip.compat import CatnipStandalone
+
+        catnip.Catnip = CatnipStandalone
 
     config.addinivalue_line(
-        "markers",
+        'markers',
         "requires_tco: skip test if TCO is disabled",
     )
     config.addinivalue_line(
-        "markers",
+        'markers',
         "requires_optimization(level): skip test if optimize_level < level",
     )
     config.addinivalue_line(
-        "markers",
+        'markers',
         "no_vm: skip test when running with VM (unsupported features)",
     )
     config.addinivalue_line(
-        "markers",
+        'markers',
         "serial: skip test when running under pytest-xdist",
+    )
+    config.addinivalue_line(
+        'markers',
+        "no_standalone: skip test in standalone mode (features requiring Python Context)",
     )
 
 
 # --- Fixtures for different configurations ---
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope='session')
 def vm_mode(request):
     """Get VM mode from command line (mapped to internal values)."""
-    executor = request.config.getoption("--executor")
+    executor = request.config.getoption('--executor')
     # Map to internal values: vm→on, ast→off
-    internal_map = {"vm": "on", "ast": "off"}
-    return internal_map.get(executor, "on")
+    internal_map = {'vm': 'on', 'ast': 'off'}
+    return internal_map.get(executor, 'on')
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip tests marked with no_vm when running with VM."""
-    executor = config.getoption("--executor")
-    if executor == "vm":
+    """Skip tests marked with no_vm (unsupported in both VM and AST modes)."""
+    executor = config.getoption('--executor')
+    if executor in ('vm', 'ast'):
         skip_vm = pytest.mark.skip(reason=f"Test not supported with executor={executor}")
         for item in items:
-            if "no_vm" in item.keywords:
+            if 'no_vm' in item.keywords:
                 item.add_marker(skip_vm)
 
+    if executor == 'standalone':
+        skip_sa = pytest.mark.skip(reason="Test not supported with standalone executor")
+        for item in items:
+            if 'no_standalone' in item.keywords:
+                item.add_marker(skip_sa)
+
     # Skip serial-only tests when running under pytest-xdist.
-    numprocesses = getattr(config.option, "numprocesses", None)
-    dist_mode = getattr(config.option, "dist", None)
-    xdist_enabled = (numprocesses not in (None, 0)) or (dist_mode not in (None, "no"))
+    numprocesses = getattr(config.option, 'numprocesses', None)
+    dist_mode = getattr(config.option, 'dist', None)
+    xdist_enabled = (numprocesses not in (None, 0)) or (dist_mode not in (None, 'no'))
     if xdist_enabled:
         skip_serial = pytest.mark.skip(reason="Test requires serial execution (xdist enabled)")
         for item in items:
-            if "serial" in item.keywords:
+            if 'serial' in item.keywords:
                 item.add_marker(skip_serial)
 
 
 @pytest.fixture
-def cat(vm_mode):
+def cat(vm_mode, request):
     """Standard Catnip instance with default settings."""
+    executor = request.config.getoption('--executor')
+    if executor == 'standalone':
+        from catnip.compat import CatnipStandalone
+
+        return CatnipStandalone()
     return Catnip(vm_mode=vm_mode)
 
 
@@ -156,45 +178,3 @@ def skip_if_no_optimization():
     c = Catnip()
     if c.pragma_context.optimize_level == 0:
         pytest.skip("Optimization is disabled (level 0)")
-
-
-# --- Helper functions for manual skipping ---
-
-
-def skip_unless_tco(catnip_instance):
-    """
-    Skip test if TCO is disabled on the given Catnip instance.
-
-    Usage:
-        def test_something(cat):
-            skip_unless_tco(cat)
-            ...
-    """
-    if not catnip_instance.pragma_context.tco_enabled:
-        pytest.skip("TCO is disabled")
-
-
-def skip_unless_optimization(catnip_instance, min_level=1):
-    """
-    Skip test if optimization level is below minimum.
-
-    Usage:
-        def test_something(cat):
-            skip_unless_optimization(cat, min_level=2)
-            ...
-    """
-    if catnip_instance.pragma_context.optimize_level < min_level:
-        pytest.skip(f"Optimization level {catnip_instance.pragma_context.optimize_level} < {min_level}")
-
-
-def skip_unless_jit(catnip_instance):
-    """
-    Skip test if JIT is disabled on the given Catnip instance.
-
-    Usage:
-        def test_something(cat):
-            skip_unless_jit(cat)
-            ...
-    """
-    if not catnip_instance.pragma_context.jit_enabled:
-        pytest.skip("JIT is disabled")

@@ -4,6 +4,8 @@
 //! Port of catnip/semantic/ from Cython to Rust
 
 pub mod analyzer;
+mod utils;
+pub(crate) use utils::extract_var_name;
 pub mod base;
 pub mod block_flattening;
 pub mod blunt_code;
@@ -14,7 +16,7 @@ pub mod copy_propagation;
 pub mod dead_code_elimination;
 pub mod dead_store_elimination;
 pub mod function_inlining;
-pub mod opcode;
+pub use catnip_core::semantic::opcode;
 pub mod optimizer;
 pub mod strength_reduction;
 pub mod tail_recursion_to_loop;

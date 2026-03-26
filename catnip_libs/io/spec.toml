@@ -1,0 +1,40 @@
+[module]
+name = "io"
+version = "0.1.0"
+description = "I/O primitives: print, input, write"
+
+[exports]
+symbols = ["PROTOCOL", "VERSION", "print", "write", "writeln", "eprint", "input", "open"]
+
+[exports.print]
+signature = "(*values, sep=' ', end='\\n', file=nil, flush=false) -> nil"
+description = "Print values to a stream (default stdout)"
+
+[exports.write]
+signature = "(*values, file=nil, flush=true) -> nil"
+description = "Write values with no separator and no trailing newline"
+
+[exports.writeln]
+signature = "(*values, file=nil, flush=true) -> nil"
+description = "Write values followed by a newline"
+
+[exports.eprint]
+signature = "(*values, sep=' ', end='\\n', flush=true) -> nil"
+description = "Print to stderr"
+
+[exports.input]
+signature = "(prompt='') -> str"
+description = "Read a line from stdin"
+
+[exports.open]
+signature = "(file, mode='r', buffering=-1, encoding=nil, errors=nil, newline=nil, closefd=true, opener=nil) -> file_object"
+description = "Open a file and return a file object (mirrors Python builtins.open)"
+
+[backends]
+rust = "rust/"
+
+[errors]
+input_eof = "EOFError raised when stdin is exhausted"
+
+[compat]
+notes = "Mirrors Python builtin print/input signatures. Uses Python sys.stdout/stderr/stdin for stream compatibility."

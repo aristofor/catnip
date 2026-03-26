@@ -1,13 +1,13 @@
-# check: no-check
-# Relative imports -- resolved from this file's location, not CWD
-# Run with: catnip docs/examples/module-loading/09_relative_import.cat
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 09_relative_import.cat
+# Résolution via caller_dir + kwarg protocol
 
-# Load a Python module in the same directory (extension inferred)
-host = import("./03_host_module_example")
-x = host.add(10, 5)
+# Nom seul : résolu depuis le répertoire de ce fichier (caller_dir), pas depuis le CWD du processus
+host = import('host_module_example')
+sum = host.add(10, 5)
 
-# ../  works too -- go up one level then back down
-host2 = import("../module-loading/03_host_module_example")
-y = host2.multiply(3, 4)
+# Même module, mais protocol force explicitement le backend Python
+host_py = import('host_module_example', protocol='py')
+product = host_py.multiply(3, 4)
 
-x + y
+sum + product  # → 27

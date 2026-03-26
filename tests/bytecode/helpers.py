@@ -6,14 +6,11 @@ Facilite l'inspection et la validation de l'AST après transformation et analyse
 Note: Le bytecode VM n'est pas directement accessible depuis Python.
 """
 
-from typing import Any
-
 from catnip import Catnip
-from catnip.nodes import Op, Ref
 
 
 class ASTInspector:
-    """Helper pour inspecter et valider l'AST transformé."""
+    """Helper pour inspecter et valider l'AST transformé (via PyIRNode)."""
 
     def __init__(self, source: str):
         self.source = source
@@ -23,12 +20,12 @@ class ASTInspector:
 
     def get_ast(self):
         """Parse le code et retourne l'AST après transformation (sans semantic)."""
-        self.ast = self.catnip.parse(self.source, semantic=False)
+        self.ast = self.catnip._pipeline.parse_to_ir(self.source, False)
         return self.ast
 
     def get_analyzed_code(self):
         """Parse et analyse sémantiquement (avec semantic)."""
-        self.analyzed_code = self.catnip.parse(self.source, semantic=True)
+        self.analyzed_code = self.catnip._pipeline.parse_to_ir(self.source, True)
         return self.analyzed_code
 
     def execute(self):
@@ -70,54 +67,35 @@ class ASTInspector:
         """Trouve récursivement toutes les références à une variable."""
         refs = []
 
-        if isinstance(node, Ref):
-            if node.ident == var_name:
-                refs.append(node)
-        elif isinstance(node, Op):
-            # Parcourir les args
-            if hasattr(node, 'args') and node.args:
-                if isinstance(node.args, (list, tuple)):
-                    for arg in node.args:
-                        refs.extend(self._find_refs_in_node(arg, var_name))
-                else:
-                    refs.extend(self._find_refs_in_node(node.args, var_name))
-        elif isinstance(node, (list, tuple)):
+        if isinstance(node, (list, tuple)):
             for item in node:
                 refs.extend(self._find_refs_in_node(item, var_name))
+        elif hasattr(node, 'kind'):
+            if node.kind == 'Ref' and node.name == var_name:
+                refs.append(node)
+            else:
+                for arg in node.args:
+                    refs.extend(self._find_refs_in_node(arg, var_name))
 
         return refs
 
     def _find_ops_by_opcode(self, node, opcode: int) -> list:
-        """Trouve récursivement tous les Op/IR avec un opcode donné."""
-        from catnip.transformer import IR
+        """Trouve récursivement tous les nodes avec un opcode donné."""
+        from catnip.semantic.opcode import OpCode
 
         ops = []
+        # Convert SCREAMING_SNAKE to PascalCase for PyIRNode comparison
+        enum_name = OpCode(opcode).name
+        target_name = ''.join(w.capitalize() for w in enum_name.split('_'))
 
-        if isinstance(node, IR):
-            # IR nodes have 'ident' as the opcode
-            if node.ident == opcode:
-                ops.append(node)
-            # Parcourir les args
-            if hasattr(node, 'args') and node.args:
-                if isinstance(node.args, (list, tuple)):
-                    for arg in node.args:
-                        ops.extend(self._find_ops_by_opcode(arg, opcode))
-                else:
-                    ops.extend(self._find_ops_by_opcode(node.args, opcode))
-        elif isinstance(node, Op):
-            # Op nodes have 'opcode'
-            if node.opcode == opcode:
-                ops.append(node)
-            # Parcourir les args
-            if hasattr(node, 'args') and node.args:
-                if isinstance(node.args, (list, tuple)):
-                    for arg in node.args:
-                        ops.extend(self._find_ops_by_opcode(arg, opcode))
-                else:
-                    ops.extend(self._find_ops_by_opcode(node.args, opcode))
-        elif isinstance(node, (list, tuple)):
+        if isinstance(node, (list, tuple)):
             for item in node:
                 ops.extend(self._find_ops_by_opcode(item, opcode))
+        elif hasattr(node, 'kind'):
+            if node.kind == 'Op' and node.opcode == target_name:
+                ops.append(node)
+            for arg in node.args or []:
+                ops.extend(self._find_ops_by_opcode(arg, opcode))
 
         return ops
 
@@ -127,10 +105,3 @@ def inspect_ast(source: str) -> ASTInspector:
     inspector = ASTInspector(source)
     inspector.get_ast()
     return inspector
-
-
-def execute_and_inspect(source: str) -> tuple[Any, ASTInspector]:
-    """Parse, exécute et retourne (résultat, inspector) pour validation."""
-    inspector = ASTInspector(source)
-    result = inspector.execute()
-    return result, inspector

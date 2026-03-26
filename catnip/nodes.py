@@ -13,18 +13,6 @@ from catnip._rs import (
 )
 
 
-# Sentinel object to mark nodes that should be skipped (e.g., pragmas)
-# Used by semantic analyzer to filter out pragmas while preserving None literals
-class _SkipSentinel:
-    """Sentinel to mark statements that should be filtered out (pragmas, etc)."""
-
-    def __repr__(self):
-        return '<SKIP>'
-
-
-_SKIP = _SkipSentinel()
-
-
 class ReturnValue(Exception):
     """Exception used to implement early return from functions/lambdas."""
 

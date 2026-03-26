@@ -2,11 +2,19 @@
 //! Control flow operations: if, while, for, block, return, break, continue, set_locals
 
 use super::Registry;
+use crate::constants::*;
+use crate::vm::structs::MethodKey;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use std::cell::RefCell;
 
 use crate::types::{catnip, exceptions};
+
+type TraitResolution = (
+    Vec<(Py<PyAny>, Py<PyAny>)>,
+    indexmap::IndexMap<String, Py<PyAny>>,
+    std::collections::HashSet<MethodKey>,
+);
 
 impl Registry {
     /// Execute a for loop: for identifier in iterable { block }
@@ -131,12 +139,7 @@ impl Registry {
     }
 
     /// Bind a loop variable (simple or unpacking) - supports nested patterns
-    fn bind_loop_variable(
-        &self,
-        py: Python<'_>,
-        identifier: &Py<PyAny>,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn bind_loop_variable(&self, py: Python<'_>, identifier: &Py<PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         // Get context locals
         let ctx = self.ctx.bind(py);
         let locals = ctx.getattr("locals")?;
@@ -176,9 +179,7 @@ impl Registry {
         // Collect all assignments first, then commit to avoid partial writes on failure.
         let pending: RefCell<Vec<(String, Py<PyAny>)>> = RefCell::new(Vec::new());
         let collect_var = |name: &str, val: &Py<PyAny>| -> PyResult<()> {
-            pending
-                .borrow_mut()
-                .push((name.to_string(), val.clone_ref(py)));
+            pending.borrow_mut().push((name.to_string(), val.clone_ref(py)));
             Ok(())
         };
 
@@ -201,11 +202,7 @@ impl Registry {
     ///
     /// Returns:
     ///     Value of the last iteration, or None
-    pub(crate) fn op_while(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_while(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "while requires 2 arguments: condition, block",
@@ -351,11 +348,7 @@ impl Registry {
     ///
     /// Returns:
     ///     Value of the last statement, or None
-    pub(crate) fn op_block(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_block(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         // Get context
         let ctx = self.ctx.bind(py);
 
@@ -396,11 +389,7 @@ impl Registry {
     /// For backward compatibility with old tests: `set_locals("x", 10)`
     /// Standard format: `set_locals(("x",), 10)`
     /// Tuple unpacking: `set_locals(("x", "y"), (1, 2))`
-    pub(crate) fn op_set_locals(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_set_locals(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "set_locals requires at least 2 arguments: names, value",
@@ -442,9 +431,7 @@ impl Registry {
                             is_simple = false;
                         } else if elem_tuple.len() == 2 {
                             // Check if it's a star pattern: ('*', 'name')
-                            if let Ok(first) =
-                                elem_tuple.get_item(0).and_then(|e| e.extract::<String>())
-                            {
+                            if let Ok(first) = elem_tuple.get_item(0).and_then(|e| e.extract::<String>()) {
                                 if first == "*" {
                                     is_simple = false; // Star pattern: don't unwrap
                                 }
@@ -484,9 +471,7 @@ impl Registry {
         // Collect all assignments first, then commit atomically.
         let pending: RefCell<Vec<(String, Py<PyAny>)>> = RefCell::new(Vec::new());
         let collect_var = |name: &str, val: &Py<PyAny>| -> PyResult<()> {
-            pending
-                .borrow_mut()
-                .push((name.to_string(), val.clone_ref(py)));
+            pending.borrow_mut().push((name.to_string(), val.clone_ref(py)));
             Ok(())
         };
 
@@ -557,19 +542,16 @@ impl Registry {
             let value_iter = match value_bound.try_iter() {
                 Ok(iter) => iter,
                 Err(_) => {
-                    let exc_module = py.import("catnip.exc")?;
+                    let exc_module = py.import(PY_MOD_EXC)?;
                     let catnip_type_error = exc_module.getattr("CatnipTypeError")?;
                     let type_name_str = value_bound.get_type().name()?;
-                    return Err(PyErr::from_value(catnip_type_error.call1((format!(
-                        "Cannot unpack non-iterable {}",
-                        type_name_str
-                    ),))?));
+                    return Err(PyErr::from_value(
+                        catnip_type_error.call1((format!("Cannot unpack non-iterable {}", type_name_str),))?,
+                    ));
                 }
             };
 
-            let values: Vec<Py<PyAny>> = value_iter
-                .map(|v| v.map(|x| x.unbind()))
-                .collect::<PyResult<_>>()?;
+            let values: Vec<Py<PyAny>> = value_iter.map(|v| v.map(|x| x.unbind())).collect::<PyResult<_>>()?;
 
             // Check for star pattern
             let (has_star, star_pos, star_name) = self.find_star_in_pattern(py, pattern_tuple)?;
@@ -581,7 +563,7 @@ impl Registry {
                 let min_values = before_count + after_count;
 
                 if values.len() < min_values {
-                    let exc_module = py.import("catnip.exc")?;
+                    let exc_module = py.import(PY_MOD_EXC)?;
                     let catnip_runtime_error = exc_module.getattr("CatnipRuntimeError")?;
                     return Err(PyErr::from_value(catnip_runtime_error.call1((format!(
                         "Not enough values to unpack: expected at least {}, got {}",
@@ -591,18 +573,16 @@ impl Registry {
                 }
 
                 // Unpack before star
-                for i in 0..before_count {
+                for (i, value) in values.iter().enumerate().take(before_count) {
                     let sub_pattern = pattern_tuple.get_item(i)?;
-                    self.unpack_pattern_recursive(py, &sub_pattern, &values[i], assign_var)?;
+                    self.unpack_pattern_recursive(py, &sub_pattern, value, assign_var)?;
                 }
 
                 // Assign star (middle part)
                 let star_start = before_count;
                 let star_end = values.len() - after_count;
-                let star_values: Vec<Py<PyAny>> = values[star_start..star_end]
-                    .iter()
-                    .map(|v| v.clone_ref(py))
-                    .collect();
+                let star_values: Vec<Py<PyAny>> =
+                    values[star_start..star_end].iter().map(|v| v.clone_ref(py)).collect();
                 let py_list = pyo3::types::PyList::new(py, star_values)?;
                 assign_var(&star_name, &py_list.into())?;
 
@@ -610,17 +590,12 @@ impl Registry {
                 let after_start = values.len() - after_count;
                 for i in 0..after_count {
                     let sub_pattern = pattern_tuple.get_item(star_pos + 1 + i)?;
-                    self.unpack_pattern_recursive(
-                        py,
-                        &sub_pattern,
-                        &values[after_start + i],
-                        assign_var,
-                    )?;
+                    self.unpack_pattern_recursive(py, &sub_pattern, &values[after_start + i], assign_var)?;
                 }
             } else {
                 // Regular pattern: (a, b, c) = [1, 2, 3]
                 if values.len() != pattern_tuple.len() {
-                    let exc_module = py.import("catnip.exc")?;
+                    let exc_module = py.import(PY_MOD_EXC)?;
                     let catnip_runtime_error = exc_module.getattr("CatnipRuntimeError")?;
                     return Err(PyErr::from_value(catnip_runtime_error.call1((format!(
                         "Cannot unpack {} values into {} variables",
@@ -716,7 +691,7 @@ impl Registry {
             let is_true = cond_value.bind(py).is_truthy()?;
 
             if is_true {
-                // Execute block inline (no scope) — if/else shares parent scope
+                // Execute block inline (no scope) - if/else shares parent scope
                 return self.exec_block_inline(py, &block_node);
             }
         }
@@ -773,11 +748,7 @@ impl Registry {
     ///
     /// Returns:
     ///     TailCall object if the return value is a tail call (for TCO)
-    pub(crate) fn op_return(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_return(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let value_node = if !args.is_empty() {
             Some(args.get_item(0)?.unbind())
         } else {
@@ -799,7 +770,7 @@ impl Registry {
         }
 
         // Raise ReturnValue exception
-        let nodes_module = py.import("catnip.nodes")?;
+        let nodes_module = py.import(PY_MOD_NODES)?;
         let return_value_class = nodes_module.getattr("ReturnValue")?;
         Err(PyErr::from_value(return_value_class.call1((result,))?))
     }
@@ -808,12 +779,8 @@ impl Registry {
     ///
     /// Raises:
     ///     BreakLoop exception to exit loop
-    pub(crate) fn op_break(
-        &self,
-        py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
-        let nodes_module = py.import("catnip.nodes")?;
+    pub(crate) fn op_break(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let nodes_module = py.import(PY_MOD_NODES)?;
         let break_loop_class = nodes_module.getattr("BreakLoop")?;
         Err(PyErr::from_value(break_loop_class.call0()?))
     }
@@ -822,12 +789,8 @@ impl Registry {
     ///
     /// Raises:
     ///     ContinueLoop exception to skip to next iteration
-    pub(crate) fn op_continue(
-        &self,
-        py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
-        let nodes_module = py.import("catnip.nodes")?;
+    pub(crate) fn op_continue(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let nodes_module = py.import(PY_MOD_NODES)?;
         let continue_loop_class = nodes_module.getattr("ContinueLoop")?;
         Err(PyErr::from_value(continue_loop_class.call0()?))
     }
@@ -844,11 +807,7 @@ impl Registry {
     ///
     /// Returns:
     ///     None
-    pub(crate) fn op_struct(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_struct(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "struct requires 2 arguments: name, fields",
@@ -924,10 +883,8 @@ impl Registry {
         }
 
         // Inheritance: compute C3 MRO and merge fields/methods
-        let mut inherited_methods: std::collections::HashMap<String, Py<PyAny>> =
-            std::collections::HashMap::new();
-        let mut inherited_static: std::collections::HashMap<String, Py<PyAny>> =
-            std::collections::HashMap::new();
+        let mut inherited_methods: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
+        let mut inherited_static: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
 
         // Compute MRO
         let struct_mro = if !base_names.is_empty() {
@@ -944,39 +901,33 @@ impl Registry {
                 let parent = parent_st.borrow();
                 Some(parent.mro.clone())
             });
-            let mro =
-                mro_result.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            let mro = mro_result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
             // Merge fields from MRO (first-seen wins, skip self)
-            let mut seen_field_names: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut seen_field_names: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut mro_field_names: Vec<String> = Vec::new();
             let mut mro_field_defaults: Vec<Option<Py<PyAny>>> = Vec::new();
 
             for mro_type_name in mro.iter().skip(1) {
-                let parent_obj =
-                    globals_dict.call_method1("get", (mro_type_name.as_str(), py.None()))?;
+                let parent_obj = globals_dict.call_method1("get", (mro_type_name.as_str(), py.None()))?;
                 if parent_obj.is_none() {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Unknown base struct '{}' in extends",
                         mro_type_name
                     )));
                 }
-                let parent_st = parent_obj
-                    .cast::<crate::vm::CatnipStructType>()
-                    .map_err(|_| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Base '{}' is not a CatnipStructType",
-                            mro_type_name
-                        ))
-                    })?;
+                let parent_st = parent_obj.cast::<crate::vm::CatnipStructType>().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Base '{}' is not a CatnipStructType",
+                        mro_type_name
+                    ))
+                })?;
                 let parent = parent_st.borrow();
 
                 for (i, fname) in parent.field_names.iter().enumerate() {
                     if seen_field_names.insert(fname.clone()) {
                         mro_field_names.push(fname.clone());
-                        mro_field_defaults
-                            .push(parent.field_defaults[i].as_ref().map(|v| v.clone_ref(py)));
+                        mro_field_defaults.push(parent.field_defaults[i].as_ref().map(|v| v.clone_ref(py)));
                     }
                 }
 
@@ -1015,9 +966,8 @@ impl Registry {
         };
 
         // Evaluate child methods
-        let mut methods: std::collections::HashMap<String, Py<PyAny>> =
-            std::collections::HashMap::new();
-        let mut static_methods: std::collections::HashMap<String, Py<PyAny>> = inherited_static;
+        let mut methods: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
+        let mut static_methods: indexmap::IndexMap<String, Py<PyAny>> = inherited_static;
         let mut struct_method_names = std::collections::HashSet::new();
         let mut init_fn: Option<Py<PyAny>> = None;
         let mut own_abstract: std::collections::HashSet<crate::vm::structs::MethodKey> =
@@ -1144,11 +1094,7 @@ impl Registry {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "struct '{}' must implement abstract method(s): {}",
                 name,
-                names
-                    .iter()
-                    .map(|n| format!("'{}'", n))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")
             )));
         }
 
@@ -1185,11 +1131,7 @@ impl Registry {
         traits_dict: &Bound<'_, pyo3::PyAny>,
         implements: &[String],
         struct_method_names: &std::collections::HashSet<String>,
-    ) -> PyResult<(
-        Vec<(Py<PyAny>, Py<PyAny>)>,
-        std::collections::HashMap<String, Py<PyAny>>,
-        std::collections::HashSet<crate::vm::structs::MethodKey>,
-    )> {
+    ) -> PyResult<TraitResolution> {
         use crate::vm::structs::{MethodKey, MethodKind};
 
         // Linearize: post-order, cycle detection integrated
@@ -1209,16 +1151,11 @@ impl Registry {
         }
 
         // Merge methods: last-wins with strict conflict detection
-        let mut merged_map: std::collections::HashMap<String, Py<PyAny>> =
-            std::collections::HashMap::new();
-        let mut merged_static: std::collections::HashMap<String, Py<PyAny>> =
-            std::collections::HashMap::new();
-        let mut method_source: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut static_source: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut merged_abstract: std::collections::HashSet<MethodKey> =
-            std::collections::HashSet::new();
+        let mut merged_map: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
+        let mut merged_static: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
+        let mut method_source: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut static_source: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut merged_abstract: std::collections::HashSet<MethodKey> = std::collections::HashSet::new();
         // Track insertion order
         let mut method_order: Vec<String> = Vec::new();
 
@@ -1233,15 +1170,14 @@ impl Registry {
                     let callable = item.get_item(1)?;
 
                     if let Some(prev) = method_source.get(&mname) {
-                        if prev != trait_name && !struct_method_names.contains(&mname) {
-                            if !self.is_ancestor_ast(traits_dict, prev, trait_name)? {
-                                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                    format!(
-                                        "Method '{}' has conflicting definitions from traits '{}' and '{}'",
-                                        mname, prev, trait_name
-                                    ),
-                                ));
-                            }
+                        if prev != trait_name
+                            && !struct_method_names.contains(&mname)
+                            && !self.is_ancestor_ast(traits_dict, prev, trait_name)?
+                        {
+                            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                "Method '{}' has conflicting definitions from traits '{}' and '{}'",
+                                mname, prev, trait_name
+                            )));
                         }
                     } else {
                         method_order.push(mname.clone());
@@ -1269,15 +1205,14 @@ impl Registry {
                     let callable = item.get_item(1)?;
 
                     if let Some(prev) = static_source.get(&mname) {
-                        if prev != trait_name && !struct_method_names.contains(&mname) {
-                            if !self.is_ancestor_ast(traits_dict, prev, trait_name)? {
-                                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                    format!(
-                                        "Static method '{}' has conflicting definitions from traits '{}' and '{}'",
-                                        mname, prev, trait_name
-                                    ),
-                                ));
-                            }
+                        if prev != trait_name
+                            && !struct_method_names.contains(&mname)
+                            && !self.is_ancestor_ast(traits_dict, prev, trait_name)?
+                        {
+                            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                "Static method '{}' has conflicting definitions from traits '{}' and '{}'",
+                                mname, prev, trait_name
+                            )));
                         }
                     }
 
@@ -1306,8 +1241,7 @@ impl Registry {
             }
 
             // Propagate abstract static methods
-            let abs_static =
-                trait_info.call_method1("get", ("abstract_static_methods", py.None()))?;
+            let abs_static = trait_info.call_method1("get", ("abstract_static_methods", py.None()))?;
             if !abs_static.is_none() {
                 for abs_item in abs_static.try_iter()? {
                     let abs_name: String = abs_item?.extract()?;
@@ -1325,7 +1259,7 @@ impl Registry {
         let merged = method_order
             .into_iter()
             .map(|mname| {
-                let callable = merged_map.remove(&mname).unwrap();
+                let callable = merged_map.swap_remove(&mname).unwrap();
                 let key = mname.into_pyobject(py).unwrap().into_any().unbind();
                 (key, callable)
             })
@@ -1336,7 +1270,7 @@ impl Registry {
 
     fn linearize_trait_ast(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         traits_dict: &Bound<'_, pyo3::PyAny>,
         name: &str,
         visiting: &mut std::collections::HashSet<String>,
@@ -1353,9 +1287,7 @@ impl Registry {
             )));
         }
         // Check trait exists
-        let has = traits_dict
-            .call_method1("__contains__", (name,))?
-            .extract::<bool>()?;
+        let has = traits_dict.call_method1("__contains__", (name,))?.extract::<bool>()?;
         if !has {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Trait '{}' not found",
@@ -1371,7 +1303,7 @@ impl Registry {
         for parent in extends.try_iter()? {
             let parent = parent?;
             let parent_name: String = parent.extract()?;
-            self.linearize_trait_ast(py, traits_dict, &parent_name, visiting, visited, result)?;
+            self.linearize_trait_ast(_py, traits_dict, &parent_name, visiting, visited, result)?;
         }
         visiting.remove(name);
         visited.insert(name.to_string());
@@ -1412,11 +1344,7 @@ impl Registry {
 
     /// Register a trait definition in AST mode.
     /// Stores in ctx.globals["__traits__"][name].
-    pub(crate) fn op_trait_def(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_trait_def(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 3 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "trait requires at least 3 arguments: name, extends, fields",
@@ -1494,14 +1422,7 @@ impl Registry {
         let trait_info = pyo3::types::PyDict::new(py);
         trait_info.set_item(
             "extends",
-            pyo3::types::PyList::new(
-                py,
-                extends
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )?,
+            pyo3::types::PyList::new(py, extends.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice())?,
         )?;
         trait_info.set_item("fields", fields_list)?;
         trait_info.set_item("methods", methods_dict)?;

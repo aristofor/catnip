@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip comme DSL pour orchestration de workflows.
 
@@ -10,8 +11,10 @@ Montre comment :
 Use case : Orchestration de tâches métier (ETL, onboarding, traitement de commandes).
 """
 
-from catnip import Catnip, Context, pass_context
 from datetime import datetime
+from decimal import Decimal
+
+from catnip import Catnip, Context, pass_context
 
 
 class WorkflowContext(Context):
@@ -175,7 +178,7 @@ if __name__ == '__main__':
     initial_state = {
         'order_id': 'ORD-12345',
         'customer_id': 'CUST-789',
-        'amount': 150.00,
+        'amount': Decimal('150.00'),
         'items': ['item1', 'item2', 'item3'],
     }
 
@@ -232,8 +235,8 @@ if __name__ == '__main__':
     initial_state = {
         'user_id': 'USER-456',
         'action': 'withdraw',
-        'amount': 500,
-        'balance': 1000,
+        'amount': Decimal('500'),
+        'balance': Decimal('1000'),
     }
 
     banking_workflow = """
@@ -266,14 +269,15 @@ if __name__ == '__main__':
     log_event('end', 'Transaction terminée')
     """
 
+    balance_before = initial_state['balance']
     workflow = WorkflowDSL(initial_state)
     result = workflow.execute_workflow(banking_workflow)
 
     print(f"Transaction : {result['state']['transaction_id']}")
     print(f"Action : {result['state']['action']}")
-    print(f"Montant : ${result['state']['amount']}")
-    print(f"Solde initial : ${initial_state['balance']}")
-    print(f"Solde final : ${result['state']['balance']}")
+    print(f"Montant : {result['state']['amount']}€")
+    print(f"Solde initial : {balance_before}€")
+    print(f"Solde final : {result['state']['balance']}€")
     print(f"Statut : {result['state']['status']}")
 
     print()
@@ -331,8 +335,7 @@ if __name__ == '__main__':
     print()
     print("⇒ Use Case : Intégration dans application")
     print()
-    print(
-        """
+    print("""
 # Exemple d'utilisation dans une application:
 
 from workflow_dsl import WorkflowDSL
@@ -355,5 +358,4 @@ def process_order(order_data):
         notify_admin('workflow_failed', result['state'].get('error'))
 
     return result
-    """
-    )
+    """)

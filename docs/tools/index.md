@@ -4,13 +4,14 @@ Outils de développement et utilitaires pour Catnip.
 
 ## Liste des outils
 
-### Intégration MCP
+### [Serveur MCP](mcp.md)
 
-Catnip fournit un serveur [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) pour l'intégration avec
-Claude et autres agents.
+Catnip fournit un serveur [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) qui expose le pipeline du
+langage à des agents : parsing multi-niveaux (tree-sitter brut → IR exécutable), inspection des représentations
+internes, debugging interactif avec breakpoints et stepping, évaluation en contexte.
 
-- **10 tools** : parsing, évaluation, validation, formatage, debugging interactif
-- **Ressources** : exemples par thème, codex d'intégration Python
+- **10 tools** : parsing, évaluation, validation, formatage, debugging interactif (6 tools de session)
+- **4 ressources** : exemples par thème, codex Python, documentation par section
 
 ### [Linter](lint.md)
 
@@ -37,7 +38,10 @@ Formatage automatique du code Catnip avec style opinionated (inspiré de Black).
 **Commandes principales** :
 
 - `catnip format script.cat` - Formater un fichier
-- `catnip format --` - Formater depuis stdin
+- `catnip format src/` - Formater un dossier récursivement
+- `catnip format --stdin` - Formater depuis stdin
+- `catnip format -i src/*.cat` - Formater en place
+- `catnip format --check src/*.cat` - Vérifier le formatage (CI)
 
 **Caractéristiques** :
 
@@ -115,7 +119,7 @@ catnip lint **/*.cat 2>/dev/null || exit 1
 ### Formater tout le code du projet
 
 ```bash
-find . -name "*.cat" -type f -exec sh -c 'catnip format "$1" > "$1.tmp" && mv "$1.tmp" "$1"' _ {} \;
+catnip format -i **/*.cat
 ```
 
 ### Générer lexer après modification grammaire

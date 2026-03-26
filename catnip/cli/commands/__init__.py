@@ -3,6 +3,7 @@
 
 from .commands import cmd_commands
 from .config import cmd_config
+from .extensions import cmd_extensions
 from .format import cmd_format
 from .lint import cmd_lint
 from .plugins import cmd_plugins
@@ -11,6 +12,7 @@ from .repl import cmd_repl
 __all__ = (
     'cmd_commands',
     'cmd_config',
+    'cmd_extensions',
     'cmd_format',
     'cmd_lint',
     'cmd_plugins',

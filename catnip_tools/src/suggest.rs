@@ -20,30 +20,20 @@ pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
 
     // Full matrix needed for transposition lookback
     let mut d = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        d[i][0] = i;
+    for (i, row) in d.iter_mut().enumerate().take(m + 1) {
+        row[0] = i;
     }
-    for j in 0..=n {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate().take(n + 1) {
+        *cell = j;
     }
 
     for i in 1..=m {
         for j in 1..=n {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
-                0
-            } else {
-                1
-            };
-            d[i][j] = (d[i - 1][j] + 1)
-                .min(d[i][j - 1] + 1)
-                .min(d[i - 1][j - 1] + cost);
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
 
             // Transposition
-            if i > 1
-                && j > 1
-                && a_bytes[i - 1] == b_bytes[j - 2]
-                && a_bytes[i - 2] == b_bytes[j - 1]
-            {
+            if i > 1 && j > 1 && a_bytes[i - 1] == b_bytes[j - 2] && a_bytes[i - 2] == b_bytes[j - 1] {
                 d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
             }
         }
@@ -66,11 +56,7 @@ pub fn suggest_similar(name: &str, candidates: &[&str], max: usize, cutoff: f64)
             }
             let dist = damerau_levenshtein(name, c);
             let ratio = 1.0 - (dist as f64 / max_len as f64);
-            if ratio >= cutoff {
-                Some((ratio, c))
-            } else {
-                None
-            }
+            if ratio >= cutoff { Some((ratio, c)) } else { None }
         })
         .collect();
 
@@ -156,10 +142,7 @@ mod tests {
     #[test]
     fn test_format_suggestion_one() {
         let sugg = vec!["factorial".to_string()];
-        assert_eq!(
-            format_suggestion(&sugg),
-            Some("Did you mean 'factorial'?".to_string())
-        );
+        assert_eq!(format_suggestion(&sugg), Some("Did you mean 'factorial'?".to_string()));
     }
 
     #[test]

@@ -98,3 +98,30 @@ def test_language_behavior_parity(executor):
    - tests d'interaction entre passes
    - tests de sémantique observable
 1. Renforcer la parité VM/AST sur `tests/language/` avec paramétrisation plutôt que duplication manuelle.
+
+## Tests standalone (`catnip_rs/tests/run_*.rs`)
+
+Tests d'intégration du binaire `catnip` (Rust pur avec Python embarqué).
+
+Helpers disponibles dans `common/mod.rs` :
+
+- `assert_output(code, expected)` - Vérifie la sortie
+- `assert_error(code)` - Vérifie qu'une erreur se produit
+- `assert_error_contains(code, fragment)` - Vérifie le message d'erreur
+- `run_code(code)` - Lance le code et retourne `Output`
+- `run_code_stdout(code)` - Lance le code et retourne stdout
+
+Ajouter un test :
+
+```rust
+// catnip_rs/tests/run_myfeature.rs
+mod common;
+use common::assert_output;
+
+#[test]
+fn test_my_feature() {
+    assert_output("2 + 2", "4");
+}
+```
+
+Lancer : `make test-run` (release) ou `make test-run-fast` (dev).

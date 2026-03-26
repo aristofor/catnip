@@ -442,10 +442,7 @@ impl PyControlFlowGraph {
 
     /// Get immediate dominator for a block.
     fn get_immediate_dominator(&self, block_id: usize) -> Option<usize> {
-        self.inner
-            .blocks
-            .get(&block_id)
-            .and_then(|b| b.immediate_dominator)
+        self.inner.blocks.get(&block_id).and_then(|b| b.immediate_dominator)
     }
 
     /// Get blocks dominated by a given block.

@@ -10,7 +10,7 @@ def test_init_basic(cat):
     """init is called automatically after field assignment."""
     code = """
 struct S {
-    x
+    x;
     init(self) => { self.x = self.x + 1 }
 }
 S(10).x
@@ -23,7 +23,7 @@ def test_init_return_ignored(cat):
     """init return value is discarded, instance is returned."""
     code = """
 struct S {
-    x
+    x;
     init(self) => { self.x = self.x * 2; 999 }
 }
 S(5).x
@@ -36,7 +36,7 @@ def test_init_with_defaults(cat):
     """init works with default field values."""
     code = """
 struct Config {
-    host, port = 8080
+    host; port = 8080;
     init(self) => { self.host = self.host + ":auto" }
 }
 list(Config("localhost").host, Config("localhost").port)
@@ -49,7 +49,7 @@ def test_init_with_kwargs(cat):
     """init works with keyword argument instantiation."""
     code = """
 struct S {
-    x, y
+    x; y;
     init(self) => { self.x = self.x + self.y }
 }
 S(x=10, y=5).x
@@ -61,7 +61,7 @@ S(x=10, y=5).x
 def test_init_no_init(cat):
     """Struct without init works normally."""
     code = """
-struct S { x }
+struct S { x; }
 S(42).x
 """
     cat.parse(code)
@@ -75,7 +75,7 @@ def test_super_basic(cat):
     """super.method() calls parent version."""
     code = """
 struct Base {
-    x
+    x;
     value(self) => { self.x }
 }
 struct Child extends(Base) {
@@ -91,7 +91,7 @@ def test_super_chain(cat):
     """super works through a multi-level inheritance chain."""
     code = """
 struct A {
-    x
+    x;
     value(self) => { self.x }
 }
 struct B extends(A) {
@@ -110,7 +110,7 @@ def test_super_with_init(cat):
     """super.init() calls parent init."""
     code = """
 struct Base {
-    x
+    x;
     init(self) => { self.x = self.x + 1 }
 }
 struct Child extends(Base) {
@@ -129,7 +129,7 @@ def test_super_no_parent_error(cat):
     """Accessing super without extends raises an error."""
     code = """
 struct S {
-    x
+    x;
     value(self) => { super.value() }
 }
 S(1).value()
@@ -146,8 +146,8 @@ def test_extends_then_implements(cat):
     """struct S extends(B) implements(T) works."""
     code = """
 trait Loggable { log(self) => { "logged" } }
-struct Base { x }
-struct Child extends(Base) implements(Loggable) { y }
+struct Base { x; }
+struct Child extends(Base) implements(Loggable) { y; }
 c = Child(1, 2)
 list(c.x, c.y, c.log())
 """
@@ -159,8 +159,8 @@ def test_implements_then_extends(cat):
     """struct S implements(T) extends(B) also works."""
     code = """
 trait Loggable { log(self) => { "logged" } }
-struct Base { x }
-struct Child implements(Loggable) extends(Base) { y }
+struct Base { x; }
+struct Child implements(Loggable) extends(Base) { y; }
 c = Child(1, 2)
 list(c.x, c.y, c.log())
 """
@@ -174,10 +174,10 @@ list(c.x, c.y, c.log())
 def test_struct_redefinition_shadowing(cat):
     """Struct defined in inner scope shadows outer."""
     code = """
-struct S { x }
+struct S { x; }
 a = S(1)
 result = {
-    struct S { x, y }
+    struct S { x; y; }
     S(10, 20).y
 }
 list(a.x, result)
@@ -191,7 +191,7 @@ def test_init_in_struct_with_traits(cat):
     code = """
 trait T { m(self) => { self.x * 2 } }
 struct S implements(T) {
-    x
+    x;
     init(self) => { self.x = self.x + 1 }
 }
 s = S(5)
@@ -205,7 +205,7 @@ def test_method_uses_mutated_field(cat):
     """Method sees field values after init mutation."""
     code = """
 struct S {
-    x
+    x;
     init(self) => { self.x = self.x * 3 }
     get(self) => { self.x }
 }
@@ -219,11 +219,11 @@ def test_multiple_structs_independent(cat):
     """Multiple structs with init don't interfere."""
     code = """
 struct A {
-    x
+    x;
     init(self) => { self.x = self.x + 1 }
 }
 struct B {
-    x
+    x;
     init(self) => { self.x = self.x * 2 }
 }
 list(A(10).x, B(10).x)
@@ -236,7 +236,7 @@ def test_super_only_for_overridden(cat):
     """super provides access to parent methods, non-overridden methods work directly."""
     code = """
 struct Base {
-    x
+    x;
     base_only(self) => { self.x * 100 }
     shared(self) => { self.x }
 }

@@ -60,59 +60,97 @@ impl CompletionState {
     }
 }
 
-/// Keywords in Catnip language
-const KEYWORDS: &[&str] = &[
-    "if", "elif", "else", "while", "for", "in", "match", "case", "True", "False", "None", "and",
-    "or", "not", "return", "break", "continue", "fn", "lambda", "pragma", "struct", "trait",
-    "abstract", "static",
-];
+impl Default for CompletionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-/// Builtin functions available in REPL (must match Context.__init__ globals)
+use catnip_tools::symbols;
+
+// GENERATED FROM catnip/context.py - do not edit manually.
+// Run: python catnip_tools/gen_builtins.py
+// @generated-completer-builtins-start
 const BUILTINS: &[&str] = &[
-    // Types et constructeurs
-    "str",
-    "int",
-    "float",
-    "list",
-    "dict",
-    "tuple",
-    "set",
-    // I/O
-    "print",
-    "write",
-    "write_err",
-    // Iteration
-    "range",
-    "enumerate",
-    "zip",
-    "map",
-    "filter",
-    "sorted",
-    "reversed",
-    // Aggregation
-    "len",
-    "sum",
-    "min",
-    "max",
+    "INT",
+    "META",
+    "ND",
+    "_cache",
     "abs",
-    "round",
-    // Formatting
-    "format",
-    "repr",
+    "all",
+    "any",
     "ascii",
-    // Decorateurs et outils
-    "jit",
-    "pure",
+    "bin",
+    "bool",
+    "breakpoint",
+    "bytearray",
+    "bytes",
     "cached",
+    "callable",
+    "chr",
+    "classmethod",
+    "complex",
     "debug",
-    "logger",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "filter",
+    "float",
+    "fold",
+    "format",
+    "freeze",
+    "frozenset",
+    "getattr",
+    "hasattr",
+    "hash",
+    "hex",
+    "id",
+    "import",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "jit",
+    "len",
+    "list",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "ord",
+    "pow",
+    "property",
+    "pure",
+    "range",
+    "reduce",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "thaw",
+    "tuple",
+    "typeof",
+    "vars",
+    "zip",
 ];
+// @generated-completer-builtins-end
 
-/// REPL commands (without leading /)
-const REPL_COMMANDS: &[&str] = &[
-    "help", "exit", "quit", "clear", "cls", "stats", "version", "jit", "verbose", "history",
-    "load", "debug", "time", "config",
-];
+/// REPL commands (without leading /) - from single source of truth
+fn repl_commands() -> Vec<&'static str> {
+    crate::commands::all_command_names()
+}
 
 /// Common string methods
 const STRING_METHODS: &[&str] = &[
@@ -156,8 +194,7 @@ const STRING_METHODS: &[&str] = &[
 
 /// Common list methods
 const LIST_METHODS: &[&str] = &[
-    "append", "clear", "copy", "count", "extend", "index", "insert", "pop", "remove", "reverse",
-    "sort",
+    "append", "clear", "copy", "count", "extend", "index", "insert", "pop", "remove", "reverse", "sort",
 ];
 
 /// Common dict methods
@@ -176,10 +213,10 @@ const DICT_METHODS: &[&str] = &[
 ];
 
 /// Extract the word at cursor position (reusable by hints)
-pub fn extract_word_at<'a>(line: &'a str, pos: usize) -> (usize, &'a str) {
+pub fn extract_word_at(line: &str, pos: usize) -> (usize, &str) {
     let start = line[..pos]
         .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|i| i + 1)
+        .map(|i| i + line[i..].chars().next().unwrap().len_utf8())
         .unwrap_or(0);
     (start, &line[start..pos])
 }
@@ -188,12 +225,15 @@ pub fn extract_word_at<'a>(line: &'a str, pos: usize) -> (usize, &'a str) {
 pub struct CatnipCompleter {
     /// Variable names from context
     variables: Vec<String>,
+    /// Per-variable attributes (from dir())
+    attrs: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl CatnipCompleter {
     pub fn new() -> Self {
         Self {
             variables: Vec::new(),
+            attrs: std::collections::HashMap::new(),
         }
     }
 
@@ -201,8 +241,13 @@ impl CatnipCompleter {
     pub fn set_variables(&mut self, vars: Vec<String>) {
         self.variables = vars
             .into_iter()
-            .filter(|v| !BUILTINS.contains(&v.as_str()) && !KEYWORDS.contains(&v.as_str()))
+            .filter(|v| !BUILTINS.contains(&v.as_str()) && !symbols::is_keyword(v))
             .collect();
+    }
+
+    /// Met a jour les attributs connus par variable
+    pub fn set_attrs(&mut self, attrs: std::collections::HashMap<String, Vec<String>>) {
+        self.attrs = attrs;
     }
 
     /// Point d'entree principal
@@ -227,8 +272,8 @@ impl CatnipCompleter {
 
     fn complete_command(&self, line: &str, pos: usize) -> Vec<Completion> {
         let prefix = &line[1..pos];
-        REPL_COMMANDS
-            .iter()
+        repl_commands()
+            .into_iter()
             .filter(|cmd| cmd.starts_with(prefix))
             .map(|cmd| Completion {
                 text: format!("/{}", cmd),
@@ -242,6 +287,33 @@ impl CatnipCompleter {
     fn complete_attribute(&self, line: &str, pos: usize) -> Vec<Completion> {
         let (start, prefix) = self.extract_word(line, pos);
 
+        // Extract object name before the dot
+        let before_dot = &line[..start.saturating_sub(1)]; // skip the '.'
+        let obj_name = before_dot
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| &before_dot[i + 1..])
+            .unwrap_or(before_dot);
+
+        // Try dynamic attrs first
+        if !obj_name.is_empty() {
+            if let Some(obj_attrs) = self.attrs.get(obj_name) {
+                let suggestions: Vec<Completion> = obj_attrs
+                    .iter()
+                    .filter(|a| a.starts_with(prefix))
+                    .map(|a| Completion {
+                        text: a.clone(),
+                        category: "method",
+                        replace_start: start,
+                        replace_end: pos,
+                    })
+                    .collect();
+                if !suggestions.is_empty() {
+                    return suggestions;
+                }
+            }
+        }
+
+        // Fallback: hardcoded str/list/dict methods
         let mut suggestions = Vec::new();
         let all_methods = STRING_METHODS
             .iter()
@@ -279,11 +351,11 @@ impl CatnipCompleter {
         }
 
         // Keywords (skip if already seen as variable)
-        for kw in KEYWORDS {
-            if kw.starts_with(prefix) && !seen.contains(*kw) {
-                seen.insert(kw.to_string());
+        for kw in symbols::keywords() {
+            if kw.starts_with(prefix) && !seen.contains(kw) {
+                seen.insert(kw.clone());
                 suggestions.push(Completion {
-                    text: kw.to_string(),
+                    text: kw.clone(),
                     category: "keyword",
                     replace_start: start,
                     replace_end: pos,
@@ -314,12 +386,19 @@ impl CatnipCompleter {
         if pos == 0 {
             return false;
         }
-        line[..pos]
-            .chars()
-            .rev()
-            .find(|c| !c.is_whitespace())
-            .map(|c| c == '.')
-            .unwrap_or(false)
+        // Check if the current word is preceded by a dot
+        let (start, _) = self.extract_word(line, pos);
+        if start == 0 {
+            return false;
+        }
+        // Look at character just before the word start
+        line[..start].chars().next_back().map(|c| c == '.').unwrap_or(false)
+    }
+}
+
+impl Default for CatnipCompleter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -355,15 +434,11 @@ mod tests {
     #[test]
     fn test_builtin_completion() {
         let completer = CatnipCompleter::new();
-        let suggestions = completer.complete("pri", 3);
+        let suggestions = completer.complete("sor", 3);
         let values: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
-        assert!(values.contains(&"print"));
+        assert!(values.contains(&"sorted"));
         assert_eq!(
-            suggestions
-                .iter()
-                .find(|s| s.text == "print")
-                .unwrap()
-                .category,
+            suggestions.iter().find(|s| s.text == "sorted").unwrap().category,
             "builtin"
         );
     }
@@ -371,11 +446,11 @@ mod tests {
     #[test]
     fn test_builtin_not_shadowed_by_variable() {
         let mut completer = CatnipCompleter::new();
-        // Simule le contexte Python qui exporte "print" comme variable
-        completer.set_variables(vec!["print".to_string(), "my_var".to_string()]);
-        let suggestions = completer.complete("pri", 3);
-        let print_s = suggestions.iter().find(|s| s.text == "print").unwrap();
-        assert_eq!(print_s.category, "builtin");
+        // Simule le contexte Python qui exporte "sorted" comme variable
+        completer.set_variables(vec!["sorted".to_string(), "my_var".to_string()]);
+        let suggestions = completer.complete("sor", 3);
+        let sorted_s = suggestions.iter().find(|s| s.text == "sorted").unwrap();
+        assert_eq!(sorted_s.category, "builtin");
     }
 
     #[test]
@@ -410,5 +485,145 @@ mod tests {
         assert_eq!(state.selected, 0); // wrap around
         state.select_prev();
         assert_eq!(state.selected, 1); // wrap back
+    }
+
+    #[test]
+    fn test_empty_line() {
+        let completer = CatnipCompleter::new();
+        let suggestions = completer.complete("", 0);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_command_no_match() {
+        let completer = CatnipCompleter::new();
+        let suggestions = completer.complete("/zzzz", 5);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_method_after_dot() {
+        let completer = CatnipCompleter::new();
+        // Dot completion triggers at cursor right after the dot
+        let suggestions = completer.complete("x.", 2);
+        let values: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(values.contains(&"upper"));
+        assert!(values.contains(&"lower"));
+        assert_eq!(
+            suggestions.iter().find(|s| s.text == "upper").unwrap().category,
+            "method"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_attrs_after_dot() {
+        let mut completer = CatnipCompleter::new();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(
+            "io".to_string(),
+            vec!["BytesIO".to_string(), "StringIO".to_string(), "open".to_string()],
+        );
+        completer.set_attrs(attrs);
+        completer.set_variables(vec!["io".to_string()]);
+
+        let suggestions = completer.complete("io.", 3);
+        let values: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(values.contains(&"BytesIO"));
+        assert!(values.contains(&"StringIO"));
+        assert!(values.contains(&"open"));
+        // Should NOT contain hardcoded str/list/dict methods
+        assert!(!values.contains(&"upper"));
+        assert!(!values.contains(&"append"));
+    }
+
+    #[test]
+    fn test_dynamic_attrs_with_prefix() {
+        let mut completer = CatnipCompleter::new();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(
+            "io".to_string(),
+            vec!["BytesIO".to_string(), "StringIO".to_string(), "open".to_string()],
+        );
+        completer.set_attrs(attrs);
+
+        let suggestions = completer.complete("io.St", 5);
+        let values: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(values, vec!["StringIO"]);
+    }
+
+    #[test]
+    fn test_unknown_var_falls_back_to_hardcoded() {
+        let completer = CatnipCompleter::new();
+        // No attrs set for "x", should fallback to str/list/dict methods
+        let suggestions = completer.complete("x.up", 4);
+        let values: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(values.contains(&"upper"));
+        assert!(values.contains(&"update"));
+    }
+
+    #[test]
+    fn test_completion_state_nav() {
+        let mut state = CompletionState::new();
+        for i in 0..3 {
+            state.suggestions.push(Completion {
+                text: format!("item{i}"),
+                category: "variable",
+                replace_start: 0,
+                replace_end: 1,
+            });
+        }
+        state.active = true;
+        assert_eq!(state.current().unwrap().text, "item0");
+        state.select_next();
+        assert_eq!(state.current().unwrap().text, "item1");
+        state.select_next();
+        assert_eq!(state.current().unwrap().text, "item2");
+        state.select_prev();
+        assert_eq!(state.current().unwrap().text, "item1");
+    }
+
+    #[test]
+    fn test_completion_state_wrap_prev() {
+        let mut state = CompletionState::new();
+        for name in ["a", "b", "c"] {
+            state.suggestions.push(Completion {
+                text: name.to_string(),
+                category: "variable",
+                replace_start: 0,
+                replace_end: 1,
+            });
+        }
+        state.active = true;
+        // At index 0, select_prev wraps to last
+        state.select_prev();
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.current().unwrap().text, "c");
+    }
+
+    #[test]
+    fn test_completion_state_empty() {
+        let mut state = CompletionState::new();
+        // Operations on empty state should not panic
+        state.select_next();
+        state.select_prev();
+        assert_eq!(state.selected, 0);
+        assert!(state.current().is_none());
+    }
+
+    #[test]
+    fn test_completion_state_reset() {
+        let mut state = CompletionState::new();
+        state.suggestions.push(Completion {
+            text: "x".to_string(),
+            category: "variable",
+            replace_start: 0,
+            replace_end: 1,
+        });
+        state.active = true;
+        state.selected = 0;
+        state.reset();
+        assert!(state.suggestions.is_empty());
+        assert_eq!(state.selected, 0);
+        assert!(!state.active);
     }
 }

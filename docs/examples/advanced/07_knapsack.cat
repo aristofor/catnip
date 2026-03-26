@@ -1,0 +1,94 @@
+#!/usr/bin/env catnip
+# Exemple : Knapsack (0/1)
+
+struct Item { name; weight; value; }
+
+items = list(
+    Item("compass", 1, 10),
+    Item("water", 3, 40),
+    Item("sandwich", 2, 30),
+    Item("glucose", 2, 25),
+    Item("banana", 1, 15),
+    Item("cream", 4, 50),
+    Item("notebook", 3, 35),
+)
+
+capacity = 8
+n = len(items)
+
+# Brute force (recursive, 2^n)
+
+print("⇒ Brute force")
+
+solve_bf = (i, w) => {
+    if i == 0 or w == 0 { 0 }
+    else {
+        item = items[i - 1]
+        if item.weight > w {
+            solve_bf(i - 1, w)
+        } else {
+            skip = solve_bf(i - 1, w)
+            take = item.value + solve_bf(i - 1, w - item.weight)
+            if take > skip { take } else { skip }
+        }
+    }
+}
+
+print(f"max value = {solve_bf(n, capacity)}")
+
+# ND-recursion with automatic memoization
+
+print("⇒ ND-memoized")
+
+pragma('nd_memoize', True)
+
+best = ~~(tuple(n, capacity), (state, recur) => {
+    i = state[0]
+    w = state[1]
+    if i == 0 or w == 0 { 0 }
+    else {
+        item = items[i - 1]
+        if item.weight > w { recur(tuple(i - 1, w)) }
+        else {
+            skip = recur(tuple(i - 1, w))
+            take = item.value + recur(tuple(i - 1, w - item.weight))
+            if take > skip { take } else { skip }
+        }
+    }
+})
+
+print(f"max value = {best}")
+
+# Backtracking: which items
+
+print("⇒ Selected items")
+
+backtrack = (i, w) => {
+    if i == 0 or w == 0 { list() }
+    else {
+        item = items[i - 1]
+        if item.weight > w {
+            backtrack(i - 1, w)
+        } else {
+            skip_val = solve_bf(i - 1, w)
+            take_val = item.value + solve_bf(i - 1, w - item.weight)
+            if take_val > skip_val {
+                backtrack(i - 1, w - item.weight) + list(item)
+            } else {
+                backtrack(i - 1, w)
+            }
+        }
+    }
+}
+
+selected = backtrack(n, capacity)
+total_weight = 0
+total_value = 0
+
+for item in selected {
+    print(f"  {item.name} (w={item.weight}, v={item.value})")
+    total_weight = total_weight + item.weight
+    total_value = total_value + item.value
+}
+
+print(f"total: weight={total_weight}, value={total_value}")

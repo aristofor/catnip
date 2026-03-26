@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Convex hull 2D (scan de Graham)
 #
 # Entrée : liste de Point{x, y}
@@ -10,16 +11,12 @@
 #   - Chan's algorithm (1996) : O(n log h), output-sensitive.
 #     Combine Graham sur des sous-groupes + Jarvis wrapping.
 # Voir aussi : quickhull.cat (divide & conquer, O(n log n) moyen)
-#
-# Exécution :
-#   catnip docs/codex/geometry/convex_hull.cat
-#
 
-builtins = import("builtins")
-math = import("math")
+builtins = import('builtins')
+math = import('math')
 
 struct Point {
-    x, y
+    x; y;
 
     # Produit vectoriel orienté (self→a) × (self→b)
     cross(self, a, b) => {
@@ -38,16 +35,10 @@ struct Point {
 
 # Point pivot : y minimal, puis x minimal
 find_pivot = (points) => {
-    p = points[0]
-    i = 1
-    while i < len(points) {
-        q = points[i]
-        if q.y < p.y or (q.y == p.y and q.x < p.x) {
-            p = q
-        }
-        i = i + 1
-    }
-    p
+    reduce(points, (p, q) => {
+            if q.y < p.y or (q.y == p.y and q.x < p.x) { q }
+            else { p }
+        })
 }
 
 graham_hull = (points) => {
@@ -63,10 +54,9 @@ graham_hull = (points) => {
             key=(p) => {
                 tuple(
                     math.atan2(p.y - pivot.y, p.x - pivot.x),
-                    pivot.sqdist(p)
+                    pivot.sqdist(p),
                 )
-            }
-        )
+            })
 
         stack = list()
         i = 0

@@ -8,12 +8,15 @@ from catnip import Catnip
 from catnip.semantic.opcode import OpCode
 
 
-@pytest.fixture
-def catnip():
-    return Catnip()
+def parse_ops(code):
+    """Parse code and return Op nodes for CFG analysis."""
+    c = Catnip()
+    c.parse(code)
+    ops = c._pipeline.prepared_ir_to_op()
+    return ops if isinstance(ops, list) else [ops]
 
 
-def test_reconstruct_while_loop(catnip):
+def test_reconstruct_while_loop():
     """Test reconstruction of while loop."""
     code = '''
 x = 0
@@ -21,7 +24,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'while')
     cfg.compute_dominators()
 
@@ -36,7 +39,7 @@ while x < 10 {
     assert len(while_ops) == 1, "Should have exactly one while operation"
 
 
-def test_reconstruct_if_else(catnip):
+def test_reconstruct_if_else():
     """Test reconstruction of if/else."""
     code = '''
 if x > 0 {
@@ -45,7 +48,7 @@ if x > 0 {
     y = 2
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'if_else')
     cfg.compute_dominators()
 
@@ -60,7 +63,7 @@ if x > 0 {
     assert len(if_ops) == 1, "Should have exactly one if operation"
 
 
-def test_reconstruct_nested_while(catnip):
+def test_reconstruct_nested_while():
     """Test reconstruction of nested while loops."""
     code = '''
 x = 0
@@ -72,7 +75,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'nested')
     cfg.compute_dominators()
 
@@ -88,7 +91,7 @@ while x < 10 {
     assert len(while_ops) >= 1, "Should have at least one while operation"
 
 
-def test_reconstruct_while_with_break(catnip):
+def test_reconstruct_while_with_break():
     """Test reconstruction of while loop with break."""
     code = '''
 x = 0
@@ -99,7 +102,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'break')
     cfg.compute_dominators()
 

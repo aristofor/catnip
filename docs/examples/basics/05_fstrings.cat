@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # F-strings : interpolation, format specs, conversion, debug
 
 # Interpolation basique

@@ -10,7 +10,8 @@ from catnip import Catnip, Context, pass_context
 
 def example_calculator():
     """Calculatrice qui garde l'historique des opérations."""
-    print("\n⇒ Exemple 1 : Calculatrice avec historique\n")
+    print()
+    print("⇒ Exemple 1 : Calculatrice avec historique\n")
 
     class Calculator:
         def __init__(self):
@@ -63,7 +64,8 @@ def example_calculator():
 
 def example_validation():
     """Système de validation de données avec règles personnalisées."""
-    print("\n⇒ Exemple 2 : Validation de données\n")
+    print()
+    print("⇒ Exemple 2 : Validation de données\n")
 
     class Validator:
         def __init__(self):
@@ -150,7 +152,8 @@ def example_validation():
 
 def example_templates():
     """Système simple de templates avec variables."""
-    print("\n⇒ Exemple 3 : Système de templates\n")
+    print()
+    print("⇒ Exemple 3 : Système de templates\n")
 
     def render(template, **variables):
         """Rend un template avec les variables fournies."""
@@ -202,7 +205,8 @@ def example_templates():
 
 def example_shared_state():
     """Démontre comment partager un état entre plusieurs exécutions."""
-    print("\n⇒ Exemple 4 : État partagé\n")
+    print()
+    print("⇒ Exemple 4 : État partagé\n")
 
     class Counter:
         def __init__(self):
@@ -249,7 +253,8 @@ def example_shared_state():
 
 def example_fluent_api():
     """Démontre une API fluente (method chaining)."""
-    print("\n⇒ Exemple 5 : API fluente\n")
+    print()
+    print("⇒ Exemple 5 : API fluente\n")
 
     class Query:
         def __init__(self):
@@ -302,7 +307,8 @@ def example_fluent_api():
 
 def example_math_extensions():
     """Ajoute des fonctions mathématiques avancées."""
-    print("\n⇒ Exemple 6 : Extensions mathématiques\n")
+    print()
+    print("⇒ Exemple 6 : Extensions mathématiques\n")
 
     import math
 

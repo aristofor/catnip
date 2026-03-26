@@ -1,0 +1,72 @@
+#!/usr/bin/env catnip
+# Calculatrice avec formules
+
+# Définir des fonctions mathématiques
+
+# Factorielle
+factorial = (n) => {
+    if n <= 1 { 1 }
+    else { n * factorial(n - 1) }
+}
+
+# Fibonacci
+fib = (n) => {
+    if n <= 1 { n }
+    else { fib(n - 1) + fib(n - 2) }
+}
+
+# Puissance
+pow = (base, exp) => {
+    if exp == 0 { 1 }
+    else { base * pow(base, exp - 1) }
+}
+
+# Somme d'une liste
+sum_list = (lst) => { fold(lst, 0, (acc, x) => { acc + x }) }
+
+# Moyenne d'une liste
+avg_list = (lst) => { sum_list(lst) / len(lst) }
+
+# Exemples de calculs
+print("Calculatrice Catnip")
+print()
+
+print("Factorielles :")
+print(f"  5! = {factorial(5)}")
+print(f"  7! = {factorial(7)}")
+print(f"  10! = {factorial(10)}")
+print()
+
+print("Fibonacci :")
+print(f"  fib(10) = {fib(10)}")
+print(f"  fib(15) = {fib(15)}")
+print(f"  fib(20) = {fib(20)}")
+print()
+
+print("Puissances :")
+print(f"  2^10 = {pow(2, 10)}")
+print(f"  3^5 = {pow(3, 5)}")
+print(f"  10^3 = {pow(10, 3)}")
+print()
+
+print("Statistiques :")
+numbers = list(10, 20, 30, 40, 50)
+print("  Liste : [10, 20, 30, 40, 50]")
+print(f"  Somme : {sum_list(numbers)}")
+print(f"  Moyenne : {avg_list(numbers)}")
+print()
+
+# Formule composée
+a      = 5
+b      = 3
+c      = 2
+result = a * pow(b, c) + factorial(4)
+
+print("Formule composée :")
+print(f"  a = {a}")
+print(f"  b = {b}")
+print(f"  c = {c}")
+print(f"  a * b^c + 4! = {a} * {b}^{c} + 24")
+print(f"  = {result}")
+
+result  # → 69

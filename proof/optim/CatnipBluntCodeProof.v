@@ -1,5 +1,5 @@
 (* FILE: proof/optim/CatnipBluntCodeProof.v *)
-(* Blunt Code — Boolean algebra simplifications.
+(* Blunt Code - Boolean algebra simplifications.
  *
  * Source: catnip_rs/src/semantic/blunt_code.rs
  *
@@ -25,7 +25,7 @@ Import ListNotations.
 
 
 (* ================================================================ *)
-(* C. Blunt Code — Boolean Algebra                                   *)
+(* C. Blunt Code - Boolean Algebra                                   *)
 (*                                                                    *)
 (* Simplifications from blunt_code.rs: double negation, comparison    *)
 (* inversion, boolean equality, idempotence, complement.              *)
@@ -62,7 +62,7 @@ Proof.
   destruct oc; simpl in H; try discriminate; simpl; eauto.
 Qed.
 
-(* Blunt code simplification — nested matches for Coq compatibility *)
+(* Blunt code simplification - nested matches for Coq compatibility *)
 Definition simplify_blunt (e : Expr) : Expr :=
   match e with
   | UnOp Not inner =>
@@ -275,7 +275,7 @@ Proof.
   destruct (n ?= m)%Z; reflexivity.
 Qed.
 
-(* Comparison inversion negates the result — all 6 ops at once *)
+(* Comparison inversion negates the result - all 6 ops at once *)
 Theorem invert_cmp_negates : forall op op' a b c,
   invert_cmp op = Some op' ->
   eval_cmp op a b = Some c ->

@@ -7,6 +7,7 @@ Tests the `catnip` builtin namespace for inspecting interpreter state.
 
 import pytest
 
+
 from catnip import Catnip, __version__
 
 
@@ -152,7 +153,7 @@ class TestRuntimeModuleTracking:
 
         cat.parse("catnip.modules")
         result = cat.execute()
-        assert result == ["math"]
+        assert result == ['math']
 
 
 class TestRuntimeRepr:

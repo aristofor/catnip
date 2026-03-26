@@ -5,7 +5,7 @@ Auto-generated from Tree-sitter grammar - DO NOT EDIT MANUALLY.
 Run `python -m catnip.tools.extract_grammar --update-lexer` to regenerate.
 """
 
-from pygments.lexer import RegexLexer, bygroups, words
+from pygments.lexer import RegexLexer, words
 from pygments.token import (
     Comment,
     Keyword,
@@ -14,7 +14,6 @@ from pygments.token import (
     Operator,
     Punctuation,
     String,
-    Text,
     Whitespace,
 )
 
@@ -46,7 +45,6 @@ class CatnipLexer(RegexLexer):
             (
                 words(
                     (
-                        'abs',
                         'and',
                         'break',
                         'continue',
@@ -57,6 +55,7 @@ class CatnipLexer(RegexLexer):
                         'if',
                         'implements',
                         'in',
+                        'is',
                         'match',
                         'not',
                         'op',
@@ -74,7 +73,26 @@ class CatnipLexer(RegexLexer):
             # Constants
             (words(('False', 'None', 'True'), suffix=r'\b'), Keyword.Constant),
             # Built-in types
-            (words(('dict', 'list', 'set', 'tuple'), suffix=r'\b'), Keyword.Type),
+            (
+                words(
+                    (
+                        'Decimal',
+                        'bool',
+                        'bytes',
+                        'complex',
+                        'dict',
+                        'float',
+                        'frozenset',
+                        'int',
+                        'list',
+                        'set',
+                        'str',
+                        'tuple',
+                    ),
+                    suffix=r'\b',
+                ),
+                Keyword.Type,
+            ),
             # F-strings
             (
                 r'[fF]("""(?:[^"\\]|\\.)*?"""' r"|'''(?:[^'\\]|\\.)*?'''" r'|"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*')",
@@ -97,12 +115,66 @@ class CatnipLexer(RegexLexer):
             # Broadcast operations
             (r'\.\[', Punctuation, 'broadcast'),
             # Operators (sorted by length for correct matching)
-            (r'(\~\[\]|\~\~|\~>|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            # Builtin functions
+            (
+                words(
+                    (
+                        'abs',
+                        'all',
+                        'any',
+                        'ascii',
+                        'bin',
+                        'callable',
+                        'chr',
+                        'delattr',
+                        'dir',
+                        'divmod',
+                        'enumerate',
+                        'filter',
+                        'fold',
+                        'format',
+                        'freeze',
+                        'getattr',
+                        'hasattr',
+                        'hash',
+                        'hex',
+                        'id',
+                        'input',
+                        'isinstance',
+                        'issubclass',
+                        'iter',
+                        'len',
+                        'map',
+                        'max',
+                        'min',
+                        'next',
+                        'oct',
+                        'ord',
+                        'pow',
+                        'print',
+                        'range',
+                        'reduce',
+                        'repr',
+                        'reversed',
+                        'round',
+                        'setattr',
+                        'slice',
+                        'sorted',
+                        'sum',
+                        'thaw',
+                        'vars',
+                        'zip',
+                    ),
+                    suffix=r'\b',
+                ),
+                Name.Builtin,
+            ),
             # Punctuation
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers (excluding keywords)
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|is|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),
@@ -119,7 +191,6 @@ class CatnipLexer(RegexLexer):
             (
                 words(
                     (
-                        'abs',
                         'and',
                         'break',
                         'continue',
@@ -130,6 +201,7 @@ class CatnipLexer(RegexLexer):
                         'if',
                         'implements',
                         'in',
+                        'is',
                         'match',
                         'not',
                         'op',
@@ -146,7 +218,26 @@ class CatnipLexer(RegexLexer):
             ),
             # Constants
             (words(('False', 'None', 'True'), suffix=r'\b'), Keyword.Constant),
-            (words(('dict', 'list', 'set', 'tuple'), suffix=r'\b'), Keyword.Type),
+            (
+                words(
+                    (
+                        'Decimal',
+                        'bool',
+                        'bytes',
+                        'complex',
+                        'dict',
+                        'float',
+                        'frozenset',
+                        'int',
+                        'list',
+                        'set',
+                        'str',
+                        'tuple',
+                    ),
+                    suffix=r'\b',
+                ),
+                Keyword.Type,
+            ),
             # Strings (F-strings and regular)
             (
                 r'[fF]("""(?:[^"\\]|\\.)*?"""' r"|'''(?:[^'\\]|\\.)*?'''" r'|"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*')",
@@ -166,12 +257,66 @@ class CatnipLexer(RegexLexer):
             # Lambda arrow
             (r'=>', Operator),
             # Operators
-            (r'(\~\[\]|\~\~|\~>|>>|>=|=>|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            # Builtin functions
+            (
+                words(
+                    (
+                        'abs',
+                        'all',
+                        'any',
+                        'ascii',
+                        'bin',
+                        'callable',
+                        'chr',
+                        'delattr',
+                        'dir',
+                        'divmod',
+                        'enumerate',
+                        'filter',
+                        'fold',
+                        'format',
+                        'freeze',
+                        'getattr',
+                        'hasattr',
+                        'hash',
+                        'hex',
+                        'id',
+                        'input',
+                        'isinstance',
+                        'issubclass',
+                        'iter',
+                        'len',
+                        'map',
+                        'max',
+                        'min',
+                        'next',
+                        'oct',
+                        'ord',
+                        'pow',
+                        'print',
+                        'range',
+                        'reduce',
+                        'repr',
+                        'reversed',
+                        'round',
+                        'setattr',
+                        'slice',
+                        'sorted',
+                        'sum',
+                        'thaw',
+                        'vars',
+                        'zip',
+                    ),
+                    suffix=r'\b',
+                ),
+                Name.Builtin,
+            ),
             # Punctuation (including nested brackets and braces)
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|is|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),

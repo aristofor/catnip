@@ -8,8 +8,10 @@ Les pragmas permettent de contrôler la compilation et l'exécution **sans chang
 
 - Un programme sans pragmas est valide et s'exécute correctement
 - Les pragmas ajustent performance ou debug, pas le comportement fonctionnel
-- Scope : fichier entier (pas de pragmas locaux à une fonction)
+- Scope : fichier entier (pas de pragmas locaux à une fonction) ; en REPL, l'état persiste entre les évaluations
 - Précédence : CLI > Fichier > Défaut
+- Résolution : les pragmas sont appliqués séquentiellement ; en cas de directives contradictoires dans un même fichier,
+  la dernière l'emporte
 
 **Cas d'usage typiques** :
 
@@ -32,20 +34,24 @@ Les pragmas sont des directives d'exécution qui contrôlent :
 
 ### Référence complète
 
-| Pragma          | Valeurs                                             | Défaut         | Description                           |
-| --------------- | --------------------------------------------------- | -------------- | ------------------------------------- |
-| `tco`           | `True`/`False`, `"on"`/`"off"`                      | `True`         | Optimisation des appels terminaux     |
-| `jit`           | `True`/`False`, `"on"`/`"off"`, `"all"`             | `False`        | Compilation JIT                       |
-| `optimize`      | `"0"`-`"3"`, `"none"`/`"basic"`/`"medium"`/`"high"` | `"3"`          | Niveau d'optimisation                 |
-| `cache`         | `True`/`False`, `"on"`/`"off"`                      | `True`         | Cache de compilation                  |
-| `debug`         | `True`/`False`, `"on"`/`"off"`                      | `False`        | Mode debug                            |
-| `pure`          | `"func_name"`                                       | --             | Marque une fonction comme pure        |
-| `inline`        | `"always"`/`"never"`/`"auto"`                       | `"auto"`       | Hint d'inlining pour une fonction     |
-| `warning`       | `"on"`/`"off"`                                      | `"on"`         | Contrôle les warnings du compilateur  |
-| `nd_mode`       | `"sequential"`/`"thread"`/`"process"`               | `"sequential"` | Mode d'exécution ND                   |
-| `nd_workers`    | `"0"`-`"N"`                                         | `"0"` (auto)   | Nombre de workers ND                  |
-| `nd_memoize`    | `"on"`/`"off"`                                      | `"off"`        | Mémoïsation ND                        |
-| `nd_batch_size` | `"0"`-`"N"`                                         | `"0"` (auto)   | Taille de lot pour parallélisation ND |
+| Pragma          | Valeurs                                  | Défaut          | Description                           |
+| --------------- | ---------------------------------------- | --------------- | ------------------------------------- |
+| `tco`           | `True`/`False`                           | `True`          | Optimisation des appels terminaux     |
+| `jit`           | `True`/`False`, `"all"`                  | `False`         | Compilation JIT                       |
+| `optimize`      | `0`-`3`                                  | `3`             | Niveau d'optimisation                 |
+| `cache`         | `True`/`False`                           | `True`          | Cache de compilation                  |
+| `debug`         | `True`/`False`                           | `False`         | Mode debug                            |
+| `pure`          | `"func_name"`                            | -               | Marque une fonction comme pure        |
+| `inline`        | `"always"`/`"never"`/`"auto"`            | `"auto"`        | Hint d'inlining pour une fonction     |
+| `warning`       | `True`/`False`                           | `True`          | Contrôle les warnings du compilateur  |
+| `nd_mode`       | `ND.sequential`/`ND.thread`/`ND.process` | `ND.sequential` | Mode d'exécution ND                   |
+| `nd_workers`    | `0`-`N`                                  | `0` (auto)      | Nombre de workers ND                  |
+| `nd_memoize`    | `True`/`False`                           | `False`         | Mémoïsation ND                        |
+| `nd_batch_size` | `0`-`N`                                  | `0` (auto)      | Taille de lot pour parallélisation ND |
+
+**Typage strict** : les pragmas booléens (`tco`, `jit`, `cache`, `debug`, `warning`, `nd_memoize`) n'acceptent que
+`True`/`False`. Les pragmas numériques (`optimize`, `nd_workers`, `nd_batch_size`) n'acceptent que des entiers. Toute
+autre valeur lève `CatnipPragmaError`. Les directives non reconnues sont rejetées à l'analyse sémantique.
 
 ## Syntaxe
 
@@ -111,7 +117,7 @@ Contrôle l'exécution et l'optimisation des opérateurs de ND-récursion (`~~`,
 | Opérateur          | Forme       | Description                                        | Exemple                                                                 |
 | ------------------ | ----------- | -------------------------------------------------- | ----------------------------------------------------------------------- |
 | `~~(seed, lambda)` | Combinator  | Exécute la ND-récursion avec une graine            | `~~(10, (n, r) => { if n <= 1 { 1 } else { n * r(n-1) } })` → `3628800` |
-| `~~ lambda`        | Déclaration | Crée une fonction ND-récursive réutilisable        | `countdown = ~~ (n, r) => { if n > 0 { r(n-1) } else { "done" } }`      |
+| `~~ lambda`        | Déclaration | Crée une fonction ND-récursive réutilisable        | `countdown = ~~(n, r) => { if n > 0 { r(n-1) } else { "done" } }`       |
 | `~>(data, f)`      | Applicatif  | Applique une fonction à des données en contexte ND | `~>(list(-1, -2, 3), abs)` → `[1, 2, 3]`                                |
 | `~> f`             | Lift        | Enveloppe une fonction dans le contexte ND         | `f = ~> abs; f(-5)` → `5`                                               |
 | `data.[~~ lambda]` | Diffusion   | Applique la ND-récursion à chaque élément          | `list(5, 3, 7).[~~ factorial]` → `[120, 6, 5040]`                       |
@@ -127,27 +133,30 @@ Contrôle l'exécution et l'optimisation des opérateurs de ND-récursion (`~~`,
 
 Contrôle le mode d'exécution pour la ND-récursion. Trois modes sont disponibles :
 
-| Mode         | Backend             | Mémoïsation   | Cas d'usage                  |
-| ------------ | ------------------- | ------------- | ---------------------------- |
-| `sequential` | Aucun               | Locale        | Debug, petits calculs        |
-| `thread`     | ThreadPoolExecutor  | Partagée      | I/O bound, mémoire partagée  |
-| `process`    | ProcessPoolExecutor | Par processus | CPU bound, vrai parallélisme |
+| Mode         | Backend                    | Mémoïsation   | Cas d'usage                  |
+| ------------ | -------------------------- | ------------- | ---------------------------- |
+| `sequential` | Aucun                      | Locale        | Debug, petits calculs        |
+| `thread`     | rayon (par_iter)           | Partagée      | I/O bound, mémoire partagée  |
+| `process`    | WorkerPool Rust (IPC) [^1] | Par processus | CPU bound, vrai parallélisme |
+
+\[^1\]: Pool de workers `catnip worker` avec IPC bincode sur pipes. Si la lambda ou ses captures ne sont pas freezables
+(struct instance, callback Python), fallback automatique vers `ProcessPoolExecutor` Python.
 
 **Syntaxe :**
 
 ```catnip
-pragma("nd_mode", "sequential")  # Exécution séquentielle (par défaut)
-pragma("nd_mode", "thread")      # Basé threads (mémoire partagée, limité par le GIL)
-pragma("nd_mode", "process")     # Basé processus (vrai parallélisme)
+pragma("nd_mode", ND.sequential)  # Exécution séquentielle (par défaut)
+pragma("nd_mode", ND.thread)      # Basé threads (mémoire partagée, limité par le GIL)
+pragma("nd_mode", ND.process)     # Basé processus (vrai parallélisme)
 ```
 
-Il n'y a qu'une seule syntaxe pour `nd_mode` - toujours utiliser le préfixe complet `"nd_mode"`.
+Les constantes `ND.*` sont des builtins disponibles sans import.
 
 **Exemples :**
 
 ```catnip
 # Mode séquentiel (par défaut)
-pragma("nd_mode", "sequential")
+pragma("nd_mode", ND.sequential)
 
 ~~(10, (n, recur) => {
     if n <= 1 { 1 }
@@ -158,8 +167,8 @@ pragma("nd_mode", "sequential")
 
 ```catnip
 # Mode thread - cache de mémoïsation partagé
-pragma("nd_mode", "thread")
-pragma("nd_memoize", "on")
+pragma("nd_mode", ND.thread)
+pragma("nd_memoize", True)
 
 # Fibonacci bénéficie du cache partagé entre threads
 ~~(30, (n, recur) => {
@@ -171,11 +180,11 @@ pragma("nd_memoize", "on")
 
 ```catnip
 # Mode process - vrai parallélisme pour les tâches CPU-bound
-pragma("nd_mode", "process")
-pragma("nd_workers", "8")
+pragma("nd_mode", ND.process)
+pragma("nd_workers", 8)
 
 # Chaque worker exécute indépendamment (mémoïsation NON partagée)
-list(5, 10, 15, 20).[~~ (n, recur) => {
+list(5, 10, 15, 20).[~~(n, recur) => {
     if n <= 1 { 1 }
     else { n * recur(n - 1) }
 }]
@@ -195,16 +204,16 @@ Configure le nombre de workers pour l'exécution parallèle.
 **Syntaxe :**
 
 ```catnip
-pragma("nd_workers", "0")   # Détection automatique (utilise le nombre de CPU)
-pragma("nd_workers", "4")   # Nombre de workers explicite
-pragma("nd_workers", "8")   # 8 workers
+pragma("nd_workers", 0)   # Détection automatique (utilise le nombre de CPU)
+pragma("nd_workers", 4)   # Nombre de workers explicite
+pragma("nd_workers", 8)   # 8 workers
 ```
 
 **Exemples :**
 
 ```catnip
-pragma("nd_mode", "process")
-pragma("nd_workers", "4")   # Utilise 4 workers
+pragma("nd_mode", ND.process)
+pragma("nd_workers", 4)   # Utilise 4 workers
 
 range(1, 101).[~> (x) => { x * 2 }]
 # → Répartit les items sur 4 workers
@@ -217,15 +226,15 @@ Active la mise en cache automatique des résultats de ND-récursion pour éviter
 **Syntaxe :**
 
 ```catnip
-pragma("nd_memoize", "on")    # Active la mémoïsation
-pragma("nd_memoize", "off")   # Désactive (par défaut)
+pragma("nd_memoize", True)    # Active la mémoïsation
+pragma("nd_memoize", False)   # Désactive (par défaut)
 ```
 
 **Exemples :**
 
 ```catnip
 # Sans mémoïsation - lent (O(2^n))
-pragma("nd_memoize", "off")
+pragma("nd_memoize", False)
 
 ~~(25, (n, recur) => {
     if n <= 1 { n }
@@ -236,7 +245,7 @@ pragma("nd_memoize", "off")
 
 ```catnip
 # Avec mémoïsation - rapide (O(n))
-pragma("nd_memoize", "on")
+pragma("nd_memoize", True)
 
 ~~(25, (n, recur) => {
     if n <= 1 { n }
@@ -259,8 +268,8 @@ Contrôle la granularité des lots pour l'exécution parallèle.
 **Syntaxe :**
 
 ```catnip
-pragma("nd_batch_size", "0")   # Calcul automatique (par défaut)
-pragma("nd_batch_size", "10")  # Taille de lot explicite
+pragma("nd_batch_size", 0)   # Calcul automatique (par défaut)
+pragma("nd_batch_size", 10)  # Taille de lot explicite
 ```
 
 **Calcul automatique :**
@@ -273,20 +282,20 @@ pragma("nd_batch_size", "10")  # Taille de lot explicite
 <!-- check: no-check -->
 
 ```catnip
-pragma("nd_mode", "process")
-pragma("nd_workers", "8")
-pragma("nd_batch_size", "0")  # Auto : ~4 lots/worker
+pragma("nd_mode", ND.process)
+pragma("nd_workers", 8)
+pragma("nd_batch_size", 0)  # Auto : ~4 lots/worker
 
 # 100 éléments → batch_size = ceil(100/32) = 4
 # Crée ~25 lots pour un équilibrage optimal
-range(1, 101).[~~ (n, recur) => { ... }]
+range(1, 101).[~~(n, recur) => { ... }]
 ```
 
 <!-- check: no-check -->
 
 ```catnip
 # Taille de lot explicite pour un contrôle fin
-pragma("nd_batch_size", "10")
+pragma("nd_batch_size", 10)
 
 # Traite 10 éléments par lot
 large_collection.[~> expensive_function]
@@ -301,16 +310,16 @@ large_collection.[~> expensive_function]
 
 ```catnip
 # Pile d'optimisations ND complète
-pragma("nd_mode", "process")
-pragma("nd_workers", "8")
-pragma("nd_memoize", "on")
-pragma("nd_batch_size", "10")
+pragma("nd_mode", ND.process)
+pragma("nd_workers", 8)
+pragma("nd_memoize", True)
+pragma("nd_batch_size", 10)
 
 # Fibonacci sur une collection avec des doublons
 # - Parallèle : utilise 8 workers
 # - Mémoïsation : met en cache les résultats (gain sur les doublons)
 # - Batching : 10 éléments/lot pour l'équilibrage
-list(10, 12, 10, 15, 12, 20, 10).[~~ (n, recur) => {
+list(10, 12, 10, 15, 12, 20, 10).[~~(n, recur) => {
     if n <= 1 { n }
     else { recur(n - 1) + recur(n - 2) }
 }]
@@ -326,18 +335,16 @@ Contrôle le comportement de compilation JIT.
 ```catnip
 pragma("jit", True)    # Active le JIT (détection de boucles chaudes)
 pragma("jit", False)   # Désactive le JIT
-pragma("jit", "on")    # Active le JIT (forme chaîne)
-pragma("jit", "off")   # Désactive le JIT (forme chaîne)
 pragma("jit", "all")   # Active le JIT ET compile TOUTES les fonctions immédiatement
 ```
 
 **Valeurs :**
 
-| Valeur           | Effet                                                               |
-| ---------------- | ------------------------------------------------------------------- |
-| `True`, `"on"`   | Active le JIT avec détection de boucles chaudes (seuil ~100 appels) |
-| `False`, `"off"` | Désactive la compilation JIT                                        |
-| `"all"`          | Force la compilation JIT immédiate pour TOUTES les fonctions        |
+| Valeur  | Effet                                                               |
+| ------- | ------------------------------------------------------------------- |
+| `True`  | Active le JIT avec détection de boucles chaudes (seuil ~100 appels) |
+| `False` | Désactive la compilation JIT                                        |
+| `"all"` | Force la compilation JIT immédiate pour TOUTES les fonctions        |
 
 **Exemple :**
 
@@ -400,10 +407,10 @@ Contrôle le niveau d'optimisation (effet actuellement minimal).
 <!-- check: no-check -->
 
 ```catnip
-pragma("optimize", "0")  # Pas d'optimisation
-pragma("optimize", "1")  # Optimisation basique
-pragma("optimize", "2")  # Optimisation modérée
-pragma("optimize", "3")  # Optimisation agressive
+pragma("optimize", 0)  # Pas d'optimisation
+pragma("optimize", 1)  # Optimisation basique
+pragma("optimize", 2)  # Optimisation modérée
+pragma("optimize", 3)  # Optimisation agressive
 ```
 
 ### Cache
@@ -469,14 +476,14 @@ Contrôle les warnings émis par le compilateur.
 **Syntaxe :**
 
 ```catnip
-pragma("warning", "off")                 # Désactiver tous les warnings
-pragma("warning", "on")                  # Activer tous les warnings (défaut)
+pragma("warning", False)                 # Désactiver tous les warnings
+pragma("warning", True)                  # Activer tous les warnings (défaut)
 ```
 
 <!-- check: no-check -->
 
 ```catnip
-pragma("warning", "off", name="unused")  # Désactiver un warning spécifique
+pragma("warning", False, name="unused")  # Désactiver un warning spécifique
 ```
 
 ## Exemples

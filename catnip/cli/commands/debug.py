@@ -6,10 +6,10 @@ import sys
 import click
 
 
-@click.command("debug")
-@click.argument("file", type=click.Path(exists=True), required=False)
-@click.option("--break", "-b", "breaklines", multiple=True, type=int, help="Line numbers to break at")
-@click.option("-c", "--command", "code", help="Code string to debug (instead of file)")
+@click.command('debug')
+@click.argument('file', type=click.Path(exists=True), required=False)
+@click.option('--break', '-b', 'breaklines', multiple=True, type=int, help="Line numbers to break at")
+@click.option('-c', '--command', 'code', help="Code string to debug (instead of file)")
 @click.pass_context
 def cmd_debug(ctx, file, breaklines, code):
     """Start an interactive debug session."""
@@ -33,11 +33,14 @@ def cmd_debug(ctx, file, breaklines, code):
         no_color=opts.get('no_color', False),
         optimizations=opts.get('optimizations', ()),
         modules=opts.get('modules', ()),
+        mode='cli',
     )
 
     session = DebugSession(catnip, source)
     for line in breaklines:
         session.add_breakpoint(line)
 
-    debugger = ConsoleDebugger(session, no_color=opts.get('no_color', False))
-    debugger.run()
+    debugger = ConsoleDebugger(session, no_color=opts.get('no_color', False), filename=file)
+    exit_code = debugger.run()
+    if exit_code:
+        sys.exit(exit_code)

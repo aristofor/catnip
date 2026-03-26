@@ -1,4 +1,5 @@
-# Exemple 3 : Fonctions
+#!/usr/bin/env catnip
+# Exemple : Fonctions
 
 print("⇒ Fonctions simples")
 
@@ -26,7 +27,8 @@ mantra()
 mantra("Alice")
 mantra("Bob")
 
-print("\n⇒ Fonctions mathématiques")
+print()
+print("⇒ Fonctions mathématiques")
 
 # Fonction pour calculer le carré
 carre = (x) => {
@@ -50,7 +52,8 @@ puissance = (base, exposant) => {
 print("2^10 =", puissance(2, 10))
 print("3^4 =", puissance(3, 4))
 
-print("\n⇒ Fonction récursive (avec while)")
+print()
+print("⇒ Fonction récursive (avec while)")
 
 # Factorielle utilisant une boucle
 factorielle = (n) => {

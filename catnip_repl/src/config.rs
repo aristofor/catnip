@@ -78,8 +78,7 @@ impl Default for ReplConfig {
             color_success: hex(constants::ui_colors::SUCCESS),
             color_dim: hex(constants::ui_colors::DIM),
 
-            welcome_message: constants::REPL_WELCOME_TEMPLATE
-                .replace("{version}", env!("CARGO_PKG_VERSION")),
+            welcome_message: constants::REPL_WELCOME_TEMPLATE.replace("{version}", env!("CARGO_PKG_VERSION")),
 
             show_parse_time: false,
             show_exec_time: false,
@@ -116,9 +115,6 @@ impl ReplConfig {
     }
 }
 
-/// Help text
-pub const HELP_TEXT: &str = catnip_rs::constants::REPL_HELP_TEXT;
-
 /// Version info
 pub fn version_info() -> String {
     format!(
@@ -126,11 +122,7 @@ pub fn version_info() -> String {
          Build: {} mode\n\
          Features: JIT (Cranelift), NaN-boxing VM, Rust builtins",
         env!("CARGO_PKG_VERSION"),
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
+        if cfg!(debug_assertions) { "debug" } else { "release" }
     )
 }
 
@@ -142,14 +134,14 @@ mod tests {
     fn test_default_config() {
         let config = ReplConfig::default();
         assert_eq!(config.prompt_main, "▸ ");
-        assert_eq!(config.enable_jit, true);
+        assert!(config.enable_jit);
         assert_eq!(config.jit_threshold, 100);
     }
 
     #[test]
     fn test_custom_config() {
         let config = ReplConfig::default().verbose().with_jit_threshold(50);
-        assert_eq!(config.show_parse_time, true);
+        assert!(config.show_parse_time);
         assert_eq!(config.jit_threshold, 50);
     }
 }

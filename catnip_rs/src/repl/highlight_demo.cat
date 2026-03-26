@@ -72,7 +72,7 @@ length = len(items)
 text = str(42)
 number = int("123")
 decimal = float("3.14")
-typeof = type(value)
+typeof = typeof(value)
 absolute = abs(-10)
 numbers = range(10)
 
@@ -91,5 +91,5 @@ add = (x, y) => x + y
 square = (n) => n * n
 
 # Pragmas
-pragma("tco", True)
-pragma("jit", "on")
+pragma('tco', True)
+pragma('jit', True)

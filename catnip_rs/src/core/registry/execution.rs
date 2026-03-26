@@ -4,6 +4,7 @@
 //! This module contains the heart of the Catnip execution engine.
 
 use super::Registry;
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -37,6 +38,11 @@ impl Registry {
             return self.exec_op(py, stmt_bound);
         }
 
+        // Handle Call nodes (function calls)
+        if type_name == catnip::CALL {
+            return self.exec_call_node(py, stmt_bound);
+        }
+
         // Handle Ref nodes (identifier references)
         if type_name == catnip::REF {
             let ident: String = stmt_bound.getattr("ident")?.extract()?;
@@ -46,16 +52,61 @@ impl Registry {
                 Some(value) => return Ok(value),
                 None => {
                     // Should not happen if check=true, but handle gracefully
-                    return Err(PyErr::new::<pyo3::exceptions::PyNameError, _>(format!(
-                        "name '{}' is not defined",
-                        ident
-                    )));
+                    return Err(PyErr::new::<pyo3::exceptions::PyNameError, _>(
+                        catnip_core::constants::format_name_error(&ident),
+                    ));
                 }
             }
         }
 
         // Default: return literal as-is
         Ok(stmt)
+    }
+
+    /// Execute a Call node (func, args, kwargs).
+    fn exec_call_node(&self, py: Python<'_>, call: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let func_expr = call.getattr("func")?;
+        let func = self.exec_stmt_impl(py, func_expr.unbind())?;
+
+        let call_args = call.getattr("args")?;
+        let call_args_tuple = call_args.cast::<PyTuple>()?;
+        let mut eval_args: Vec<Py<PyAny>> = Vec::with_capacity(call_args_tuple.len());
+        for i in 0..call_args_tuple.len() {
+            let evaluated = self.exec_stmt_impl(py, call_args_tuple.get_item(i)?.unbind())?;
+            eval_args.push(evaluated);
+        }
+
+        let call_kwargs = call.getattr("kwargs")?;
+
+        // Check if function needs context passed
+        let pass_context = func
+            .bind(py)
+            .getattr("pass_context")
+            .map(|attr| attr.is_truthy().unwrap_or(false))
+            .unwrap_or(false);
+
+        let py_args = if pass_context {
+            let ctx = self.ctx.clone_ref(py);
+            let mut ctx_args = vec![ctx];
+            ctx_args.extend(eval_args);
+            PyTuple::new(py, &ctx_args)?
+        } else {
+            PyTuple::new(py, &eval_args)?
+        };
+
+        if call_kwargs.is_none() || call_kwargs.len()? == 0 {
+            func.call1(py, py_args)
+        } else {
+            let eval_kwargs = PyDict::new(py);
+            for item in call_kwargs.call_method0("items")?.try_iter()? {
+                let item = item?;
+                let key = item.get_item(0)?;
+                let value = item.get_item(1)?;
+                let eval_val = self.exec_stmt_impl(py, value.unbind())?;
+                eval_kwargs.set_item(key, eval_val)?;
+            }
+            func.call(py, py_args, Some(&eval_kwargs))
+        }
     }
 
     /// Execute an Op node
@@ -83,55 +134,25 @@ impl Registry {
 
             // Fast arithmetic dispatch
             if ident == op_cache.add {
-                return val0
-                    .bind(py)
-                    .call_method1("__add__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__add__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.sub {
-                return val0
-                    .bind(py)
-                    .call_method1("__sub__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__sub__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.mul {
-                return val0
-                    .bind(py)
-                    .call_method1("__mul__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__mul__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.truediv {
-                return val0
-                    .bind(py)
-                    .call_method1("__truediv__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__truediv__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.lt {
-                return val0
-                    .bind(py)
-                    .call_method1("__lt__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__lt__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.gt {
-                return val0
-                    .bind(py)
-                    .call_method1("__gt__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__gt__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.le {
-                return val0
-                    .bind(py)
-                    .call_method1("__le__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__le__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.ge {
-                return val0
-                    .bind(py)
-                    .call_method1("__ge__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__ge__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.eq {
-                return val0
-                    .bind(py)
-                    .call_method1("__eq__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__eq__", (val1,)).map(|r| r.unbind());
             } else if ident == op_cache.ne {
-                return val0
-                    .bind(py)
-                    .call_method1("__ne__", (val1,))
-                    .map(|r| r.unbind());
+                return val0.bind(py).call_method1("__ne__", (val1,)).map(|r| r.unbind());
             }
         }
 
@@ -180,7 +201,7 @@ impl Registry {
             }
 
             // Special case: CALL needs the node passed as _node kwarg
-            let opcode_module = py.import("catnip.semantic.opcode")?;
+            let opcode_module = py.import(PY_MOD_SEMANTIC_OPCODE)?;
             let opcode_class = opcode_module.getattr("OpCode")?;
             let call_value: i32 = opcode_class.getattr("CALL")?.extract()?;
 
@@ -221,12 +242,7 @@ impl Registry {
 
     /// Try to dispatch to a Rust-implemented operation
     /// Returns Some(result) if handled, None if not implemented in Rust
-    fn try_rust_dispatch(
-        &self,
-        py: Python<'_>,
-        opcode: i32,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    fn try_rust_dispatch(&self, py: Python<'_>, opcode: i32, args: &Bound<'_, PyTuple>) -> PyResult<Option<Py<PyAny>>> {
         // Use cached OpCode values for fast comparison
         let op = &self.opcodes;
 
@@ -270,6 +286,8 @@ impl Registry {
             return Ok(Some(self.op_bool_or(py, args)?));
         } else if opcode == op.and {
             return Ok(Some(self.op_bool_and(py, args)?));
+        } else if opcode == op.null_coalesce {
+            return Ok(Some(self.op_null_coalesce(py, args)?));
         } else if opcode == op.lt {
             return Ok(Some(self.op_lt(py, args)?));
         } else if opcode == op.le {
@@ -282,6 +300,14 @@ impl Registry {
             return Ok(Some(self.op_eq(py, args)?));
         } else if opcode == op.ne {
             return Ok(Some(self.op_ne(py, args)?));
+        } else if opcode == op.in_ {
+            return Ok(Some(self.op_in(py, args)?));
+        } else if opcode == op.not_in {
+            return Ok(Some(self.op_not_in(py, args)?));
+        } else if opcode == op.is_ {
+            return Ok(Some(self.op_is(py, args)?));
+        } else if opcode == op.is_not {
+            return Ok(Some(self.op_is_not(py, args)?));
         }
         // Bitwise operations
         else if opcode == op.bor {
@@ -370,10 +396,73 @@ impl Registry {
         else if opcode == op.trait_def {
             return Ok(Some(self.op_trait_def(py, args)?));
         }
+        // Intrinsics
+        else if opcode == op.type_of && args.len() >= 1 {
+            let val = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?;
+            return Ok(Some(self.op_type_of(py, &val)?));
+        } else if opcode == op.globals {
+            return Ok(Some(self.op_globals(py)?));
+        } else if opcode == op.locals {
+            return Ok(Some(self.op_locals(py)?));
+        }
 
         // Not implemented in Rust, fall back to Python
         // Note: OP_LAMBDA uses special bound_self signature, handled via Python fallback
         Ok(None)
+    }
+
+    /// Globals intrinsic: return copy of the globals dict
+    pub(crate) fn op_globals(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let ctx = self.ctx.bind(py);
+        let globals = ctx.getattr("globals")?;
+        let dict = globals.cast::<pyo3::types::PyDict>()?;
+        Ok(dict.copy()?.into_any().unbind())
+    }
+
+    /// Locals intrinsic: return current scope locals as dict
+    pub(crate) fn op_locals(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let ctx = self.ctx.bind(py);
+        let locals_scope = ctx.getattr("locals")?;
+        locals_scope.call_method0("items").map(|v| v.unbind())
+    }
+
+    /// TypeOf intrinsic: return type name as string
+    pub(crate) fn op_type_of(&self, py: Python<'_>, val: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let obj = val.bind(py);
+        let type_str = if obj.is_none() {
+            "nil"
+        } else if obj.is_instance_of::<pyo3::types::PyBool>() {
+            "bool"
+        } else if obj.is_instance_of::<pyo3::types::PyInt>() {
+            "int"
+        } else if obj.is_instance_of::<pyo3::types::PyFloat>() {
+            "float"
+        } else if obj.is_instance_of::<pyo3::types::PyString>() {
+            "string"
+        } else if obj.is_instance_of::<pyo3::types::PyList>() {
+            "list"
+        } else if obj.is_instance_of::<pyo3::types::PyTuple>() {
+            "tuple"
+        } else if obj.is_instance_of::<pyo3::types::PyDict>() {
+            "dict"
+        } else if obj.is_instance_of::<pyo3::types::PySet>() || obj.is_instance_of::<pyo3::types::PyFrozenSet>() {
+            "set"
+        } else if let Ok(proxy) = obj.cast::<crate::vm::structs::CatnipStructProxy>() {
+            let name = proxy.borrow().type_name.clone();
+            return Ok(pyo3::types::PyString::intern(py, &name).into_any().unbind());
+        } else if obj.is_callable() {
+            "function"
+        } else {
+            // Catnip convention: lowercase type names
+            let class_name: String = obj
+                .get_type()
+                .qualname()
+                .and_then(|n| n.extract())
+                .unwrap_or_else(|_| "object".to_string());
+            let catnip_name = class_name.to_ascii_lowercase();
+            return Ok(pyo3::types::PyString::new(py, &catnip_name).into_any().unbind());
+        };
+        Ok(pyo3::types::PyString::intern(py, type_str).into_any().unbind())
     }
 
     /// Look up an operation by its OpCode
@@ -394,12 +483,7 @@ impl Registry {
     }
 
     /// Resolve an identifier from locals/globals
-    pub(crate) fn resolve_ident_impl(
-        &self,
-        py: Python<'_>,
-        ident: &str,
-        check: bool,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    pub(crate) fn resolve_ident_impl(&self, py: Python<'_>, ident: &str, check: bool) -> PyResult<Option<Py<PyAny>>> {
         // Special case: '_' returns last result
         if ident == "_" {
             let ctx = self.ctx.bind(py);
@@ -436,14 +520,15 @@ impl Registry {
         if check {
             // Try to suggest a similar name
             let suggestion = self.suggest_name(py, ident)?;
+            let base_msg = catnip_core::constants::format_name_error(ident);
             let error_msg = if let Some(sugg) = suggestion {
-                format!("name '{}' is not defined. Did you mean '{}'?", ident, sugg)
+                format!("{base_msg}. Did you mean '{sugg}'?")
             } else {
-                format!("name '{}' is not defined", ident)
+                base_msg
             };
 
             // Use CatnipNameError for better error handling
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let catnip_name_error = exc_module.getattr("CatnipNameError")?;
             Err(PyErr::from_value(catnip_name_error.call1((error_msg,))?))
         } else {
@@ -465,14 +550,12 @@ impl Registry {
         if let Ok(locals) = ctx.getattr("locals") {
             if let Ok(items) = locals.call_method0("items") {
                 if let Ok(items_iter) = items.try_iter() {
-                    for item in items_iter {
-                        if let Ok(i) = item {
-                            // item is a (key, value) tuple
-                            if let Ok(tuple) = i.cast::<PyTuple>() {
-                                if let Ok(key) = tuple.get_item(0) {
-                                    if let Ok(name) = key.extract::<String>() {
-                                        available.push(name);
-                                    }
+                    for i in items_iter.flatten() {
+                        // item is a (key, value) tuple
+                        if let Ok(tuple) = i.cast::<PyTuple>() {
+                            if let Ok(key) = tuple.get_item(0) {
+                                if let Ok(name) = key.extract::<String>() {
+                                    available.push(name);
                                 }
                             }
                         }
@@ -505,11 +588,7 @@ impl Registry {
     }
 
     /// Handle Broadcast nodes
-    pub fn handle_broadcast(
-        &self,
-        py: Python<'_>,
-        broadcast_node: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    pub fn handle_broadcast(&self, py: Python<'_>, broadcast_node: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // Extract target, operator, operand from Broadcast node
         let node = broadcast_node.bind(py);
         let target = node.getattr("target")?;
@@ -565,7 +644,7 @@ impl Registry {
         operand: Py<PyAny>,
         is_filter: bool,
     ) -> PyResult<Py<PyAny>> {
-        use crate::core::registry::broadcast;
+        use crate::core::broadcast;
 
         let target_bound = target.bind(py);
         let operator_bound = operator.bind(py);
@@ -586,12 +665,9 @@ impl Registry {
             // SIMD fast path pour filtres numériques
             if let Ok(op_str) = operator_bound.cast::<pyo3::types::PyString>() {
                 if let Some(operand_ref) = operand_opt {
-                    if let Some(result) = broadcast::simd::try_simd_filter(
-                        py,
-                        target_bound,
-                        op_str.to_str().unwrap_or(""),
-                        operand_ref,
-                    ) {
+                    if let Some(result) =
+                        broadcast::simd::try_simd_filter(py, target_bound, op_str.to_str().unwrap_or(""), operand_ref)
+                    {
                         return result;
                     }
                 }
@@ -599,16 +675,11 @@ impl Registry {
 
             // Build condition function from operator and operand
             // Create exec_func closure that calls self.exec_stmt_impl
-            let exec_func_closure = |stmt: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
-                self.exec_stmt_impl(py, stmt.clone().unbind())
-            };
+            let exec_func_closure =
+                |stmt: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> { self.exec_stmt_impl(py, stmt.clone().unbind()) };
 
-            let condition_func = self.make_condition_func_internal(
-                py,
-                operator_bound,
-                operand_opt,
-                exec_func_closure,
-            )?;
+            let condition_func =
+                self.make_condition_func_internal(py, operator_bound, operand_opt, exec_func_closure)?;
             return broadcast::filter_conditional(py, target_bound, condition_func.bind(py));
         }
 
@@ -633,9 +704,7 @@ impl Registry {
                     return broadcast::filter_by_mask(py, target_bound, &mask);
                 }
 
-                if mask.is_instance_of::<pyo3::types::PyList>()
-                    || mask.is_instance_of::<pyo3::types::PyTuple>()
-                {
+                if mask.is_instance_of::<pyo3::types::PyList>() || mask.is_instance_of::<pyo3::types::PyTuple>() {
                     return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                         "Mask must be a list or tuple of booleans, got {} with non-boolean elements",
                         mask.get_type().name()?
@@ -647,15 +716,9 @@ impl Registry {
         // CASE 3: Map mode (normal broadcast)
         if operator_bound.is_callable() {
             // Check if function is marked as pure (has is_pure attribute)
-            if let Ok(true) = operator_bound
-                .getattr("is_pure")
-                .and_then(|attr| attr.is_truthy())
-            {
+            if let Ok(true) = operator_bound.getattr("is_pure").and_then(|attr| attr.is_truthy()) {
                 // Add function name to context.pure_functions
-                if let Ok(func_name) = operator_bound
-                    .getattr("__name__")
-                    .and_then(|n| n.extract::<String>())
-                {
+                if let Ok(func_name) = operator_bound.getattr("__name__").and_then(|n| n.extract::<String>()) {
                     let ctx_bound = self.ctx.bind(py);
                     if let Ok(pure_funcs) = ctx_bound.getattr("pure_functions") {
                         let _ = pure_funcs.call_method1("add", (func_name,));
@@ -668,13 +731,7 @@ impl Registry {
         // Handle string operators
         if let Ok(op_str) = operator_bound.cast::<pyo3::types::PyString>() {
             let op_str_val = op_str.to_str()?;
-            return self.broadcast_string_op_internal(
-                py,
-                target_bound,
-                op_str_val,
-                operand_opt,
-                &ctx_globals,
-            );
+            return self.broadcast_string_op_internal(py, target_bound, op_str_val, operand_opt, &ctx_globals);
         }
 
         // If operator is an expression node, evaluate it first
@@ -741,11 +798,7 @@ impl Registry {
                 locals.set_item("__op_func__", op_func_bound)?;
                 locals.set_item("__operand__", operand)?;
                 return py
-                    .eval(
-                        c"lambda x: __op_func__(x, __operand__)",
-                        Some(&locals),
-                        Some(&locals),
-                    )
+                    .eval(c"lambda x: __op_func__(x, __operand__)", Some(&locals), Some(&locals))
                     .map(|o| o.unbind());
             }
 
@@ -757,9 +810,7 @@ impl Registry {
             // Logical operators
             if op_str_val == OP_AND {
                 let operand = operand.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "Filter operator 'and' requires an operand",
-                    )
+                    pyo3::exceptions::PyValueError::new_err("Filter operator 'and' requires an operand")
                 })?;
                 let locals = PyDict::new(py);
                 locals.set_item("__operand__", operand)?;
@@ -770,9 +821,7 @@ impl Registry {
 
             if op_str_val == OP_OR {
                 let operand = operand.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(
-                        "Filter operator 'or' requires an operand",
-                    )
+                    pyo3::exceptions::PyValueError::new_err("Filter operator 'or' requires an operand")
                 })?;
                 let locals = PyDict::new(py);
                 locals.set_item("__operand__", operand)?;
@@ -809,33 +858,21 @@ impl Registry {
         operand: Option<&Bound<'_, PyAny>>,
         ctx_globals: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::core::registry::broadcast;
+        use crate::core::broadcast;
 
         // Handle ND operators (~~, ~>) via shared broadcast_nd_* methods
         if operator == "~~" {
             let operand_bound = operand.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "ND operator '~~' requires an operand (lambda or function)",
-                )
+                pyo3::exceptions::PyValueError::new_err("ND operator '~~' requires an operand (lambda or function)")
             })?;
-            return self.broadcast_nd_recursion(
-                py,
-                target.clone().unbind(),
-                operand_bound.clone().unbind(),
-            );
+            return self.broadcast_nd_recursion(py, target.clone().unbind(), operand_bound.clone().unbind());
         }
 
         if operator == "~>" {
             let operand_bound = operand.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "ND operator '~>' requires an operand (function)",
-                )
+                pyo3::exceptions::PyValueError::new_err("ND operator '~>' requires an operand (function)")
             })?;
-            return self.broadcast_nd_map(
-                py,
-                target.clone().unbind(),
-                operand_bound.clone().unbind(),
-            );
+            return self.broadcast_nd_map(py, target.clone().unbind(), operand_bound.clone().unbind());
         }
 
         // Check if operator is a function name in globals
@@ -845,9 +882,7 @@ impl Registry {
                     // Check if function is marked as pure (has is_pure attribute)
                     if let Ok(true) = func.getattr("is_pure").and_then(|attr| attr.is_truthy()) {
                         // Add function name to context.pure_functions
-                        if let Ok(func_name) =
-                            func.getattr("__name__").and_then(|n| n.extract::<String>())
-                        {
+                        if let Ok(func_name) = func.getattr("__name__").and_then(|n| n.extract::<String>()) {
                             let ctx_bound = self.ctx.bind(py);
                             if let Ok(pure_funcs) = ctx_bound.getattr("pure_functions") {
                                 let _ = pure_funcs.call_method1("add", (func_name,));
@@ -861,8 +896,7 @@ impl Registry {
 
         // SIMD fast path pour listes numériques homogènes
         if let Some(operand_bound) = operand {
-            if let Some(result) = broadcast::simd::try_simd_map(py, target, operator, operand_bound)
-            {
+            if let Some(result) = broadcast::simd::try_simd_map(py, target, operator, operand_bound) {
                 return result;
             }
         }
@@ -870,61 +904,9 @@ impl Registry {
         // Binary operators
         if let Some(op_func) = self.get_binary_op(py, operator)? {
             let operand = operand.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Binary operator '{}' requires an operand",
-                    operator
-                ))
+                pyo3::exceptions::PyValueError::new_err(format!("Binary operator '{}' requires an operand", operator))
             })?;
-
-            // Element-wise for list/tuple operands
-            if operand.is_instance_of::<pyo3::types::PyList>()
-                || operand.is_instance_of::<pyo3::types::PyTuple>()
-            {
-                if !target.is_instance_of::<pyo3::types::PyList>()
-                    && !target.is_instance_of::<pyo3::types::PyTuple>()
-                {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                        "Cannot broadcast {} with {}",
-                        target.get_type().name()?,
-                        operand.get_type().name()?
-                    )));
-                }
-                let target_len = target.len()?;
-                let operand_len = operand.len()?;
-                if target_len != operand_len {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Broadcast size mismatch: {} vs {}",
-                        target_len, operand_len
-                    )));
-                }
-
-                let target_is_tuple = target.is_instance_of::<pyo3::types::PyTuple>();
-                let result_list = pyo3::types::PyList::empty(py);
-
-                for (t, o) in target.try_iter()?.zip(operand.try_iter()?) {
-                    let res = op_func.call1(py, (t?, o?))?;
-                    result_list.append(res)?;
-                }
-
-                return if target_is_tuple {
-                    Ok(pyo3::types::PyTuple::new(py, &result_list)?
-                        .into_any()
-                        .unbind())
-                } else {
-                    Ok(result_list.into())
-                };
-            }
-
-            // Scalar operand
-            let locals = PyDict::new(py);
-            locals.set_item("__op_func__", op_func.bind(py))?;
-            locals.set_item("__operand__", operand)?;
-            let lambda = py.eval(
-                c"lambda x: __op_func__(x, __operand__)",
-                Some(&locals),
-                Some(&locals),
-            )?;
-            return broadcast::broadcast_map(py, target, &lambda);
+            return broadcast::broadcast_binary_op(py, target, op_func.bind(py), operand, false);
         }
 
         // Unary operators
@@ -934,9 +916,8 @@ impl Registry {
 
         // Logical operators
         if operator == OP_AND {
-            let operand = operand.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("Operator 'and' requires an operand")
-            })?;
+            let operand =
+                operand.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Operator 'and' requires an operand"))?;
             let locals = PyDict::new(py);
             locals.set_item("__operand__", operand)?;
             let lambda = py.eval(c"lambda x: x and __operand__", Some(&locals), Some(&locals))?;
@@ -944,9 +925,8 @@ impl Registry {
         }
 
         if operator == OP_OR {
-            let operand = operand.ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err("Operator 'or' requires an operand")
-            })?;
+            let operand =
+                operand.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Operator 'or' requires an operand"))?;
             let locals = PyDict::new(py);
             locals.set_item("__operand__", operand)?;
             let lambda = py.eval(c"lambda x: x or __operand__", Some(&locals), Some(&locals))?;
@@ -999,22 +979,11 @@ impl Registry {
     }
 
     /// Handle ND recursion broadcasting
-    fn broadcast_nd_recursion(
-        &self,
-        py: Python<'_>,
-        target: Py<PyAny>,
-        lambda_node: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn broadcast_nd_recursion(&self, py: Python<'_>, target: Py<PyAny>, lambda_node: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // Track pure functions
         let lambda_bound = lambda_node.bind(py);
-        if let Ok(true) = lambda_bound
-            .getattr("is_pure")
-            .and_then(|attr| attr.is_truthy())
-        {
-            if let Ok(func_name) = lambda_bound
-                .getattr("__name__")
-                .and_then(|n| n.extract::<String>())
-            {
+        if let Ok(true) = lambda_bound.getattr("is_pure").and_then(|attr| attr.is_truthy()) {
+            if let Ok(func_name) = lambda_bound.getattr("__name__").and_then(|n| n.extract::<String>()) {
                 let ctx_bound = self.ctx.bind(py);
                 if let Ok(pure_funcs) = ctx_bound.getattr("pure_functions") {
                     let _ = pure_funcs.call_method1("add", (func_name,));
@@ -1042,31 +1011,18 @@ impl Registry {
 
         // Convert back to tuple if needed
         if is_tuple {
-            Ok(pyo3::types::PyTuple::new(py, result_list)?
-                .into_any()
-                .unbind())
+            Ok(pyo3::types::PyTuple::new(py, result_list)?.into_any().unbind())
         } else {
             Ok(result_list.into_any().unbind())
         }
     }
 
     /// Handle ND map broadcasting
-    fn broadcast_nd_map(
-        &self,
-        py: Python<'_>,
-        target: Py<PyAny>,
-        func_node: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn broadcast_nd_map(&self, py: Python<'_>, target: Py<PyAny>, func_node: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // Track pure functions
         let func_bound = func_node.bind(py);
-        if let Ok(true) = func_bound
-            .getattr("is_pure")
-            .and_then(|attr| attr.is_truthy())
-        {
-            if let Ok(func_name) = func_bound
-                .getattr("__name__")
-                .and_then(|n| n.extract::<String>())
-            {
+        if let Ok(true) = func_bound.getattr("is_pure").and_then(|attr| attr.is_truthy()) {
+            if let Ok(func_name) = func_bound.getattr("__name__").and_then(|n| n.extract::<String>()) {
                 let ctx_bound = self.ctx.bind(py);
                 if let Ok(pure_funcs) = ctx_bound.getattr("pure_functions") {
                     let _ = pure_funcs.call_method1("add", (func_name,));
@@ -1094,9 +1050,7 @@ impl Registry {
 
         // Convert back to tuple if needed
         if is_tuple {
-            Ok(pyo3::types::PyTuple::new(py, result_list)?
-                .into_any()
-                .unbind())
+            Ok(pyo3::types::PyTuple::new(py, result_list)?.into_any().unbind())
         } else {
             Ok(result_list.into_any().unbind())
         }

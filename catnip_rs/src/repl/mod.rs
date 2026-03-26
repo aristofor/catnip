@@ -1,26 +1,32 @@
 // FILE: catnip_rs/src/repl/mod.rs
-//! REPL text utilities optimized in Rust.
-//!
-//! Contains performance-critical functions for:
-//! - Multiline continuation detection
-//! - Code preprocessing
-//! - Command parsing
+//! REPL text utilities - PyO3 wrappers around `catnip_tools::multiline`.
 //!
 //! The full TUI REPL lives in the `catnip_repl` crate.
 
+use std::time::SystemTime;
+
 use pyo3::prelude::*;
 
-/// Continuation operators
-const CONTINUATION_OPS: &[&str] = &[
-    // Arithmetic (sorted by length, longest first)
-    "**", "//", "+", "-", "*", "/", "%", // Bitwise
-    "<<", ">>", "&", "|", "^", // Comparison
-    "==", "!=", "<=", ">=", "<", ">", // Other
-    ",", "=",
-];
+/// Pick a random exit message for the given reason.
+///
+/// `reason`: `"ok"`, `"abort"`, or `"weird"`.
+#[pyfunction]
+#[pyo3(name = "repl_exit_message")]
+pub fn repl_exit_message(reason: &str) -> &'static str {
+    use catnip_core::constants;
 
-/// Continuation keywords
-const CONTINUATION_KEYWORDS: &[&str] = &["if", "elif", "else", "while", "for", "match"];
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+
+    let msgs = match reason {
+        "abort" => constants::REPL_EXIT_ABORT,
+        "weird" => constants::REPL_EXIT_RARE,
+        _ => constants::REPL_EXIT_OK,
+    };
+    msgs[nanos % msgs.len()]
+}
 
 /// Check if input requires multiline continuation.
 ///
@@ -28,39 +34,7 @@ const CONTINUATION_KEYWORDS: &[&str] = &["if", "elif", "else", "while", "for", "
 #[pyfunction]
 #[pyo3(name = "should_continue_multiline")]
 pub fn should_continue_multiline(text: &str) -> bool {
-    let stripped = text.trim_end();
-
-    // Count delimiters
-    let brace_count = text.matches('{').count() as i32 - text.matches('}').count() as i32;
-    let paren_count = text.matches('(').count() as i32 - text.matches(')').count() as i32;
-    let bracket_count = text.matches('[').count() as i32 - text.matches(']').count() as i32;
-
-    // Continue if any delimiters are still open
-    if brace_count > 0 || paren_count > 0 || bracket_count > 0 {
-        return true;
-    }
-
-    // Check for operators (multi-char operators first - already sorted)
-    for op in CONTINUATION_OPS {
-        if stripped.ends_with(op) {
-            return true;
-        }
-    }
-
-    // Check for continuation keywords
-    if let Some(last_word) = stripped.split_whitespace().last() {
-        if CONTINUATION_KEYWORDS.contains(&last_word) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if line ends with continuation operator (internal helper).
-fn has_continuation_op(line: &str) -> bool {
-    let stripped = line.trim_end();
-    CONTINUATION_OPS.iter().any(|op| stripped.ends_with(op))
+    catnip_tools::multiline::should_continue_multiline(text)
 }
 
 /// Preprocess multiline code to handle implicit continuations.
@@ -70,50 +44,7 @@ fn has_continuation_op(line: &str) -> bool {
 #[pyfunction]
 #[pyo3(name = "preprocess_multiline")]
 pub fn preprocess_multiline(code: &str) -> String {
-    let lines: Vec<&str> = code.split('\n').collect();
-    let n_lines = lines.len();
-
-    if n_lines == 1 {
-        return code.to_string();
-    }
-
-    let mut processed = Vec::new();
-    let mut i = 0;
-
-    while i < n_lines {
-        let line = lines[i];
-        let stripped = line.trim_end();
-
-        // If the line has a continuation, accumulate all following lines
-        if has_continuation_op(stripped) {
-            let mut accumulated = vec![stripped.to_string()];
-            let mut j = i + 1;
-
-            // Continue accumulating while we have continuations
-            while j < n_lines {
-                let next_line = lines[j].trim_start();
-                accumulated.push(next_line.to_string());
-
-                // If this line also has a continuation, keep going
-                if has_continuation_op(next_line) {
-                    j += 1;
-                } else {
-                    // Last line of the continuation
-                    j += 1;
-                    break;
-                }
-            }
-
-            // Join all accumulated lines
-            processed.push(accumulated.join(" "));
-            i = j; // Skip all processed lines
-        } else {
-            processed.push(line.to_string());
-            i += 1;
-        }
-    }
-
-    processed.join("\n")
+    catnip_tools::multiline::preprocess_multiline(code)
 }
 
 /// Parse a REPL command (starting with slash).

@@ -1,7 +1,7 @@
 # FILE: tests/cli/test_config.py
 from pathlib import Path
 
-from catnip.config import get_cache_dir, get_config_dir, get_data_dir, get_state_dir
+from catnip._rs import get_cache_dir, get_config_dir, get_data_dir, get_state_dir
 
 
 def test_get_config_dir_uses_xdg_config_home(monkeypatch, tmp_path):

@@ -26,12 +26,7 @@ pub struct NDRecur {
 impl NDRecur {
     #[new]
     #[pyo3(signature = (scheduler, lambda_func, parent_future=None, mode="sequential"))]
-    fn new(
-        scheduler: Py<PyAny>,
-        lambda_func: Py<PyAny>,
-        parent_future: Option<Py<PyAny>>,
-        mode: &str,
-    ) -> Self {
+    fn new(scheduler: Py<PyAny>, lambda_func: Py<PyAny>, parent_future: Option<Py<PyAny>>, mode: &str) -> Self {
         Self {
             scheduler,
             lambda_func,
@@ -46,10 +41,7 @@ impl NDRecur {
     fn __call__(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
         self.scheduler
             .bind(py)
-            .call_method1(
-                "submit_recursive",
-                (value, &self.lambda_func, &self.parent_future),
-            )?
+            .call_method1("submit_recursive", (value, &self.lambda_func, &self.parent_future))?
             .extract()
             .map_err(Into::into)
     }
@@ -61,12 +53,7 @@ impl NDRecur {
 
 impl NDRecur {
     /// Create from Rust code.
-    pub fn create(
-        scheduler: Py<PyAny>,
-        lambda_func: Py<PyAny>,
-        parent_future: Option<Py<PyAny>>,
-        mode: &str,
-    ) -> Self {
+    pub fn create(scheduler: Py<PyAny>, lambda_func: Py<PyAny>, parent_future: Option<Py<PyAny>>, mode: &str) -> Self {
         Self {
             scheduler,
             lambda_func,

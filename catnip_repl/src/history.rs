@@ -75,9 +75,28 @@ impl History {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Access all entries (for /history)
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    /// Search entries containing `query` (case-insensitive), most recent first.
+    /// Returns indices into the entries vec (from the end, like `get()`).
+    pub fn search(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let query_lower = query.to_lowercase();
+        let len = self.entries.len();
+        (0..len)
+            .rev()
+            .filter(|&i| self.entries[i].to_lowercase().contains(&query_lower))
+            .map(|i| len - 1 - i)
+            .collect()
     }
 
     fn truncate(&mut self) {
@@ -141,6 +160,102 @@ mod tests {
             let hist = History::load(&tmp, 100);
             assert_eq!(hist.len(), 2);
             assert_eq!(hist.get(0), Some("second"));
+        }
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_push_empty_ignored() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_empty");
+        let mut hist = History::load(&tmp, 100);
+        hist.push("");
+        hist.push("   ");
+        hist.push("\t\n");
+        assert_eq!(hist.len(), 0);
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_non_consecutive_dup_kept() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_nondup");
+        let mut hist = History::load(&tmp, 100);
+        hist.push("a");
+        hist.push("b");
+        hist.push("a");
+        assert_eq!(hist.len(), 3);
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_get_out_of_range() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_range");
+        let mut hist = History::load(&tmp, 100);
+        hist.push("only");
+        assert_eq!(hist.get(0), Some("only"));
+        assert_eq!(hist.get(1), None);
+        assert_eq!(hist.get(99), None);
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_entries_order() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_order");
+        let mut hist = History::load(&tmp, 100);
+        hist.push("first");
+        hist.push("second");
+        hist.push("third");
+        let entries = hist.entries();
+        assert_eq!(entries, &["first", "second", "third"]);
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_search() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_search");
+        let mut hist = History::load(&tmp, 100);
+        hist.push("x = 10");
+        hist.push("y = 20");
+        hist.push("print(x)");
+        hist.push("x = 30");
+
+        // Most recent match first
+        let results = hist.search("x");
+        assert_eq!(results.len(), 3);
+        assert_eq!(hist.get(results[0]), Some("x = 30"));
+        assert_eq!(hist.get(results[1]), Some("print(x)"));
+        assert_eq!(hist.get(results[2]), Some("x = 10"));
+
+        // Case insensitive
+        let results = hist.search("PRINT");
+        assert_eq!(results.len(), 1);
+        assert_eq!(hist.get(results[0]), Some("print(x)"));
+
+        // No match
+        assert!(hist.search("zzz").is_empty());
+
+        // Empty query
+        assert!(hist.search("").is_empty());
+
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_roundtrip");
+        let _ = fs::remove_file(&tmp);
+        {
+            let mut hist = History::load(&tmp, 100);
+            hist.push("alpha");
+            hist.push("beta");
+            hist.push("gamma");
+            hist.save().unwrap();
+        }
+        {
+            let hist = History::load(&tmp, 100);
+            assert_eq!(hist.len(), 3);
+            assert_eq!(hist.entries(), &["alpha", "beta", "gamma"]);
+            assert_eq!(hist.get(0), Some("gamma"));
+            assert_eq!(hist.get(2), Some("alpha"));
         }
         let _ = fs::remove_file(&tmp);
     }

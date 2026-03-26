@@ -1,0 +1,24 @@
+#!/usr/bin/env catnip
+# Decimal exact type (base-10, suffix d/D)
+# Arithmetic exacte : 0.1d + 0.2d == 0.3d
+
+# Litteraux
+prix  = 99.99d
+taxe  = 0.08d
+total = prix + prix * taxe
+print(total)
+
+# Le test canonique IEEE 754
+print(0.1 + 0.2 == 0.3)     # → False (float)
+print(0.1d + 0.2d == 0.3d)  # → True  (decimal)
+
+# Promotion entier → decimal
+print(2 + 0.5d)  # → 2.5
+
+# builtin decimal
+pi = 3.14159265358979323846d
+print(pi)
+
+# Comparaisons
+print(1.0d == 1d)  # → True (même valeur, scale différente)
+print(42d > 41)    # → True (int promu)

@@ -1,4 +1,5 @@
-# Exemple 2 : Boucles while et for
+#!/usr/bin/env catnip
+# Exemple : Boucles while et for
 
 print("⇒ Boucle while")
 # Compter de 0 à 4
@@ -8,13 +9,15 @@ while compteur < 5 {
     compteur = compteur + 1
 }
 
-print("\n⇒ Boucle for")
+print()
+print("⇒ Boucle for")
 # Parcourir une séquence
 for nombre in range(1, 6) {
     print("Nombre:", nombre)
 }
 
-print("\n⇒ Calcul de somme")
+print()
+print("⇒ Calcul de somme")
 # Calculer la somme des nombres de 1 à 10
 somme = 0
 for i in range(1, 11) {
@@ -22,7 +25,8 @@ for i in range(1, 11) {
 }
 print("Somme de 1 à 10:", somme)
 
-print("\n⇒ Table de multiplication")
+print()
+print("⇒ Table de multiplication")
 # Table de multiplication de 5
 for i in range(1, 11) {
     resultat = 5 * i

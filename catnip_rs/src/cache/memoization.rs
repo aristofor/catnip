@@ -89,10 +89,7 @@ impl Memoization {
 
         // Get kwargs keys (try as dict)
         let kwargs_keys: Vec<String> = if let Ok(dict) = kwargs.cast_bound::<PyDict>(py) {
-            dict.keys()
-                .iter()
-                .filter_map(|k| k.extract::<String>().ok())
-                .collect()
+            dict.keys().iter().filter_map(|k| k.extract::<String>().ok()).collect()
         } else {
             Vec::new()
         };
@@ -105,7 +102,7 @@ impl Memoization {
         // Update func_name index (store both content and hash)
         self.func_index
             .entry(func_name.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((key.content.clone(), key_string));
 
         Ok(())
@@ -136,13 +133,7 @@ impl Memoization {
 
                     for (content, _hash) in keys {
                         // Reconstruct CacheKey with original content
-                        let key = CacheKey::new(
-                            content.clone(),
-                            CacheType::Result,
-                            false,
-                            false,
-                            String::new(),
-                        );
+                        let key = CacheKey::new(content.clone(), CacheType::Result, false, false, String::new());
                         if backend.delete(py, &key)? {
                             count += 1;
                         }
@@ -213,28 +204,16 @@ impl Memoization {
             .name()
             .map(|n| n.to_string())
             .unwrap_or_else(|_| "Unknown".to_string());
-        format!(
-            "Memoization(backend={}, enabled={})",
-            backend_name, self.enabled
-        )
+        format!("Memoization(backend={}, enabled={})", backend_name, self.enabled)
     }
 }
 
 impl Memoization {
     /// Create a cache key from function name and arguments.
-    fn make_key(
-        &self,
-        py: Python<'_>,
-        func_name: &str,
-        args: &Py<PyAny>,
-        kwargs: &Py<PyAny>,
-    ) -> PyResult<CacheKey> {
+    fn make_key(&self, py: Python<'_>, func_name: &str, args: &Py<PyAny>, kwargs: &Py<PyAny>) -> PyResult<CacheKey> {
         // Serialize arguments to string for hashing
         let args_str = if let Ok(tuple) = args.cast_bound::<PyTuple>(py) {
-            let reprs: Vec<String> = tuple
-                .iter()
-                .map(|arg| arg.repr().unwrap().to_string())
-                .collect();
+            let reprs: Vec<String> = tuple.iter().map(|arg| arg.repr().unwrap().to_string()).collect();
             reprs.join(",")
         } else {
             String::new()
@@ -267,12 +246,6 @@ impl Memoization {
         };
         let content = format!("{}({}{}{})", func_name, args_str, sep, kwargs_str);
 
-        Ok(CacheKey::new(
-            content,
-            CacheType::Result,
-            false,
-            false,
-            String::new(),
-        ))
+        Ok(CacheKey::new(content, CacheType::Result, false, false, String::new()))
     }
 }

@@ -137,7 +137,7 @@ Chaque fonction crée un nouveau frame de scope, et les variables sont résolues
 
 Le scope global contient :
 
-- Les builtins Python (`print`, `len`, `range`, etc.)
+- Les builtins (`len`, `range`, `sorted`, etc.) et les fonctions importées (ex: `print` via le module `io`)
 - Les variables définies au niveau racine du programme
 - Les fonctions définies au niveau racine
 
@@ -189,14 +189,14 @@ Frame 1 (fonction 1)      # Variables locales de fonction 1
 Frame 2 (fonction 2)      # Variables locales de fonction 2 imbriquée
 ```
 
-Contrairement à un modèle de scopes chaînés, Scope utilise un HashMap flat où toutes les variables sont stockées dans un
-seul dictionnaire, avec des métadonnées pour suivre quel frame a introduit chaque variable.
+Contrairement à un modèle de scopes chaînés, Scope utilise un IndexMap flat où toutes les variables sont stockées dans
+un seul dictionnaire ordonné, avec des métadonnées pour suivre quel frame a introduit chaque variable.
 
 ```mermaid
-graph TD
-    F2["Frame 2 (fonction imbriquée)"] -->|non trouvé| F1["Frame 1 (fonction)"]
-    F1 -->|non trouvé| F0["Frame 0 (global + builtins)"]
-    F0 -->|non trouvé| ERR["NameError"]
+graph LR
+    REQ["lookup(name)"] --> HM["IndexMap unique<br/>(toutes variables)"]
+    HM -->|trouvé| VAL["Valeur"]
+    HM -->|non trouvé| ERR["NameError"]
 ```
 
 ### Détection du scope global
@@ -219,11 +219,11 @@ else:
 
 Quand Catnip cherche une variable, il suit cet ordre :
 
-1. **HashMap local** : Lookup O(1) dans `context.locals.symbols`
+1. **IndexMap local** : Lookup O(1) dans `context.locals.symbols`
 1. **Scope global** : `context.globals` si non trouvé
 1. **Erreur** : `NameError` si non trouvé
 
-Scope stocke toutes les variables locales dans un seul HashMap flat, évitant les traversées de chaîne parent. La
+Scope stocke toutes les variables locales dans un seul IndexMap flat, évitant les traversées de chaîne parent. La
 résolution est donc toujours O(1).
 
 ### Exemple de résolution
@@ -515,7 +515,7 @@ print(config)  # [1, 2, 3, 4] - inchangé (g a créé une locale)
 | **Paramètres**        | Toujours locaux                                          | Identique                                      |
 
 ```catnip
-# Catnip - similaire à Python pour l'assignation
+# Catnip : similaire à Python pour l'assignation
 x = 10
 f = () => {
     x = 20  # Variable locale
@@ -557,6 +557,32 @@ factorial(1000)  # Pas de stack overflow !
 
 **Note** : TCO permet d'exécuter des récursions profondes sans dépassement de pile.
 
+## Introspection : globals() et locals()
+
+Deux intrinsics permettent d'inspecter le scope à l'exécution :
+
+- **`globals()`** : retourne un dict de toutes les variables globales (user + builtins)
+- **`locals()`** : retourne un dict des variables locales du frame courant
+
+Au niveau module, `locals()` et `globals()` retournent le même contenu. Dans une fonction, `locals()` ne contient que
+les paramètres et variables locales.
+
+```catnip
+x = 42
+y = "hello"
+globals()["x"]
+# ⇒ 42
+```
+
+```catnip
+f = (a, b) => {
+    c = a + b
+    locals()
+}
+f(1, 2)
+# ⇒ {'a': 1, 'b': 2, 'c': 3}
+```
+
 ## Résumé
 
 | Concept             | Description                                                |
@@ -568,3 +594,5 @@ factorial(1000)  # Pas de stack overflow !
 | **Closure mutable** | Lecture puis écriture → capture et propage la modification |
 | **Mutation**        | `obj.method()` / `obj[key] = v` modifie l'objet partagé    |
 | **TCO**             | Un seul scope pour tail-récursion                          |
+| **`globals()`**     | Dict de toutes les variables globales                      |
+| **`locals()`**      | Dict des variables du frame courant                        |

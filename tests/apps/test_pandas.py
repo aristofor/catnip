@@ -18,7 +18,7 @@ Known Limitations:
 ------------------
 - Comparison operators (>, <, ==) on Series not yet supported
 - Boolean indexing (df[mask]) not yet supported
-- Indexed assignment (df["col"][0] = value) not yet supported
+- Indexed assignment (df['col'][0] = value) not yet supported
 - List/dict literals needed for some pandas operations
 
 These limitations are Catnip syntax issues, not pandas integration problems.
@@ -50,7 +50,7 @@ def test_dataframe_from_python(cat):
     import pandas as pd
 
     # Create DataFrame in Python
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
 
     # Inject into Catnip context
     cat.registry.ctx.globals['df'] = df
@@ -67,7 +67,7 @@ def test_dataframe_column_access(cat):
     """Test DataFrame column access using getitem."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [10, 20, 30], "y": [40, 50, 60]})
+    df = pd.DataFrame({'x': [10, 20, 30], 'y': [40, 50, 60]})
     cat.registry.ctx.globals['df'] = df
 
     # Access column using bracket notation
@@ -81,7 +81,7 @@ def test_dataframe_method_call(cat):
     """Test calling DataFrame methods."""
     import pandas as pd
 
-    df = pd.DataFrame({"values": [1, 2, 3, 4, 5]})
+    df = pd.DataFrame({'values': [1, 2, 3, 4, 5]})
     cat.registry.ctx.globals['df'] = df
 
     # Call sum() method on a Series
@@ -94,7 +94,7 @@ def test_dataframe_attribute_access(cat):
     """Test accessing DataFrame attributes."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
     cat.registry.ctx.globals['df'] = df
 
     # Access columns attribute
@@ -107,7 +107,7 @@ def test_dataframe_operations_chain(cat):
     """Test chaining DataFrame operations."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3, 4, 5]})
+    df = pd.DataFrame({'x': [1, 2, 3, 4, 5]})
     cat.registry.ctx.globals['df'] = df
 
     # Chain: select column, multiply by 2, sum
@@ -120,7 +120,7 @@ def test_dataframe_shape(cat):
     """Test accessing DataFrame shape attribute."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
     cat.registry.ctx.globals['df'] = df
 
     cat.parse("df.shape")
@@ -144,13 +144,13 @@ def test_dataframe_head(cat):
     """Test DataFrame head() method."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": range(10)})
+    df = pd.DataFrame({'x': range(10)})
     cat.registry.ctx.globals['df'] = df
 
     cat.parse("df.head(3)")
     result = cat.execute()
     assert len(result) == 3
-    assert list(result["x"]) == [0, 1, 2]
+    assert list(result['x']) == [0, 1, 2]
 
 
 # --- Edge cases and error handling ---
@@ -160,7 +160,7 @@ def test_pandas_type_error_propagates(cat):
     """Test that pandas TypeError is properly propagated."""
     import pandas as pd
 
-    df = pd.DataFrame({"numbers": [1, 2, 3]})
+    df = pd.DataFrame({'numbers': [1, 2, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Try to set a string in a numeric column
@@ -184,7 +184,7 @@ def test_pandas_key_error_propagates(cat):
     """Test that pandas KeyError for missing column is properly propagated."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2, 3]})
+    df = pd.DataFrame({'a': [1, 2, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Try to access non-existent column
@@ -221,7 +221,7 @@ def test_dataframe_with_nan(cat):
 
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1.0, float('nan'), 3.0]})
+    df = pd.DataFrame({'x': [1.0, float('nan'), 3.0]})
     cat.registry.ctx.globals['df'] = df
 
     # Access the Series (not individual element, indexing returns scalar)
@@ -241,7 +241,7 @@ def test_dataframe_with_none(cat):
     import numpy as np
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, None, 3]})
+    df = pd.DataFrame({'x': [1, None, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Access the Series
@@ -256,7 +256,7 @@ def test_dataframe_mixed_types(cat):
     """Test DataFrame with mixed types (should work, pandas is flexible)."""
     import pandas as pd
 
-    df = pd.DataFrame({"mixed": [1, "text", 3.14, None]})
+    df = pd.DataFrame({'mixed': [1, "text", 3.14, None]})
     cat.registry.ctx.globals['df'] = df
 
     # Access different types
@@ -277,9 +277,9 @@ def test_dataframe_boolean_series(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3, 4, 5]})
+    df = pd.DataFrame({'x': [1, 2, 3, 4, 5]})
     # Create boolean mask in Python
-    mask = df["x"] > 3
+    mask = df['x'] > 3
 
     cat.registry.ctx.globals['df'] = df
     cat.registry.ctx.globals['mask'] = mask
@@ -303,7 +303,7 @@ def test_pandas_method_signature_error(cat):
 
     from catnip.exc import CatnipTypeError
 
-    df = pd.DataFrame({"x": [1, 2, 3]})
+    df = pd.DataFrame({'x': [1, 2, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # head() expects an integer, pass invalid argument
@@ -347,7 +347,7 @@ def test_pandas_attributeerror_propagates(cat):
     """Test that pandas AttributeError for non-existent method is propagated."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3]})
+    df = pd.DataFrame({'x': [1, 2, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Try to call non-existent method
@@ -365,7 +365,7 @@ def test_dataframe_len(cat):
     """Test len() on DataFrame returns number of rows."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
     cat.registry.ctx.globals['df'] = df
 
     cat.parse("df.shape[0]")
@@ -389,14 +389,14 @@ def test_dataframe_loc_getitem(cat):
     """Test DataFrame.loc attribute access."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3]}, index=["a", "b", "c"])
+    df = pd.DataFrame({'x': [1, 2, 3]}, index=['a', 'b', 'c'])
     cat.registry.ctx.globals['df'] = df
 
     # Access loc indexer
     cat.parse("df.loc")
     result = cat.execute()
     # loc is a pandas indexer object
-    assert hasattr(result, "__getitem__")
+    assert hasattr(result, '__getitem__')
 
 
 def test_pandas_concat_available(cat):
@@ -404,8 +404,8 @@ def test_pandas_concat_available(cat):
     import pandas as pd
 
     cat.registry.ctx.globals['pd'] = pd
-    cat.registry.ctx.globals['df1'] = pd.DataFrame({"x": [1, 2]})
-    cat.registry.ctx.globals['df2'] = pd.DataFrame({"x": [3, 4]})
+    cat.registry.ctx.globals['df1'] = pd.DataFrame({'x': [1, 2]})
+    cat.registry.ctx.globals['df2'] = pd.DataFrame({'x': [3, 4]})
 
     # Call pandas.concat (top-level function)
     cat.parse("pd.concat")
@@ -420,26 +420,17 @@ def test_pandas_concat_available(cat):
 # --- Known limitations (documented) ---
 
 
-def test_limitation_comparison_operators(cat):
-    """Document that comparison operators on Series are not yet supported.
-
-    This test demonstrates a known limitation: Catnip doesn't support
-    comparison operators (>, <, ==, !=, >=, <=) on pandas objects yet.
-    """
+def test_comparison_operators_on_series(cat):
+    """Comparison operators on pandas Series produce boolean Series."""
     import pandas as pd
 
     series = pd.Series([1, 2, 3])
     cat.registry.ctx.globals['s'] = series
 
-    # This will fail because > operator is not supported
     cat.parse("s > 2")
-
-    with pytest.raises(Exception) as exc_info:
-        cat.execute()
-
-    # Verify it's a Catnip error about unsupported operation
-    error_msg = str(exc_info.value)
-    assert "not supported" in error_msg.lower() or "unsupported" in error_msg.lower()
+    result = cat.execute()
+    expected = pd.Series([False, False, True])
+    assert list(result) == list(expected)
 
 
 def test_limitation_boolean_indexing(cat):
@@ -450,8 +441,8 @@ def test_limitation_boolean_indexing(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3, 4, 5]})
-    mask = df["x"] > 3
+    df = pd.DataFrame({'x': [1, 2, 3, 4, 5]})
+    mask = df['x'] > 3
 
     cat.registry.ctx.globals['df'] = df
     cat.registry.ctx.globals['mask'] = mask
@@ -472,26 +463,26 @@ def test_dataframe_filtering_boolean_indexing(cat):
     """Test DataFrame filtering with boolean indexing.
 
     This requires both:
-    1. Comparison operators on Series (df["x"] > 5)
+    1. Comparison operators on Series (df['x'] > 5)
     2. Boolean indexing syntax (df[mask])
 
     Neither is currently supported in Catnip.
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3, 4, 5], "y": [10, 20, 30, 40, 50]})
+    df = pd.DataFrame({'x': [1, 2, 3, 4, 5], 'y': [10, 20, 30, 40, 50]})
     cat.registry.ctx.globals['df'] = df
 
     # This would be the ideal Catnip syntax (when supported):
     # cat.parse('df[df["x"] > 3]')
     # For now, we can create the filter in Python
-    filtered = df[df["x"] > 3]
+    filtered = df[df['x'] > 3]
     cat.registry.ctx.globals['filtered'] = filtered
 
     cat.parse("filtered")
     result = cat.execute()
     assert len(result) == 2
-    assert list(result["x"]) == [4, 5]
+    assert list(result['x']) == [4, 5]
 
 
 def test_groupby_basic(cat):
@@ -502,7 +493,7 @@ def test_groupby_basic(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"category": ["A", "B", "A", "B", "A"], "value": [1, 2, 3, 4, 5]})
+    df = pd.DataFrame({'category': ["A", "B", "A", "B", "A"], 'value': [1, 2, 3, 4, 5]})
 
     # Create groupby in Python
     grouped = df.groupby("category")
@@ -512,7 +503,7 @@ def test_groupby_basic(cat):
     # Access the groupby object
     cat.parse("grouped")
     result = cat.execute()
-    assert hasattr(result, "mean")  # Verify it's a groupby object
+    assert hasattr(result, 'mean')  # Verify it's a groupby object
 
     # Call aggregation method
     cat.parse("grouped.mean()")
@@ -552,9 +543,9 @@ def test_merge_dataframes(cat):
     """
     import pandas as pd
 
-    df1 = pd.DataFrame({"key": ["A", "B", "C"], "value1": [1, 2, 3]})
+    df1 = pd.DataFrame({'key': ["A", "B", "C"], 'value1': [1, 2, 3]})
 
-    df2 = pd.DataFrame({"key": ["A", "B", "D"], "value2": [10, 20, 30]})
+    df2 = pd.DataFrame({'key': ["A", "B", "D"], 'value2': [10, 20, 30]})
 
     cat.registry.ctx.globals['pd'] = pd
     cat.registry.ctx.globals['df1'] = df1
@@ -566,18 +557,18 @@ def test_merge_dataframes(cat):
 
     # Default is inner join, should have keys A and B
     assert len(result) == 2
-    assert list(result["key"]) == ["A", "B"]
-    assert list(result["value1"]) == [1, 2]
-    assert list(result["value2"]) == [10, 20]
+    assert list(result['key']) == ["A", "B"]
+    assert list(result['value1']) == [1, 2]
+    assert list(result['value2']) == [10, 20]
 
 
 def test_merge_with_options(cat):
     """Test merge with different join types."""
     import pandas as pd
 
-    df1 = pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
+    df1 = pd.DataFrame({'id': [1, 2, 3], 'name': ["Alice", "Bob", "Charlie"]})
 
-    df2 = pd.DataFrame({"id": [2, 3, 4], "score": [85, 90, 95]})
+    df2 = pd.DataFrame({'id': [2, 3, 4], 'score': [85, 90, 95]})
 
     cat.registry.ctx.globals['pd'] = pd
     cat.registry.ctx.globals['df1'] = df1
@@ -588,11 +579,11 @@ def test_merge_with_options(cat):
     result = cat.execute()
 
     assert len(result) == 3
-    assert list(result["id"]) == [1, 2, 3]
+    assert list(result['id']) == [1, 2, 3]
     # First row should have NaN for score
     import math
 
-    assert math.isnan(result["score"].iloc[0])
+    assert math.isnan(result['score'].iloc[0])
 
 
 def test_broadcasting_with_pandas_series(cat):
@@ -618,7 +609,7 @@ def test_broadcasting_pandas_dataframe_column_operation(cat):
     """Test broadcasting on DataFrame columns."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
     cat.registry.ctx.globals['df'] = df
 
     # Column arithmetic
@@ -656,6 +647,45 @@ def test_pandas_apply_function(cat):
     assert list(result) == [1, 4, 9, 16, 25]
 
 
+def test_pandas_apply_catnip_lambda(cat):
+    """pandas.apply() with Catnip lambda -- regression segfault."""
+    import pandas as pd
+
+    series = pd.Series([1, 2, 3, 4, 5])
+    cat.registry.ctx.globals['s'] = series
+
+    cat.parse('s.apply((x) => { x * 2 })')
+    result = cat.execute()
+    assert list(result) == [2, 4, 6, 8, 10]
+
+
+def test_pandas_apply_catnip_lambda_closure(cat):
+    """pandas.apply() with Catnip lambda capturing a closure variable."""
+    import pandas as pd
+
+    series = pd.Series([1, 2, 3])
+    cat.registry.ctx.globals['s'] = series
+
+    cat.parse('''
+    factor = 10
+    s.apply((x) => { x * factor })
+    ''')
+    result = cat.execute()
+    assert list(result) == [10, 20, 30]
+
+
+def test_pandas_apply_stress(cat):
+    """pandas.apply() with many rows -- previously caused segfault."""
+    import pandas as pd
+
+    series = pd.Series(list(range(2000)))
+    cat.registry.ctx.globals['s'] = series
+
+    cat.parse('s.apply((x) => { x + 1 })')
+    result = cat.execute()
+    assert list(result) == list(range(1, 2001))
+
+
 def test_pandas_string_methods(cat):
     """Test pandas string accessor methods."""
     import pandas as pd
@@ -666,7 +696,7 @@ def test_pandas_string_methods(cat):
     # Access str accessor
     cat.parse("s.str")
     str_accessor = cat.execute()
-    assert hasattr(str_accessor, "upper")
+    assert hasattr(str_accessor, 'upper')
 
     # Use string method
     cat.parse("s.str.upper()")
@@ -692,7 +722,7 @@ def test_pandas_datetime_operations(cat):
     # Access dt accessor
     cat.parse("dates.dt")
     dt_accessor = cat.execute()
-    assert hasattr(dt_accessor, "year")
+    assert hasattr(dt_accessor, 'year')
 
     # Extract year
     cat.parse("dates.dt.year")
@@ -736,7 +766,7 @@ def test_pandas_pivot_table(cat):
     """Test pandas pivot table operations."""
     import pandas as pd
 
-    df = pd.DataFrame({"category": ["A", "A", "B", "B"], "type": ["X", "Y", "X", "Y"], "value": [10, 20, 30, 40]})
+    df = pd.DataFrame({'category': ["A", "A", "B", "B"], 'type': ["X", "Y", "X", "Y"], 'value': [10, 20, 30, 40]})
 
     cat.registry.ctx.globals['pd'] = pd
     cat.registry.ctx.globals['df'] = df
@@ -754,7 +784,7 @@ def test_pandas_stack_unstack(cat):
     """Test pandas stack/unstack operations."""
     import pandas as pd
 
-    df = pd.DataFrame({"A": [1, 2], "B": [3, 4]}, index=["row1", "row2"])
+    df = pd.DataFrame({'A': [1, 2], 'B': [3, 4]}, index=["row1", "row2"])
 
     cat.registry.ctx.globals['df'] = df
 
@@ -807,36 +837,36 @@ def test_pandas_value_counts(cat):
     # Count values
     cat.parse("s.value_counts()")
     result = cat.execute()
-    assert result["A"] == 3
-    assert result["B"] == 2
-    assert result["C"] == 1
+    assert result['A'] == 3
+    assert result['B'] == 2
+    assert result['C'] == 1
 
 
 def test_pandas_sort_values(cat):
     """Test pandas sort_values method."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [3, 1, 4, 1, 5], "y": [9, 2, 6, 5, 3]})
+    df = pd.DataFrame({'x': [3, 1, 4, 1, 5], 'y': [9, 2, 6, 5, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Sort by column x
     cat.parse('df.sort_values("x")')
     result = cat.execute()
-    assert list(result["x"]) == [1, 1, 3, 4, 5]
+    assert list(result['x']) == [1, 1, 3, 4, 5]
 
 
 def test_pandas_reset_index(cat):
     """Test pandas reset_index method."""
     import pandas as pd
 
-    df = pd.DataFrame({"value": [10, 20, 30]}, index=["a", "b", "c"])
+    df = pd.DataFrame({'value': [10, 20, 30]}, index=['a', 'b', 'c'])
     cat.registry.ctx.globals['df'] = df
 
     # Reset index
     cat.parse("df.reset_index()")
     result = cat.execute()
     assert "index" in result.columns
-    assert list(result["index"]) == ["a", "b", "c"]
+    assert list(result['index']) == ["a", "b", "c"]
 
 
 # --- Inplace operations (critical for context coupling) ---
@@ -850,7 +880,7 @@ def test_inplace_sort_values(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [3, 1, 4, 1, 5], "y": [9, 2, 6, 5, 3]})
+    df = pd.DataFrame({'x': [3, 1, 4, 1, 5], 'y': [9, 2, 6, 5, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Sort inplace - returns None
@@ -861,14 +891,14 @@ def test_inplace_sort_values(cat):
     # Verify the DataFrame was modified in context
     cat.parse("df")
     modified_df = cat.execute()
-    assert list(modified_df["x"]) == [1, 1, 3, 4, 5]
+    assert list(modified_df['x']) == [1, 1, 3, 4, 5]
 
 
 def test_inplace_fillna(cat):
     """Test fillna with inplace=True."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1.0, float('nan'), 3.0, float('nan'), 5.0]})
+    df = pd.DataFrame({'x': [1.0, float('nan'), 3.0, float('nan'), 5.0]})
     cat.registry.ctx.globals['df'] = df
 
     # Fill NaN inplace (pandas 3.0+ returns the DataFrame, not None)
@@ -885,7 +915,7 @@ def test_inplace_dropna(cat):
     """Test dropna with inplace=True."""
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1.0, float('nan'), 3.0], "y": [4.0, 5.0, float('nan')]})
+    df = pd.DataFrame({'x': [1.0, float('nan'), 3.0], 'y': [4.0, 5.0, float('nan')]})
     cat.registry.ctx.globals['df'] = df
 
     # Drop rows with any NaN inplace
@@ -897,14 +927,14 @@ def test_inplace_dropna(cat):
     cat.parse("df")
     modified_df = cat.execute()
     assert len(modified_df) == 1
-    assert modified_df["x"].iloc[0] == 1.0
+    assert modified_df['x'].iloc[0] == 1.0
 
 
 def test_inplace_reset_index(cat):
     """Test reset_index with inplace=True."""
     import pandas as pd
 
-    df = pd.DataFrame({"value": [10, 20, 30]}, index=["a", "b", "c"])
+    df = pd.DataFrame({'value': [10, 20, 30]}, index=['a', 'b', 'c'])
     cat.registry.ctx.globals['df'] = df
 
     # Reset index inplace
@@ -922,7 +952,7 @@ def test_inplace_drop_column(cat):
     """Test drop with inplace=True."""
     import pandas as pd
 
-    df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
+    df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': [7, 8, 9]})
     cat.registry.ctx.globals['df'] = df
 
     # Drop column inplace
@@ -944,7 +974,7 @@ def test_inplace_rename(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"old_name": [1, 2, 3]})
+    df = pd.DataFrame({'old_name': [1, 2, 3]})
     rename_dict = {"old_name": "new_name"}
 
     cat.registry.ctx.globals['df'] = df
@@ -970,8 +1000,8 @@ def test_inplace_vs_copy_behavior(cat):
     import pandas as pd
 
     # Create two identical DataFrames
-    df1 = pd.DataFrame({"x": [3, 1, 2]})
-    df2 = pd.DataFrame({"x": [3, 1, 2]})
+    df1 = pd.DataFrame({'x': [3, 1, 2]})
+    df2 = pd.DataFrame({'x': [3, 1, 2]})
 
     cat.registry.ctx.globals['df1'] = df1
     cat.registry.ctx.globals['df2'] = df2
@@ -979,7 +1009,7 @@ def test_inplace_vs_copy_behavior(cat):
     # Sort df1 WITHOUT inplace (returns new DataFrame)
     cat.parse('df1.sort_values("x")')
     sorted_df = cat.execute()
-    assert list(sorted_df["x"]) == [1, 2, 3]
+    assert list(sorted_df['x']) == [1, 2, 3]
 
     # Original df1 should be unchanged
     cat.parse("df1")
@@ -1003,7 +1033,7 @@ def test_inplace_chaining_error(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [3, 1, 2], "y": [6, 4, 5]})
+    df = pd.DataFrame({'x': [3, 1, 2], 'y': [6, 4, 5]})
     cat.registry.ctx.globals['df'] = df
 
     # Try to chain after inplace operation (this fails because it returns None)
@@ -1021,12 +1051,12 @@ def test_inplace_set_value_warning(cat):
     """Test setting values in DataFrame columns.
 
     Pandas 3.0+ uses Copy-on-Write by default, so chained assignment
-    (df["x"][0] = value) no longer modifies the original DataFrame.
+    (df['x'][0] = value) no longer modifies the original DataFrame.
     Use .loc[] for proper in-place mutation.
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [1, 2, 3]})
+    df = pd.DataFrame({'x': [1, 2, 3]})
     cat.registry.ctx.globals['df'] = df
 
     # Use .loc for CoW-safe assignment
@@ -1046,7 +1076,7 @@ def test_inplace_reference_preservation(cat):
     """
     import pandas as pd
 
-    df = pd.DataFrame({"x": [3, 1, 2]})
+    df = pd.DataFrame({'x': [3, 1, 2]})
 
     # Store reference in context
     cat.registry.ctx.globals['df'] = df
@@ -1059,11 +1089,11 @@ def test_inplace_reference_preservation(cat):
     # Both references should see the change
     cat.parse("df")
     df_result = cat.execute()
-    assert list(df_result["x"]) == [1, 2, 3]
+    assert list(df_result['x']) == [1, 2, 3]
 
     cat.parse("df_reference")
     ref_result = cat.execute()
-    assert list(ref_result["x"]) == [1, 2, 3]
+    assert list(ref_result['x']) == [1, 2, 3]
 
     # Verify they're the same object (not copies)
     assert df_result is ref_result
@@ -1076,8 +1106,8 @@ def test_series_alignment_by_index(cat):
     """Test pandas alignment by index when operating on Series."""
     import pandas as pd
 
-    s1 = pd.Series([1, 2, 3], index=["a", "b", "c"])
-    s2 = pd.Series([10, 20, 30], index=["b", "c", "d"])
+    s1 = pd.Series([1, 2, 3], index=['a', 'b', 'c'])
+    s2 = pd.Series([10, 20, 30], index=['b', 'c', 'd'])
 
     cat.registry.ctx.globals['s1'] = s1
     cat.registry.ctx.globals['s2'] = s2
@@ -1096,7 +1126,7 @@ def test_non_unique_index_access(cat):
     """Test Series with non-unique index."""
     import pandas as pd
 
-    s = pd.Series([1, 2, 3], index=["a", "a", "b"])
+    s = pd.Series([1, 2, 3], index=['a', 'a', 'b'])
     cat.registry.ctx.globals['s'] = s
 
     cat.parse('s.loc["a"]')
@@ -1115,7 +1145,7 @@ def test_multiindex_basic(cat):
     import pandas as pd
 
     index = pd.MultiIndex.from_tuples([("A", 1), ("A", 2), ("B", 1)], names=["grp", "id"])
-    df = pd.DataFrame({"val": [10, 20, 30]}, index=index)
+    df = pd.DataFrame({'val': [10, 20, 30]}, index=index)
     idx_tuple = ("A", 2)
 
     cat.registry.ctx.globals['df'] = df
@@ -1124,7 +1154,7 @@ def test_multiindex_basic(cat):
     # Access MultiIndex using tuple from context
     cat.parse('df.loc[idx]')
     result = cat.execute()
-    assert result["val"] == 20
+    assert result['val'] == 20
 
 
 def test_timezone_aware_datetimeindex(cat):

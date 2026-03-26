@@ -14,10 +14,10 @@
  *   - Block stack push/pop pairing (scope isolation)
  *   - ForRangeInt/ForRangeStep bitpacking roundtrips
  *
- * Depends on: CatnipVMBase.v (VMOpCode, Stack, Locals, Instr)
+ * Depends on: CatnipVMStackSafety.v (VMOpCode, Stack, Locals, Instr)
  *)
 
-From Catnip Require Export CatnipVMBase.
+From Catnip Require Export CatnipVMStackSafety.
 From Coq Require Import List Lia PeanoNat Bool.
 Import ListNotations.
 Open Scope nat_scope.

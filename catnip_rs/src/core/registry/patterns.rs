@@ -9,9 +9,12 @@
 //! - Tuple patterns: destructure iterables (with star support)
 
 use super::Registry;
+use crate::constants::*;
 use crate::core::pattern::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
+
+type PatternBindings = Vec<(String, Py<PyAny>)>;
 
 impl Registry {
     /// Execute a match expression with pattern matching.
@@ -22,11 +25,7 @@ impl Registry {
     ///
     /// Returns:
     ///     Result of the matched case body, or None if no match
-    pub(crate) fn op_match(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_match(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "match requires 2 arguments: value_expr, cases",
@@ -100,15 +99,11 @@ impl Registry {
             }
         }
 
-        // No pattern matched — raise CatnipRuntimeError if available
-        let exc_class = py
-            .import("catnip.exc")
-            .and_then(|m| m.getattr("CatnipRuntimeError"));
+        // No pattern matched - raise CatnipRuntimeError if available
+        let exc_class = py.import(PY_MOD_EXC).and_then(|m| m.getattr("CatnipRuntimeError"));
         match exc_class {
             Ok(cls) => Err(PyErr::from_value(cls.call1(("No matching pattern",))?)),
-            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "No matching pattern",
-            )),
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err("No matching pattern")),
         }
     }
 
@@ -125,18 +120,11 @@ impl Registry {
         py: Python<'_>,
         pattern: &Bound<'_, PyAny>,
         value: &Py<PyAny>,
-    ) -> PyResult<Option<Vec<(String, Py<PyAny>)>>> {
+    ) -> PyResult<Option<PatternBindings>> {
         // Tag dispatch via downcast (pointer comparison, not string)
         let tag = get_pattern_tag(pattern).ok_or_else(|| {
-            let type_name = pattern
-                .get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Unknown pattern type: {}",
-                type_name
-            ))
+            let type_name = pattern.get_type().name().map(|n| n.to_string()).unwrap_or_default();
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Unknown pattern type: {}", type_name))
         })?;
 
         match tag {
@@ -146,11 +134,7 @@ impl Registry {
                 let pattern_value_node = pat.borrow().value.clone_ref(py);
                 let pattern_value = self.exec_stmt_impl(py, pattern_value_node)?;
                 let is_equal = pattern_value.bind(py).eq(value.bind(py))?;
-                if is_equal {
-                    Ok(Some(Vec::new()))
-                } else {
-                    Ok(None)
-                }
+                if is_equal { Ok(Some(Vec::new())) } else { Ok(None) }
             }
             TAG_VAR => {
                 let pat = pattern.cast::<PatternVar>().unwrap();
@@ -179,12 +163,11 @@ impl Registry {
                 let fields = pat.borrow().fields.clone_ref(py);
 
                 // Check type name matches (CatnipStructProxy stores type_name directly)
-                let value_type_name: String =
-                    if let Ok(proxy) = value.bind(py).cast::<crate::vm::CatnipStructProxy>() {
-                        proxy.borrow().type_name.clone()
-                    } else {
-                        value.bind(py).get_type().name()?.extract()?
-                    };
+                let value_type_name: String = if let Ok(proxy) = value.bind(py).cast::<crate::vm::CatnipStructProxy>() {
+                    proxy.borrow().type_name.clone()
+                } else {
+                    value.bind(py).get_type().name()?.extract()?
+                };
                 if value_type_name != struct_name {
                     return Ok(None);
                 }
@@ -218,13 +201,12 @@ impl Registry {
         py: Python<'_>,
         patterns: &Bound<'_, PyAny>,
         value: &Py<PyAny>,
-    ) -> PyResult<Option<Vec<(String, Py<PyAny>)>>> {
+    ) -> PyResult<Option<PatternBindings>> {
         // Convert value to list
         let value_bound = value.bind(py);
         let values_list = match value_bound.try_iter() {
             Ok(iter) => {
-                let values: Result<Vec<Py<PyAny>>, PyErr> =
-                    iter.map(|item| Ok(item?.unbind())).collect();
+                let values: Result<Vec<Py<PyAny>>, PyErr> = iter.map(|item| Ok(item?.unbind())).collect();
                 values?
             }
             Err(_) => {
@@ -281,11 +263,9 @@ impl Registry {
                     return Ok(None);
                 }
             }
-
             Ok(Some(bindings))
-        } else {
+        } else if let Some(star_idx) = star_idx {
             // With star: need at least (n_patterns - 1) values
-            let star_idx = star_idx.unwrap();
             let n_required = n_patterns - 1;
 
             if n_values < n_required {
@@ -309,8 +289,7 @@ impl Registry {
             for i in 0..n_after {
                 let value_idx = n_values - n_after + i;
                 let pattern_idx = star_idx + 1 + i;
-                let sub_bindings =
-                    self.match_pattern(py, &patterns_list[pattern_idx], &values_list[value_idx])?;
+                let sub_bindings = self.match_pattern(py, &patterns_list[pattern_idx], &values_list[value_idx])?;
                 if let Some(sub_bindings) = sub_bindings {
                     bindings.extend(sub_bindings);
                 } else {
@@ -327,7 +306,8 @@ impl Registry {
                 let star_list = PyList::new(py, &star_values)?;
                 bindings.push((star_name, star_list.unbind().into()));
             }
-
+            Ok(Some(bindings))
+        } else {
             Ok(Some(bindings))
         }
     }

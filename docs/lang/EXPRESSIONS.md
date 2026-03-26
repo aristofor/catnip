@@ -1,13 +1,5 @@
 # Expressions
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 ## Expressions multilignes
 
 Les expressions peuvent s'étendre sur plusieurs lignes en utilisant des parenthèses. Les newlines sont ignorés à
@@ -44,8 +36,10 @@ total = (
 
 ### Appels de fonction
 
-Les arguments de fonction peuvent être répartis sur plusieurs lignes. **Note** : le premier argument doit être sur la
-même ligne que `(`, les arguments suivants peuvent être sur des lignes séparées.
+Les arguments de fonction peuvent être répartis sur plusieurs lignes.
+
+**Note** : le premier argument doit être sur la même ligne que `(`, les arguments suivants peuvent être sur des lignes
+séparées.
 
 <!-- check: no-check -->
 
@@ -71,8 +65,9 @@ creer_serveur("192.168.1.1",
 
 ### Lambdas multilignes
 
-Les paramètres de lambda peuvent aussi s'étendre sur plusieurs lignes. **Note** : le premier paramètre doit être sur la
-même ligne que `(`.
+Les paramètres de lambda peuvent aussi s'étendre sur plusieurs lignes.
+
+**Note** : le premier paramètre doit être sur la même ligne que `(`.
 
 ```catnip
 # Paramètres multiligne
@@ -152,12 +147,12 @@ ______________________________________________________________________
 resultat = 10 + 5 - 2 * 3
 
 # Division flottante (true division) : toujours un float
-10 / 3                 # ⇒ 3.3333333333333335
-6 / 2                  # ⇒ 3.0 (float, pas int)
+10 / 3                 # → 3.3333333333333335
+6 / 2                  # → 3.0 (float, pas int)
 
 # Division entière (floor division) : arrondi vers le bas
-17 // 5                # ⇒ 3
--17 // 5               # ⇒ -4 (floor, pas troncature)
+17 // 5                # → 3
+-17 // 5               # → -4 (floor, pas troncature)
 
 # Modulo
 reste = 17 % 5         # 2
@@ -165,18 +160,22 @@ reste = 17 % 5         # 2
 # Exponentiation
 puissance = 2 ** 10    # 1024
 
+# Exponentiation et unaire : ** lie plus fort que -
+-2 ** 2                # → -4 (= -(2**2), comme Python)
+(-2) ** 2              # → 4
+
 # Opérateurs unaires
 negatif = -42
 positif = +42
 
 # Promotion automatique en grands entiers
-2 ** 100               # ⇒ 1267650600228229401496703205376
+2 ** 100               # → 1267650600228229401496703205376
 ```
 
 **Division** : `/` produit toujours un `float` (true division, comme Python 3). `//` produit un `int` arrondi vers le
 bas (floor division). Pour les entiers, `/` promeut en float même si le résultat est entier (`6 / 2` → `3.0`).
 
-L'arithmétique entière est en précision arbitraire : quand le résultat dépasse 48 bits, la VM promeut automatiquement en
+L'arithmétique entière est en précision arbitraire : quand le résultat dépasse 47 bits, la VM promeut automatiquement en
 BigInt natif. La démotion se fait si le résultat retombe dans la plage SmallInt. Ce mécanisme est transparent pour le
 code utilisateur.
 
@@ -197,6 +196,19 @@ sup_egal = 10 >= 5     # True
 
 # Comparaisons en chaîne
 dans_intervalle = 1 < x < 10
+
+# Appartenance (membership)
+present = 2 in list(1, 2, 3)          # True
+absent = "x" not in dict(a=1, b=2)    # True
+substr = "cat" in "catnip"            # True
+
+# Identité (identity)
+x = None
+x is None          # True
+x is not None      # False
+a = list(1, 2)
+b = a
+a is b             # True (même objet)
 ```
 
 ### Opérateurs logiques
@@ -211,6 +223,19 @@ condition3 = not True          # False
 
 # Court-circuit
 resultat = x > 0 and y / x > 2
+```
+
+### Nil-coalescing
+
+```catnip
+# ?? retourne la valeur si non-None, sinon le RHS
+42 ?? 0              # → 42
+None ?? 0            # → 0
+None ?? None ?? 3    # → 3
+
+# Teste None uniquement, pas la truthiness
+0 ?? 99              # → 0
+False ?? 99          # → False
 ```
 
 ### Opérateurs binaires

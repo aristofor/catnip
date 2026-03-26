@@ -1,6 +1,7 @@
 // FILE: catnip_rs/src/semantic/tests/helpers.rs
 //! Test helpers for creating IR nodes and running semantic passes.
 
+use crate::constants::*;
 use crate::ir::IROpCode;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -23,60 +24,38 @@ pub fn not_op(py: Python, operand: &Py<PyAny>) -> Py<PyAny> {
 
 /// Create an ADD operation IR node
 pub fn add_op(py: Python, left: &Py<PyAny>, right: &Py<PyAny>) -> Py<PyAny> {
-    create_ir(
-        py,
-        IROpCode::Add,
-        vec![left.clone_ref(py), right.clone_ref(py)],
-    )
+    create_ir(py, IROpCode::Add, vec![left.clone_ref(py), right.clone_ref(py)])
 }
 
 /// Create a MUL operation IR node
 pub fn mul_op(py: Python, left: &Py<PyAny>, right: &Py<PyAny>) -> Py<PyAny> {
-    create_ir(
-        py,
-        IROpCode::Mul,
-        vec![left.clone_ref(py), right.clone_ref(py)],
-    )
+    create_ir(py, IROpCode::Mul, vec![left.clone_ref(py), right.clone_ref(py)])
 }
 
 /// Create a TRUEDIV operation IR node
 pub fn div_op(py: Python, left: &Py<PyAny>, right: &Py<PyAny>) -> Py<PyAny> {
-    create_ir(
-        py,
-        IROpCode::TrueDiv,
-        vec![left.clone_ref(py), right.clone_ref(py)],
-    )
+    create_ir(py, IROpCode::TrueDiv, vec![left.clone_ref(py), right.clone_ref(py)])
 }
 
 /// Create an EQ (equals) operation IR node
 pub fn eq_op(py: Python, left: &Py<PyAny>, right: &Py<PyAny>) -> Py<PyAny> {
-    create_ir(
-        py,
-        IROpCode::Eq,
-        vec![left.clone_ref(py), right.clone_ref(py)],
-    )
+    create_ir(py, IROpCode::Eq, vec![left.clone_ref(py), right.clone_ref(py)])
 }
 
 /// Create an AND operation IR node
 pub fn and_op(py: Python, left: &Py<PyAny>, right: &Py<PyAny>) -> Py<PyAny> {
-    create_ir(
-        py,
-        IROpCode::And,
-        vec![left.clone_ref(py), right.clone_ref(py)],
-    )
+    create_ir(py, IROpCode::And, vec![left.clone_ref(py), right.clone_ref(py)])
 }
 
 /// Create a generic IR node with given opcode and args
 pub fn create_ir(py: Python, opcode: IROpCode, args: Vec<Py<PyAny>>) -> Py<PyAny> {
     let ir_class = py
-        .import("catnip.transformer")
+        .import(PY_MOD_TRANSFORMER)
         .expect("Failed to import catnip.transformer")
         .getattr("IR")
         .expect("Failed to get IR class");
 
-    let args_tuple = PyTuple::new(py, &args)
-        .expect("Failed to create tuple")
-        .unbind();
+    let args_tuple = PyTuple::new(py, &args).expect("Failed to create tuple").unbind();
     let kwargs = PyDict::new(py).unbind();
 
     ir_class
@@ -116,10 +95,7 @@ pub fn is_value<T>(py: Python<'_>, node: &Py<PyAny>, expected: T) -> bool
 where
     T: PartialEq + for<'py> pyo3::FromPyObject<'py, 'py>,
 {
-    node.bind(py)
-        .extract::<T>()
-        .map(|v| v == expected)
-        .unwrap_or(false)
+    node.bind(py).extract::<T>().map(|v| v == expected).unwrap_or(false)
 }
 
 /// Check if a node is an IR node with a specific opcode
@@ -132,12 +108,7 @@ pub fn has_opcode(py: Python, node: &Py<PyAny>, expected_opcode: IROpCode) -> bo
 
 /// Create a Ref node (variable reference)
 pub fn ref_node(py: Python, name: &str) -> Py<PyAny> {
-    let nodes_mod = py
-        .import("catnip.nodes")
-        .expect("Failed to import catnip.nodes");
+    let nodes_mod = py.import(PY_MOD_NODES).expect("Failed to import catnip.nodes");
     let ref_class = nodes_mod.getattr("Ref").expect("Failed to get Ref class");
-    ref_class
-        .call1((name,))
-        .expect("Failed to create Ref")
-        .unbind()
+    ref_class.call1((name,)).expect("Failed to create Ref").unbind()
 }

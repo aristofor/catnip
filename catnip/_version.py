@@ -4,8 +4,13 @@
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "0.0.6"
+__version__ = "0.0.7"
 __lang_id__ = "catnip"
+
+try:
+    from ._commit import __commit__
+except ImportError:
+    __commit__ = None
 
 
 def _get_build_date():

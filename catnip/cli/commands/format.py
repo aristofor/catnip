@@ -15,9 +15,10 @@ import click
 @click.option('--check', is_flag=True, help='Check if formatted (exit 1 if not)')
 @click.option('--indent-size', type=int, help='Indent size (default: from config)')
 @click.option('--line-length', '-l', type=int, help='Line length (default: from config)')
+@click.option('--align', is_flag=True, help='Align = (assignments), => (match arms), # (trailing comments)')
 @click.option('--diff', is_flag=True, help='Show diff instead of formatted code')
 @click.pass_context
-def cmd_format(ctx, files, stdin, in_place, check, indent_size, line_length, diff):
+def cmd_format(ctx, files, stdin, in_place, check, indent_size, line_length, align, diff):
     """Format Catnip code files.
 
     \b
@@ -51,6 +52,8 @@ def cmd_format(ctx, files, stdin, in_place, check, indent_size, line_length, dif
         config_mgr.apply_cli_format_indent_size(indent_size)
     if line_length is not None:
         config_mgr.apply_cli_format_line_length(line_length)
+    if align:
+        config_mgr.apply_cli_format_align(True)
 
     format_config = config_mgr.get_format_config()
 

@@ -3,6 +3,7 @@
 //!
 //! Port of catnip/semantic/_optimizer.pyx
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -22,9 +23,7 @@ impl OptimizationPassBase {
     #[new]
     #[pyo3(signature = (name="OptimizationPass"))]
     fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+        Self { name: name.to_string() }
     }
 
     /// Visit a node and apply optimizations
@@ -62,8 +61,8 @@ impl OptimizationPassBase {
         let type_name_str = type_name.to_str()?;
 
         match type_name_str {
-            "IR" => self.visit_ir(py, node),
-            "Op" => self.visit_op(py, node),
+            // IR and Op are the same class (IR = Op alias)
+            "IR" | "Op" => self.visit_ir(py, node),
             "Ref" => self.visit_ref(py, node),
             _ => {
                 // Literals and other nodes pass through unchanged
@@ -114,7 +113,7 @@ impl OptimizationPassBase {
         }
 
         // Create new IR with visited children
-        let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+        let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
         let ident = bound.getattr("ident")?;
         let new_node = ir_class.call1((ident, visited_args_tuple, visited_kwargs))?;
         Ok(new_node.unbind())
@@ -162,7 +161,7 @@ impl OptimizationPassBase {
         }
 
         // Create new Op with visited children
-        let op_class = py.import("catnip._rs")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_RS)?.getattr("Op")?;
         let ident = bound.getattr("ident")?;
         let new_node = op_class.call1((ident, visited_args_tuple, visited_kwargs))?;
         Ok(new_node.unbind())
@@ -191,26 +190,18 @@ impl Optimizer {
             p
         } else {
             // Default optimization pipeline
-            let semantic_module = py.import("catnip.semantic")?;
+            let semantic_module = py.import(PY_MOD_SEMANTIC)?;
 
             let blunt_code = semantic_module.getattr("BluntCodePass")?.call0()?;
-            let constant_propagation = semantic_module
-                .getattr("ConstantPropagationPass")?
-                .call0()?;
+            let constant_propagation = semantic_module.getattr("ConstantPropagationPass")?.call0()?;
             let constant_folding = semantic_module.getattr("ConstantFoldingPass")?.call0()?;
             let copy_propagation = semantic_module.getattr("CopyPropagationPass")?.call0()?;
             let function_inlining = semantic_module.getattr("FunctionInliningPass")?.call0()?;
-            let dead_store = semantic_module
-                .getattr("DeadStoreEliminationPass")?
-                .call0()?;
+            let dead_store = semantic_module.getattr("DeadStoreEliminationPass")?.call0()?;
             let strength_reduction = semantic_module.getattr("StrengthReductionPass")?.call0()?;
             let block_flattening = semantic_module.getattr("BlockFlatteningPass")?.call0()?;
-            let dead_code = semantic_module
-                .getattr("DeadCodeEliminationPass")?
-                .call0()?;
-            let cse = semantic_module
-                .getattr("CommonSubexpressionEliminationPass")?
-                .call0()?;
+            let dead_code = semantic_module.getattr("DeadCodeEliminationPass")?.call0()?;
+            let cse = semantic_module.getattr("CommonSubexpressionEliminationPass")?.call0()?;
             // TailRecursionToLoopPass moved to post-semantic phase (see analyzer.rs)
             // NOTE: BlockFlatteningPass and DeadCodeEliminationPass will be replaced
             // by CFG-based optimizations once CFG reconstruction is properly implemented
@@ -230,21 +221,14 @@ impl Optimizer {
             list.unbind()
         };
 
-        Ok(Self {
-            passes: passes_list,
-        })
+        Ok(Self { passes: passes_list })
     }
 
     /// Apply all optimization passes to the IR
     ///
     /// Multiple iterations allow optimizations to enable each other.
     #[pyo3(signature = (ir, max_iterations=10))]
-    fn optimize(
-        &self,
-        py: Python<'_>,
-        ir: Py<PyAny>,
-        max_iterations: usize,
-    ) -> PyResult<Py<PyAny>> {
+    fn optimize(&self, py: Python<'_>, ir: Py<PyAny>, max_iterations: usize) -> PyResult<Py<PyAny>> {
         let mut optimized = ir;
 
         for _iteration in 0..max_iterations {

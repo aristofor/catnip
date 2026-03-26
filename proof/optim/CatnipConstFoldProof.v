@@ -1,12 +1,12 @@
 (* FILE: proof/optim/CatnipConstFoldProof.v *)
-(* CatnipConstFoldProof.v — Correctness of the constant folding pass
+(* CatnipConstFoldProof.v - Correctness of the constant folding pass
  *
  * Source of truth:
  *   catnip_rs/src/semantic/constant_folding.rs
  *
  * Scope: pure algebraic constant folding. Expressions whose operands
  * are all concrete literals are replaced by their computed value.
- * Division by zero is never folded — preserved for runtime error.
+ * Division by zero is never folded - preserved for runtime error.
  *
  * TrueDiv folds to QConst (rational). Pow folds to Const when
  * exponent >= 0, left unfolded otherwise (negative exponent yields

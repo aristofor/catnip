@@ -3,39 +3,91 @@
 //!
 //! Stack-based VM that executes bytecode without growing the Python stack.
 
-use super::frame::{
-    ClosureParent, CodeObject, Frame, FramePool, NativeClosureScope, PyCodeObject, RustVMFunction,
-};
+use super::OpCode;
+use super::frame::{CodeObject, Frame, FramePool, NativeClosureScope, PyCodeObject, VMFunction};
+use super::host::{BinaryOp, VmHost};
 use super::iter::SeqIter;
 use super::pattern::{VMPattern, VMPatternElement};
-use super::py_interop::{call_binary_op, convert_code_object, lookup_ctx_global, store_ctx_global};
+use super::py_interop::{
+    PyResultExt, cast_tuple, convert_code_object, portabilize_struct_values, tuple_extract, tuple_get,
+};
 use super::structs::{
-    CatnipStructType, MethodKey, StructField, StructRegistry, StructType, StructTypeId,
+    CatnipStructType, MethodKey, StructField, StructMethods, StructParents, StructRegistry, StructType, StructTypeId,
+    cascade_decref_fields,
 };
 use super::traits::{TraitDef, TraitField, TraitRegistry};
-use super::value::Value;
-use super::OpCode;
-use crate::constants::{
-    JIT_PURE_BUILTINS, JIT_THRESHOLD_DEFAULT, MEMORY_CHECK_INTERVAL, MEMORY_LIMIT_DEFAULT_MB,
-};
+use super::value::{FuncSlot, FunctionTable, Value};
+use crate::constants::*;
 use crate::jit::builtin_dispatch::builtin_name_to_id;
 use crate::jit::{HotLoopDetector, JITExecutor, TraceOp, TraceRecorder};
-use num_bigint::BigInt;
-use num_integer::Integer;
-use num_traits::{ToPrimitive, Zero};
+use indexmap::IndexMap;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
+use rug::Integer;
+use rug::ops::{DivRounding, Pow, RemRounding};
 use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+
+/// Resolve a captured variable's integer value for JIT guard validation.
+/// Searches: closure scope -> host globals -> VM globals.
+#[inline]
+fn resolve_jit_guard_value(
+    py: Python<'_>,
+    name: &str,
+    closure: &Option<NativeClosureScope>,
+    host: &(impl VmHost + ?Sized),
+    globals: &IndexMap<String, Value>,
+) -> Option<i64> {
+    if let Some(ref closure) = closure {
+        if let Some(val) = closure.resolve_with_py(py, name).and_then(|v| v.as_int()) {
+            return Some(val);
+        }
+    }
+    if let Some(val) = host.lookup_global(py, name).ok().flatten().and_then(|v| v.as_int()) {
+        return Some(val);
+    }
+    globals.get(name).and_then(|v| v.as_int())
+}
+
+/// Decref a Value being discarded (PopTop, StoreLocal overwrite, SetAttr old value).
+/// Handles BigInt (Arc) and Struct (registry slot + field cascade).
+/// PyObj is managed by Python GC -- not touched here.
+#[inline]
+fn decref_discard(registry: &mut StructRegistry, val: Value) {
+    if val.is_bigint() {
+        val.decref_bigint();
+    } else if val.is_struct_instance() {
+        let idx = val.as_struct_instance_idx().unwrap();
+        if let Some(fields) = registry.decref(idx) {
+            cascade_decref_fields(registry, fields);
+        }
+    }
+}
+
+/// Check abstract struct guard. Returns Err if struct has unimplemented abstract methods.
+#[inline]
+fn check_abstract_guard(registry: &StructRegistry, type_id: StructTypeId) -> VMResult<()> {
+    let ty = registry.get_type(type_id).unwrap();
+    if !ty.abstract_methods.is_empty() {
+        let mut names: Vec<&str> = ty.abstract_methods.iter().map(|k| k.name.as_str()).collect();
+        names.sort();
+        return Err(VMError::RuntimeError(format!(
+            "cannot instantiate abstract struct '{}' (unimplemented: {})",
+            ty.name,
+            names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(())
+}
 
 /// Build an error message for a missing attribute on a struct, with "did you mean?" suggestion.
 fn attr_error_msg(ty: &StructType, attr: &str) -> String {
     let candidates = ty.available_names();
-    let candidates_ref: Vec<&str> = candidates.iter().copied().collect();
+    let candidates_ref: Vec<&str> = candidates.to_vec();
     let suggestions = catnip_tools::suggest::suggest_similar(attr, &candidates_ref, 1, 0.6);
     match catnip_tools::suggest::format_suggestion(&suggestions) {
         Some(hint) => format!("'{}' has no attribute '{}'. {}", ty.name, attr, hint),
@@ -43,8 +95,17 @@ fn attr_error_msg(ty: &StructType, attr: &str) -> String {
     }
 }
 
+/// Safely index into code.names with bounds check.
+#[inline(always)]
+fn get_name(code: &CodeObject, arg: u32) -> Result<&String, VMError> {
+    let idx = arg as usize;
+    code.names
+        .get(idx)
+        .ok_or_else(|| VMError::RuntimeError(format!("invalid name index {} (names len={})", idx, code.names.len())))
+}
+
 /// Build an error message for a missing attribute on a Python object, via dir().
-fn py_attr_error_msg(py_bound: &Bound<'_, PyAny>, attr: &str, original_msg: &str) -> String {
+pub(crate) fn py_attr_error_msg(py_bound: &Bound<'_, PyAny>, attr: &str, original_msg: &str) -> String {
     if let Ok(dir_list) = py_bound.dir() {
         let candidates: Vec<String> = dir_list
             .iter()
@@ -53,30 +114,11 @@ fn py_attr_error_msg(py_bound: &Bound<'_, PyAny>, attr: &str, original_msg: &str
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
         let suggestions = catnip_tools::suggest::suggest_similar(attr, &refs, 1, 0.6);
         if let Some(hint) = catnip_tools::suggest::format_suggestion(&suggestions) {
-            let base = original_msg
-                .strip_prefix("AttributeError: ")
-                .unwrap_or(original_msg);
+            let base = original_msg.strip_prefix("AttributeError: ").unwrap_or(original_msg);
             return format!("AttributeError: {base}. {hint}");
         }
     }
     original_msg.to_string()
-}
-
-/// Convert TAG_STRUCT values to TAG_PYOBJ in captured closure scope.
-/// Struct instances are registry-indexed; the index is only valid in the VM
-/// that owns the registry. Converting eagerly to PyObject (CatnipStructProxy)
-/// makes closures portable across child VMs (e.g. ND recursion).
-fn portabilize_struct_values(py: Python<'_>, captured: &mut HashMap<String, Value>) {
-    for val in captured.values_mut() {
-        if val.is_struct_instance() {
-            let py_obj = val.to_pyobject(py);
-            let ptr = py_obj.as_ptr();
-            unsafe {
-                pyo3::ffi::Py_IncRef(ptr);
-                *val = Value::from_pyobj_ptr(ptr);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -144,22 +186,16 @@ fn elapsed_ns_per_op(start: Instant, iterations: usize) -> f64 {
 }
 
 pub fn bench_bigint_ops(bits: u32, iterations: usize) -> BigIntOpsBenchResult {
-    Python::attach(|py| {
+    Python::attach(|_py| {
         let mut result = BigIntOpsBenchResult {
             bits,
             iterations,
             ..BigIntOpsBenchResult::default()
         };
-        let a_big = (BigInt::from(1_u8) << bits) + BigInt::from(123_456_789_u64);
-        let b_big =
-            (BigInt::from(1_u8) << (bits.saturating_sub(1))) + BigInt::from(987_654_321_u64);
+        let a_big = (Integer::from(1_u8) << bits) + Integer::from(123_456_789_u64);
+        let b_big = (Integer::from(1_u8) << bits.saturating_sub(1)) + Integer::from(987_654_321_u64);
         let a = Value::from_bigint(a_big);
         let b = Value::from_bigint(b_big);
-        let op_mod_py = py.import("operator").expect("import operator for bench");
-        let op_truediv = op_mod_py.getattr("truediv").unwrap().unbind();
-        let op_floordiv_fn = op_mod_py.getattr("floordiv").unwrap().unbind();
-        let op_mod_fn = op_mod_py.getattr("mod").unwrap().unbind();
-
         let before = get_vm_fallback_stats();
 
         let start = Instant::now();
@@ -184,7 +220,7 @@ pub fn bench_bigint_ops(bits: u32, iterations: usize) -> BigIntOpsBenchResult {
 
         let start = Instant::now();
         for _ in 0..iterations {
-            let v = binary_floordiv(py, &op_floordiv_fn, a, b).expect("binary_floordiv failed");
+            let v = binary_floordiv(a, b).expect("binary_floordiv failed");
             black_box(v.bits());
             if v.is_bigint() {
                 v.decref();
@@ -194,7 +230,7 @@ pub fn bench_bigint_ops(bits: u32, iterations: usize) -> BigIntOpsBenchResult {
 
         let start = Instant::now();
         for _ in 0..iterations {
-            let v = binary_mod(py, &op_mod_fn, a, b).expect("binary_mod failed");
+            let v = binary_mod(a, b).expect("binary_mod failed");
             black_box(v.bits());
             if v.is_bigint() {
                 v.decref();
@@ -204,7 +240,7 @@ pub fn bench_bigint_ops(bits: u32, iterations: usize) -> BigIntOpsBenchResult {
 
         let start = Instant::now();
         for _ in 0..iterations {
-            let v = binary_div(py, &op_truediv, a, b).expect("binary_div failed");
+            let v = binary_div(a, b).expect("binary_div failed");
             black_box(v.bits());
         }
         result.div_ns = elapsed_ns_per_op(start, iterations);
@@ -212,15 +248,11 @@ pub fn bench_bigint_ops(bits: u32, iterations: usize) -> BigIntOpsBenchResult {
         let after = get_vm_fallback_stats();
         result.fallback_delta = VMFallbackStats {
             py_binary_div: after.py_binary_div.saturating_sub(before.py_binary_div),
-            py_binary_floordiv: after
-                .py_binary_floordiv
-                .saturating_sub(before.py_binary_floordiv),
+            py_binary_floordiv: after.py_binary_floordiv.saturating_sub(before.py_binary_floordiv),
             py_binary_mod: after.py_binary_mod.saturating_sub(before.py_binary_mod),
             py_compare_eq: after.py_compare_eq.saturating_sub(before.py_compare_eq),
             py_compare_ne: after.py_compare_ne.saturating_sub(before.py_compare_ne),
-            py_pattern_literal_eq: after
-                .py_pattern_literal_eq
-                .saturating_sub(before.py_pattern_literal_eq),
+            py_pattern_literal_eq: after.py_pattern_literal_eq.saturating_sub(before.py_pattern_literal_eq),
         };
 
         a.decref();
@@ -239,6 +271,8 @@ pub enum VMError {
     RuntimeError(String),
     ZeroDivisionError(String),
     MemoryLimitExceeded(String),
+    Interrupted,
+    Exit(i32),
     Return(Value),
     Break,
     Continue,
@@ -249,11 +283,20 @@ impl std::fmt::Display for VMError {
         match self {
             VMError::StackUnderflow => write!(f, "WeirdError: VM stack underflow"),
             VMError::FrameOverflow => write!(f, "WeirdError: VM frame stack overflow"),
-            VMError::NameError(s) => write!(f, "name '{}' is not defined", s),
-            VMError::TypeError(s) => write!(f, "type error: {}", s),
-            VMError::RuntimeError(s) => write!(f, "runtime error: {}", s),
-            VMError::ZeroDivisionError(s) => write!(f, "{}", s),
-            VMError::MemoryLimitExceeded(s) => write!(f, "{}", s),
+            VMError::NameError(s) => {
+                // VM creates NameError with bare name, py_interop with full message
+                if s.starts_with("name '") {
+                    write!(f, "NameError: {}", s)
+                } else {
+                    write!(f, "NameError: {}", catnip_core::constants::format_name_error(s))
+                }
+            }
+            VMError::TypeError(s) => write!(f, "TypeError: {}", s),
+            VMError::RuntimeError(s) => write!(f, "{}", s),
+            VMError::ZeroDivisionError(s) => write!(f, "ZeroDivisionError: {}", s),
+            VMError::MemoryLimitExceeded(s) => write!(f, "MemoryLimitExceeded: {}", s),
+            VMError::Interrupted => write!(f, "KeyboardInterrupt"),
+            VMError::Exit(code) => write!(f, "exit({})", code),
             VMError::Return(_) => write!(f, "return signal"),
             VMError::Break => write!(f, "break signal"),
             VMError::Continue => write!(f, "continue signal"),
@@ -262,35 +305,6 @@ impl std::fmt::Display for VMError {
 }
 
 impl std::error::Error for VMError {}
-
-impl From<VMError> for PyErr {
-    fn from(err: VMError) -> PyErr {
-        match err {
-            VMError::NameError(s) => pyo3::exceptions::PyNameError::new_err(s),
-            VMError::TypeError(s) => pyo3::exceptions::PyTypeError::new_err(s),
-            VMError::ZeroDivisionError(s) => pyo3::exceptions::PyZeroDivisionError::new_err(s),
-            VMError::MemoryLimitExceeded(s) => pyo3::exceptions::PyMemoryError::new_err(s),
-            _ => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
-        }
-    }
-}
-
-impl From<PyErr> for VMError {
-    fn from(err: PyErr) -> VMError {
-        Python::attach(|py| {
-            let py_err = &err;
-            if py_err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
-                VMError::TypeError(err.to_string())
-            } else if py_err.is_instance_of::<pyo3::exceptions::PyNameError>(py) {
-                VMError::NameError(err.to_string())
-            } else if py_err.is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py) {
-                VMError::ZeroDivisionError(err.to_string())
-            } else {
-                VMError::RuntimeError(err.to_string())
-            }
-        })
-    }
-}
 
 type VMResult<T> = Result<T, VMError>;
 
@@ -343,6 +357,16 @@ pub struct ErrorContext {
     pub call_stack: Vec<(String, u32)>,
 }
 
+/// Tracking entry for an ND recursion frame pushed onto the VM stack.
+struct NdRecurEntry {
+    /// frame_stack.len() before the ND frame was pushed
+    caller_depth: usize,
+    /// Reference to the NDVmRecur for depth/cache updates on pop
+    recur_py: Py<PyAny>,
+    /// Cache key for memoization (None if disabled or unhashable)
+    memo_key: Option<u64>,
+}
+
 /// Stack-based virtual machine for Catnip bytecode.
 pub struct VM {
     /// Frame stack
@@ -350,7 +374,7 @@ pub struct VM {
     /// Frame pool for reuse
     frame_pool: FramePool,
     /// Global variables (VM-owned)
-    globals: HashMap<String, Value>,
+    globals: IndexMap<String, Value>,
     /// Python context for name resolution fallback
     py_context: Option<Py<PyAny>>,
     /// Cached iter() builtin for GetIter
@@ -379,6 +403,8 @@ pub struct VM {
     cached_op_gt: Option<Py<PyAny>>,
     /// Cached operator.ge for Ge fallback
     cached_op_ge: Option<Py<PyAny>>,
+    /// Cached operator.contains for In/NotIn
+    cached_op_contains: Option<Py<PyAny>>,
     /// Cached NDTopos singleton for NdEmptyTopos
     cached_nd_topos: Option<Py<PyAny>>,
     /// Cached builtins.set for BuildSet
@@ -431,6 +457,8 @@ pub struct VM {
     pub debug_step_depth: usize,
     /// Last byte offset where we paused (to avoid double-pause on same position)
     debug_last_paused_byte: Option<u32>,
+    /// Native VM function table (grow-only, no refcounting)
+    pub func_table: FunctionTable,
     /// Native struct type and instance registry
     pub struct_registry: StructRegistry,
     /// PyObject ptr -> StructTypeId, populated by MakeStruct
@@ -445,16 +473,21 @@ pub struct VM {
     memory_limit_bytes: u64,
     /// Instruction counter for periodic RSS checks
     instruction_count: u64,
+    /// Interrupt flag (set by external signal to abort execution)
+    interrupt_flag: Arc<AtomicBool>,
+    /// ND recursion frame tracking stack
+    nd_recur_stack: Vec<NdRecurEntry>,
+    /// Loop offsets already checked against JIT trace cache (warm-start)
+    jit_cache_checked: HashSet<usize>,
 }
 
 impl VM {
     /// Create a new VM.
     pub fn new() -> Self {
-        const FRAME_STACK_CAPACITY: usize = 64;
         Self {
-            frame_stack: Vec::with_capacity(FRAME_STACK_CAPACITY),
+            frame_stack: Vec::with_capacity(crate::constants::VM_FRAME_STACK_INIT),
             frame_pool: FramePool::default(),
-            globals: HashMap::new(),
+            globals: IndexMap::new(),
             py_context: None,
             cached_iter_fn: None,
             cached_operator: None,
@@ -469,6 +502,7 @@ impl VM {
             cached_op_le: None,
             cached_op_gt: None,
             cached_op_ge: None,
+            cached_op_contains: None,
             cached_nd_topos: None,
             cached_set_type: None,
             trace: false,
@@ -495,6 +529,7 @@ impl VM {
             debug_step_mode: DebugStepMode::Disabled,
             debug_step_depth: 0,
             debug_last_paused_byte: None,
+            func_table: FunctionTable::new(),
             struct_registry: StructRegistry::new(),
             struct_type_map: HashMap::new(),
             trait_registry: TraitRegistry::new(),
@@ -502,7 +537,15 @@ impl VM {
             last_src_byte: 0,
             memory_limit_bytes: MEMORY_LIMIT_DEFAULT_MB * 1024 * 1024,
             instruction_count: 0,
+            interrupt_flag: Arc::new(AtomicBool::new(false)),
+            nd_recur_stack: Vec::new(),
+            jit_cache_checked: HashSet::new(),
         }
+    }
+
+    /// Get a clone of the interrupt flag for external signal handlers.
+    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.interrupt_flag)
     }
 
     /// Enable JIT compilation with custom threshold.
@@ -511,8 +554,9 @@ impl VM {
         // Reset detector with new threshold
         self.jit_detector = HotLoopDetector::new(threshold);
         // Lazy init the JIT executor
-        if self.jit.lock().unwrap().is_none() {
-            *self.jit.lock().unwrap() = Some(JITExecutor::new(threshold));
+        let mut jit = self.jit.lock().unwrap();
+        if jit.is_none() {
+            *jit = Some(JITExecutor::new(threshold));
         }
     }
 
@@ -534,6 +578,48 @@ impl VM {
         *self.jit.lock().unwrap() = None;
     }
 
+    /// Handle frame pop for ND recursion: decrement depth, cache result.
+    #[inline]
+    fn handle_nd_frame_pop(&mut self, py: Python<'_>, result: Value) {
+        if let Some(entry) = self.nd_recur_stack.last() {
+            if self.frame_stack.len() == entry.caller_depth {
+                let entry = self.nd_recur_stack.pop().unwrap();
+                if let Ok(nd_recur) = entry.recur_py.bind(py).cast::<crate::nd::NDVmRecur>() {
+                    let r = nd_recur.borrow();
+                    let d = r.depth_cell().get();
+                    if d > 0 {
+                        r.depth_cell().set(d - 1);
+                    }
+                    if let Some(k) = entry.memo_key {
+                        r.cache_ref().borrow_mut().insert(k, result.to_pyobject(py));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update the JIT executor's bytecode hash from a CodeObject (lazy, cached).
+    #[inline]
+    fn update_jit_bytecode_hash(&self, code: &CodeObject) {
+        if !self.jit_enabled {
+            return;
+        }
+        self.update_jit_bytecode_hash_value(code.bytecode_hash());
+    }
+
+    /// Set a pre-computed bytecode hash on the JIT executor.
+    #[inline]
+    fn update_jit_bytecode_hash_value(&self, hash: u64) {
+        if !self.jit_enabled {
+            return;
+        }
+        if let Ok(mut jit) = self.jit.lock() {
+            if let Some(ref mut executor) = *jit {
+                executor.set_bytecode_hash(hash);
+            }
+        }
+    }
+
     /// Set memory limit in MB (0 = disabled).
     pub fn set_memory_limit(&mut self, mb: u64) {
         self.memory_limit_bytes = mb * 1024 * 1024;
@@ -542,6 +628,46 @@ impl VM {
     /// Set the Python context for name resolution.
     pub fn set_context(&mut self, context: Py<PyAny>) {
         self.py_context = Some(context);
+    }
+
+    /// Borrow the Python context reference (used by `ContextHost::new()`).
+    #[inline]
+    pub fn py_context(&self) -> &Option<Py<PyAny>> {
+        &self.py_context
+    }
+
+    /// Get the cached iter() builtin (used by `ContextHost::new()`).
+    /// Panics if `ensure_builtins_cached` hasn't been called.
+    #[inline]
+    pub fn cached_iter_fn(&self) -> &Py<PyAny> {
+        self.cached_iter_fn.as_ref().expect("iter_fn should be cached")
+    }
+
+    /// Get cached `operator.contains` ref (used by `ContextHost::new()`).
+    /// Panics if `ensure_builtins_cached` hasn't been called.
+    #[inline]
+    pub fn cached_contains_fn(&self) -> &Py<PyAny> {
+        self.cached_op_contains.as_ref().expect("contains_fn should be cached")
+    }
+
+    /// Get a cached operator ref by enum variant (used by `ContextHost::new()`).
+    /// Panics if `ensure_builtins_cached` hasn't been called.
+    #[inline]
+    pub fn cached_op(&self, op: super::host::CachedOp) -> &Py<PyAny> {
+        use super::host::CachedOp;
+        match op {
+            CachedOp::Add => self.cached_op_add.as_ref().unwrap(),
+            CachedOp::Sub => self.cached_op_sub.as_ref().unwrap(),
+            CachedOp::Mul => self.cached_op_mul.as_ref().unwrap(),
+            CachedOp::TrueDiv => self.cached_op_truediv.as_ref().unwrap(),
+            CachedOp::FloorDiv => self.cached_op_floordiv.as_ref().unwrap(),
+            CachedOp::Mod => self.cached_op_mod.as_ref().unwrap(),
+            CachedOp::Pow => self.cached_op_pow.as_ref().unwrap(),
+            CachedOp::Lt => self.cached_op_lt.as_ref().unwrap(),
+            CachedOp::Le => self.cached_op_le.as_ref().unwrap(),
+            CachedOp::Gt => self.cached_op_gt.as_ref().unwrap(),
+            CachedOp::Ge => self.cached_op_ge.as_ref().unwrap(),
+        }
     }
 
     /// Set source code and filename for error reporting.
@@ -588,11 +714,9 @@ impl VM {
                 .unbind()
             }),
         )
-        .map_err(VMError::from)?;
+        .to_vm(py)?;
 
-        let result = cb
-            .call1(py, (start_byte, locals_dict, call_stack))
-            .map_err(VMError::from)?;
+        let result = cb.call1(py, (start_byte, locals_dict, call_stack)).to_vm(py)?;
         let action_int: i32 = result.extract(py).unwrap_or(1);
         Ok(DebugStepMode::from_i32(action_int))
     }
@@ -605,16 +729,14 @@ impl VM {
             VMError::ZeroDivisionError(s) => ("ZeroDivisionError".to_string(), s.clone()),
             VMError::RuntimeError(s) => ("RuntimeError".to_string(), s.clone()),
             VMError::MemoryLimitExceeded(s) => ("MemoryError".to_string(), s.clone()),
-            VMError::StackUnderflow => (
-                "RuntimeError".to_string(),
-                "WeirdError: VM stack underflow".to_string(),
-            ),
+            VMError::StackUnderflow => ("RuntimeError".to_string(), "WeirdError: VM stack underflow".to_string()),
             VMError::FrameOverflow => (
                 "RuntimeError".to_string(),
                 "WeirdError: VM frame stack overflow".to_string(),
             ),
-            // Control flow signals - no error context needed
-            VMError::Return(_) | VMError::Break | VMError::Continue => return,
+            VMError::Interrupted => ("KeyboardInterrupt".to_string(), "execution interrupted".to_string()),
+            // Exit and control flow signals - no error context needed
+            VMError::Exit(_) | VMError::Return(_) | VMError::Break | VMError::Continue => return,
         };
 
         // Use last_src_byte tracked in dispatch loop (always up-to-date)
@@ -652,9 +774,46 @@ impl VM {
             self.cached_op_le = Some(op_mod.getattr("le")?.unbind());
             self.cached_op_gt = Some(op_mod.getattr("gt")?.unbind());
             self.cached_op_ge = Some(op_mod.getattr("ge")?.unbind());
+            self.cached_op_contains = Some(op_mod.getattr("contains")?.unbind());
             self.cached_operator = Some(op_mod.unbind().into());
         }
         Ok(())
+    }
+
+    /// Push an init frame for a struct instance if init_fn is Some.
+    /// Returns true if a frame was pushed (caller should `continue`).
+    fn push_struct_init_frame(
+        &mut self,
+        py: Python<'_>,
+        inst_val: Value,
+        init_fn: Option<Py<PyAny>>,
+    ) -> VMResult<bool> {
+        let Some(init_fn) = init_fn else { return Ok(false) };
+        let init_bound = init_fn.bind(py);
+        let init_data = if let Ok(f) = init_bound.cast::<VMFunction>() {
+            let r = f.borrow();
+            let code = Arc::clone(&r.vm_code.borrow(py).inner);
+            let cl = r.native_closure.clone();
+            drop(r);
+            Some((code, cl))
+        } else if let Ok(vm_code) = init_bound.getattr("vm_code") {
+            Some((convert_code_object(py, &vm_code).to_vm(py)?, None))
+        } else {
+            None
+        };
+        if let Some((new_code, native_closure)) = init_data {
+            self.struct_registry.incref(inst_val.as_struct_instance_idx().unwrap());
+            let frame = self.frame_stack.last_mut().unwrap();
+            frame.push(inst_val);
+            let mut new_frame = Frame::with_code(new_code);
+            new_frame.set_local(0, inst_val);
+            new_frame.closure_scope = native_closure;
+            new_frame.discard_return = true;
+            self.setup_super_proxy(py, inst_val, None, &mut new_frame)?;
+            self.frame_stack.push(new_frame);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Setup a super proxy on a frame for method calls on struct instances.
@@ -669,11 +828,9 @@ impl VM {
     ) -> VMResult<()> {
         // Resolve the instance's real type name
         let real_type_name = if let Some(idx) = inst_val.as_struct_instance_idx() {
-            self.struct_registry.get_instance(idx).and_then(|inst| {
-                self.struct_registry
-                    .get_type(inst.type_id)
-                    .map(|ty| ty.name.clone())
-            })
+            self.struct_registry
+                .get_instance(idx)
+                .and_then(|inst| self.struct_registry.get_type(inst.type_id).map(|ty| ty.name.clone()))
         } else {
             let inst_py = inst_val.to_pyobject(py);
             let inst_bound = inst_py.bind(py);
@@ -701,10 +858,7 @@ impl VM {
         // Find position: super_source_type tells us which type's method we're in
         let start_pos = if let Some(ref source) = super_source_type {
             // Find source in MRO and skip past it
-            mro.iter()
-                .position(|n| n == source)
-                .map(|p| p + 1)
-                .unwrap_or(1)
+            mro.iter().position(|n| n == source).map(|p| p + 1).unwrap_or(1)
         } else {
             // Normal call from the struct's own method: skip self (pos 0)
             1
@@ -715,7 +869,7 @@ impl VM {
         }
 
         // Collect methods from MRO[start_pos:], first-wins, with provenance
-        let mut methods: HashMap<String, Py<PyAny>> = HashMap::new();
+        let mut methods: IndexMap<String, Py<PyAny>> = IndexMap::new();
         let mut method_sources: HashMap<String, String> = HashMap::new();
         for mro_type_name in &mro[start_pos..] {
             if let Some(ty) = self.struct_registry.find_type_by_name(mro_type_name) {
@@ -747,12 +901,7 @@ impl VM {
     }
 
     /// Execute a code object and return the result.
-    pub fn execute(
-        &mut self,
-        py: Python<'_>,
-        code: Arc<CodeObject>,
-        args: &[Value],
-    ) -> VMResult<Value> {
+    pub fn execute(&mut self, py: Python<'_>, code: Arc<CodeObject>, args: &[Value]) -> VMResult<Value> {
         self.execute_with_closure(py, code, args, None)
     }
 
@@ -764,28 +913,9 @@ impl VM {
         args: &[Value],
         closure_scope: Option<NativeClosureScope>,
     ) -> VMResult<Value> {
-        // Set bytecode hash for JIT trace cache (instructions + constants + names)
-        if self.jit_enabled {
-            let mut bytes: Vec<u8> =
-                Vec::with_capacity(code.instructions.len() * 5 + code.constants.len() * 8);
-            for i in &code.instructions {
-                bytes.push(i.op as u8);
-                bytes.extend_from_slice(&i.arg.to_le_bytes());
-            }
-            for c in &code.constants {
-                bytes.extend_from_slice(&c.to_raw().to_le_bytes());
-            }
-            for n in &code.names {
-                bytes.extend_from_slice(n.as_bytes());
-                bytes.push(0); // separator
-            }
-            let hash = crate::jit::hash_bytecode(&bytes);
-            if let Ok(mut jit) = self.jit.lock() {
-                if let Some(ref mut executor) = *jit {
-                    executor.set_bytecode_hash(hash);
-                }
-            }
-        }
+        // Set bytecode hash for JIT trace cache and reset warm-start tracking
+        self.update_jit_bytecode_hash(&code);
+        self.jit_cache_checked.clear();
 
         // Create initial frame
         let mut frame = Frame::with_code(code);
@@ -798,20 +928,21 @@ impl VM {
         self.last_error_context = None;
         self.call_stack.clear();
 
-        // Install struct registry pointer for Value::to_pyobject.
+        // Install thread-local pointers for Value conversions.
         // Note: save/restore is handled by the PyRustVM wrapper (lib.rs),
         // NOT here, because the caller may still need to_pyobject after
         // execute returns (globals sync, result conversion).
         super::value::set_struct_registry(&self.struct_registry as *const _);
+        super::value::set_func_table(&self.func_table as *const _);
 
         // Run dispatch loop
         let result = match self.run(py) {
             Ok(v) => v,
             Err(e) => {
                 self.capture_error_context(&e);
-                // Clean up frame stack
+                self.nd_recur_stack.clear();
                 while let Some(frame) = self.frame_stack.pop() {
-                    self.frame_pool.free(frame);
+                    self.frame_pool.free(frame, &mut self.struct_registry);
                 }
                 return Err(e);
             }
@@ -819,65 +950,93 @@ impl VM {
 
         // Clean up
         while let Some(frame) = self.frame_stack.pop() {
-            self.frame_pool.free(frame);
+            self.frame_pool.free(frame, &mut self.struct_registry);
+        }
+
+        Ok(result)
+    }
+
+    /// Execute a code object with a custom VmHost (no Python Context needed).
+    pub fn execute_with_host(
+        &mut self,
+        py: Python<'_>,
+        code: Arc<CodeObject>,
+        args: &[Value],
+        host: &dyn super::host::VmHost,
+        closure_scope: Option<NativeClosureScope>,
+    ) -> VMResult<Value> {
+        let mut frame = Frame::with_code(code);
+        frame.bind_args(py, args, None);
+        frame.closure_scope = closure_scope;
+
+        self.frame_stack.push(frame);
+        self.last_error_context = None;
+        self.call_stack.clear();
+
+        super::value::set_struct_registry(&self.struct_registry as *const _);
+        super::value::set_func_table(&self.func_table as *const _);
+
+        let result = match self.run_with_host(py, host) {
+            Ok(v) => v,
+            Err(e) => {
+                self.capture_error_context(&e);
+                self.nd_recur_stack.clear();
+                while let Some(frame) = self.frame_stack.pop() {
+                    self.frame_pool.free(frame, &mut self.struct_registry);
+                }
+                return Err(e);
+            }
+        };
+
+        while let Some(frame) = self.frame_stack.pop() {
+            self.frame_pool.free(frame, &mut self.struct_registry);
         }
 
         Ok(result)
     }
 
     /// Get globals as a HashMap reference for syncing back to Python.
-    pub fn get_globals(&self) -> &HashMap<String, Value> {
+    pub fn get_globals(&self) -> &IndexMap<String, Value> {
         &self.globals
     }
 
-    /// Main dispatch loop.
+    /// Main dispatch loop with the default ContextHost.
     fn run(&mut self, py: Python<'_>) -> VMResult<Value> {
         // Cache builtins once at start of execution
-        self.ensure_builtins_cached(py)?;
+        self.ensure_builtins_cached(py).to_vm(py)?;
 
-        // Clone refs for use inside the loop (avoids borrow issues)
-        let iter_fn = self
-            .cached_iter_fn
-            .as_ref()
-            .expect("iter_fn should be cached")
-            .clone_ref(py);
-        let op_add = self.cached_op_add.as_ref().unwrap().clone_ref(py);
-        let op_sub = self.cached_op_sub.as_ref().unwrap().clone_ref(py);
-        let op_mul = self.cached_op_mul.as_ref().unwrap().clone_ref(py);
-        let op_truediv = self.cached_op_truediv.as_ref().unwrap().clone_ref(py);
-        let op_floordiv = self.cached_op_floordiv.as_ref().unwrap().clone_ref(py);
-        let op_mod = self.cached_op_mod.as_ref().unwrap().clone_ref(py);
-        let op_pow = self.cached_op_pow.as_ref().unwrap().clone_ref(py);
-        let op_lt = self.cached_op_lt.as_ref().unwrap().clone_ref(py);
-        let op_le = self.cached_op_le.as_ref().unwrap().clone_ref(py);
-        let op_gt = self.cached_op_gt.as_ref().unwrap().clone_ref(py);
-        let op_ge = self.cached_op_ge.as_ref().unwrap().clone_ref(py);
-        let ctx_globals: Option<Py<PyDict>> = self.py_context.as_ref().and_then(|ctx| {
-            ctx.bind(py)
-                .getattr("globals")
-                .ok()
-                .and_then(|g| match g.cast::<PyDict>() {
-                    Ok(d) => Some(d.clone().unbind()),
-                    Err(_) => None,
-                })
-        });
+        // Build host: owns ctx_globals, operator refs, py_context, and iter_fn
+        let host = super::host::ContextHost::new(py, self);
+        self.dispatch(py, &host)
+    }
 
+    /// Main dispatch loop with a custom host.
+    fn run_with_host(&mut self, py: Python<'_>, host: &dyn super::host::VmHost) -> VMResult<Value> {
+        self.dispatch(py, host)
+    }
+
+    /// Core dispatch loop, parameterized by host.
+    fn dispatch(&mut self, py: Python<'_>, host: &dyn super::host::VmHost) -> VMResult<Value> {
         let mut last_result = Value::NIL;
 
         while let Some(frame) = self.frame_stack.last_mut() {
             let code = match &frame.code {
-                Some(c) => Arc::clone(c),
+                Some(c) => c.clone(),
                 None => {
                     self.frame_stack.pop();
                     continue;
                 }
             };
+            // SAFETY: code Arc is kept alive by the frame (never replaced during execution).
+            // Raw pointer avoids atomic refcount on every instruction fetch.
+            let code: &CodeObject = unsafe { &*Arc::as_ptr(&code) };
 
             // Check if we've reached the end of bytecode
             if frame.ip >= code.instructions.len() {
                 last_result = frame.pop();
                 let discard = frame.discard_return;
                 self.frame_stack.pop();
+                self.handle_nd_frame_pop(py, last_result);
                 if !discard {
                     if let Some(caller) = self.frame_stack.last_mut() {
                         caller.push(last_result);
@@ -886,26 +1045,33 @@ impl VM {
                 continue;
             }
 
-            // Fetch instruction
+            // Fetch instruction + source position
             let instr = code.instructions[frame.ip];
-            // Capture source position for error reporting (copy, no borrow)
             let _current_src_byte = code.line_table.get(frame.ip).copied().unwrap_or(0);
             self.last_src_byte = _current_src_byte;
             frame.ip += 1;
 
-            // Periodic RSS check for memory guard
+            // Periodic checks (every ~65k instructions)
             self.instruction_count = self.instruction_count.wrapping_add(1);
-            if self.memory_limit_bytes > 0 && self.instruction_count & MEMORY_CHECK_INTERVAL == 0 {
-                if let Some(rss) = super::memory::get_rss_bytes() {
-                    if rss > self.memory_limit_bytes {
-                        let rss_mb = rss / (1024 * 1024);
-                        let limit_mb = self.memory_limit_bytes / (1024 * 1024);
-                        return Err(VMError::MemoryLimitExceeded(format!(
-                            "memory limit exceeded ({rss_mb} MB / {limit_mb} MB)\n\
-                             Increase: catnip -o memory:{}\n\
-                             Disable:  catnip -o memory:0",
-                            limit_mb * 2
-                        )));
+            if self.instruction_count & MEMORY_CHECK_INTERVAL == 0 {
+                // Interrupt check (Ctrl+C from REPL)
+                if self.interrupt_flag.load(Ordering::Relaxed) {
+                    self.interrupt_flag.store(false, Ordering::Relaxed);
+                    return Err(VMError::Interrupted);
+                }
+                // RSS memory guard
+                if self.memory_limit_bytes > 0 {
+                    if let Some(rss) = super::memory::get_rss_bytes() {
+                        if rss > self.memory_limit_bytes {
+                            let rss_mb = rss / (1024 * 1024);
+                            let limit_mb = self.memory_limit_bytes / (1024 * 1024);
+                            return Err(VMError::MemoryLimitExceeded(format!(
+                                "memory limit exceeded ({rss_mb} MB / {limit_mb} MB)\n\
+                                 Increase: catnip -o memory:{}\n\
+                                 Disable:  catnip -o memory:0",
+                                limit_mb * 2
+                            )));
+                        }
                     }
                 }
             }
@@ -993,8 +1159,7 @@ impl VM {
                     // Default to int for other ops
                     _ => true,
                 };
-                self.jit_recorder
-                    .record_opcode(instr.op, instr.arg, is_int_value, ip);
+                self.jit_recorder.record_opcode(instr.op, instr.arg, is_int_value, ip);
             }
 
             // Dispatch via match - compiles to jump table
@@ -1016,13 +1181,17 @@ impl VM {
                             self.jit_recorder.record_const_float(f, ip);
                         } else if let Some(b) = value.as_bool() {
                             // Treat booleans as ints for JIT (0 or 1)
-                            self.jit_recorder
-                                .record_const_int(if b { 1 } else { 0 }, ip);
+                            self.jit_recorder.record_const_int(if b { 1 } else { 0 }, ip);
                         } else {
                             // Other constants (None, strings, etc.) - record as 0 to balance stack
                             // These will likely prevent compilation (fallback to interpreter)
                             self.jit_recorder.record_const_int(0, ip);
                         }
+                    }
+                    // Incref: const is shared with stack
+                    value.clone_refcount_bigint();
+                    if value.is_struct_instance() {
+                        self.struct_registry.incref(value.as_struct_instance_idx().unwrap());
                     }
                     frame.push(value);
                 }
@@ -1030,18 +1199,21 @@ impl VM {
                 OpCode::LoadLocal => {
                     let value = frame.get_local(instr.arg as usize);
                     value.clone_refcount_bigint();
+                    if value.is_struct_instance() {
+                        self.struct_registry.incref(value.as_struct_instance_idx().unwrap());
+                    }
                     frame.push(value);
                 }
 
                 OpCode::StoreLocal => {
                     let value = frame.pop();
                     let old = frame.get_local(instr.arg as usize);
-                    old.decref_bigint();
+                    decref_discard(&mut self.struct_registry, old);
                     frame.set_local(instr.arg as usize, value);
                 }
 
                 OpCode::LoadScope => {
-                    let name = &code.names[instr.arg as usize];
+                    let name = get_name(code, instr.arg)?;
                     let resolved_value: Value;
 
                     // 0. Check super proxy (for extends parent method access)
@@ -1054,13 +1226,16 @@ impl VM {
                         }
                     }
 
-                    // 1. Check closure_scope first (captured variables)
+                    // 1. Check closure captured vars (no parent chain, pure Rust)
                     if let Some(ref closure) = frame.closure_scope {
-                        if let Some(value) = closure.resolve_with_py(py, name) {
+                        if let Some(value) = closure.resolve_captured_only(name) {
                             resolved_value = value;
+                            resolved_value.clone_refcount_bigint();
+                            if resolved_value.is_struct_instance() {
+                                self.struct_registry
+                                    .incref(resolved_value.as_struct_instance_idx().unwrap());
+                            }
                             frame.push(resolved_value);
-
-                            // Record LoadScope during tracing
                             if self.jit_tracing {
                                 if let Some(int_val) = resolved_value.as_int() {
                                     let ip = frame.ip - 1;
@@ -1073,9 +1248,12 @@ impl VM {
                     // 2. Check VM globals (Rust HashMap, O(1), always in sync)
                     if let Some(&value) = self.globals.get(name.as_str()) {
                         resolved_value = value;
+                        resolved_value.clone_refcount_bigint();
+                        if resolved_value.is_struct_instance() {
+                            self.struct_registry
+                                .incref(resolved_value.as_struct_instance_idx().unwrap());
+                        }
                         frame.push(resolved_value);
-
-                        // Record LoadScope during tracing
                         if self.jit_tracing {
                             if let Some(int_val) = resolved_value.as_int() {
                                 let ip = frame.ip - 1;
@@ -1084,13 +1262,16 @@ impl VM {
                         }
                         continue;
                     }
-                    // 3. Fallback to ctx_globals (Python builtins, modules)
-                    if let Some(ref py_globals) = ctx_globals {
-                        if let Some(value) = lookup_ctx_global(py, py_globals, name)? {
+                    // 3. Check closure parent chain (may hit PyGlobals)
+                    if let Some(ref closure) = frame.closure_scope {
+                        if let Some(value) = closure.resolve_with_py(py, name) {
                             resolved_value = value;
+                            resolved_value.clone_refcount_bigint();
+                            if resolved_value.is_struct_instance() {
+                                self.struct_registry
+                                    .incref(resolved_value.as_struct_instance_idx().unwrap());
+                            }
                             frame.push(resolved_value);
-
-                            // Record LoadScope during tracing
                             if self.jit_tracing {
                                 if let Some(int_val) = resolved_value.as_int() {
                                     let ip = frame.ip - 1;
@@ -1100,11 +1281,28 @@ impl VM {
                             continue;
                         }
                     }
+                    // 4. Fallback to ctx_globals (Python builtins, modules)
+                    if let Some(value) = host.lookup_global(py, name)? {
+                        resolved_value = value;
+                        resolved_value.clone_refcount_bigint();
+                        if resolved_value.is_struct_instance() {
+                            self.struct_registry
+                                .incref(resolved_value.as_struct_instance_idx().unwrap());
+                        }
+                        frame.push(resolved_value);
+                        if self.jit_tracing {
+                            if let Some(int_val) = resolved_value.as_int() {
+                                let ip = frame.ip - 1;
+                                self.jit_recorder.record_load_scope(name, int_val, ip);
+                            }
+                        }
+                        continue;
+                    }
                     return Err(VMError::NameError(name.to_owned()));
                 }
 
                 OpCode::StoreScope => {
-                    let name = &code.names[instr.arg as usize];
+                    let name = get_name(code, instr.arg)?;
 
                     // Check slotmap before recording
                     let slot_idx = code.slotmap.get(name.as_str()).copied();
@@ -1121,12 +1319,16 @@ impl VM {
                     let value = frame.pop();
 
                     // During tracing, also store to the trace slot to keep frame.locals synchronized
+                    // Track whether we already wrote to the local slot (to avoid double-decref)
+                    let mut local_slot_written = false;
                     if let Some(slot) = trace_slot {
-                        // Extend locals array if necessary
                         if slot >= frame.locals.len() {
                             frame.locals.resize(slot + 1, Value::NIL);
                         }
+                        let old = frame.get_local(slot);
+                        decref_discard(&mut self.struct_registry, old);
                         frame.set_local(slot, value);
+                        local_slot_written = true;
                     } else if self.jit_enabled {
                         // When JIT is enabled (but not currently tracing), still sync frame.locals
                         // using the slotmap so that JIT code can read correct values
@@ -1134,7 +1336,10 @@ impl VM {
                             if slot >= frame.locals.len() {
                                 frame.locals.resize(slot + 1, Value::NIL);
                             }
+                            let old = frame.get_local(slot);
+                            decref_discard(&mut self.struct_registry, old);
                             frame.set_local(slot, value);
+                            local_slot_written = true;
                         }
                     }
 
@@ -1148,12 +1353,25 @@ impl VM {
                     }
 
                     // 2. Store to local slot if name is in slotmap
-                    if let Some(idx) = slot_idx {
-                        frame.set_local(idx, value);
+                    // Skip if already written above (same slot) to avoid double-decref.
+                    // Also skip if the slot already holds `value` (StoreLocal ran before
+                    // StoreScope in the DupTop;StoreLocal;StoreScope sequence).
+                    if !local_slot_written {
+                        if let Some(idx) = slot_idx {
+                            let old = frame.get_local(idx);
+                            if old.bits() != value.bits() {
+                                decref_discard(&mut self.struct_registry, old);
+                                frame.set_local(idx, value);
+                            }
+                        }
                     }
 
                     // Keep VM globals in sync for module-level vars modified via closures
                     if stored_in_closure {
+                        if let Some(&old_global) = self.globals.get(name.as_str()) {
+                            decref_discard(&mut self.struct_registry, old_global);
+                        }
+                        value.clone_refcount();
                         if let Some(existing) = self.globals.get_mut(name.as_str()) {
                             *existing = value;
                         }
@@ -1164,7 +1382,12 @@ impl VM {
 
                     // 3. Store to globals for name resolution (if not in closure)
                     if !stored_in_closure {
-                        // Update in-place if key exists (avoids String clone on every store)
+                        // Decref old value in globals (BigInt/Struct refcount)
+                        if let Some(&old_global) = self.globals.get(name.as_str()) {
+                            decref_discard(&mut self.struct_registry, old_global);
+                        }
+                        // Incref new value going into globals (separate ownership)
+                        value.clone_refcount();
                         if let Some(existing) = self.globals.get_mut(name.as_str()) {
                             *existing = value;
                         } else {
@@ -1173,23 +1396,24 @@ impl VM {
                         GLOBALS_GEN.fetch_add(1, Ordering::Relaxed);
                         // Also sync to Python context.globals immediately
                         // so closures created later can access these values
-                        if let Some(ref py_globals) = ctx_globals {
-                            store_ctx_global(py, py_globals, name.as_str(), value);
-                        }
+                        host.store_global(py, name.as_str(), value)?;
                     }
                 }
 
                 OpCode::LoadGlobal => {
-                    let name = &code.names[instr.arg as usize];
+                    let name = get_name(code, instr.arg)?;
                     if let Some(&value) = self.globals.get(name.as_str()) {
-                        frame.push(value);
-                    } else if let Some(ref py_globals) = ctx_globals {
-                        // Try to get from Python context.globals
-                        if let Some(value) = lookup_ctx_global(py, py_globals, name.as_str())? {
-                            frame.push(value);
-                        } else {
-                            return Err(VMError::NameError(name.to_owned()));
+                        value.clone_refcount_bigint();
+                        if value.is_struct_instance() {
+                            self.struct_registry.incref(value.as_struct_instance_idx().unwrap());
                         }
+                        frame.push(value);
+                    } else if let Some(value) = host.lookup_global(py, name.as_str())? {
+                        value.clone_refcount_bigint();
+                        if value.is_struct_instance() {
+                            self.struct_registry.incref(value.as_struct_instance_idx().unwrap());
+                        }
+                        frame.push(value);
                     } else {
                         return Err(VMError::NameError(name.to_owned()));
                     }
@@ -1208,7 +1432,7 @@ impl VM {
                 // --- Stack manipulation ---
                 OpCode::PopTop => {
                     let val = frame.pop();
-                    val.decref_bigint();
+                    decref_discard(&mut self.struct_registry, val);
                 }
 
                 OpCode::DupTop => {
@@ -1234,6 +1458,7 @@ impl VM {
                             // Struct operator overload (stays in VM)
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_add")
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_add"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1244,7 +1469,7 @@ impl VM {
                                 continue;
                             }
                             // Fallback to Python for strings, lists, etc.
-                            call_binary_op(py, &op_add, a, b)?
+                            host.binary_op(py, BinaryOp::Add, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1259,6 +1484,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_sub")
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_sub"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1268,7 +1494,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            call_binary_op(py, &op_sub, a, b)?
+                            host.binary_op(py, BinaryOp::Sub, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1283,6 +1509,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_mul")
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_mul"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1293,7 +1520,7 @@ impl VM {
                                 continue;
                             }
                             // Fallback to Python for string * int, etc.
-                            call_binary_op(py, &op_mul, a, b)?
+                            host.binary_op(py, BinaryOp::Mul, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1303,8 +1530,8 @@ impl VM {
                 OpCode::Div => {
                     let b = frame.pop();
                     let a = frame.pop();
-                    if let Some((code, closure, args)) =
-                        try_struct_binop(&self.struct_registry, py, a, b, "op_div")
+                    if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_div")
+                        .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_div"))
                     {
                         let mut new_frame = Frame::with_code(code);
                         for (i, arg) in args.iter().enumerate() {
@@ -1314,7 +1541,14 @@ impl VM {
                         self.frame_stack.push(new_frame);
                         continue;
                     }
-                    let result = binary_div(py, &op_truediv, a, b)?;
+                    let result = match binary_div(a, b) {
+                        Ok(v) => v,
+                        Err(VMError::TypeError(_)) => {
+                            inc(&PY_BINARY_DIV_FALLBACKS);
+                            host.binary_op(py, BinaryOp::TrueDiv, a, b)?
+                        }
+                        Err(e) => return Err(e),
+                    };
                     frame.push(result);
                 }
 
@@ -1323,6 +1557,7 @@ impl VM {
                     let a = frame.pop();
                     if let Some((code, closure, args)) =
                         try_struct_binop(&self.struct_registry, py, a, b, "op_floordiv")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_floordiv"))
                     {
                         let mut new_frame = Frame::with_code(code);
                         for (i, arg) in args.iter().enumerate() {
@@ -1332,15 +1567,22 @@ impl VM {
                         self.frame_stack.push(new_frame);
                         continue;
                     }
-                    let result = binary_floordiv(py, &op_floordiv, a, b)?;
+                    let result = match binary_floordiv(a, b) {
+                        Ok(v) => v,
+                        Err(VMError::TypeError(_)) => {
+                            inc(&PY_BINARY_FLOORDIV_FALLBACKS);
+                            host.binary_op(py, BinaryOp::FloorDiv, a, b)?
+                        }
+                        Err(e) => return Err(e),
+                    };
                     frame.push(result);
                 }
 
                 OpCode::Mod => {
                     let b = frame.pop();
                     let a = frame.pop();
-                    if let Some((code, closure, args)) =
-                        try_struct_binop(&self.struct_registry, py, a, b, "op_mod")
+                    if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_mod")
+                        .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_mod"))
                     {
                         let mut new_frame = Frame::with_code(code);
                         for (i, arg) in args.iter().enumerate() {
@@ -1350,7 +1592,14 @@ impl VM {
                         self.frame_stack.push(new_frame);
                         continue;
                     }
-                    let result = binary_mod(py, &op_mod, a, b)?;
+                    let result = match binary_mod(a, b) {
+                        Ok(v) => v,
+                        Err(VMError::TypeError(_)) => {
+                            inc(&PY_BINARY_MOD_FALLBACKS);
+                            host.binary_op(py, BinaryOp::Mod, a, b)?
+                        }
+                        Err(e) => return Err(e),
+                    };
                     frame.push(result);
                 }
 
@@ -1362,6 +1611,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_pow")
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_pow"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1371,7 +1621,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            call_binary_op(py, &op_pow, a, b)?
+                            host.binary_op(py, BinaryOp::Pow, a, b)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1396,8 +1646,8 @@ impl VM {
                                 continue;
                             }
                             let py_a = a.to_pyobject(py);
-                            let py_result = py_a.call_method0(py, "__neg__")?;
-                            Value::from_pyobject(py, py_result.bind(py))?
+                            let py_result = py_a.call_method0(py, "__neg__").to_vm(py)?;
+                            Value::from_pyobject(py, py_result.bind(py)).to_vm(py)?
                         }
                         Err(e) => return Err(e),
                     };
@@ -1408,8 +1658,7 @@ impl VM {
                     let a = frame.peek();
                     if a.as_struct_instance_idx().is_some() {
                         frame.pop();
-                        if let Some((code, closure, args)) =
-                            try_struct_unaryop(&self.struct_registry, py, a, "op_pos")
+                        if let Some((code, closure, args)) = try_struct_unaryop(&self.struct_registry, py, a, "op_pos")
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1419,9 +1668,7 @@ impl VM {
                             self.frame_stack.push(new_frame);
                             continue;
                         }
-                        return Err(VMError::TypeError(format!(
-                            "bad operand type for unary +: struct"
-                        )));
+                        return Err(VMError::TypeError("bad operand type for unary +: struct".to_string()));
                     }
                     // No-op for native numbers
                 }
@@ -1434,9 +1681,8 @@ impl VM {
                         Ok(v) => v,
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
-                                try_struct_binop(&self.struct_registry, py, a, b, "op_bor").or_else(
-                                    || try_struct_rbinop(&self.struct_registry, py, a, b, "op_bor"),
-                                )
+                                try_struct_binop(&self.struct_registry, py, a, b, "op_bor")
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_bor"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1446,9 +1692,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "unsupported operand type(s) for |"
-                            )));
+                            return Err(VMError::TypeError("unsupported operand type(s) for |".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1463,15 +1707,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_bxor")
-                                    .or_else(|| {
-                                        try_struct_rbinop(
-                                            &self.struct_registry,
-                                            py,
-                                            a,
-                                            b,
-                                            "op_bxor",
-                                        )
-                                    })
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_bxor"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1481,9 +1717,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "unsupported operand type(s) for ^"
-                            )));
+                            return Err(VMError::TypeError("unsupported operand type(s) for ^".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1498,15 +1732,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_band")
-                                    .or_else(|| {
-                                        try_struct_rbinop(
-                                            &self.struct_registry,
-                                            py,
-                                            a,
-                                            b,
-                                            "op_band",
-                                        )
-                                    })
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_band"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1516,9 +1742,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "unsupported operand type(s) for &"
-                            )));
+                            return Err(VMError::TypeError("unsupported operand type(s) for &".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1541,9 +1765,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "bad operand type for unary ~"
-                            )));
+                            return Err(VMError::TypeError("bad operand type for unary ~".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1558,15 +1780,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_lshift")
-                                    .or_else(|| {
-                                        try_struct_rbinop(
-                                            &self.struct_registry,
-                                            py,
-                                            a,
-                                            b,
-                                            "op_lshift",
-                                        )
-                                    })
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_lshift"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1576,9 +1790,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "unsupported operand type(s) for <<"
-                            )));
+                            return Err(VMError::TypeError("unsupported operand type(s) for <<".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1593,15 +1805,7 @@ impl VM {
                         Err(VMError::TypeError(_)) => {
                             if let Some((code, closure, args)) =
                                 try_struct_binop(&self.struct_registry, py, a, b, "op_rshift")
-                                    .or_else(|| {
-                                        try_struct_rbinop(
-                                            &self.struct_registry,
-                                            py,
-                                            a,
-                                            b,
-                                            "op_rshift",
-                                        )
-                                    })
+                                    .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_rshift"))
                             {
                                 let mut new_frame = Frame::with_code(code);
                                 for (i, arg) in args.iter().enumerate() {
@@ -1611,9 +1815,7 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             }
-                            return Err(VMError::TypeError(format!(
-                                "unsupported operand type(s) for >>"
-                            )));
+                            return Err(VMError::TypeError("unsupported operand type(s) for >>".to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1625,8 +1827,8 @@ impl VM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_lt")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_lt")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_gt"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1639,7 +1841,7 @@ impl VM {
                     }
                     let result = match compare_lt(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_lt, a, b)?,
+                        Err(VMError::TypeError(_)) => host.binary_op(py, BinaryOp::Lt, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1649,8 +1851,8 @@ impl VM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_le")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_le")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_ge"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1663,7 +1865,7 @@ impl VM {
                     }
                     let result = match compare_le(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_le, a, b)?,
+                        Err(VMError::TypeError(_)) => host.binary_op(py, BinaryOp::Le, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1673,8 +1875,8 @@ impl VM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_gt")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_gt")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_lt"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1687,7 +1889,7 @@ impl VM {
                     }
                     let result = match compare_gt(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_gt, a, b)?,
+                        Err(VMError::TypeError(_)) => host.binary_op(py, BinaryOp::Gt, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1697,8 +1899,8 @@ impl VM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_ge")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_ge")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_le"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1711,7 +1913,7 @@ impl VM {
                     }
                     let result = match compare_ge(a, b) {
                         Ok(v) => v,
-                        Err(VMError::TypeError(_)) => call_binary_op(py, &op_ge, a, b)?,
+                        Err(VMError::TypeError(_)) => host.binary_op(py, BinaryOp::Ge, a, b)?,
                         Err(e) => return Err(e),
                     };
                     frame.push(result);
@@ -1722,8 +1924,8 @@ impl VM {
                     let a = frame.pop();
                     // Try op_eq method first
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_eq")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_eq")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_eq"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1735,27 +1937,26 @@ impl VM {
                         }
                     }
                     // Fallback: structural equality for structs
-                    let result = if let (Some(idx_a), Some(idx_b)) =
-                        (a.as_struct_instance_idx(), b.as_struct_instance_idx())
-                    {
-                        let inst_a = self.struct_registry.get_instance(idx_a).unwrap();
-                        let inst_b = self.struct_registry.get_instance(idx_b).unwrap();
-                        if inst_a.type_id != inst_b.type_id {
-                            Value::FALSE
-                        } else {
-                            let mut equal = true;
-                            for (fa, fb) in inst_a.fields.iter().zip(inst_b.fields.iter()) {
-                                let eq = compare_eq(py, *fa, *fb)?;
-                                if eq.as_bool() != Some(true) {
-                                    equal = false;
-                                    break;
+                    let result =
+                        if let (Some(idx_a), Some(idx_b)) = (a.as_struct_instance_idx(), b.as_struct_instance_idx()) {
+                            let inst_a = self.struct_registry.get_instance(idx_a).unwrap();
+                            let inst_b = self.struct_registry.get_instance(idx_b).unwrap();
+                            if inst_a.type_id != inst_b.type_id {
+                                Value::FALSE
+                            } else {
+                                let mut equal = true;
+                                for (fa, fb) in inst_a.fields.iter().zip(inst_b.fields.iter()) {
+                                    let eq = compare_eq(py, *fa, *fb)?;
+                                    if eq.as_bool() != Some(true) {
+                                        equal = false;
+                                        break;
+                                    }
                                 }
+                                Value::from_bool(equal)
                             }
-                            Value::from_bool(equal)
-                        }
-                    } else {
-                        compare_eq(py, a, b)?
-                    };
+                        } else {
+                            compare_eq(py, a, b)?
+                        };
                     frame.push(result);
                 }
 
@@ -1764,8 +1965,8 @@ impl VM {
                     let a = frame.pop();
                     // Try op_ne method first
                     if a.as_struct_instance_idx().is_some() {
-                        if let Some((code, closure, args)) =
-                            try_struct_binop(&self.struct_registry, py, a, b, "op_ne")
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, a, b, "op_ne")
+                            .or_else(|| try_struct_rbinop(&self.struct_registry, py, a, b, "op_ne"))
                         {
                             let mut new_frame = Frame::with_code(code);
                             for (i, arg) in args.iter().enumerate() {
@@ -1777,28 +1978,83 @@ impl VM {
                         }
                     }
                     // Fallback: structural inequality for structs
-                    let result = if let (Some(idx_a), Some(idx_b)) =
-                        (a.as_struct_instance_idx(), b.as_struct_instance_idx())
-                    {
-                        let inst_a = self.struct_registry.get_instance(idx_a).unwrap();
-                        let inst_b = self.struct_registry.get_instance(idx_b).unwrap();
-                        if inst_a.type_id != inst_b.type_id {
-                            Value::TRUE
-                        } else {
-                            let mut not_equal = false;
-                            for (fa, fb) in inst_a.fields.iter().zip(inst_b.fields.iter()) {
-                                let eq = compare_eq(py, *fa, *fb)?;
-                                if eq.as_bool() != Some(true) {
-                                    not_equal = true;
-                                    break;
+                    let result =
+                        if let (Some(idx_a), Some(idx_b)) = (a.as_struct_instance_idx(), b.as_struct_instance_idx()) {
+                            let inst_a = self.struct_registry.get_instance(idx_a).unwrap();
+                            let inst_b = self.struct_registry.get_instance(idx_b).unwrap();
+                            if inst_a.type_id != inst_b.type_id {
+                                Value::TRUE
+                            } else {
+                                let mut not_equal = false;
+                                for (fa, fb) in inst_a.fields.iter().zip(inst_b.fields.iter()) {
+                                    let eq = compare_eq(py, *fa, *fb)?;
+                                    if eq.as_bool() != Some(true) {
+                                        not_equal = true;
+                                        break;
+                                    }
                                 }
+                                Value::from_bool(not_equal)
                             }
-                            Value::from_bool(not_equal)
-                        }
-                    } else {
-                        compare_ne(py, a, b)?
-                    };
+                        } else {
+                            compare_ne(py, a, b)?
+                        };
                     frame.push(result);
+                }
+
+                // --- Membership ---
+                OpCode::In => {
+                    let b = frame.pop(); // container
+                    let a = frame.pop(); // item
+                    // Try op_in method on container
+                    if b.as_struct_instance_idx().is_some() {
+                        if let Some((code, closure, args)) = try_struct_binop(&self.struct_registry, py, b, a, "op_in")
+                        {
+                            let mut new_frame = Frame::with_code(code);
+                            for (i, arg) in args.iter().enumerate() {
+                                new_frame.set_local(i, *arg);
+                            }
+                            new_frame.closure_scope = closure;
+                            self.frame_stack.push(new_frame);
+                            continue;
+                        }
+                    }
+                    let result = host.contains_op(py, a, b)?;
+                    frame.push(result);
+                }
+                OpCode::NotIn => {
+                    let b = frame.pop(); // container
+                    let a = frame.pop(); // item
+                    // Dispatch op_not_in on struct (mirrors Eq/Ne pattern)
+                    if b.as_struct_instance_idx().is_some() {
+                        if let Some((code, closure, args)) =
+                            try_struct_binop(&self.struct_registry, py, b, a, "op_not_in")
+                        {
+                            let mut new_frame = Frame::with_code(code);
+                            for (i, arg) in args.iter().enumerate() {
+                                new_frame.set_local(i, *arg);
+                            }
+                            new_frame.closure_scope = closure;
+                            self.frame_stack.push(new_frame);
+                            continue;
+                        }
+                    }
+                    let result = host.contains_op(py, a, b)?;
+                    let negated = Value::from_bool(!result.is_truthy_py(py));
+                    frame.push(negated);
+                }
+
+                // --- Identity ---
+                OpCode::Is => {
+                    let b = frame.pop();
+                    let a = frame.pop();
+                    let result = a.is_identical(py, b);
+                    frame.push(Value::from_bool(result));
+                }
+                OpCode::IsNot => {
+                    let b = frame.pop();
+                    let a = frame.pop();
+                    let result = !a.is_identical(py, b);
+                    frame.push(Value::from_bool(result));
                 }
 
                 // --- Logic ---
@@ -1828,18 +2084,14 @@ impl VM {
                             if !self.jit_tracing {
                                 let has_compiled = {
                                     let jit = self.jit.lock().unwrap();
-                                    jit.as_ref()
-                                        .map(|e| e.has_compiled(loop_offset))
-                                        .unwrap_or(false)
+                                    jit.as_ref().map(|e| e.has_compiled(loop_offset)).unwrap_or(false)
                                 };
 
                                 if has_compiled {
                                     // Validate guards before executing JIT code
                                     let guards = {
                                         let jit = self.jit.lock().unwrap();
-                                        jit.as_ref()
-                                            .and_then(|e| e.get_guards(loop_offset))
-                                            .cloned()
+                                        jit.as_ref().and_then(|e| e.get_guards(loop_offset)).cloned()
                                     };
 
                                     let mut guards_pass = true;
@@ -1848,31 +2100,13 @@ impl VM {
                                     if let Some(ref guards) = guards {
                                         for (name, expected_value, slot) in guards {
                                             // Resolve current value of name
-                                            let current_value: Option<i64> = {
-                                                // 1. Check closure_scope (native)
-                                                if let Some(ref closure) = frame.closure_scope {
-                                                    closure
-                                                        .resolve_with_py(py, name.as_str())
-                                                        .and_then(|v| v.as_int())
-                                                } else {
-                                                    None
-                                                }
-                                                .or_else(|| {
-                                                    // 2. Check context.globals
-                                                    if let Some(ref py_globals) = ctx_globals {
-                                                        lookup_ctx_global(py, py_globals, name)
-                                                            .ok()
-                                                            .flatten()
-                                                            .and_then(|v| v.as_int())
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .or_else(|| {
-                                                    // 3. Check VM globals
-                                                    self.globals.get(name).and_then(|v| v.as_int())
-                                                })
-                                            };
+                                            let current_value = resolve_jit_guard_value(
+                                                py,
+                                                name,
+                                                &frame.closure_scope,
+                                                host,
+                                                &self.globals,
+                                            );
 
                                             match current_value {
                                                 Some(val) if val == *expected_value => {
@@ -1888,17 +2122,25 @@ impl VM {
                                         }
                                     }
 
+                                    // Skip JIT if any local holds a non-SmallInt value
+                                    // (BigInt, PyObj, etc.). The JIT operates on raw i64
+                                    // and can't handle heap-allocated types.
                                     if guards_pass {
-                                        // Execute compiled code
-                                        let mut locals_i64: Vec<i64> = frame
-                                            .locals
-                                            .iter()
-                                            .map(|v| v.as_int().unwrap_or(0))
-                                            .collect();
+                                        for v in frame.locals.iter() {
+                                            if !(v.is_int() || v.is_bool() || v.is_nil()) {
+                                                guards_pass = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if guards_pass {
+                                        // Execute compiled code (pass NaN-boxed bits)
+                                        let mut locals_i64: Vec<i64> =
+                                            frame.locals.iter().map(|v| v.bits() as i64).collect();
 
                                         // Extend locals array for LoadScope slots
-                                        let max_slot =
-                                            guard_locals.iter().map(|(s, _)| s).max().copied();
+                                        let max_slot = guard_locals.iter().map(|(s, _)| s).max().copied();
                                         if let Some(max_slot) = max_slot {
                                             if max_slot >= locals_i64.len() {
                                                 locals_i64.resize(max_slot + 1, 0);
@@ -1910,12 +2152,13 @@ impl VM {
                                             locals_i64[slot] = value;
                                         }
 
+                                        // Snapshot pre-JIT values to detect which slots changed
+                                        let snapshot: Vec<i64> = locals_i64.clone();
+
                                         let result = {
                                             let jit = self.jit.lock().unwrap();
                                             if let Some(ref executor) = *jit {
-                                                unsafe {
-                                                    executor.execute(loop_offset, &mut locals_i64)
-                                                }
+                                                unsafe { executor.execute(loop_offset, &mut locals_i64) }
                                             } else {
                                                 None
                                             }
@@ -1924,14 +2167,21 @@ impl VM {
                                         if let Some(_ret) = result {
                                             if self.trace {
                                                 eprintln!(
-                                                "[JIT] Executed compiled trace for while loop at {}",
-                                                loop_offset
-                                            );
+                                                    "[JIT] Executed compiled trace for while loop at {}",
+                                                    loop_offset
+                                                );
                                             }
-                                            // Restore locals from i64 array
+                                            // Restore only slots actually modified by JIT
+                                            // (values are NaN-boxed by codegen)
                                             for (i, &val) in locals_i64.iter().enumerate() {
-                                                if i < frame.locals.len() {
-                                                    frame.locals[i] = Value::from_int(val);
+                                                if i < frame.locals.len() && val != snapshot[i] {
+                                                    let new_val = Value::from_raw(val as u64);
+                                                    let old = frame.locals[i];
+                                                    decref_discard(&mut self.struct_registry, old);
+                                                    frame.locals[i] = new_val;
+                                                    if i < code.varnames.len() {
+                                                        host.store_global(py, &code.varnames[i], new_val)?;
+                                                    }
                                                 }
                                             }
                                             // Loop completed, jump to condition check
@@ -1967,24 +2217,17 @@ impl VM {
                                                 match executor.compile_trace(t) {
                                                     Ok(true) => {
                                                         if self.trace {
-                                                            eprintln!(
-                                                                "[JIT] While loop trace compiled!"
-                                                            );
+                                                            eprintln!("[JIT] While loop trace compiled!");
                                                         }
                                                     }
                                                     Ok(false) => {
                                                         if self.trace {
-                                                            eprintln!(
-                                                                "[JIT] While loop trace not compilable"
-                                                            );
+                                                            eprintln!("[JIT] While loop trace not compilable");
                                                         }
                                                     }
                                                     Err(e) => {
                                                         if self.trace {
-                                                            eprintln!(
-                                                                "[JIT] While loop compilation failed: {}",
-                                                                e
-                                                            );
+                                                            eprintln!("[JIT] While loop compilation failed: {}", e);
                                                         }
                                                     }
                                                 }
@@ -1993,9 +2236,23 @@ impl VM {
                                     }
                                 }
                             } else if !self.jit_tracing {
+                                // Warm-start: check trace cache on first encounter
+                                if !self.jit_cache_checked.contains(&loop_offset) {
+                                    self.jit_cache_checked.insert(loop_offset);
+                                    let hit = {
+                                        let mut jit = self.jit.lock().unwrap();
+                                        jit.as_mut()
+                                            .map(|e| e.try_compile_from_cache(loop_offset))
+                                            .unwrap_or(false)
+                                    };
+                                    if hit && self.trace {
+                                        eprintln!("[JIT] Warm-start: while loop at {} loaded from cache", loop_offset);
+                                    }
+                                }
+
                                 // Not tracing, check if loop becomes hot
                                 if self.jit_detector.record_loop_header(loop_offset) {
-                                    // Try cache first — skip recording if trace already cached
+                                    // Try cache first - skip recording if trace already cached
                                     let compiled_from_cache = {
                                         let mut jit = self.jit.lock().unwrap();
                                         jit.as_mut()
@@ -2004,23 +2261,17 @@ impl VM {
                                     };
                                     if compiled_from_cache {
                                         if self.trace {
-                                            eprintln!(
-                                                "[JIT] While loop at offset {} compiled from cache",
-                                                loop_offset
-                                            );
+                                            eprintln!("[JIT] While loop at offset {} compiled from cache", loop_offset);
                                         }
                                     } else {
-                                        // Cache miss — start tracing
+                                        // Cache miss - start tracing
                                         let num_locals = frame.locals.len();
                                         self.jit_recorder.start(loop_offset, num_locals);
                                         self.jit_tracing = true;
                                         self.jit_tracing_offset = loop_offset;
 
                                         if self.trace {
-                                            eprintln!(
-                                                "[JIT] Started tracing while loop at offset {}",
-                                                loop_offset
-                                            );
+                                            eprintln!("[JIT] Started tracing while loop at offset {}", loop_offset);
                                         }
                                     }
                                 }
@@ -2041,8 +2292,7 @@ impl VM {
                     // Only record if not suspended in recursive call
                     if self.jit_tracing && self.jit_recursive_depth == 0 {
                         let ip = frame.ip.saturating_sub(1);
-                        self.jit_recorder
-                            .record_conditional_jump(took_jump, true, ip);
+                        self.jit_recorder.record_conditional_jump(took_jump, true, ip);
                     }
                 }
 
@@ -2055,14 +2305,13 @@ impl VM {
                     // Record for JIT after execution
                     if self.jit_tracing {
                         let ip = frame.ip.saturating_sub(1);
-                        self.jit_recorder
-                            .record_conditional_jump(took_jump, false, ip);
+                        self.jit_recorder.record_conditional_jump(took_jump, false, ip);
                     }
                 }
 
                 OpCode::JumpIfFalseOrPop => {
                     let cond = frame.peek();
-                    if !cond.is_truthy() {
+                    if !cond.is_truthy_py(py) {
                         frame.ip = instr.arg as usize;
                     } else {
                         frame.pop();
@@ -2071,7 +2320,7 @@ impl VM {
 
                 OpCode::JumpIfTrueOrPop => {
                     let cond = frame.peek();
-                    if cond.is_truthy() {
+                    if cond.is_truthy_py(py) {
                         frame.ip = instr.arg as usize;
                     } else {
                         frame.pop();
@@ -2085,32 +2334,20 @@ impl VM {
                     let py_obj_bound = py_obj.bind(py);
 
                     if let Ok(list) = py_obj_bound.cast::<PyList>() {
-                        let iter = Py::new(py, SeqIter::from_list(list)?)?;
-                        let ptr = iter.bind(py).as_any().as_ptr();
-                        unsafe {
-                            pyo3::ffi::Py_IncRef(ptr);
-                            frame.push(Value::from_pyobj_ptr(ptr));
-                        }
+                        let iter = Py::new(py, SeqIter::from_list(list).to_vm(py)?).to_vm(py)?;
+                        frame.push(Value::from_owned_pyobject(iter.into_any()));
                         continue;
                     }
 
                     if let Ok(tuple) = py_obj_bound.cast::<PyTuple>() {
-                        let iter = Py::new(py, SeqIter::from_tuple(tuple)?)?;
-                        let ptr = iter.bind(py).as_any().as_ptr();
-                        unsafe {
-                            pyo3::ffi::Py_IncRef(ptr);
-                            frame.push(Value::from_pyobj_ptr(ptr));
-                        }
+                        let iter = Py::new(py, SeqIter::from_tuple(tuple).to_vm(py)?).to_vm(py)?;
+                        frame.push(Value::from_owned_pyobject(iter.into_any()));
                         continue;
                     }
 
-                    // Fallback: use cached iter() builtin
-                    let iterator = iter_fn.bind(py).call1((py_obj,))?;
-                    let ptr = iterator.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    // Fallback: use host's iter() builtin
+                    let iterator = host.get_iter(py, py_obj_bound)?;
+                    frame.push(Value::from_owned_pyobject(iterator.unbind()));
                 }
 
                 OpCode::ForIter => {
@@ -2122,7 +2359,7 @@ impl VM {
 
                     if let Ok(iter_ref) = py_iter_bound.cast::<SeqIter>() {
                         let mut iter = iter_ref.borrow_mut();
-                        match iter.next_value(py)? {
+                        match iter.next_value(py).to_vm(py)? {
                             Some(value) => frame.push(value),
                             None => {
                                 frame.pop();
@@ -2133,6 +2370,19 @@ impl VM {
                     }
 
                     // Fallback: use CPython tp_iternext directly (avoids sentinel + clone_ref)
+                    // Safety: verify tp_iternext is non-NULL to avoid segfault on
+                    // corrupted stack or objects that slipped past GetIter
+                    let tp_iternext = unsafe { (*(*py_iter_bound.as_ptr()).ob_type).tp_iternext };
+                    if tp_iternext.is_none() {
+                        let type_name = py_iter_bound
+                            .get_type()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "?".to_string());
+                        return Err(VMError::RuntimeError(format!(
+                            "ForIter: object of type '{type_name}' is not a valid iterator (NULL tp_iternext)"
+                        )));
+                    }
                     let next_ptr = unsafe { pyo3::ffi::PyIter_Next(py_iter_bound.as_ptr()) };
                     if next_ptr.is_null() {
                         // NULL = exhausted (StopIteration) or real error
@@ -2145,7 +2395,7 @@ impl VM {
                         frame.ip = instr.arg as usize;
                     } else {
                         let result = unsafe { pyo3::Bound::from_owned_ptr(py, next_ptr) };
-                        let value = Value::from_pyobject(py, &result)?;
+                        let value = Value::from_pyobject(py, &result).to_vm(py)?;
                         frame.push(value);
                     }
                 }
@@ -2156,44 +2406,202 @@ impl VM {
                     // Read args in order from stack, then pop all + function
                     let stack_len = frame.stack.len();
                     let args_start = stack_len - nargs;
+
+                    // Peek at the function (below args) to try the fast path
+                    // before allocating a Vec for args
+                    let func_pos = args_start - 1;
+                    let func = frame.stack[func_pos];
+
+                    // FAST PATH: native VM function (skip PyO3 boundary + avoid Vec alloc)
+                    if func.is_vmfunc() {
+                        let idx = func.as_vmfunc_idx();
+                        let (new_code, native_closure) = {
+                            let slot = self.func_table.get(idx).ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "invalid function index {idx} (table has {} entries)",
+                                    self.func_table.slots.len()
+                                ))
+                            })?;
+                            (Arc::clone(&slot.code), slot.closure.clone())
+                        };
+                        let func_id = new_code.func_id();
+
+                        // JIT trace recording
+                        if self.jit_recorder.is_recording() {
+                            let ip = frame.ip - 1;
+                            let is_recursive = self.jit_tracing_func_id.as_ref() == Some(&func_id);
+                            if is_recursive {
+                                if self.jit_recursive_depth == 0 {
+                                    self.jit_recorder.record_call(&func_id, nargs, new_code.is_pure, ip);
+                                }
+                                self.jit_recursive_depth += 1;
+                            } else {
+                                self.jit_recorder.record_call(&func_id, nargs, new_code.is_pure, ip);
+                            }
+                        }
+
+                        // JIT pure function registration + hot detection
+                        if self.jit_enabled {
+                            if new_code.is_pure {
+                                if let Ok(mut jit) = self.jit.lock() {
+                                    if let Some(ref mut executor) = *jit {
+                                        crate::jit::executor::register_pure_function(
+                                            executor,
+                                            func_id.clone(),
+                                            &new_code,
+                                        );
+                                    }
+                                }
+                            }
+                            self.jit_detector.record_call_internal(&func_id);
+                        }
+
+                        // Setup new frame - copy args directly from caller stack
+                        let jit_hash = new_code.bytecode_hash();
+                        let call_start_byte = _current_src_byte;
+                        let fn_name = new_code.name.clone();
+                        let has_varargs = new_code.vararg_idx >= 0;
+                        // Snapshot args into inline buffer, then release frame borrow
+                        // to access self.frame_pool
+                        let mut arg_buf = [Value::NIL; 8];
+                        let use_pool = !has_varargs && nargs <= 8;
+                        if use_pool {
+                            arg_buf[..nargs].copy_from_slice(&frame.stack[args_start..(nargs + args_start)]);
+                            frame.stack.truncate(func_pos);
+                        }
+                        // Allocate frame: pool (fast) or new (fallback)
+                        let mut new_frame = if use_pool {
+                            self.frame_pool.alloc_with_code(new_code)
+                        } else {
+                            Frame::with_code(new_code)
+                        };
+                        if use_pool {
+                            let nparams = new_frame.locals.len().min(nargs);
+                            new_frame.locals[..nparams].copy_from_slice(&arg_buf[..nparams]);
+                            // Fill defaults for missing args
+                            if let Some(ref fc) = new_frame.code {
+                                let code_nargs = fc.nargs;
+                                let ndefaults = fc.defaults.len();
+                                if ndefaults > 0 && nargs < code_nargs {
+                                    let default_start = code_nargs.saturating_sub(ndefaults);
+                                    for i in nargs.max(default_start)..code_nargs {
+                                        let default_idx = i - default_start;
+                                        if default_idx < ndefaults {
+                                            let val = fc.defaults[default_idx];
+                                            val.clone_refcount();
+                                            new_frame.locals[i] = val;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Varargs or >8 args: use bind_args with Vec
+                            let frame = self.frame_stack.last_mut().unwrap();
+                            let args: Vec<Value> = frame.stack[args_start..args_start + nargs].to_vec();
+                            frame.stack.truncate(func_pos);
+                            new_frame.bind_args(py, &args, None);
+                        }
+                        new_frame.closure_scope = native_closure;
+                        if self.jit_enabled {
+                            if let Ok(mut jit) = self.jit.lock() {
+                                if let Some(ref mut executor) = *jit {
+                                    executor.set_bytecode_hash(jit_hash);
+                                }
+                            }
+                        }
+                        self.call_stack.push(CallInfo {
+                            name: fn_name,
+                            call_start_byte,
+                        });
+                        self.frame_stack.push(new_frame);
+                        continue;
+                    }
+
+                    // SLOW PATH: pop args into Vec
                     let args: Vec<Value> = frame.stack[args_start..].to_vec();
                     frame.stack.truncate(args_start);
                     // Pop function
-                    let func = frame.pop();
+                    frame.pop();
 
-                    // Single conversion: reused for struct check and general call path
+                    // SLOW PATH: PyObject (struct instantiation, bound methods, Python callables)
                     let py_func = func.to_pyobject(py);
                     let py_func_bound = py_func.bind(py);
+
+                    // ND recursion fast path: push frame instead of creating new VM
+                    if let Ok(nd_recur) = py_func_bound.cast::<crate::nd::NDVmRecur>() {
+                        let r = nd_recur.borrow();
+                        if let Some(code) = r.vm_code_arc().cloned() {
+                            // Depth guard
+                            let depth = r.depth_cell().get();
+                            if depth >= ND_MAX_RECURSION_DEPTH {
+                                drop(r);
+                                crate::nd::set_nd_abort();
+                                return Err(VMError::RuntimeError("maximum ND recursion depth exceeded".to_string()));
+                            }
+
+                            // Memo cache check
+                            let key = if r.is_memoize() && !args.is_empty() {
+                                let py_val = args[0].to_pyobject(py);
+                                py_val.bind(py).hash().ok().map(|h| h as u64)
+                            } else {
+                                None
+                            };
+                            let cache_hit = if let Some(k) = key {
+                                let guard = r.cache_ref().borrow();
+                                guard.get(&k).map(|c| c.clone_ref(py))
+                            } else {
+                                None
+                            };
+                            if let Some(cached) = cache_hit {
+                                drop(r);
+                                let value = Value::from_pyobject(py, cached.bind(py))
+                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                                let frame = self.frame_stack.last_mut().unwrap();
+                                frame.push(value);
+                                continue;
+                            }
+
+                            // Increment depth
+                            r.depth_cell().set(depth + 1);
+                            let closure = r.vm_closure_ref().cloned();
+                            drop(r);
+
+                            // Build args: [value, recur] - inject self as 2nd arg
+                            let recur_value = Value::from_pyobject(py, py_func_bound)
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let mut lambda_args = Vec::with_capacity(args.len() + 1);
+                            lambda_args.extend_from_slice(&args);
+                            lambda_args.push(recur_value);
+
+                            let caller_depth = self.frame_stack.len();
+                            let mut new_frame = Frame::with_code(code);
+                            new_frame.bind_args(py, &lambda_args, None);
+                            new_frame.closure_scope = closure;
+
+                            self.nd_recur_stack.push(NdRecurEntry {
+                                caller_depth,
+                                recur_py: py_func.clone_ref(py),
+                                memo_key: key,
+                            });
+
+                            self.frame_stack.push(new_frame);
+                            continue;
+                        }
+                        // No vm_code: fall through to Python slow path
+                    }
 
                     // Native struct instantiation (fast path)
                     {
                         let ptr = py_func_bound.as_ptr() as usize;
                         if let Some(&type_id) = self.struct_type_map.get(&ptr) {
-                            // Guard: cannot instantiate abstract struct
-                            {
-                                let ty = self.struct_registry.get_type(type_id).unwrap();
-                                if !ty.abstract_methods.is_empty() {
-                                    let mut names: Vec<&str> = ty
-                                        .abstract_methods
-                                        .iter()
-                                        .map(|k| k.name.as_str())
-                                        .collect();
-                                    names.sort();
-                                    return Err(VMError::RuntimeError(format!(
-                                        "cannot instantiate abstract struct '{}' (unimplemented: {})",
-                                        ty.name,
-                                        names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")
-                                    )));
-                                }
-                            }
+                            check_abstract_guard(&self.struct_registry, type_id)?;
                             // Extract type info before mutable borrow
                             let (num_fields, min_args, type_name, defaults, init_func) = {
                                 let ty = self.struct_registry.get_type(type_id).unwrap();
                                 let nf = ty.fields.len();
                                 let ma = ty.fields.iter().filter(|f| !f.has_default).count();
                                 let tn = ty.name.clone();
-                                let defs: Vec<Value> =
-                                    ty.fields.iter().map(|f| f.default).collect();
+                                let defs: Vec<Value> = ty.fields.iter().map(|f| f.default).collect();
                                 let init = ty.methods.get("init").map(|f| f.clone_ref(py));
                                 (nf, ma, tn, defs, init)
                             };
@@ -2211,39 +2619,13 @@ impl VM {
                                 )));
                             }
                             let mut field_values = args;
-                            for i in nargs..num_fields {
-                                field_values.push(defaults[i]);
-                            }
+                            field_values.extend(defaults.iter().take(num_fields).skip(nargs).copied());
                             let idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(idx);
 
-                            // Check for init method (post-constructor)
-                            if let Some(init_fn) = init_func {
-                                let init_bound = init_fn.bind(py);
-                                let init_data = if let Ok(f) = init_bound.cast::<RustVMFunction>() {
-                                    let r = f.borrow();
-                                    let code = Arc::clone(&r.vm_code.borrow(py).inner);
-                                    let cl = r.native_closure.clone();
-                                    drop(r);
-                                    Some((code, cl))
-                                } else if let Ok(vm_code) = init_bound.getattr("vm_code") {
-                                    Some((convert_code_object(py, &vm_code)?, None))
-                                } else {
-                                    None
-                                };
-                                if let Some((new_code, native_closure)) = init_data {
-                                    let frame = self.frame_stack.last_mut().unwrap();
-                                    frame.push(inst_val);
-                                    let mut new_frame = Frame::with_code(new_code);
-                                    new_frame.set_local(0, inst_val);
-                                    new_frame.closure_scope = native_closure;
-                                    new_frame.discard_return = true;
-                                    self.setup_super_proxy(py, inst_val, None, &mut new_frame)?;
-                                    self.frame_stack.push(new_frame);
-                                    continue;
-                                }
+                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                                continue;
                             }
-
                             let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
@@ -2255,15 +2637,15 @@ impl VM {
                     let actual_func: &Bound<'_, PyAny>;
                     let mut bound_instance: Option<Value> = None;
                     let mut super_source_type: Option<String> = None;
-                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>()
-                    {
+                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>() {
                         let bm = bound_method.borrow();
                         actual_func_ref = bm.func.bind(py).clone();
                         // Use native struct index if available (avoids CatnipStructProxy round-trip)
                         let instance_val = if let Some(idx) = bm.native_instance_idx {
+                            self.struct_registry.incref(idx);
                             Value::from_struct_instance(idx)
                         } else {
-                            Value::from_pyobject(py, bm.instance.bind(py))?
+                            Value::from_pyobject(py, bm.instance.bind(py)).to_vm(py)?
                         };
                         bound_instance = Some(instance_val);
                         super_source_type = bm.super_source_type.clone();
@@ -2283,14 +2665,14 @@ impl VM {
 
                     // Check if this is a VMFunction (fast Rust cast, then fallback)
                     let vm_func_data: Option<(Arc<CodeObject>, Option<NativeClosureScope>)> =
-                        if let Ok(vm_func) = actual_func.cast::<RustVMFunction>() {
+                        if let Ok(vm_func) = actual_func.cast::<VMFunction>() {
                             let vm_ref = vm_func.borrow();
                             let code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                             let closure = vm_ref.native_closure.clone();
                             drop(vm_ref);
                             Some((code, closure))
                         } else if let Ok(vm_code) = actual_func.getattr("vm_code") {
-                            Some((convert_code_object(py, &vm_code)?, None))
+                            Some((convert_code_object(py, &vm_code).to_vm(py)?, None))
                         } else {
                             None
                         };
@@ -2301,8 +2683,7 @@ impl VM {
                         if new_code.is_pure && self.jit_enabled {
                             let mut jit = self.jit.lock().unwrap();
                             if let Some(ref mut executor) = *jit {
-                                executor
-                                    .register_pure_function(func_id.clone(), Arc::clone(&new_code));
+                                crate::jit::executor::register_pure_function(executor, func_id.clone(), &new_code);
                             }
                         }
 
@@ -2311,33 +2692,22 @@ impl VM {
                             let ip = frame.ip - 1; // Call instruction was just executed
 
                             // Check if this is a recursive call (calling the function being traced)
-                            let is_recursive_call =
-                                if let Some(ref tracing_func_id) = self.jit_tracing_func_id {
-                                    &func_id == tracing_func_id
-                                } else {
-                                    false
-                                };
+                            let is_recursive_call = if let Some(ref tracing_func_id) = self.jit_tracing_func_id {
+                                &func_id == tracing_func_id
+                            } else {
+                                false
+                            };
 
                             if is_recursive_call {
                                 // Only record the FIRST CallSelf (when depth=0)
                                 // Then increment depth to suspend further recording
                                 if self.jit_recursive_depth == 0 {
-                                    self.jit_recorder.record_call(
-                                        &func_id,
-                                        nargs,
-                                        new_code.is_pure,
-                                        ip,
-                                    );
+                                    self.jit_recorder.record_call(&func_id, nargs, new_code.is_pure, ip);
                                 }
                                 self.jit_recursive_depth += 1;
                             } else {
                                 // Non-recursive call - record normally
-                                self.jit_recorder.record_call(
-                                    &func_id,
-                                    nargs,
-                                    new_code.is_pure,
-                                    ip,
-                                );
+                                self.jit_recorder.record_call(&func_id, nargs, new_code.is_pure, ip);
                             }
                         }
 
@@ -2356,46 +2726,25 @@ impl VM {
                                         let array_size = (max_slot + 1).max(new_code.nlocals);
                                         let mut locals_array: Vec<i64> = vec![0; array_size];
 
-                                        // Copy arguments to first N slots
+                                        // Copy arguments to first N slots (native i64, not NaN-boxed)
                                         for (i, arg) in args.iter().enumerate() {
                                             if i < array_size {
-                                                locals_array[i] = arg.to_raw() as i64;
+                                                locals_array[i] = arg.as_int().unwrap_or(0);
                                             }
                                         }
 
                                         // Populate captured variable slots from name_guards
                                         let fn_guards = fn_guards.to_vec();
+                                        let mut guards_passed = true;
                                         for (name, expected_value, slot) in &fn_guards {
                                             // Resolve current value of captured variable
-                                            let current_value: Option<i64> = {
-                                                // 1. Check closure_scope (native)
-                                                if let Some(ref closure) = frame.closure_scope {
-                                                    closure
-                                                        .resolve_with_py(py, name.as_str())
-                                                        .and_then(|v| v.as_int())
-                                                } else {
-                                                    None
-                                                }
-                                                .or_else(|| {
-                                                    if let Some(ref py_globals) = ctx_globals {
-                                                        py_globals
-                                                            .bind(py)
-                                                            .get_item(name)
-                                                            .ok()
-                                                            .flatten()
-                                                            .and_then(|val| {
-                                                                Value::from_pyobject(py, &val)
-                                                                    .ok()
-                                                                    .and_then(|v| v.as_int())
-                                                            })
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .or_else(|| {
-                                                    self.globals.get(name).and_then(|v| v.as_int())
-                                                })
-                                            };
+                                            let current_value = resolve_jit_guard_value(
+                                                py,
+                                                name,
+                                                &frame.closure_scope,
+                                                host,
+                                                &self.globals,
+                                            );
 
                                             match current_value {
                                                 Some(val) if val == *expected_value => {
@@ -2405,21 +2754,19 @@ impl VM {
                                                 }
                                                 _ => {
                                                     // Guard failed: fall back to interpreter
-                                                    use_compiled = false;
+                                                    guards_passed = false;
                                                     break;
                                                 }
                                             }
                                         }
 
-                                        if !use_compiled {
+                                        if !guards_passed {
                                             // Guard failed, skip to interpreter path
                                         } else {
                                             // Call compiled function with locals pointer and depth=0
                                             // Phase 3: Initial call starts at depth 0
                                             // Safety: locals_array has enough elements for all used slots
-                                            let result_raw = unsafe {
-                                                compiled_fn(locals_array.as_mut_ptr(), 0)
-                                            };
+                                            let result_raw = unsafe { compiled_fn(locals_array.as_mut_ptr(), 0) };
 
                                             // Check for guard failure (-1 = side exit needed)
                                             if result_raw == -1 {
@@ -2440,8 +2787,7 @@ impl VM {
                                                     );
                                                 }
 
-                                                let result_value =
-                                                    Value::from_raw(result_raw as u64);
+                                                let result_value = Value::from_raw(result_raw as u64);
                                                 frame.push(result_value);
                                                 use_compiled = true;
                                             }
@@ -2450,9 +2796,7 @@ impl VM {
                                 }
                             } else {
                                 // Check if this function has a pending trace from previous hot detection
-                                if let Some(ref pending_func_id) =
-                                    self.jit_pending_function_trace.clone()
-                                {
+                                if let Some(ref pending_func_id) = self.jit_pending_function_trace.clone() {
                                     if pending_func_id == &func_id {
                                         // Check if this is a top-level call (not recursive)
                                         let is_recursive = self.frame_stack.iter().any(|f| {
@@ -2490,10 +2834,7 @@ impl VM {
 
                                 if became_hot {
                                     if self.trace {
-                                        eprintln!(
-                                            "[JIT] Function '{}' became hot (id: {})",
-                                            new_code.name, func_id
-                                        );
+                                        eprintln!("[JIT] Function '{}' became hot (id: {})", new_code.name, func_id);
                                     }
 
                                     // Check if this is a recursive call (function already in call stack)
@@ -2544,6 +2885,7 @@ impl VM {
                             // Track call for stack traces
                             let call_start_byte = _current_src_byte;
                             let fn_name = new_code.name.clone();
+                            let jit_hash = new_code.bytecode_hash();
 
                             // Create and setup new frame
                             let mut new_frame = Frame::with_code(new_code);
@@ -2552,16 +2894,10 @@ impl VM {
 
                             // Setup super proxy if this is a bound method call on a struct with parent_methods
                             if let Some(inst_val) = bound_instance {
-                                self.setup_super_proxy(
-                                    py,
-                                    inst_val,
-                                    super_source_type,
-                                    &mut new_frame,
-                                )?;
+                                self.setup_super_proxy(py, inst_val, super_source_type, &mut new_frame)?;
                             }
 
-                            // Drop the mutable borrow on frame_stack before pushing
-                            // (frame ref becomes invalid after push)
+                            self.update_jit_bytecode_hash_value(jit_hash);
                             self.call_stack.push(CallInfo {
                                 name: fn_name,
                                 call_start_byte,
@@ -2578,16 +2914,14 @@ impl VM {
                             .map(|attr| attr.is_truthy().unwrap_or(false))
                             .unwrap_or(false);
 
-                        let mut args_py: Vec<Py<PyAny>> =
-                            Vec::with_capacity(args.len() + usize::from(pass_context));
+                        let mut args_py: Vec<Py<PyAny>> = Vec::with_capacity(args.len() + usize::from(pass_context));
 
                         if pass_context {
-                            if let Some(ref ctx) = self.py_context {
+                            if let Some(ref ctx) = host.context() {
                                 args_py.push(ctx.clone_ref(py));
                             } else {
                                 return Err(VMError::RuntimeError(
-                                    "Function requires context but VM has no context available"
-                                        .to_string(),
+                                    "Function requires context but VM has no context available".to_string(),
                                 ));
                             }
                         }
@@ -2598,9 +2932,8 @@ impl VM {
 
                         // JIT: record builtin pure calls as native ops
                         if self.jit_tracing && self.jit_recursive_depth == 0 {
-                            if let Ok(qualname) = actual_func
-                                .getattr("__qualname__")
-                                .and_then(|n| n.extract::<String>())
+                            if let Ok(qualname) =
+                                actual_func.getattr("__qualname__").and_then(|n| n.extract::<String>())
                             {
                                 let ip = frame.ip - 1;
                                 let recorded = match (qualname.as_str(), nargs) {
@@ -2652,9 +2985,9 @@ impl VM {
                         }
 
                         let gen_before = GLOBALS_GEN.load(Ordering::Relaxed);
-                        let args_tuple = PyTuple::new(py, args_py)?;
-                        let result = actual_func.call1(args_tuple)?;
-                        let value = Value::from_pyobject(py, &result)?;
+                        let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                        let result = actual_func.call1(args_tuple).to_vm(py)?;
+                        let value = Value::from_pyobject(py, &result).to_vm(py)?;
                         frame.push(value);
 
                         // Sync globals back to local slots after Python call.
@@ -2662,29 +2995,26 @@ impl VM {
                         // Uses static GLOBALS_GEN to detect re-entrant VMs that share ctx_globals.
                         if GLOBALS_GEN.load(Ordering::Relaxed) != gen_before {
                             if let Some(ref code) = frame.code {
-                                if let Some(ref py_globals) = ctx_globals {
-                                    let updates: Vec<(String, usize, Value)> = code
-                                        .slotmap
-                                        .iter()
-                                        .filter_map(|(name, &slot_idx)| {
-                                            // Skip native-tagged values (would lose tag through Python round-trip)
-                                            let current = frame.get_local(slot_idx);
-                                            if current.has_native_tag() {
-                                                return None;
-                                            }
-                                            lookup_ctx_global(py, py_globals, name.as_str())
-                                                .ok()
-                                                .flatten()
-                                                .map(|v| (name.clone(), slot_idx, v))
-                                        })
-                                        .collect();
-                                    for (name, slot_idx, v) in updates {
-                                        frame.set_local(slot_idx, v);
-                                        // Keep self.globals in sync for subsequent LoadScope
-                                        if let Some(existing) = self.globals.get_mut(name.as_str())
-                                        {
-                                            *existing = v;
+                                let updates: Vec<(String, usize, Value)> = code
+                                    .slotmap
+                                    .iter()
+                                    .filter_map(|(name, &slot_idx)| {
+                                        // Skip native-tagged values (would lose tag through Python round-trip)
+                                        let current = frame.get_local(slot_idx);
+                                        if current.has_native_tag() {
+                                            return None;
                                         }
+                                        host.lookup_global(py, name.as_str())
+                                            .ok()
+                                            .flatten()
+                                            .map(|v| (name.clone(), slot_idx, v))
+                                    })
+                                    .collect();
+                                for (name, slot_idx, v) in updates {
+                                    frame.set_local(slot_idx, v);
+                                    // Keep self.globals in sync for subsequent LoadScope
+                                    if let Some(existing) = self.globals.get_mut(name.as_str()) {
+                                        *existing = v;
                                     }
                                 }
                             }
@@ -2722,37 +3052,15 @@ impl VM {
                         let py_func_tmp = func.to_pyobject(py);
                         let ptr = py_func_tmp.bind(py).as_ptr() as usize;
                         if let Some(&type_id) = self.struct_type_map.get(&ptr) {
-                            // Guard: cannot instantiate abstract struct
-                            {
-                                let ty = self.struct_registry.get_type(type_id).unwrap();
-                                if !ty.abstract_methods.is_empty() {
-                                    let mut names: Vec<&str> = ty
-                                        .abstract_methods
-                                        .iter()
-                                        .map(|k| k.name.as_str())
-                                        .collect();
-                                    names.sort();
-                                    return Err(VMError::RuntimeError(format!(
-                                        "cannot instantiate abstract struct '{}' (unimplemented: {})",
-                                        ty.name,
-                                        names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")
-                                    )));
-                                }
-                            }
+                            check_abstract_guard(&self.struct_registry, type_id)?;
                             // Extract type info before mutable borrow
                             let (type_name, field_defaults, field_info, init_func) = {
                                 let ty = self.struct_registry.get_type(type_id).unwrap();
                                 let tn = ty.name.clone();
-                                let defs: Vec<(Value, bool)> = ty
-                                    .fields
-                                    .iter()
-                                    .map(|f| (f.default, f.has_default))
-                                    .collect();
-                                let fi: Vec<(String, bool)> = ty
-                                    .fields
-                                    .iter()
-                                    .map(|f| (f.name.clone(), f.has_default))
-                                    .collect();
+                                let defs: Vec<(Value, bool)> =
+                                    ty.fields.iter().map(|f| (f.default, f.has_default)).collect();
+                                let fi: Vec<(String, bool)> =
+                                    ty.fields.iter().map(|f| (f.name.clone(), f.has_default)).collect();
                                 let init = ty.methods.get("init").map(|f| f.clone_ref(py));
                                 (tn, defs, fi, init)
                             };
@@ -2770,14 +3078,14 @@ impl VM {
 
                             // Place keyword args by name
                             for (i, val) in kw_values.iter().enumerate() {
-                                let kw_name: String = kw_names_tuple.get_item(i)?.extract()?;
+                                let kw_name: String = kw_names_tuple.get_item(i).to_vm(py)?.extract().to_vm(py)?;
                                 match field_info.iter().position(|(n, _)| n == &kw_name) {
                                     Some(idx) => field_values[idx] = *val,
                                     None => {
                                         return Err(VMError::TypeError(format!(
                                             "{}() got an unexpected keyword argument '{}'",
                                             type_name, kw_name
-                                        )))
+                                        )));
                                     }
                                 }
                             }
@@ -2792,35 +3100,11 @@ impl VM {
                                 }
                             }
 
-                            let inst_idx =
-                                self.struct_registry.create_instance(type_id, field_values);
+                            let inst_idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(inst_idx);
-                            if let Some(init_fn) = init_func {
-                                let init_bound = init_fn.bind(py);
-                                let init_data = if let Ok(f) = init_bound.cast::<RustVMFunction>() {
-                                    let r = f.borrow();
-                                    let code = Arc::clone(&r.vm_code.borrow(py).inner);
-                                    let cl = r.native_closure.clone();
-                                    drop(r);
-                                    Some((code, cl))
-                                } else if let Ok(vm_code) = init_bound.getattr("vm_code") {
-                                    Some((convert_code_object(py, &vm_code)?, None))
-                                } else {
-                                    None
-                                };
-                                if let Some((new_code, native_closure)) = init_data {
-                                    let frame = self.frame_stack.last_mut().unwrap();
-                                    frame.push(inst_val);
-                                    let mut new_frame = Frame::with_code(new_code);
-                                    new_frame.set_local(0, inst_val);
-                                    new_frame.closure_scope = native_closure;
-                                    new_frame.discard_return = true;
-                                    self.setup_super_proxy(py, inst_val, None, &mut new_frame)?;
-                                    self.frame_stack.push(new_frame);
-                                    continue;
-                                }
+                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                                continue;
                             }
-
                             let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
@@ -2835,14 +3119,14 @@ impl VM {
                     let actual_func_kw: &Bound<'_, PyAny>;
                     let mut bound_instance_kw: Option<Value> = None;
                     let mut super_source_type_kw: Option<String> = None;
-                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>()
-                    {
+                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>() {
                         let bm = bound_method.borrow();
                         actual_func_ref_kw = bm.func.bind(py).clone();
                         let instance_val = if let Some(idx) = bm.native_instance_idx {
+                            self.struct_registry.incref(idx);
                             Value::from_struct_instance(idx)
                         } else {
-                            Value::from_pyobject(py, bm.instance.bind(py))?
+                            Value::from_pyobject(py, bm.instance.bind(py)).to_vm(py)?
                         };
                         bound_instance_kw = Some(instance_val);
                         super_source_type_kw = bm.super_source_type.clone();
@@ -2861,38 +3145,39 @@ impl VM {
                     // Build kwargs dict
                     let kwargs_dict = PyDict::new(py);
                     for (i, val) in kw_values.iter().enumerate() {
-                        let name = kw_names_tuple.get_item(i)?;
-                        kwargs_dict.set_item(name, val.to_pyobject(py))?;
+                        let name = kw_names_tuple.get_item(i).to_vm(py)?;
+                        kwargs_dict.set_item(name, val.to_pyobject(py)).to_vm(py)?;
                     }
 
                     // Check if VMFunction (fast Rust cast, then fallback)
                     let vm_func_data_kw: Option<(Arc<CodeObject>, Option<NativeClosureScope>)> =
-                        if let Ok(vm_func) = actual_func_kw.cast::<RustVMFunction>() {
+                        if let Ok(vm_func) = actual_func_kw.cast::<VMFunction>() {
                             let vm_ref = vm_func.borrow();
                             let code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                             let closure = vm_ref.native_closure.clone();
                             drop(vm_ref);
                             Some((code, closure))
                         } else if let Ok(vm_code) = actual_func_kw.getattr("vm_code") {
-                            Some((convert_code_object(py, &vm_code)?, None))
+                            Some((convert_code_object(py, &vm_code).to_vm(py)?, None))
                         } else {
                             None
                         };
                     if let Some((new_code, native_closure)) = vm_func_data_kw {
+                        let fn_name = new_code.name.clone();
+                        let call_start_byte = _current_src_byte;
                         let mut new_frame = Frame::with_code(new_code);
                         new_frame.bind_args(py, &args, Some(&kwargs_dict));
                         new_frame.closure_scope = native_closure;
 
                         // Setup super proxy for bound method calls
                         if let Some(inst_val) = bound_instance_kw {
-                            self.setup_super_proxy(
-                                py,
-                                inst_val,
-                                super_source_type_kw,
-                                &mut new_frame,
-                            )?;
+                            self.setup_super_proxy(py, inst_val, super_source_type_kw, &mut new_frame)?;
                         }
 
+                        self.call_stack.push(CallInfo {
+                            name: fn_name,
+                            call_start_byte,
+                        });
                         self.frame_stack.push(new_frame);
                         continue;
                     } else {
@@ -2904,16 +3189,14 @@ impl VM {
                             .map(|attr| attr.is_truthy().unwrap_or(false))
                             .unwrap_or(false);
 
-                        let mut args_py: Vec<Py<PyAny>> =
-                            Vec::with_capacity(args.len() + usize::from(pass_context));
+                        let mut args_py: Vec<Py<PyAny>> = Vec::with_capacity(args.len() + usize::from(pass_context));
 
                         if pass_context {
-                            if let Some(ref ctx) = self.py_context {
+                            if let Some(ref ctx) = host.context() {
                                 args_py.push(ctx.clone_ref(py));
                             } else {
                                 return Err(VMError::RuntimeError(
-                                    "Function requires context but VM has no context available"
-                                        .to_string(),
+                                    "Function requires context but VM has no context available".to_string(),
                                 ));
                             }
                         }
@@ -2922,9 +3205,9 @@ impl VM {
                             args_py.push(arg.to_pyobject(py));
                         }
 
-                        let args_tuple = PyTuple::new(py, args_py)?;
-                        let result = actual_func_kw.call(args_tuple, Some(&kwargs_dict))?;
-                        let value = Value::from_pyobject(py, &result)?;
+                        let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                        let result = actual_func_kw.call(args_tuple, Some(&kwargs_dict)).to_vm(py)?;
+                        let value = Value::from_pyobject(py, &result).to_vm(py)?;
                         frame.push(value);
                     }
                 }
@@ -2943,34 +3226,13 @@ impl VM {
                         let py_func_tmp = func.to_pyobject(py);
                         let ptr = py_func_tmp.bind(py).as_ptr() as usize;
                         if let Some(&type_id) = self.struct_type_map.get(&ptr) {
-                            // Guard: cannot instantiate abstract struct
-                            {
-                                let ty = self.struct_registry.get_type(type_id).unwrap();
-                                if !ty.abstract_methods.is_empty() {
-                                    let mut names: Vec<&str> = ty
-                                        .abstract_methods
-                                        .iter()
-                                        .map(|k| k.name.as_str())
-                                        .collect();
-                                    names.sort();
-                                    return Err(VMError::RuntimeError(format!(
-                                        "cannot instantiate abstract struct '{}' (unimplemented: {})",
-                                        ty.name,
-                                        names
-                                            .iter()
-                                            .map(|n| format!("'{}'", n))
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    )));
-                                }
-                            }
+                            check_abstract_guard(&self.struct_registry, type_id)?;
                             let (num_fields, min_args, type_name, defaults, init_func) = {
                                 let ty = self.struct_registry.get_type(type_id).unwrap();
                                 let nf = ty.fields.len();
                                 let ma = ty.fields.iter().filter(|f| !f.has_default).count();
                                 let tn = ty.name.clone();
-                                let defs: Vec<Value> =
-                                    ty.fields.iter().map(|f| f.default).collect();
+                                let defs: Vec<Value> = ty.fields.iter().map(|f| f.default).collect();
                                 let init = ty.methods.get("init").map(|f| f.clone_ref(py));
                                 (nf, ma, tn, defs, init)
                             };
@@ -2988,39 +3250,13 @@ impl VM {
                                 )));
                             }
                             let mut field_values = args;
-                            for i in nargs..num_fields {
-                                field_values.push(defaults[i]);
-                            }
+                            field_values.extend(defaults.iter().take(num_fields).skip(nargs).copied());
                             let idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(idx);
 
-                            // Check for init method (post-constructor)
-                            if let Some(init_fn) = init_func {
-                                let init_bound = init_fn.bind(py);
-                                let init_data = if let Ok(f) = init_bound.cast::<RustVMFunction>() {
-                                    let r = f.borrow();
-                                    let code = Arc::clone(&r.vm_code.borrow(py).inner);
-                                    let cl = r.native_closure.clone();
-                                    drop(r);
-                                    Some((code, cl))
-                                } else if let Ok(vm_code) = init_bound.getattr("vm_code") {
-                                    Some((convert_code_object(py, &vm_code)?, None))
-                                } else {
-                                    None
-                                };
-                                if let Some((new_code, native_closure)) = init_data {
-                                    let frame = self.frame_stack.last_mut().unwrap();
-                                    frame.push(inst_val);
-                                    let mut new_frame = Frame::with_code(new_code);
-                                    new_frame.set_local(0, inst_val);
-                                    new_frame.closure_scope = native_closure;
-                                    new_frame.discard_return = true;
-                                    self.setup_super_proxy(py, inst_val, None, &mut new_frame)?;
-                                    self.frame_stack.push(new_frame);
-                                    continue;
-                                }
+                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                                continue;
                             }
-
                             let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
@@ -3035,14 +3271,14 @@ impl VM {
                     let actual_func: &Bound<'_, PyAny>;
                     let mut bound_instance: Option<Value> = None;
                     let mut super_source_type: Option<String> = None;
-                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>()
-                    {
+                    if let Ok(bound_method) = py_func_bound.cast::<crate::core::BoundCatnipMethod>() {
                         let bm = bound_method.borrow();
                         actual_func_ref = bm.func.bind(py).clone();
                         let instance_val = if let Some(idx) = bm.native_instance_idx {
+                            self.struct_registry.incref(idx);
                             Value::from_struct_instance(idx)
                         } else {
-                            Value::from_pyobject(py, bm.instance.bind(py))?
+                            Value::from_pyobject(py, bm.instance.bind(py)).to_vm(py)?
                         };
                         bound_instance = Some(instance_val);
                         super_source_type = bm.super_source_type.clone();
@@ -3061,14 +3297,14 @@ impl VM {
 
                     // VMFunction detection (fast Rust cast, then fallback)
                     let tco_data: Option<(Arc<CodeObject>, Option<NativeClosureScope>)> =
-                        if let Ok(vm_func) = actual_func.cast::<RustVMFunction>() {
+                        if let Ok(vm_func) = actual_func.cast::<VMFunction>() {
                             let vm_ref = vm_func.borrow();
                             let code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                             let closure = vm_ref.native_closure.clone();
                             drop(vm_ref);
                             Some((code, closure))
                         } else if let Ok(vm_code) = actual_func.getattr("vm_code") {
-                            Some((convert_code_object(py, &vm_code)?, None))
+                            Some((convert_code_object(py, &vm_code).to_vm(py)?, None))
                         } else {
                             None
                         };
@@ -3089,29 +3325,19 @@ impl VM {
                         if vararg_idx >= 0 {
                             let vararg_idx_usize = vararg_idx as usize;
                             // Args before vararg
-                            for i in 0..args.len().min(vararg_idx_usize) {
-                                frame.locals[i] = args[i];
-                            }
+                            frame.locals[..args.len().min(vararg_idx_usize)]
+                                .copy_from_slice(&args[..args.len().min(vararg_idx_usize)]);
                             // Collect excess into vararg slot (store PyList directly, skip type detection)
                             if args.len() > vararg_idx_usize {
                                 let excess: Vec<Py<PyAny>> = args[vararg_idx_usize..]
                                     .iter()
                                     .map(|v: &Value| v.to_pyobject(py))
                                     .collect();
-                                let list = PyList::new(py, excess)
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                                let ptr = list.as_ptr();
-                                unsafe {
-                                    pyo3::ffi::Py_IncRef(ptr);
-                                    frame.locals[vararg_idx_usize] = Value::from_pyobj_ptr(ptr);
-                                }
+                                let list = PyList::new(py, excess).map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                                frame.locals[vararg_idx_usize] = Value::from_owned_pyobject(list.unbind().into_any());
                             } else {
                                 let empty = PyList::empty(py);
-                                let ptr = empty.as_ptr();
-                                unsafe {
-                                    pyo3::ffi::Py_IncRef(ptr);
-                                    frame.locals[vararg_idx_usize] = Value::from_pyobj_ptr(ptr);
-                                }
+                                frame.locals[vararg_idx_usize] = Value::from_owned_pyobject(empty.unbind().into_any());
                             }
                         } else {
                             // No varargs - direct rebind
@@ -3130,8 +3356,9 @@ impl VM {
                             for i in nargs.max(default_start)..nparams {
                                 let default_idx = i - default_start;
                                 if default_idx < ndefaults {
-                                    let default_obj = new_code.defaults[default_idx].bind(py);
-                                    frame.locals[i] = Value::from_pyobject(py, default_obj)?;
+                                    let val = new_code.defaults[default_idx];
+                                    val.clone_refcount();
+                                    frame.locals[i] = val;
                                 }
                             }
                         }
@@ -3143,56 +3370,39 @@ impl VM {
 
                         // Setup super proxy for bound method calls (inlined MRO-based)
                         if let Some(inst_val) = bound_instance {
-                            let real_type_name =
-                                if let Some(idx) = inst_val.as_struct_instance_idx() {
-                                    self.struct_registry.get_instance(idx).and_then(|inst| {
-                                        self.struct_registry
-                                            .get_type(inst.type_id)
-                                            .map(|ty| ty.name.clone())
-                                    })
-                                } else {
-                                    let inst_py = inst_val.to_pyobject(py);
-                                    inst_py
-                                        .bind(py)
-                                        .cast::<super::structs::CatnipStructProxy>()
-                                        .ok()
-                                        .map(|proxy| proxy.borrow().type_name.clone())
-                                };
+                            let real_type_name = if let Some(idx) = inst_val.as_struct_instance_idx() {
+                                self.struct_registry.get_instance(idx).and_then(|inst| {
+                                    self.struct_registry.get_type(inst.type_id).map(|ty| ty.name.clone())
+                                })
+                            } else {
+                                let inst_py = inst_val.to_pyobject(py);
+                                inst_py
+                                    .bind(py)
+                                    .cast::<super::structs::CatnipStructProxy>()
+                                    .ok()
+                                    .map(|proxy| proxy.borrow().type_name.clone())
+                            };
 
                             let mut did_set = false;
                             if let Some(ref real_name) = real_type_name {
-                                if let Some(real_type) =
-                                    self.struct_registry.find_type_by_name(real_name)
-                                {
+                                if let Some(real_type) = self.struct_registry.find_type_by_name(real_name) {
                                     if !real_type.parent_names.is_empty() {
                                         let mro = &real_type.mro;
-                                        let start_pos = if let Some(ref source) = super_source_type
-                                        {
-                                            mro.iter()
-                                                .position(|n| n == source)
-                                                .map(|p| p + 1)
-                                                .unwrap_or(1)
+                                        let start_pos = if let Some(ref source) = super_source_type {
+                                            mro.iter().position(|n| n == source).map(|p| p + 1).unwrap_or(1)
                                         } else {
                                             1
                                         };
                                         if start_pos < mro.len() {
-                                            let mut methods: HashMap<String, Py<PyAny>> =
-                                                HashMap::new();
-                                            let mut method_sources: HashMap<String, String> =
-                                                HashMap::new();
+                                            let mut methods: IndexMap<String, Py<PyAny>> = IndexMap::new();
+                                            let mut method_sources: HashMap<String, String> = HashMap::new();
                                             for mro_type_name in &mro[start_pos..] {
-                                                if let Some(ty) = self
-                                                    .struct_registry
-                                                    .find_type_by_name(mro_type_name)
+                                                if let Some(ty) = self.struct_registry.find_type_by_name(mro_type_name)
                                                 {
                                                     for (k, v) in &ty.methods {
                                                         if !methods.contains_key(k) {
-                                                            methods
-                                                                .insert(k.clone(), v.clone_ref(py));
-                                                            method_sources.insert(
-                                                                k.clone(),
-                                                                mro_type_name.clone(),
-                                                            );
+                                                            methods.insert(k.clone(), v.clone_ref(py));
+                                                            method_sources.insert(k.clone(), mro_type_name.clone());
                                                         }
                                                     }
                                                 }
@@ -3209,9 +3419,7 @@ impl VM {
                                                         native_instance_idx: native_idx,
                                                     },
                                                 )
-                                                .map_err(|e| {
-                                                    VMError::RuntimeError(e.to_string())
-                                                })?;
+                                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
                                                 frame.super_proxy = Some(proxy.into_any());
                                                 did_set = true;
                                             }
@@ -3237,16 +3445,14 @@ impl VM {
                             .map(|attr| attr.is_truthy().unwrap_or(false))
                             .unwrap_or(false);
 
-                        let mut args_py: Vec<Py<PyAny>> =
-                            Vec::with_capacity(args.len() + usize::from(pass_context));
+                        let mut args_py: Vec<Py<PyAny>> = Vec::with_capacity(args.len() + usize::from(pass_context));
 
                         if pass_context {
-                            if let Some(ref ctx) = self.py_context {
+                            if let Some(ref ctx) = host.context() {
                                 args_py.push(ctx.clone_ref(py));
                             } else {
                                 return Err(VMError::RuntimeError(
-                                    "Function requires context but VM has no context available"
-                                        .to_string(),
+                                    "Function requires context but VM has no context available".to_string(),
                                 ));
                             }
                         }
@@ -3255,12 +3461,11 @@ impl VM {
                             args_py.push(arg.to_pyobject(py));
                         }
 
-                        let args_tuple = PyTuple::new(py, args_py)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        let args_tuple = PyTuple::new(py, args_py).map_err(|e| VMError::RuntimeError(e.to_string()))?;
                         let result = actual_func
                             .call1(args_tuple)
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        let value = Value::from_pyobject(py, &result)?;
+                        let value = Value::from_pyobject(py, &result).to_vm(py)?;
                         frame.push(value);
                     }
                 }
@@ -3280,9 +3485,15 @@ impl VM {
                     let obj = frame.pop();
 
                     if let Some(idx) = obj.as_struct_instance_idx() {
-                        let inst = self.struct_registry.get_instance(idx).unwrap();
+                        let inst = self
+                            .struct_registry
+                            .get_instance(idx)
+                            .ok_or_else(|| VMError::RuntimeError(format!("invalid struct instance index {idx}")))?;
                         let type_id = inst.type_id;
-                        let ty = self.struct_registry.get_type(type_id).unwrap();
+                        let ty = self
+                            .struct_registry
+                            .get_type(type_id)
+                            .ok_or_else(|| VMError::RuntimeError(format!("invalid struct type index {type_id}")))?;
 
                         // Check field first (callable field, no self binding)
                         if let Some(field_idx) = ty.field_index(method_name) {
@@ -3290,7 +3501,7 @@ impl VM {
                             // Call as regular function (no self)
                             let py_func = field_val.to_pyobject(py);
                             let py_func_bound = py_func.bind(py);
-                            if let Ok(vm_func) = py_func_bound.cast::<RustVMFunction>() {
+                            if let Ok(vm_func) = py_func_bound.cast::<VMFunction>() {
                                 let vm_ref = vm_func.borrow();
                                 let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                                 let closure = vm_ref.native_closure.clone();
@@ -3302,11 +3513,10 @@ impl VM {
                                 continue;
                             } else {
                                 // Python callable field
-                                let args_py: Vec<Py<PyAny>> =
-                                    args.iter().map(|v| v.to_pyobject(py)).collect();
-                                let args_tuple = PyTuple::new(py, args_py)?;
-                                let result = py_func_bound.call1(args_tuple)?;
-                                let value = Value::from_pyobject(py, &result)?;
+                                let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
+                                let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                                let result = py_func_bound.call1(args_tuple).to_vm(py)?;
+                                let value = Value::from_pyobject(py, &result).to_vm(py)?;
                                 frame.push(value);
                                 continue;
                             }
@@ -3320,7 +3530,7 @@ impl VM {
                             all_args.push(obj);
                             all_args.extend_from_slice(&args);
 
-                            if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
+                            if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
                                 let vm_ref = vm_func.borrow();
                                 let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                                 let closure = vm_ref.native_closure.clone();
@@ -3334,11 +3544,10 @@ impl VM {
                                 continue;
                             } else {
                                 // Python method
-                                let args_py: Vec<Py<PyAny>> =
-                                    all_args.iter().map(|v| v.to_pyobject(py)).collect();
-                                let args_tuple = PyTuple::new(py, args_py)?;
-                                let result = func_bound.call1(args_tuple)?;
-                                let value = Value::from_pyobject(py, &result)?;
+                                let args_py: Vec<Py<PyAny>> = all_args.iter().map(|v| v.to_pyobject(py)).collect();
+                                let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                                let result = func_bound.call1(args_tuple).to_vm(py)?;
+                                let value = Value::from_pyobject(py, &result).to_vm(py)?;
                                 frame.push(value);
                                 continue;
                             }
@@ -3347,7 +3556,7 @@ impl VM {
                         // Static method (no self binding)
                         if let Some(func) = ty.static_methods.get(method_name.as_str()) {
                             let func_bound = func.bind(py);
-                            if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
+                            if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
                                 let vm_ref = vm_func.borrow();
                                 let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                                 let closure = vm_ref.native_closure.clone();
@@ -3358,11 +3567,10 @@ impl VM {
                                 self.frame_stack.push(new_frame);
                                 continue;
                             } else {
-                                let args_py: Vec<Py<PyAny>> =
-                                    args.iter().map(|v| v.to_pyobject(py)).collect();
-                                let args_tuple = PyTuple::new(py, args_py)?;
-                                let result = func_bound.call1(args_tuple)?;
-                                let value = Value::from_pyobject(py, &result)?;
+                                let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
+                                let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                                let result = func_bound.call1(args_tuple).to_vm(py)?;
+                                let value = Value::from_pyobject(py, &result).to_vm(py)?;
                                 frame.push(value);
                                 continue;
                             }
@@ -3380,7 +3588,7 @@ impl VM {
                             let ty = self.struct_registry.get_type(type_id).unwrap();
                             if let Some(func) = ty.static_methods.get(method_name.as_str()) {
                                 let func_bound = func.bind(py);
-                                if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
+                                if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
                                     let vm_ref = vm_func.borrow();
                                     let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                                     let closure = vm_ref.native_closure.clone();
@@ -3392,11 +3600,10 @@ impl VM {
                                     continue;
                                 } else {
                                     // Python static method
-                                    let args_py: Vec<Py<PyAny>> =
-                                        args.iter().map(|v| v.to_pyobject(py)).collect();
-                                    let args_tuple = PyTuple::new(py, args_py)?;
-                                    let result = func_bound.call1(args_tuple)?;
-                                    let value = Value::from_pyobject(py, &result)?;
+                                    let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
+                                    let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                                    let result = func_bound.call1(args_tuple).to_vm(py)?;
+                                    let value = Value::from_pyobject(py, &result).to_vm(py)?;
                                     frame.push(value);
                                     continue;
                                 }
@@ -3420,14 +3627,15 @@ impl VM {
                                 let func_bound = func_clone.bind(py);
                                 // Build args with self prepended
                                 let inst_val = if let Some(idx) = native_idx {
+                                    self.struct_registry.incref(idx);
                                     Value::from_struct_instance(idx)
                                 } else {
-                                    Value::from_pyobject(py, &inst_py.bind(py))?
+                                    Value::from_pyobject(py, inst_py.bind(py)).to_vm(py)?
                                 };
                                 let mut all_args = Vec::with_capacity(nargs + 1);
                                 all_args.push(inst_val);
                                 all_args.extend_from_slice(&args);
-                                if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
+                                if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
                                     let vm_ref = vm_func.borrow();
                                     let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
                                     let closure = vm_ref.native_closure.clone();
@@ -3436,42 +3644,30 @@ impl VM {
                                     new_frame.bind_args(py, &all_args, None);
                                     new_frame.closure_scope = closure;
                                     // Setup super chain for parent of parent
-                                    self.setup_super_proxy(
-                                        py,
-                                        inst_val,
-                                        Some(source_type),
-                                        &mut new_frame,
-                                    )?;
+                                    self.setup_super_proxy(py, inst_val, Some(source_type), &mut new_frame)?;
                                     self.frame_stack.push(new_frame);
                                     continue;
                                 } else {
-                                    let args_py: Vec<Py<PyAny>> =
-                                        all_args.iter().map(|v| v.to_pyobject(py)).collect();
-                                    let args_tuple = PyTuple::new(py, args_py)?;
-                                    let result = func_bound.call1(args_tuple)?;
-                                    let value = Value::from_pyobject(py, &result)?;
+                                    let args_py: Vec<Py<PyAny>> = all_args.iter().map(|v| v.to_pyobject(py)).collect();
+                                    let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                                    let result = func_bound.call1(args_tuple).to_vm(py)?;
+                                    let value = Value::from_pyobject(py, &result).to_vm(py)?;
                                     frame.push(value);
                                     continue;
                                 }
                             }
-                            return Err(VMError::RuntimeError(format!(
-                                "super has no method '{}'",
-                                method_name
-                            )));
+                            return Err(VMError::RuntimeError(format!("super has no method '{}'", method_name)));
                         }
 
                         // General Python getattr + call
                         let method = py_bound.getattr(method_name.as_str()).map_err(|e| {
                             let msg = e.to_string();
-                            VMError::RuntimeError(py_attr_error_msg(&py_bound, method_name, &msg))
+                            VMError::RuntimeError(py_attr_error_msg(py_bound, method_name, &msg))
                         })?;
-                        let args_py: Vec<Py<PyAny>> =
-                            args.iter().map(|v| v.to_pyobject(py)).collect();
-                        let args_tuple = PyTuple::new(py, args_py)?;
-                        let result = method
-                            .call1(args_tuple)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        let value = Value::from_pyobject(py, &result)?;
+                        let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
+                        let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
+                        let result = method.call1(args_tuple).to_vm(py)?;
+                        let value = Value::from_pyobject(py, &result).to_vm(py)?;
                         frame.push(value);
                     }
                 }
@@ -3500,13 +3696,25 @@ impl VM {
                         && self.jit_tracing_func_id.is_some()
                         && current_depth == self.jit_tracing_depth;
 
-                    // Pop the frame
+                    // Pop the frame -- struct refcounts are balanced by
+                    // LoadLocal (incref) / PopTop+StoreLocal (decref) pairs.
+                    // frame_pool.free() handles cleanup on error/abort paths.
                     self.frame_stack.pop();
+                    self.handle_nd_frame_pop(py, last_result);
 
                     // Push result to caller if any (unless init whose return is discarded)
                     if !discard {
                         if let Some(caller) = self.frame_stack.last_mut() {
                             caller.push(last_result);
+                        }
+                    }
+
+                    // Restore caller's bytecode hash for JIT
+                    if self.jit_enabled {
+                        if let Some(caller_frame) = self.frame_stack.last() {
+                            if let Some(ref caller_code) = caller_frame.code {
+                                self.update_jit_bytecode_hash_value(caller_code.bytecode_hash());
+                            }
                         }
                     }
 
@@ -3535,7 +3743,9 @@ impl VM {
                                             if self.trace {
                                                 eprintln!(
                                                     "[JIT] Function compiled successfully: {} (max_slot: {}, guards: {})",
-                                                    func_id, max_slot, name_guards.len()
+                                                    func_id,
+                                                    max_slot,
+                                                    name_guards.len()
                                                 );
                                             }
                                             // Store compiled function with max slot info and guards
@@ -3550,10 +3760,7 @@ impl VM {
                                         }
                                         Err(e) => {
                                             if self.trace {
-                                                eprintln!(
-                                                    "[JIT] Function compilation failed: {}",
-                                                    e
-                                                );
+                                                eprintln!("[JIT] Function compilation failed: {}", e);
                                             }
                                         }
                                     }
@@ -3596,7 +3803,7 @@ impl VM {
                     let code_obj = frame.pop().to_pyobject(py);
 
                     // Build native captured HashMap (no Python boundary crossing)
-                    let mut captured: HashMap<String, Value> = HashMap::new();
+                    let mut captured: IndexMap<String, Value> = IndexMap::new();
                     if let Some(ref code) = frame.code {
                         for (name, &slot_idx) in &code.slotmap {
                             // Skip module-level vars (accessed via parent chain)
@@ -3609,31 +3816,13 @@ impl VM {
                             }
                         }
                     }
-                    portabilize_struct_values(py, &mut captured);
+                    portabilize_struct_values(py, &mut captured, &mut self.struct_registry);
 
                     // Build parent: native chain or PyGlobals terminal
-                    let parent = match frame.closure_scope {
-                        Some(ref parent_closure) => ClosureParent::Native(parent_closure.clone()),
-                        None => {
-                            if let Some(ref ctx) = self.py_context {
-                                let ctx_bound = ctx.bind(py);
-                                if let Ok(py_globals) = ctx_bound.getattr("globals") {
-                                    if let Ok(dict) = py_globals.cast::<PyDict>() {
-                                        ClosureParent::PyGlobals(dict.clone().unbind())
-                                    } else {
-                                        ClosureParent::None
-                                    }
-                                } else {
-                                    ClosureParent::None
-                                }
-                            } else {
-                                ClosureParent::None
-                            }
-                        }
-                    };
+                    let parent = host.build_closure_parent(py, frame.closure_scope.as_ref());
 
                     let native_scope = NativeClosureScope::new(captured, parent);
-                    let context_for_func = self.py_context.as_ref().map(|c| c.clone_ref(py));
+                    let context_for_func = host.context().as_ref().map(|c| c.clone_ref(py));
 
                     let code_py: Py<PyCodeObject> = code_obj
                         .bind(py)
@@ -3642,20 +3831,14 @@ impl VM {
                         .clone()
                         .unbind();
 
-                    let func = Py::new(
-                        py,
-                        RustVMFunction::create_native(
-                            py,
-                            code_py,
-                            Some(native_scope),
-                            context_for_func,
-                        ),
-                    )?;
-                    let ptr = func.bind(py).as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    let code = Arc::clone(&code_py.borrow(py).inner);
+                    let idx = self.func_table.insert(FuncSlot {
+                        code,
+                        closure: Some(native_scope),
+                        code_py,
+                        context: context_for_func,
+                    });
+                    frame.push(Value::from_vmfunc(idx));
                 }
 
                 // --- Collection literals ---
@@ -3663,60 +3846,39 @@ impl VM {
                     let n = instr.arg as usize;
                     let stack_len = frame.stack.len();
                     let start = stack_len - n;
-                    let items: Vec<Py<PyAny>> = frame.stack[start..]
-                        .iter()
-                        .map(|v| v.to_pyobject(py))
-                        .collect();
+                    let items: Vec<Py<PyAny>> = frame.stack[start..].iter().map(|v| v.to_pyobject(py)).collect();
                     frame.stack.truncate(start);
                     let list = PyList::new(py, items).unwrap();
-                    let ptr = list.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    frame.push(Value::from_owned_pyobject(list.unbind().into_any()));
                 }
 
                 OpCode::BuildTuple => {
                     let n = instr.arg as usize;
                     let stack_len = frame.stack.len();
                     let start = stack_len - n;
-                    let items: Vec<Py<PyAny>> = frame.stack[start..]
-                        .iter()
-                        .map(|v| v.to_pyobject(py))
-                        .collect();
+                    let items: Vec<Py<PyAny>> = frame.stack[start..].iter().map(|v| v.to_pyobject(py)).collect();
                     frame.stack.truncate(start);
                     let tuple = PyTuple::new(py, items).unwrap();
-                    let ptr = tuple.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    frame.push(Value::from_owned_pyobject(tuple.unbind().into_any()));
                 }
 
                 OpCode::BuildSet => {
                     let n = instr.arg as usize;
                     let stack_len = frame.stack.len();
                     let start = stack_len - n;
-                    let items: Vec<Py<PyAny>> = frame.stack[start..]
-                        .iter()
-                        .map(|v| v.to_pyobject(py))
-                        .collect();
+                    let items: Vec<Py<PyAny>> = frame.stack[start..].iter().map(|v| v.to_pyobject(py)).collect();
                     frame.stack.truncate(start);
                     let set_type = match &self.cached_set_type {
                         Some(cached) => cached.bind(py).clone(),
                         None => {
-                            let st = py.import("builtins")?.getattr("set")?;
+                            let st = py.import("builtins").to_vm(py)?.getattr("set").to_vm(py)?;
                             self.cached_set_type = Some(st.unbind());
                             self.cached_set_type.as_ref().unwrap().bind(py).clone()
                         }
                     };
-                    let py_list = PyList::new(py, items)?;
-                    let py_set = set_type.call1((py_list,))?;
-                    let ptr = py_set.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    let py_list = PyList::new(py, items).to_vm(py)?;
+                    let py_set = set_type.call1((py_list,)).to_vm(py)?;
+                    frame.push(Value::from_owned_pyobject(py_set.unbind()));
                 }
 
                 OpCode::BuildDict => {
@@ -3727,11 +3889,7 @@ impl VM {
                         let key = frame.pop().to_pyobject(py);
                         dict.set_item(key, value).ok();
                     }
-                    let ptr = dict.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    frame.push(Value::from_owned_pyobject(dict.unbind().into_any()));
                 }
 
                 OpCode::BuildSlice => {
@@ -3741,34 +3899,27 @@ impl VM {
                     let n = instr.arg as usize;
                     let stack_len = frame.stack.len();
                     let start = stack_len - n;
-                    let items: Vec<Py<PyAny>> = frame.stack[start..]
-                        .iter()
-                        .map(|v| v.to_pyobject(py))
-                        .collect();
+                    let items: Vec<Py<PyAny>> = frame.stack[start..].iter().map(|v| v.to_pyobject(py)).collect();
                     frame.stack.truncate(start);
 
                     // Create slice object
                     let slice_type = py.get_type::<pyo3::types::PySlice>();
                     let slice = if n == SLICE_ARGS_MIN {
-                        slice_type.call1((&items[0], &items[1]))?
+                        slice_type.call1((&items[0], &items[1])).to_vm(py)?
                     } else if n == SLICE_ARGS_MAX {
-                        slice_type.call1((&items[0], &items[1], &items[2]))?
+                        slice_type.call1((&items[0], &items[1], &items[2])).to_vm(py)?
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "BUILD_SLICE expects 2 or 3 args, got {}",
                             n
                         )));
                     };
-                    let ptr = slice.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    frame.push(Value::from_owned_pyobject(slice.unbind()));
                 }
 
                 // --- Attribute/item access ---
                 OpCode::GetAttr => {
-                    let attr_name = &code.names[instr.arg as usize];
+                    let attr_name = get_name(code, instr.arg)?;
                     let obj = frame.pop();
 
                     if let Some(idx) = obj.as_struct_instance_idx() {
@@ -3778,40 +3929,41 @@ impl VM {
                         match ty.field_index(attr_name) {
                             Some(field_idx) => {
                                 let val = inst.fields[field_idx];
+                                // inst/ty borrows end here (NLL: val and type_id are Copy)
+                                val.clone_refcount_bigint();
+                                if val.is_struct_instance() {
+                                    self.struct_registry.incref(val.as_struct_instance_idx().unwrap());
+                                }
                                 frame.push(val);
+                                decref_discard(&mut self.struct_registry, obj);
                             }
                             None => {
                                 // Look up method in StructType
                                 let ty = self.struct_registry.get_type(type_id).unwrap();
                                 if let Some(func) = ty.methods.get(attr_name.as_str()) {
+                                    let func_clone = func.clone_ref(py);
+                                    // ty borrow ends (NLL: func_clone is owned)
                                     let proxy = obj.to_pyobject(py);
                                     let bound = Py::new(
                                         py,
                                         crate::core::BoundCatnipMethod {
-                                            func: func.clone_ref(py),
+                                            func: func_clone,
                                             instance: proxy,
                                             super_source_type: None,
                                             native_instance_idx: Some(idx),
                                         },
                                     )
                                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                                    let ptr = bound.bind(py).as_ptr();
-                                    unsafe {
-                                        pyo3::ffi::Py_IncRef(ptr);
-                                        frame.push(Value::from_pyobj_ptr(ptr));
-                                    }
-                                } else if let Some(func) = ty.static_methods.get(attr_name.as_str())
-                                {
-                                    // Static method: return raw callable (no self binding)
-                                    let ptr = func.bind(py).as_ptr();
-                                    unsafe {
-                                        pyo3::ffi::Py_IncRef(ptr);
-                                        frame.push(Value::from_pyobj_ptr(ptr));
-                                    }
+                                    frame.push(Value::from_owned_pyobject(bound.into_any()));
+                                    decref_discard(&mut self.struct_registry, obj);
+                                } else if let Some(func) = ty.static_methods.get(attr_name.as_str()) {
+                                    let func_clone = func.clone_ref(py);
+                                    frame.push(Value::from_owned_pyobject(func_clone));
+                                    decref_discard(&mut self.struct_registry, obj);
                                 } else {
-                                    return Err(VMError::RuntimeError(attr_error_msg(
-                                        ty, attr_name,
-                                    )));
+                                    let msg = attr_error_msg(ty, attr_name);
+                                    decref_discard(&mut self.struct_registry, obj);
+                                    return Err(VMError::RuntimeError(msg));
                                 }
                             }
                         }
@@ -3823,24 +3975,20 @@ impl VM {
                         if let Some(&type_id) = self.struct_type_map.get(&ptr) {
                             let ty = self.struct_registry.get_type(type_id).unwrap();
                             if let Some(func) = ty.static_methods.get(attr_name.as_str()) {
-                                let value = Value::from_pyobject(py, func.bind(py))?;
+                                let value = Value::from_pyobject(py, func.bind(py)).to_vm(py)?;
                                 frame.push(value);
                             } else {
                                 return Err(VMError::RuntimeError(attr_error_msg(ty, attr_name)));
                             }
                         } else {
-                            let result = py_bound.getattr(attr_name.as_str()).map_err(|e| {
-                                let msg = e.to_string();
-                                VMError::RuntimeError(py_attr_error_msg(&py_bound, attr_name, &msg))
-                            })?;
-                            let value = Value::from_pyobject(py, &result)?;
+                            let value = host.obj_getattr(py, obj, attr_name)?;
                             frame.push(value);
                         }
                     }
                 }
 
                 OpCode::SetAttr => {
-                    let attr_name = &code.names[instr.arg as usize];
+                    let attr_name = get_name(code, instr.arg)?;
                     let value = frame.pop();
                     let obj = frame.pop();
 
@@ -3849,33 +3997,31 @@ impl VM {
                         let ty = self.struct_registry.get_type(type_id).unwrap();
                         match ty.field_index(attr_name) {
                             Some(field_idx) => {
-                                self.struct_registry.get_instance_mut(idx).unwrap().fields
-                                    [field_idx] = value;
+                                // ty borrow ends (NLL: field_idx is Copy)
+                                let old = {
+                                    let inst = self.struct_registry.get_instance_mut(idx).unwrap();
+                                    let old = inst.fields[field_idx];
+                                    inst.fields[field_idx] = value;
+                                    old
+                                };
+                                decref_discard(&mut self.struct_registry, old);
+                                decref_discard(&mut self.struct_registry, obj);
                             }
                             None => {
-                                return Err(VMError::RuntimeError(attr_error_msg(ty, attr_name)));
+                                let msg = attr_error_msg(ty, attr_name);
+                                decref_discard(&mut self.struct_registry, obj);
+                                return Err(VMError::RuntimeError(msg));
                             }
                         }
                     } else {
-                        let py_obj = obj.to_pyobject(py);
-                        let py_value = value.to_pyobject(py);
-                        py_obj
-                            .bind(py)
-                            .setattr(attr_name.as_str(), py_value)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        host.obj_setattr(py, obj, attr_name, value)?;
                     }
                 }
 
                 OpCode::GetItem => {
                     let index = frame.pop();
                     let obj = frame.pop();
-                    let py_obj = obj.to_pyobject(py);
-                    let py_index = index.to_pyobject(py);
-                    let result = py_obj
-                        .bind(py)
-                        .get_item(py_index)
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                    let value = Value::from_pyobject(py, &result)?;
+                    let value = host.obj_getitem(py, obj, index)?;
                     frame.push(value);
                 }
 
@@ -3883,13 +4029,7 @@ impl VM {
                     let value = frame.pop();
                     let index = frame.pop();
                     let obj = frame.pop();
-                    let py_obj = obj.to_pyobject(py);
-                    let py_index = index.to_pyobject(py);
-                    let py_value = value.to_pyobject(py);
-                    py_obj
-                        .bind(py)
-                        .set_item(py_index, py_value)
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    host.obj_setitem(py, obj, index, value)?;
                 }
 
                 // --- Block/scope ---
@@ -3902,13 +4042,7 @@ impl VM {
                         if let Some(ref code) = frame.code {
                             let existing: Vec<String> = code.varnames[slot_start..]
                                 .iter()
-                                .filter(|n| {
-                                    self.globals.contains_key(n.as_str())
-                                        || ctx_globals
-                                            .as_ref()
-                                            .and_then(|g| g.bind(py).contains(n.as_str()).ok())
-                                            .unwrap_or(false)
-                                })
+                                .filter(|n| self.globals.contains_key(n.as_str()) || host.has_global(py, n.as_str()))
                                 .cloned()
                                 .collect();
                             self.block_globals_snapshot.push(existing);
@@ -3926,14 +4060,11 @@ impl VM {
                                 for slot in slot_start..code.varnames.len() {
                                     let name = &code.varnames[slot];
                                     // Only clean names not in globals before the block
-                                    let existed_before = pre_existing
-                                        .as_ref()
-                                        .is_some_and(|names| names.contains(name));
+                                    let existed_before =
+                                        pre_existing.as_ref().is_some_and(|names| names.contains(name));
                                     if !existed_before {
-                                        self.globals.remove(name);
-                                        if let Some(ref py_globals) = ctx_globals {
-                                            let _ = py_globals.bind(py).del_item(name.as_str());
-                                        }
+                                        self.globals.swap_remove(name);
+                                        host.delete_global(py, name.as_str())?;
                                     }
                                 }
                             }
@@ -3964,68 +4095,22 @@ impl VM {
                     let is_nd_recursion = (flags & FLAG_ND_RECURSION) != 0;
                     let is_nd_map = (flags & FLAG_ND_MAP) != 0;
 
-                    // Handle ND operations specially
+                    // Handle ND operations specially (delegated to host for parallelism)
                     if is_nd_recursion || is_nd_map {
-                        // For ND ops: pop lambda/func, then target
                         let lambda_val = frame.pop();
                         let target_val = frame.pop();
                         let lambda_py = lambda_val.to_pyobject(py);
                         let target_py = target_val.to_pyobject(py);
-
-                        // Get registry
-                        let registry = if let Some(ref ctx) = self.py_context {
-                            let ctx_bound = ctx.bind(py);
-                            ctx_bound
-                                .getattr("_registry")
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                        } else {
-                            return Err(VMError::RuntimeError(
-                                "Context not available for broadcast".to_string(),
-                            ));
-                        };
-
-                        // Iterate over target and apply ND operation to each element
                         let target_bound = target_py.bind(py);
-                        let is_tuple = target_bound.is_instance_of::<pyo3::types::PyTuple>();
-                        let result_list = pyo3::types::PyList::empty(py);
+                        let lambda_bound = lambda_py.bind(py);
 
-                        for elem_result in target_bound.try_iter()? {
-                            let elem = elem_result?;
-                            let elem_py = elem.unbind();
-
-                            // Call appropriate ND operation
-                            let nd_result = if is_nd_recursion {
-                                registry
-                                    .call_method(
-                                        "execute_nd_recursion_py",
-                                        (elem_py, lambda_py.clone_ref(py)),
-                                        None,
-                                    )
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                            } else {
-                                registry
-                                    .call_method(
-                                        "execute_nd_map_py",
-                                        (elem_py, lambda_py.clone_ref(py)),
-                                        None,
-                                    )
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                            };
-
-                            result_list
-                                .append(nd_result)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        }
-
-                        // Convert back to tuple if needed
-                        let result_bound = if is_tuple {
-                            pyo3::types::PyTuple::new(py, result_list)?.into_any()
+                        let result_py = if is_nd_recursion {
+                            host.broadcast_nd_recursion(py, target_bound, lambda_bound)?
                         } else {
-                            result_list.into_any()
+                            host.broadcast_nd_map(py, target_bound, lambda_bound)?
                         };
 
-                        let value = Value::from_pyobject(py, &result_bound)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        let value = Value::from_pyobject(py, result_py.bind(py)).to_vm(py)?;
                         frame.push(value);
                     } else {
                         // Regular broadcast: pop operand if present
@@ -4039,86 +4124,43 @@ impl VM {
                         let operator = frame.pop().to_pyobject(py);
                         let target = frame.pop().to_pyobject(py);
 
-                        // Delegate to Rust Registry's _apply_broadcast
-                        let result = if let Some(ref ctx) = self.py_context {
-                            let ctx_bound = ctx.bind(py);
-                            if let Ok(registry) = ctx_bound.getattr("_registry") {
-                                let target_bound = target.bind(py);
-                                let operator_bound = operator.bind(py);
-                                let operand_bound = operand.as_ref().map(|o| o.bind(py));
+                        // Delegate broadcast to host
+                        let target_bound = target.bind(py);
+                        let operator_bound = operator.bind(py);
+                        let result = host.apply_broadcast(
+                            py,
+                            target_bound,
+                            operator_bound,
+                            operand.as_ref().map(|o| o.bind(py)),
+                            is_filter,
+                        )?;
 
-                                registry.call_method(
-                                    "_apply_broadcast",
-                                    (&target_bound, &operator_bound, operand_bound, is_filter),
-                                    None,
-                                )?
-                            } else {
-                                return Err(VMError::RuntimeError(
-                                    "Registry not available in context".to_string(),
-                                ));
-                            }
-                        } else {
-                            return Err(VMError::RuntimeError(
-                                "Context not available for broadcast".to_string(),
-                            ));
-                        };
-
-                        let value = Value::from_pyobject(py, &result)?;
+                        let value = Value::from_pyobject(py, result.bind(py)).to_vm(py)?;
                         frame.push(value);
                     }
                 }
 
                 // --- Pattern matching ---
                 OpCode::MatchPattern => {
-                    // Legacy path: pattern stored as constant (PyObject)
-                    let pattern_idx = instr.arg as usize;
-                    let pattern = code
-                        .constants
-                        .get(pattern_idx)
-                        .copied()
-                        .unwrap_or(Value::NIL)
-                        .to_pyobject(py);
-
-                    let value = frame.pop().to_pyobject(py);
-
-                    // Delegate to Python's _match_pattern via context
-                    let bindings = if let Some(ref ctx) = self.py_context {
-                        let ctx_bound = ctx.bind(py);
-                        if let Ok(registry) = ctx_bound.getattr("_registry") {
-                            let result =
-                                registry.call_method1("_match_pattern", (&pattern, &value))?;
-                            Value::from_pyobject(py, &result)?
-                        } else {
-                            Value::NIL
-                        }
-                    } else {
-                        Value::NIL
-                    };
-                    frame.push(bindings);
+                    return Err(VMError::RuntimeError("legacy MatchPattern is no longer emitted".into()));
                 }
 
                 OpCode::MatchPatternVM => {
                     // Native path: pre-compiled VMPattern, no Python boundary crossing
                     let pat_idx = instr.arg as usize;
                     let value = frame.pop();
-                    let pattern = frame
-                        .code
-                        .as_ref()
-                        .and_then(|c| c.patterns.get(pat_idx))
-                        .cloned();
+                    let pattern = frame.code.as_ref().and_then(|c| c.patterns.get(pat_idx)).cloned();
                     match pattern {
-                        Some(ref pat) => {
-                            match vm_match_pattern(py, pat, value, &self.struct_registry)? {
-                                Some(bindings) => {
-                                    frame.match_bindings = Some(bindings);
-                                    frame.push(Value::TRUE);
-                                }
-                                None => {
-                                    frame.match_bindings = None;
-                                    frame.push(Value::NIL);
-                                }
+                        Some(ref pat) => match vm_match_pattern(py, pat, value, &self.struct_registry).to_vm(py)? {
+                            Some(bindings) => {
+                                frame.match_bindings = Some(bindings);
+                                frame.push(Value::TRUE);
                             }
-                        }
+                            None => {
+                                frame.match_bindings = None;
+                                frame.push(Value::NIL);
+                            }
+                        },
                         None => {
                             frame.match_bindings = None;
                             frame.push(Value::NIL);
@@ -4131,47 +4173,24 @@ impl VM {
                     // on mismatch, raise unpacking error (type/runtime) with details.
                     let pat_idx = instr.arg as usize;
                     let value = frame.pop();
-                    let pattern = frame
-                        .code
-                        .as_ref()
-                        .and_then(|c| c.patterns.get(pat_idx))
-                        .cloned();
+                    let pattern = frame.code.as_ref().and_then(|c| c.patterns.get(pat_idx)).cloned();
                     match pattern {
                         Some(ref pat) => {
-                            let bindings =
-                                vm_match_assign_pattern(py, pat, value, &self.struct_registry)?;
+                            let bindings = vm_match_assign_pattern(py, pat, value, &self.struct_registry)?;
                             frame.match_bindings = Some(bindings);
                             frame.push(Value::TRUE);
                         }
                         None => {
-                            return Err(VMError::RuntimeError(
-                                "Invalid assignment pattern index".to_string(),
-                            ));
+                            return Err(VMError::RuntimeError("Invalid assignment pattern index".to_string()));
                         }
                     }
                 }
 
                 OpCode::BindMatch => {
-                    // New path: native bindings from MatchPatternVM
                     if let Some(bindings) = frame.match_bindings.clone() {
                         frame.pop(); // pop the sentinel TRUE
                         for (slot, val) in bindings {
                             frame.set_local(slot, val);
-                        }
-                    } else {
-                        // Legacy path: bindings as PyDict from MatchPattern
-                        let bindings = frame.pop().to_pyobject(py);
-                        let bindings_bound = bindings.bind(py);
-
-                        if let Ok(dict) = bindings_bound.cast::<PyDict>() {
-                            for (key, val) in dict.iter() {
-                                if let Ok(name) = key.extract::<String>() {
-                                    if let Some(&slot_idx) = code.slotmap.get(&name) {
-                                        let value = Value::from_pyobject(py, &val)?;
-                                        frame.set_local(slot_idx, value);
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -4183,6 +4202,32 @@ impl VM {
                     }
                 }
 
+                OpCode::JumpIfNotNoneOrPop => {
+                    let cond = frame.peek();
+                    if !cond.is_nil() {
+                        frame.ip = instr.arg as usize;
+                    } else {
+                        frame.pop();
+                    }
+                }
+
+                OpCode::ToBool => {
+                    let value = frame.pop();
+                    frame.push(Value::from_bool(value.is_truthy()));
+                }
+
+                // --- Process ---
+                OpCode::Exit => {
+                    // arg encodes: 0 = no argument (default 0), 1 = pop code from stack
+                    let code = if instr.arg == 1 {
+                        let v = frame.pop();
+                        v.as_int().map(|n| n as i32).unwrap_or(1)
+                    } else {
+                        0
+                    };
+                    return Err(VMError::Exit(code));
+                }
+
                 // --- Unpacking ---
                 OpCode::UnpackSequence => {
                     let n = instr.arg as usize;
@@ -4191,10 +4236,20 @@ impl VM {
                     let py_seq_bound = py_seq.bind(py);
 
                     // Convert to list to get items
-                    let items: Vec<Py<PyAny>> = py_seq_bound
-                        .try_iter()?
-                        .map(|item| item.map(|i| i.unbind()))
-                        .collect::<PyResult<Vec<_>>>()?;
+                    let items: Vec<Py<PyAny>> = match py_seq_bound.try_iter() {
+                        Ok(iter) => iter
+                            .map(|item| item.map(|i| i.unbind()))
+                            .collect::<PyResult<Vec<_>>>()
+                            .to_vm(py)?,
+                        Err(_) => {
+                            let ty = py_seq_bound
+                                .get_type()
+                                .name()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|_| "value".to_string());
+                            return Err(VMError::TypeError(format!("Cannot unpack non-iterable {}", ty)));
+                        }
+                    };
 
                     if items.len() != n {
                         return Err(VMError::RuntimeError(format!(
@@ -4206,7 +4261,7 @@ impl VM {
 
                     // Push items in reverse order (so first item ends on top)
                     for item in items.into_iter().rev() {
-                        let val = Value::from_pyobject(py, item.bind(py))?;
+                        let val = Value::from_pyobject(py, item.bind(py)).to_vm(py)?;
                         frame.push(val);
                     }
                 }
@@ -4222,10 +4277,20 @@ impl VM {
                     let py_seq_bound = py_seq.bind(py);
 
                     // Convert to list
-                    let items: Vec<Py<PyAny>> = py_seq_bound
-                        .try_iter()?
-                        .map(|item| item.map(|i| i.unbind()))
-                        .collect::<PyResult<Vec<_>>>()?;
+                    let items: Vec<Py<PyAny>> = match py_seq_bound.try_iter() {
+                        Ok(iter) => iter
+                            .map(|item| item.map(|i| i.unbind()))
+                            .collect::<PyResult<Vec<_>>>()
+                            .to_vm(py)?,
+                        Err(_) => {
+                            let ty = py_seq_bound
+                                .get_type()
+                                .name()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|_| "value".to_string());
+                            return Err(VMError::TypeError(format!("Cannot unpack non-iterable {}", ty)));
+                        }
+                    };
 
                     let total_fixed = before + after;
                     if items.len() < total_fixed {
@@ -4244,22 +4309,17 @@ impl VM {
 
                     // Push in reverse order: after, rest (as list), before
                     for item in after_items.iter().rev() {
-                        let val = Value::from_pyobject(py, item.bind(py))?;
+                        let val = Value::from_pyobject(py, item.bind(py)).to_vm(py)?;
                         frame.push(val);
                     }
 
                     // Create list for rest
-                    let rest_py: Vec<Py<PyAny>> =
-                        rest_items.iter().map(|item| item.clone_ref(py)).collect();
-                    let rest_list = PyList::new(py, rest_py)?;
-                    let ptr = rest_list.as_ptr();
-                    unsafe {
-                        pyo3::ffi::Py_IncRef(ptr);
-                        frame.push(Value::from_pyobj_ptr(ptr));
-                    }
+                    let rest_py: Vec<Py<PyAny>> = rest_items.iter().map(|item| item.clone_ref(py)).collect();
+                    let rest_list = PyList::new(py, rest_py).to_vm(py)?;
+                    frame.push(Value::from_owned_pyobject(rest_list.unbind().into_any()));
 
                     for item in before_items.iter().rev() {
-                        let val = Value::from_pyobject(py, item.bind(py))?;
+                        let val = Value::from_pyobject(py, item.bind(py)).to_vm(py)?;
                         frame.push(val);
                     }
                 }
@@ -4268,19 +4328,15 @@ impl VM {
                 OpCode::ForRangeInt => {
                     // Optimized range loop condition check
                     // Replaces: LoadLocal + LoadLocal + GE/LE + JumpIfTrue (4 opcodes -> 1)
-                    // arg = (slot_i << 24) | (slot_stop << 16) | (step_sign << 15) | jump_offset
-                    // step_sign: 0 = positive step, 1 = negative step
-                    // jump_offset: relative offset to jump when done (max 32767)
-                    const SLOT_I_SHIFT: u32 = 24;
-                    const SLOT_STOP_SHIFT: u32 = 16;
-                    const STEP_SIGN_SHIFT: u32 = 15;
-                    const SLOT_MASK: u32 = 0xFF;
-                    const JUMP_OFFSET_MASK: u32 = 0x7FFF;
+                    use super::{
+                        FOR_RANGE_JUMP_MASK, FOR_RANGE_SLOT_I_SHIFT, FOR_RANGE_SLOT_MASK, FOR_RANGE_SLOT_STOP_SHIFT,
+                        FOR_RANGE_STEP_SIGN_SHIFT,
+                    };
 
-                    let slot_i = (instr.arg >> SLOT_I_SHIFT) as usize;
-                    let slot_stop = ((instr.arg >> SLOT_STOP_SHIFT) & SLOT_MASK) as usize;
-                    let step_positive = ((instr.arg >> STEP_SIGN_SHIFT) & 1) == 0;
-                    let jump_offset = (instr.arg & JUMP_OFFSET_MASK) as usize;
+                    let slot_i = (instr.arg >> FOR_RANGE_SLOT_I_SHIFT) as usize;
+                    let slot_stop = ((instr.arg >> FOR_RANGE_SLOT_STOP_SHIFT) & FOR_RANGE_SLOT_MASK) as usize;
+                    let step_positive = ((instr.arg >> FOR_RANGE_STEP_SIGN_SHIFT) & 1) == 0;
+                    let jump_offset = (instr.arg & FOR_RANGE_JUMP_MASK) as usize;
 
                     let i = frame.get_local(slot_i);
                     let stop = frame.get_local(slot_stop);
@@ -4301,12 +4357,8 @@ impl VM {
                         // If we were tracing this loop, finish tracing
                         if self.jit_tracing && self.jit_tracing_offset == frame.ip - 1 {
                             let ip = frame.ip - 1;
-                            self.jit_recorder.record_opcode(
-                                OpCode::ForRangeInt,
-                                instr.arg,
-                                true,
-                                ip,
-                            );
+                            self.jit_recorder
+                                .record_opcode(OpCode::ForRangeInt, instr.arg, true, ip);
                             let trace = self.jit_recorder.stop();
                             self.jit_tracing = false;
 
@@ -4356,18 +4408,14 @@ impl VM {
                             } else {
                                 let has_compiled = {
                                     let jit = self.jit.lock().unwrap();
-                                    jit.as_ref()
-                                        .map(|e| e.has_compiled(loop_offset))
-                                        .unwrap_or(false)
+                                    jit.as_ref().map(|e| e.has_compiled(loop_offset)).unwrap_or(false)
                                 };
 
                                 if has_compiled {
                                     // Validate guards before executing JIT code
                                     let guards = {
                                         let jit = self.jit.lock().unwrap();
-                                        jit.as_ref()
-                                            .and_then(|e| e.get_guards(loop_offset))
-                                            .cloned()
+                                        jit.as_ref().and_then(|e| e.get_guards(loop_offset)).cloned()
                                     };
 
                                     let mut guards_pass = true;
@@ -4376,31 +4424,13 @@ impl VM {
                                     if let Some(ref guards) = guards {
                                         for (name, expected_value, slot) in guards {
                                             // Resolve current value of name
-                                            let current_value: Option<i64> = {
-                                                // 1. Check closure_scope (native)
-                                                if let Some(ref closure) = frame.closure_scope {
-                                                    closure
-                                                        .resolve_with_py(py, name.as_str())
-                                                        .and_then(|v| v.as_int())
-                                                } else {
-                                                    None
-                                                }
-                                                .or_else(|| {
-                                                    // 2. Check context.globals
-                                                    if let Some(ref py_globals) = ctx_globals {
-                                                        lookup_ctx_global(py, py_globals, name)
-                                                            .ok()
-                                                            .flatten()
-                                                            .and_then(|v| v.as_int())
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .or_else(|| {
-                                                    // 3. Check VM globals
-                                                    self.globals.get(name).and_then(|v| v.as_int())
-                                                })
-                                            };
+                                            let current_value = resolve_jit_guard_value(
+                                                py,
+                                                name,
+                                                &frame.closure_scope,
+                                                host,
+                                                &self.globals,
+                                            );
 
                                             match current_value {
                                                 Some(val) if val == *expected_value => {
@@ -4414,48 +4444,25 @@ impl VM {
                                         }
                                     }
 
+                                    // Skip JIT if any local holds a heap type (BigInt, PyObj).
+                                    // The JIT operates on raw i64 and can't handle them.
+                                    if guards_pass {
+                                        for v in frame.locals.iter() {
+                                            if v.is_bigint() || v.is_pyobj() || v.is_struct_instance() {
+                                                guards_pass = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+
                                     if guards_pass {
                                         // Execute compiled code
-                                        // Convert locals to raw i64: ints/bools as i64, floats as f64 bits
-                                        // JIT operates on "native" values, not NaN-boxed
-                                        let mut locals_raw: Vec<i64> = frame
-                                            .locals
-                                            .iter()
-                                            .map(|v| {
-                                                if let Some(i) = v.as_int() {
-                                                    i // Real int value
-                                                } else if let Some(b) = v.as_bool() {
-                                                    if b {
-                                                        1
-                                                    } else {
-                                                        0
-                                                    } // Bool as int
-                                                } else if let Some(f) = v.as_float() {
-                                                    f.to_bits() as i64 // Float bits as i64
-                                                } else {
-                                                    0 // Fallback
-                                                }
-                                            })
-                                            .collect();
-
-                                        // Remember slot types for restoration (0=int, 1=bool, 2=float)
-                                        let slot_types: Vec<u8> = frame
-                                            .locals
-                                            .iter()
-                                            .map(|v| {
-                                                if v.is_float() {
-                                                    2
-                                                } else if v.is_bool() {
-                                                    1
-                                                } else {
-                                                    0
-                                                }
-                                            })
-                                            .collect();
+                                        // Pass NaN-boxed bits to JIT (codegen handles unboxing)
+                                        let mut locals_raw: Vec<i64> =
+                                            frame.locals.iter().map(|v| v.bits() as i64).collect();
 
                                         // Extend locals array for LoadScope slots
-                                        let max_slot =
-                                            guard_locals.iter().map(|(s, _)| s).max().copied();
+                                        let max_slot = guard_locals.iter().map(|(s, _)| s).max().copied();
                                         if let Some(max_slot) = max_slot {
                                             if max_slot >= locals_raw.len() {
                                                 locals_raw.resize(max_slot + 1, 0);
@@ -4467,13 +4474,14 @@ impl VM {
                                             locals_raw[slot] = value;
                                         }
 
+                                        // Snapshot pre-JIT values to detect which slots changed
+                                        let snapshot: Vec<i64> = locals_raw.clone();
+
                                         // Call JIT code
                                         let result = {
                                             let jit = self.jit.lock().unwrap();
                                             if let Some(ref executor) = *jit {
-                                                unsafe {
-                                                    executor.execute(loop_offset, &mut locals_raw)
-                                                }
+                                                unsafe { executor.execute(loop_offset, &mut locals_raw) }
                                             } else {
                                                 None
                                             }
@@ -4486,21 +4494,21 @@ impl VM {
 
                                             if self.trace {
                                                 eprintln!(
-                                            "[JIT] Executed compiled trace for loop at {} (guard_failed={})",
-                                            loop_offset, guard_failed
-                                        );
+                                                    "[JIT] Executed compiled trace for loop at {} (guard_failed={})",
+                                                    loop_offset, guard_failed
+                                                );
                                             }
-                                            // Restore locals: reconstruct Values from raw i64
-                                            // Use original type info to decide int/bool/float
+                                            // Restore only slots actually modified by JIT.
+                                            // Values are already NaN-boxed by the codegen.
                                             for (i, &val) in locals_raw.iter().enumerate() {
-                                                if i < frame.locals.len() {
-                                                    frame.locals[i] = match slot_types[i] {
-                                                        2 => Value::from_float(f64::from_bits(
-                                                            val as u64,
-                                                        )),
-                                                        1 => Value::from_bool(val != 0),
-                                                        _ => Value::from_int(val),
-                                                    };
+                                                if i < frame.locals.len() && val != snapshot[i] {
+                                                    let new_val = Value::from_raw(val as u64);
+                                                    let old = frame.locals[i];
+                                                    decref_discard(&mut self.struct_registry, old);
+                                                    frame.locals[i] = new_val;
+                                                    if i < code.varnames.len() {
+                                                        host.store_global(py, &code.varnames[i], new_val)?;
+                                                    }
                                                 }
                                             }
                                             if guard_failed {
@@ -4560,10 +4568,7 @@ impl VM {
                                                 }
                                                 Err(e) => {
                                                     if self.trace {
-                                                        eprintln!(
-                                                            "[JIT] Compilation failed: {}",
-                                                            e
-                                                        );
+                                                        eprintln!("[JIT] Compilation failed: {}", e);
                                                     }
                                                 }
                                             }
@@ -4577,12 +4582,8 @@ impl VM {
                             // Tracing a different loop - nested loop encountered
                             // Record the nested ForRangeInt as part of outer trace
                             let ip = frame.ip - 1;
-                            self.jit_recorder.record_opcode(
-                                OpCode::ForRangeInt,
-                                instr.arg,
-                                true,
-                                ip,
-                            );
+                            self.jit_recorder
+                                .record_opcode(OpCode::ForRangeInt, instr.arg, true, ip);
                         } else if !self.jit_tracing {
                             // Check if we have a pending trace for this loop
                             if self.jit_pending_trace == Some(loop_offset) {
@@ -4603,12 +4604,8 @@ impl VM {
 
                                 // Record ForRangeInt as FIRST op
                                 let ip = frame.ip - 1;
-                                self.jit_recorder.record_opcode(
-                                    OpCode::ForRangeInt,
-                                    instr.arg,
-                                    true,
-                                    ip,
-                                );
+                                self.jit_recorder
+                                    .record_opcode(OpCode::ForRangeInt, instr.arg, true, ip);
 
                                 if self.trace {
                                     eprintln!(
@@ -4616,32 +4613,48 @@ impl VM {
                                         loop_offset, loop_start, loop_end
                                     );
                                 }
-                            } else if self.jit_detector.record_loop_header(loop_offset) {
-                                // Loop just became hot — try cache first
-                                let compiled_from_cache = {
-                                    let mut jit = self.jit.lock().unwrap();
-                                    jit.as_mut()
-                                        .map(|e| e.try_compile_from_cache(loop_offset))
-                                        .unwrap_or(false)
-                                };
-                                if compiled_from_cache {
-                                    if self.trace {
+                            } else {
+                                // Warm-start: check trace cache on first encounter
+                                if !self.jit_cache_checked.contains(&loop_offset) {
+                                    self.jit_cache_checked.insert(loop_offset);
+                                    let hit = {
+                                        let mut jit = self.jit.lock().unwrap();
+                                        jit.as_mut()
+                                            .map(|e| e.try_compile_from_cache(loop_offset))
+                                            .unwrap_or(false)
+                                    };
+                                    if hit && self.trace {
                                         eprintln!(
-                                            "[JIT] ForRange loop at {} compiled from cache",
+                                            "[JIT] Warm-start: for-range loop at {} loaded from cache",
                                             loop_offset
                                         );
                                     }
-                                    // Don't schedule tracing, compiled code will be picked up next iteration
-                                } else {
-                                    // Cache miss — schedule tracing for next iteration
-                                    self.jit_pending_trace = Some(loop_offset);
                                 }
 
-                                if self.trace && !compiled_from_cache {
-                                    eprintln!(
-                                        "[JIT] Hot loop detected at {}, will trace next iteration",
-                                        loop_offset
-                                    );
+                                if self.jit_detector.record_loop_header(loop_offset) {
+                                    // Loop just became hot - try cache first
+                                    let compiled_from_cache = {
+                                        let mut jit = self.jit.lock().unwrap();
+                                        jit.as_mut()
+                                            .map(|e| e.try_compile_from_cache(loop_offset))
+                                            .unwrap_or(false)
+                                    };
+                                    if compiled_from_cache {
+                                        if self.trace {
+                                            eprintln!("[JIT] ForRange loop at {} compiled from cache", loop_offset);
+                                        }
+                                        // Don't schedule tracing, compiled code will be picked up next iteration
+                                    } else {
+                                        // Cache miss - schedule tracing for next iteration
+                                        self.jit_pending_trace = Some(loop_offset);
+                                    }
+
+                                    if self.trace && !compiled_from_cache {
+                                        eprintln!(
+                                            "[JIT] Hot loop detected at {}, will trace next iteration",
+                                            loop_offset
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -4715,27 +4728,138 @@ impl VM {
                 OpCode::Nop => {}
                 OpCode::Breakpoint => {} // handled by debug hook above
 
+                OpCode::TypeOf => {
+                    let val = frame.pop();
+                    let type_str: &str = if val.is_bool() {
+                        "bool"
+                    } else if val.is_int() {
+                        "int"
+                    } else if val.is_float() {
+                        "float"
+                    } else if val.is_nil() {
+                        "nil"
+                    } else if val.is_symbol() {
+                        "string"
+                    } else if val.is_bigint() {
+                        "int"
+                    } else if val.is_vmfunc() {
+                        "function"
+                    } else if val.is_struct_instance() {
+                        let idx = val.as_struct_instance_idx().unwrap();
+                        let name = self
+                            .struct_registry
+                            .get_instance(idx)
+                            .and_then(|inst| self.struct_registry.get_type(inst.type_id).map(|ty| ty.name.clone()))
+                            .unwrap_or_else(|| "object".to_string());
+                        let py_str = PyString::intern(py, &name);
+                        frame.push(Value::from_pyobject(py, py_str.as_any()).to_vm(py)?);
+                        continue;
+                    } else if val.is_pyobj() {
+                        let obj = val.to_pyobject(py);
+                        let obj_bound = obj.bind(py);
+                        if obj_bound.is_instance_of::<pyo3::types::PyBool>() {
+                            "bool"
+                        } else if obj_bound.is_instance_of::<pyo3::types::PyInt>() {
+                            "int"
+                        } else if obj_bound.is_instance_of::<pyo3::types::PyFloat>() {
+                            "float"
+                        } else if obj_bound.is_instance_of::<PyString>() {
+                            "string"
+                        } else if obj_bound.is_instance_of::<PyList>() {
+                            "list"
+                        } else if obj_bound.is_instance_of::<PyTuple>() {
+                            "tuple"
+                        } else if obj_bound.is_instance_of::<PyDict>() {
+                            "dict"
+                        } else if obj_bound.is_instance_of::<pyo3::types::PySet>()
+                            || obj_bound.is_instance_of::<pyo3::types::PyFrozenSet>()
+                        {
+                            "set"
+                        } else if obj_bound.is_none() {
+                            "nil"
+                        } else if let Ok(proxy) = obj_bound.cast::<super::structs::CatnipStructProxy>() {
+                            let name = proxy.borrow().type_name.clone();
+                            let py_str = PyString::intern(py, &name);
+                            frame.push(Value::from_pyobject(py, py_str.as_any()).to_vm(py)?);
+                            continue;
+                        } else if obj_bound.is_callable() {
+                            "function"
+                        } else {
+                            let class_name: String = obj_bound
+                                .get_type()
+                                .qualname()
+                                .and_then(|n| n.extract())
+                                .unwrap_or_else(|_| "object".to_string());
+                            // Catnip convention: lowercase type names
+                            let catnip_name = class_name.to_ascii_lowercase();
+                            let py_str = PyString::new(py, &catnip_name);
+                            frame.push(Value::from_pyobject(py, py_str.as_any()).to_vm(py)?);
+                            continue;
+                        }
+                    } else {
+                        "object"
+                    };
+                    let py_str = PyString::intern(py, type_str);
+                    frame.push(Value::from_pyobject(py, py_str.as_any()).to_vm(py)?);
+                }
+
+                OpCode::Globals => {
+                    let dict = PyDict::new(py);
+                    for (k, v) in self.globals.iter() {
+                        dict.set_item(k, v.to_pyobject(py))
+                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    }
+                    host.collect_globals(py, &dict)?;
+                    let result =
+                        Value::from_pyobject(py, dict.as_any()).map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    frame.push(result);
+                }
+
+                OpCode::Locals => {
+                    let dict = PyDict::new(py);
+                    // Inside function: frame.locals + code.varnames + closure captures.
+                    // At module level (code.name == "<module>"), fall through to globals.
+                    let is_module = code.name == "<module>" || code.name.is_empty();
+                    if is_module {
+                        // Module level: locals() == globals()
+                        for (k, v) in self.globals.iter() {
+                            dict.set_item(k, v.to_pyobject(py))
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        }
+                        host.collect_globals(py, &dict)?;
+                    } else {
+                        for (i, name) in code.varnames.iter().enumerate() {
+                            if i < frame.locals.len() {
+                                let val = frame.locals[i];
+                                if !val.is_nil() && val.bits() != Value::INVALID.bits() {
+                                    dict.set_item(name, val.to_pyobject(py))
+                                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                                }
+                            }
+                        }
+                        if let Some(ref closure) = frame.closure_scope {
+                            closure
+                                .dump_into_dict(py, &dict)
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        }
+                    }
+                    let result =
+                        Value::from_pyobject(py, dict.as_any()).map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    frame.push(result);
+                }
+
                 OpCode::MakeStruct => {
                     let const_idx = instr.arg as usize;
                     let struct_info_val = code.constants[const_idx];
                     let struct_info_py = struct_info_val.to_pyobject(py);
-                    let info_tuple = struct_info_py.bind(py).cast::<PyTuple>().map_err(|e| {
-                        VMError::RuntimeError(format!("MakeStruct: bad constant: {e}"))
-                    })?;
+                    let info_tuple = struct_info_py
+                        .bind(py)
+                        .cast::<PyTuple>()
+                        .map_err(|e| VMError::RuntimeError(format!("MakeStruct: bad constant: {e}")))?;
 
-                    let name: String = info_tuple
-                        .get_item(0)
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                        .extract()
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
-                    let fields_info = info_tuple
-                        .get_item(1)
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                    let num_defaults: usize = info_tuple
-                        .get_item(2)
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                        .extract()
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                    let name: String = tuple_extract(info_tuple, 0)?;
+                    let fields_info = tuple_get(info_tuple, 1)?;
+                    let num_defaults: usize = tuple_extract(info_tuple, 2)?;
                     // Detect format: new format has implements tuple at index 3
                     // New: (name, fields, num_defaults, implements, bases_tuple_or_None, [methods])
                     // Legacy: (name, fields, num_defaults, [methods_list])
@@ -4744,38 +4868,24 @@ impl VM {
                     let mut methods_idx: Option<usize> = None;
 
                     if info_tuple.len() > 3 {
-                        let item3 = info_tuple
-                            .get_item(3)
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let item3 = tuple_get(info_tuple, 3)?;
                         // New format: item3 is a tuple (implements list)
                         if item3.is_instance_of::<PyTuple>() {
-                            for imp in item3
-                                .try_iter()
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                            {
+                            for imp in item3.try_iter().map_err(|e| VMError::RuntimeError(e.to_string()))? {
                                 let imp = imp.map_err(|e| VMError::RuntimeError(e.to_string()))?;
                                 implements_list
-                                    .push(imp.extract().map_err(|e: PyErr| {
-                                        VMError::RuntimeError(e.to_string())
-                                    })?);
+                                    .push(imp.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?);
                             }
                             // item4 = bases tuple or None
                             if info_tuple.len() > 4 {
-                                let item4 = info_tuple
-                                    .get_item(4)
-                                    .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                                let item4 = tuple_get(info_tuple, 4)?;
                                 if !item4.is_none() {
                                     if item4.is_instance_of::<PyTuple>() {
-                                        for b in item4
-                                            .try_iter()
-                                            .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                                        {
-                                            let b = b.map_err(|e| {
-                                                VMError::RuntimeError(e.to_string())
-                                            })?;
-                                            base_names.push(b.extract().map_err(|e: PyErr| {
-                                                VMError::RuntimeError(e.to_string())
-                                            })?);
+                                        for b in item4.try_iter().map_err(|e| VMError::RuntimeError(e.to_string()))? {
+                                            let b = b.map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                                            base_names.push(
+                                                b.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?,
+                                            );
                                         }
                                     } else if let Ok(base) = item4.extract::<String>() {
                                         // Legacy single base string
@@ -4806,25 +4916,13 @@ impl VM {
                     frame.stack.truncate(dstart);
 
                     // Parse fields
-                    let fields_tuple = fields_info
-                        .cast::<PyTuple>()
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    let fields_tuple = cast_tuple(&fields_info)?;
                     let mut native_fields = Vec::new();
                     let mut default_idx = 0usize;
                     for fi in fields_tuple.iter() {
-                        let pair = fi
-                            .cast::<PyTuple>()
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        let fname: String = pair
-                            .get_item(0)
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                            .extract()
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
-                        let has_default: bool = pair
-                            .get_item(1)
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                            .extract()
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let pair = cast_tuple(&fi)?;
+                        let fname: String = tuple_extract(pair, 0)?;
+                        let has_default: bool = tuple_extract(pair, 1)?;
                         let default_val = if has_default {
                             let v = default_values[default_idx];
                             default_idx += 1;
@@ -4840,42 +4938,25 @@ impl VM {
                     }
 
                     // Build methods map if present
-                    let mut methods_map: HashMap<String, Py<PyAny>> = HashMap::new();
-                    let mut static_methods_map: HashMap<String, Py<PyAny>> = HashMap::new();
+                    let mut methods_map: IndexMap<String, Py<PyAny>> = IndexMap::new();
+                    let mut static_methods_map: IndexMap<String, Py<PyAny>> = IndexMap::new();
                     let mut own_abstract: HashSet<MethodKey> = HashSet::new();
                     if let Some(midx) = methods_idx {
-                        let methods = info_tuple
-                            .get_item(midx)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        for method_result in methods
-                            .try_iter()
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                        {
-                            let method_pair =
-                                method_result.map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                            let pair = method_pair
-                                .cast::<PyTuple>()
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                            let method_name: String = pair
-                                .get_item(0)
-                                .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                                .extract()
-                                .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let methods = tuple_get(info_tuple, midx)?;
+                        for method_result in methods.try_iter().map_err(|e| VMError::RuntimeError(e.to_string()))? {
+                            let method_pair = method_result.map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let pair = cast_tuple(&method_pair)?;
+                            let method_name: String = tuple_extract(pair, 0)?;
 
                             // Read is_static flag (3rd element, defaults to false)
                             let is_static: bool = if pair.len() > 2 {
-                                pair.get_item(2)
-                                    .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                                    .extract()
-                                    .unwrap_or(false)
+                                tuple_extract(pair, 2).unwrap_or(false)
                             } else {
                                 false
                             };
 
                             // Get CodeObject and create VMFunction
-                            let code_obj = pair
-                                .get_item(1)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let code_obj = tuple_get(pair, 1)?;
 
                             // Abstract method: code_obj is None
                             if code_obj.is_none() {
@@ -4890,68 +4971,34 @@ impl VM {
                                 continue;
                             }
 
-                            // Build native captured HashMap
-                            let mut captured: HashMap<String, Value> = HashMap::new();
-                            if let Some(ref code) = frame.code {
-                                let ctx_globals_bound: Option<Bound<'_, PyDict>> =
-                                    ctx_globals.as_ref().map(|g| g.bind(py).clone());
-
-                                for (lname, &slot_idx) in &code.slotmap {
-                                    if let Some(ref globals) = ctx_globals_bound {
-                                        if globals
-                                            .contains(lname)
-                                            .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                                        {
+                            let captured = {
+                                let mut cap: IndexMap<String, Value> = IndexMap::new();
+                                if let Some(ref code) = frame.code {
+                                    for (lname, &slot_idx) in &code.slotmap {
+                                        if host.has_global(py, lname) {
                                             continue;
                                         }
-                                    }
-                                    let val = frame.get_local(slot_idx);
-                                    if !val.is_nil() && !val.is_invalid() {
-                                        captured.insert(lname.clone(), val);
-                                    }
-                                }
-                            }
-                            portabilize_struct_values(py, &mut captured);
-
-                            let parent = match frame.closure_scope {
-                                Some(ref parent_closure) => {
-                                    ClosureParent::Native(parent_closure.clone())
-                                }
-                                None => {
-                                    if let Some(ref ctx) = self.py_context {
-                                        let ctx_bound = ctx.bind(py);
-                                        if let Ok(py_globals) = ctx_bound.getattr("globals") {
-                                            if let Ok(dict) = py_globals.cast::<PyDict>() {
-                                                ClosureParent::PyGlobals(dict.clone().unbind())
-                                            } else {
-                                                ClosureParent::None
-                                            }
-                                        } else {
-                                            ClosureParent::None
+                                        let val = frame.get_local(slot_idx);
+                                        if !val.is_nil() && !val.is_invalid() {
+                                            cap.insert(lname.clone(), val);
                                         }
-                                    } else {
-                                        ClosureParent::None
                                     }
                                 }
+                                portabilize_struct_values(py, &mut cap, &mut self.struct_registry);
+                                cap
                             };
+
+                            let parent = host.build_closure_parent(py, frame.closure_scope.as_ref());
                             let native_scope = NativeClosureScope::new(captured, parent);
-                            let context_for_func =
-                                self.py_context.as_ref().map(|c| c.clone_ref(py));
+                            let context_for_func = host.context().as_ref().map(|c| c.clone_ref(py));
                             let code_py: Py<PyCodeObject> = code_obj
                                 .cast::<PyCodeObject>()
-                                .map_err(|e| {
-                                    VMError::TypeError(format!("Expected CodeObject: {e}"))
-                                })?
+                                .map_err(|e| VMError::TypeError(format!("Expected CodeObject: {e}")))?
                                 .clone()
                                 .unbind();
                             let func = Py::new(
                                 py,
-                                RustVMFunction::create_native(
-                                    py,
-                                    code_py,
-                                    Some(native_scope),
-                                    context_for_func,
-                                ),
+                                VMFunction::create_native(py, code_py, Some(native_scope), context_for_func),
                             )
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
 
@@ -4968,9 +5015,7 @@ impl VM {
                         if !base_names.is_empty() {
                             // Compute C3 MRO
                             let struct_mro = super::mro::c3_linearize(&name, &base_names, |n| {
-                                self.struct_registry
-                                    .find_type_by_name(n)
-                                    .map(|ty| ty.mro.clone())
+                                self.struct_registry.find_type_by_name(n).map(|ty| ty.mro.clone())
                             })
                             .map_err(VMError::RuntimeError)?;
 
@@ -4978,9 +5023,7 @@ impl VM {
                             let mut seen_fields: HashSet<String> = HashSet::new();
                             let mut mro_fields: Vec<StructField> = Vec::new();
                             for mro_type_name in struct_mro.iter().skip(1) {
-                                if let Some(ty) =
-                                    self.struct_registry.find_type_by_name(mro_type_name)
-                                {
+                                if let Some(ty) = self.struct_registry.find_type_by_name(mro_type_name) {
                                     for f in &ty.fields {
                                         if seen_fields.insert(f.name.clone()) {
                                             mro_fields.push(f.clone());
@@ -5001,12 +5044,10 @@ impl VM {
                             mro_fields.extend(native_fields);
 
                             // Merge methods following MRO (first-seen wins, skip self)
-                            let mut inherited_methods: HashMap<String, Py<PyAny>> = HashMap::new();
-                            let mut inherited_static: HashMap<String, Py<PyAny>> = HashMap::new();
+                            let mut inherited_methods: IndexMap<String, Py<PyAny>> = IndexMap::new();
+                            let mut inherited_static: IndexMap<String, Py<PyAny>> = IndexMap::new();
                             for mro_type_name in struct_mro.iter().skip(1) {
-                                if let Some(ty) =
-                                    self.struct_registry.find_type_by_name(mro_type_name)
-                                {
+                                if let Some(ty) = self.struct_registry.find_type_by_name(mro_type_name) {
                                     for (k, v) in &ty.methods {
                                         if !inherited_methods.contains_key(k) {
                                             inherited_methods.insert(k.clone(), v.clone_ref(py));
@@ -5038,8 +5079,7 @@ impl VM {
                     let mut trait_mro = Vec::new();
                     let mut trait_abstract: HashSet<MethodKey> = HashSet::new();
                     if !implements_list.is_empty() {
-                        let struct_method_names: HashSet<String> =
-                            merged_methods.keys().cloned().collect();
+                        let struct_method_names: HashSet<String> = merged_methods.keys().cloned().collect();
                         let resolved = self
                             .trait_registry
                             .resolve_for_struct(py, &implements_list, &struct_method_names)
@@ -5084,11 +5124,9 @@ impl VM {
                     // Collect all abstract methods (own + inherited)
                     let mut final_abstract = own_abstract.clone();
 
-                    // From parents (extends) — collect from all parents in MRO
+                    // From parents (extends) - collect from all parents in MRO
                     for parent_name in &base_names {
-                        if let Some(parent_type) =
-                            self.struct_registry.find_type_by_name(parent_name)
-                        {
+                        if let Some(parent_type) = self.struct_registry.find_type_by_name(parent_name) {
                             for key in &parent_type.abstract_methods {
                                 final_abstract.insert(key.clone());
                             }
@@ -5102,27 +5140,18 @@ impl VM {
 
                     // Remove methods that have concrete implementations
                     final_abstract.retain(|key| match key.kind {
-                        super::structs::MethodKind::Instance => {
-                            !merged_methods.contains_key(&key.name)
-                        }
-                        super::structs::MethodKind::Static => {
-                            !merged_static.contains_key(&key.name)
-                        }
+                        super::structs::MethodKind::Instance => !merged_methods.contains_key(&key.name),
+                        super::structs::MethodKind::Static => !merged_static.contains_key(&key.name),
                     });
 
                     // Concrete struct with unresolved abstracts => error
                     if own_abstract.is_empty() && !final_abstract.is_empty() {
-                        let mut names: Vec<&str> =
-                            final_abstract.iter().map(|k| k.name.as_str()).collect();
+                        let mut names: Vec<&str> = final_abstract.iter().map(|k| k.name.as_str()).collect();
                         names.sort();
                         return Err(VMError::RuntimeError(format!(
                             "struct '{}' must implement abstract method(s): {}",
                             name,
-                            names
-                                .iter()
-                                .map(|n| format!("'{}'", n))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ")
                         )));
                     }
 
@@ -5133,18 +5162,21 @@ impl VM {
                     let type_id = self.struct_registry.register_type_with_parents(
                         name.clone(),
                         merged_fields,
-                        merged_methods,
-                        implements_list,
-                        mro,
-                        base_names,
-                        final_abstract,
-                        merged_static,
+                        StructMethods {
+                            instance: merged_methods,
+                            statics: merged_static,
+                            abstract_methods: final_abstract,
+                        },
+                        StructParents {
+                            implements: implements_list,
+                            mro,
+                            parent_names: base_names,
+                        },
                     );
 
                     // Build a callable CatnipStructType for Python-side access
                     let ty = self.struct_registry.get_type(type_id).unwrap();
-                    let field_names: Vec<String> =
-                        ty.fields.iter().map(|f| f.name.clone()).collect();
+                    let field_names: Vec<String> = ty.fields.iter().map(|f| f.name.clone()).collect();
                     let field_defaults: Vec<Option<Py<PyAny>>> = ty
                         .fields
                         .iter()
@@ -5156,12 +5188,9 @@ impl VM {
                             }
                         })
                         .collect();
-                    let methods_py: HashMap<String, Py<PyAny>> = ty
-                        .methods
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-                        .collect();
-                    let static_py: HashMap<String, Py<PyAny>> = ty
+                    let methods_py: IndexMap<String, Py<PyAny>> =
+                        ty.methods.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect();
+                    let static_py: IndexMap<String, Py<PyAny>> = ty
                         .static_methods
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone_ref(py)))
@@ -5190,21 +5219,13 @@ impl VM {
                     let marker_ptr = struct_type_obj.as_ptr();
                     self.struct_type_map.insert(marker_ptr as usize, type_id);
 
+                    // Insert once into ObjectTable, then clone_refcount for second use
+                    let val = Value::from_owned_pyobject(struct_type_obj.into_any());
+                    val.clone_refcount(); // two owners: host globals + vm globals
+
                     // Store in context.globals for Python-side access
-                    if let Some(ref ctx) = self.py_context {
-                        let ctx_bound = ctx.bind(py);
-                        let globals = ctx_bound
-                            .getattr("globals")
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        globals
-                            .call_method1("__setitem__", (&name, struct_type_obj.bind(py)))
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                    }
+                    host.store_global(py, &name, val)?;
                     // Also store in VM globals for scope resolution
-                    let val = unsafe {
-                        pyo3::ffi::Py_IncRef(marker_ptr);
-                        Value::from_pyobj_ptr(marker_ptr)
-                    };
                     self.globals.insert(name, val);
                 }
 
@@ -5212,40 +5233,26 @@ impl VM {
                     let const_idx = instr.arg as usize;
                     let trait_info_val = code.constants[const_idx];
                     let trait_info_py = trait_info_val.to_pyobject(py);
-                    let info_tuple = trait_info_py.bind(py).cast::<PyTuple>().map_err(|e| {
-                        VMError::RuntimeError(format!("MakeTrait: bad constant: {e}"))
-                    })?;
+                    let info_tuple = trait_info_py
+                        .bind(py)
+                        .cast::<PyTuple>()
+                        .map_err(|e| VMError::RuntimeError(format!("MakeTrait: bad constant: {e}")))?;
 
                     // (name, extends_tuple, fields_info, num_defaults, [methods])
-                    let name: String = info_tuple
-                        .get_item(0)
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                        .extract()
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                    let name: String = tuple_extract(info_tuple, 0)?;
 
-                    let extends_obj = info_tuple
-                        .get_item(1)
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    let extends_obj = tuple_get(info_tuple, 1)?;
                     let mut extends: Vec<String> = Vec::new();
                     for e in extends_obj
                         .try_iter()
                         .map_err(|e| VMError::RuntimeError(e.to_string()))?
                     {
                         let e = e.map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        extends.push(
-                            e.extract()
-                                .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?,
-                        );
+                        extends.push(e.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?);
                     }
 
-                    let fields_info = info_tuple
-                        .get_item(2)
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                    let num_defaults: usize = info_tuple
-                        .get_item(3)
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                        .extract()
-                        .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                    let fields_info = tuple_get(info_tuple, 2)?;
+                    let num_defaults: usize = tuple_extract(info_tuple, 3)?;
 
                     let has_methods = info_tuple.len() > 4;
 
@@ -5256,25 +5263,13 @@ impl VM {
                     frame.stack.truncate(dstart);
 
                     // Parse fields
-                    let fields_tuple = fields_info
-                        .cast::<PyTuple>()
-                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    let fields_tuple = cast_tuple(&fields_info)?;
                     let mut trait_fields = Vec::new();
                     let mut default_idx = 0usize;
                     for fi in fields_tuple.iter() {
-                        let pair = fi
-                            .cast::<PyTuple>()
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        let fname: String = pair
-                            .get_item(0)
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                            .extract()
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
-                        let has_default: bool = pair
-                            .get_item(1)
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                            .extract()
-                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let pair = cast_tuple(&fi)?;
+                        let fname: String = tuple_extract(pair, 0)?;
+                        let has_default: bool = tuple_extract(pair, 1)?;
                         let default_val = if has_default {
                             let v = default_values[default_idx];
                             default_idx += 1;
@@ -5290,41 +5285,24 @@ impl VM {
                     }
 
                     // Build method callables (same pattern as MakeStruct)
-                    let mut method_bodies: HashMap<String, Py<PyAny>> = HashMap::new();
-                    let mut trait_static_methods: HashMap<String, Py<PyAny>> = HashMap::new();
+                    let mut method_bodies: IndexMap<String, Py<PyAny>> = IndexMap::new();
+                    let mut trait_static_methods: IndexMap<String, Py<PyAny>> = IndexMap::new();
                     let mut abstract_methods: HashSet<MethodKey> = HashSet::new();
                     if has_methods {
-                        let methods = info_tuple
-                            .get_item(4)
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                        for method_result in methods
-                            .try_iter()
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                        {
-                            let method_pair =
-                                method_result.map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                            let pair = method_pair
-                                .cast::<PyTuple>()
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                            let method_name: String = pair
-                                .get_item(0)
-                                .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                                .extract()
-                                .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let methods = tuple_get(info_tuple, 4)?;
+                        for method_result in methods.try_iter().map_err(|e| VMError::RuntimeError(e.to_string()))? {
+                            let method_pair = method_result.map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let pair = cast_tuple(&method_pair)?;
+                            let method_name: String = tuple_extract(pair, 0)?;
 
                             // Read is_static flag (3rd element, defaults to false)
                             let is_static: bool = if pair.len() > 2 {
-                                pair.get_item(2)
-                                    .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?
-                                    .extract()
-                                    .unwrap_or(false)
+                                tuple_extract(pair, 2).unwrap_or(false)
                             } else {
                                 false
                             };
 
-                            let code_obj = pair
-                                .get_item(1)
-                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let code_obj = tuple_get(pair, 1)?;
 
                             // Abstract method: code_obj is None
                             if code_obj.is_none() {
@@ -5340,18 +5318,11 @@ impl VM {
                             }
 
                             // Build native captured HashMap
-                            let mut captured: HashMap<String, Value> = HashMap::new();
+                            let mut captured: IndexMap<String, Value> = IndexMap::new();
                             if let Some(ref code) = frame.code {
-                                let ctx_globals_bound: Option<Bound<'_, PyDict>> =
-                                    ctx_globals.as_ref().map(|g| g.bind(py).clone());
                                 for (lname, &slot_idx) in &code.slotmap {
-                                    if let Some(ref globals) = ctx_globals_bound {
-                                        if globals
-                                            .contains(lname)
-                                            .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                                        {
-                                            continue;
-                                        }
+                                    if host.has_global(py, lname) {
+                                        continue;
                                     }
                                     let val = frame.get_local(slot_idx);
                                     if !val.is_nil() && !val.is_invalid() {
@@ -5359,47 +5330,19 @@ impl VM {
                                     }
                                 }
                             }
-                            portabilize_struct_values(py, &mut captured);
+                            portabilize_struct_values(py, &mut captured, &mut self.struct_registry);
 
-                            let parent = match frame.closure_scope {
-                                Some(ref parent_closure) => {
-                                    ClosureParent::Native(parent_closure.clone())
-                                }
-                                None => {
-                                    if let Some(ref ctx) = self.py_context {
-                                        let ctx_bound = ctx.bind(py);
-                                        if let Ok(py_globals) = ctx_bound.getattr("globals") {
-                                            if let Ok(dict) = py_globals.cast::<PyDict>() {
-                                                ClosureParent::PyGlobals(dict.clone().unbind())
-                                            } else {
-                                                ClosureParent::None
-                                            }
-                                        } else {
-                                            ClosureParent::None
-                                        }
-                                    } else {
-                                        ClosureParent::None
-                                    }
-                                }
-                            };
+                            let parent = host.build_closure_parent(py, frame.closure_scope.as_ref());
                             let native_scope = NativeClosureScope::new(captured, parent);
-                            let context_for_func =
-                                self.py_context.as_ref().map(|c| c.clone_ref(py));
+                            let context_for_func = host.context().as_ref().map(|c| c.clone_ref(py));
                             let code_py: Py<PyCodeObject> = code_obj
                                 .cast::<PyCodeObject>()
-                                .map_err(|e| {
-                                    VMError::TypeError(format!("Expected CodeObject: {e}"))
-                                })?
+                                .map_err(|e| VMError::TypeError(format!("Expected CodeObject: {e}")))?
                                 .clone()
                                 .unbind();
                             let func = Py::new(
                                 py,
-                                RustVMFunction::create_native(
-                                    py,
-                                    code_py,
-                                    Some(native_scope),
-                                    context_for_func,
-                                ),
+                                VMFunction::create_native(py, code_py, Some(native_scope), context_for_func),
                             )
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
 
@@ -5427,9 +5370,7 @@ impl VM {
                 OpCode::NdEmptyTopos => {
                     // Get cached NDTopos singleton or create it
                     if self.cached_nd_topos.is_none() {
-                        let nd_module = py
-                            .import("catnip.nd")
-                            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                        let nd_module = py.import(PY_MOD_ND).map_err(|e| VMError::RuntimeError(e.to_string()))?;
                         let nd_topos_class = nd_module
                             .getattr("NDTopos")
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
@@ -5455,31 +5396,28 @@ impl VM {
                         let lambda_py = lambda_val.to_pyobject(py);
                         let seed_py = seed_val.to_pyobject(py);
 
-                        let result = if let Some(ref ctx) = self.py_context {
-                            let ctx_bound = ctx.bind(py);
-                            if let Ok(registry) = ctx_bound.getattr("_registry") {
-                                registry
-                                    .call_method(
-                                        "execute_nd_recursion_py",
-                                        (seed_py, lambda_py),
-                                        None,
-                                    )
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                            } else {
-                                return Err(VMError::RuntimeError(
-                                    "Registry not found in context".to_string(),
-                                ));
-                            }
-                        } else {
-                            return Err(VMError::RuntimeError("No context available".to_string()));
-                        };
-                        let value = Value::from_pyobject(py, &result)
+                        let result = host.execute_nd_recursion(py, seed_py.bind(py), lambda_py.bind(py))?;
+                        let value = Value::from_pyobject(py, result.bind(py))
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
                         frame.push(value);
                     } else {
-                        // Declaration: pop lambda, push back
+                        // Declaration: pop lambda, wrap in NDDeclaration
                         let lambda_val = frame.pop();
-                        frame.push(lambda_val);
+                        let lambda_py = lambda_val.to_pyobject(py);
+                        if let Some(ctx) = host.context() {
+                            let decl = Py::new(py, crate::nd::NDDeclaration::new(lambda_py, ctx.clone_ref(py)))
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let value = Value::from_pyobject(py, decl.into_any().bind(py))
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            frame.push(value);
+                        } else {
+                            // Standalone mode: wrap in NDVmDecl so f(seed) calls lambda(seed, f)
+                            let decl = Py::new(py, crate::nd::NDVmDecl::new(lambda_py))
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            let value = Value::from_pyobject(py, decl.into_any().bind(py))
+                                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                            frame.push(value);
+                        }
                     }
                 }
 
@@ -5493,21 +5431,8 @@ impl VM {
                         let func_py = func_val.to_pyobject(py);
                         let data_py = data_val.to_pyobject(py);
 
-                        let result = if let Some(ref ctx) = self.py_context {
-                            let ctx_bound = ctx.bind(py);
-                            if let Ok(registry) = ctx_bound.getattr("_registry") {
-                                registry
-                                    .call_method("execute_nd_map_py", (data_py, func_py), None)
-                                    .map_err(|e| VMError::RuntimeError(e.to_string()))?
-                            } else {
-                                return Err(VMError::RuntimeError(
-                                    "Registry not found in context".to_string(),
-                                ));
-                            }
-                        } else {
-                            return Err(VMError::RuntimeError("No context available".to_string()));
-                        };
-                        let value = Value::from_pyobject(py, &result)
+                        let result = host.execute_nd_map(py, data_py.bind(py), func_py.bind(py))?;
+                        let value = Value::from_pyobject(py, result.bind(py))
                             .map_err(|e| VMError::RuntimeError(e.to_string()))?;
                         frame.push(value);
                     } else {
@@ -5522,6 +5447,70 @@ impl VM {
                     let msg = code.constants[msg_idx].to_pyobject(py);
                     let msg_str: String = msg.bind(py).extract().unwrap_or_default();
                     return Err(VMError::RuntimeError(msg_str));
+                }
+
+                // --- String formatting ---
+                OpCode::FormatValue => {
+                    // flags = (conv << 1) | has_spec
+                    let flags = instr.arg;
+                    let has_spec = (flags & 1) != 0;
+                    let conv = (flags >> 1) & 3;
+
+                    let spec_obj = if has_spec {
+                        frame.pop().to_pyobject(py)
+                    } else {
+                        "".into_pyobject(py).unwrap().into_any().unbind()
+                    };
+                    let value = frame.pop().to_pyobject(py);
+
+                    let builtins = py.import("builtins").to_vm(py)?;
+
+                    // Apply conversion: 0=none, 1=str, 2=repr, 3=ascii
+                    let converted = match conv {
+                        1 => builtins
+                            .getattr("str")
+                            .to_vm(py)?
+                            .call1((value.bind(py),))
+                            .to_vm(py)?
+                            .unbind(),
+                        2 => builtins
+                            .getattr("repr")
+                            .to_vm(py)?
+                            .call1((value.bind(py),))
+                            .to_vm(py)?
+                            .unbind(),
+                        3 => builtins
+                            .getattr("ascii")
+                            .to_vm(py)?
+                            .call1((value.bind(py),))
+                            .to_vm(py)?
+                            .unbind(),
+                        _ => value,
+                    };
+
+                    let result = builtins
+                        .getattr("format")
+                        .to_vm(py)?
+                        .call1((converted.bind(py), spec_obj.bind(py)))
+                        .to_vm(py)?;
+                    frame.push(Value::from_owned_pyobject(result.unbind()));
+                }
+
+                OpCode::BuildString => {
+                    let n = instr.arg as usize;
+                    let stack_len = frame.stack.len();
+                    let start = stack_len - n;
+
+                    let mut buf = String::with_capacity(n * 16);
+                    for i in start..stack_len {
+                        let py_obj = frame.stack[i].to_pyobject(py);
+                        let s: String = py_obj.bind(py).extract().unwrap_or_default();
+                        buf.push_str(&s);
+                    }
+                    frame.stack.truncate(start);
+
+                    let py_str = PyString::new(py, &buf);
+                    frame.push(Value::from_owned_pyobject(py_str.unbind().into_any()));
                 }
 
                 OpCode::Halt => {
@@ -5592,12 +5581,7 @@ impl VM {
                 let depth = self.call_stack.len();
                 // frame no longer used past this point
                 self.debug_step_mode = DebugStepMode::Disabled;
-                let action = self.invoke_debug_callback(
-                    py,
-                    _current_src_byte,
-                    &locals_data,
-                    &call_stack_snapshot,
-                )?;
+                let action = self.invoke_debug_callback(py, _current_src_byte, &locals_data, &call_stack_snapshot)?;
                 self.debug_step_mode = action;
                 if action == DebugStepMode::StepOver || action == DebugStepMode::StepOut {
                     self.debug_step_depth = depth;
@@ -5618,12 +5602,18 @@ impl Default for VM {
 
 // --- Binary operations on NaN-boxed values ---
 
-/// Promote a Value (SmallInt or BigInt) to BigInt for mixed arithmetic.
-/// Clones when BigInt (needed for cases where we can't borrow).
+// Floor div/mod helpers -- shared from catnip_vm (type-independent, no Value dependency).
+use catnip_vm::ops::arith::{i64_div_floor, i64_mod_floor};
+
+// NOTE: binary_*, compare_*, eq_without_python, to_f64, to_bigint, bigint_binop, bigint_cmp
+// remain local because catnip_rs::vm::value::Value is a distinct type from catnip_vm::Value.
+// Type unification is Phase 5 (pipeline integration).
+
+/// Promote a Value (SmallInt or BigInt) to owned Integer for mixed arithmetic.
 #[inline]
-fn to_bigint(v: Value) -> Option<BigInt> {
+fn to_bigint(v: Value) -> Option<Integer> {
     if let Some(i) = v.as_int() {
-        Some(BigInt::from(i))
+        Some(Integer::from(i))
     } else if v.is_bigint() {
         Some(unsafe { v.as_bigint_ref().unwrap().clone() })
     } else {
@@ -5631,31 +5621,27 @@ fn to_bigint(v: Value) -> Option<BigInt> {
     }
 }
 
-/// Apply a binary BigInt operation using references to avoid cloning.
-/// Handles all 4 combinations: BigInt op BigInt, BigInt op SmallInt,
-/// SmallInt op BigInt, SmallInt op SmallInt (promoted).
+/// Apply a binary BigInt operation using references (zero-clone).
 #[inline]
 fn bigint_binop<F>(a: Value, b: Value, op: F) -> Option<Value>
 where
-    F: FnOnce(&BigInt, &BigInt) -> BigInt,
+    F: FnOnce(&Integer, &Integer) -> Integer,
 {
-    // Both BigInt: borrow both, zero clones
     if a.is_bigint() && b.is_bigint() {
         let (ra, rb) = unsafe { (a.as_bigint_ref().unwrap(), b.as_bigint_ref().unwrap()) };
         return Some(Value::from_bigint_or_demote(op(ra, rb)));
     }
-    // One BigInt, one SmallInt: borrow the BigInt, promote the SmallInt
     if a.is_bigint() {
         if let Some(bi) = b.as_int() {
             let ra = unsafe { a.as_bigint_ref().unwrap() };
-            let tmp = BigInt::from(bi);
+            let tmp = Integer::from(bi);
             return Some(Value::from_bigint_or_demote(op(ra, &tmp)));
         }
     }
     if b.is_bigint() {
         if let Some(ai) = a.as_int() {
             let rb = unsafe { b.as_bigint_ref().unwrap() };
-            let tmp = BigInt::from(ai);
+            let tmp = Integer::from(ai);
             return Some(Value::from_bigint_or_demote(op(&tmp, rb)));
         }
     }
@@ -5666,7 +5652,7 @@ where
 #[inline]
 fn bigint_cmp<F>(a: Value, b: Value, cmp: F) -> Option<bool>
 where
-    F: FnOnce(&BigInt, &BigInt) -> bool,
+    F: FnOnce(&Integer, &Integer) -> bool,
 {
     if a.is_bigint() && b.is_bigint() {
         let (ra, rb) = unsafe { (a.as_bigint_ref().unwrap(), b.as_bigint_ref().unwrap()) };
@@ -5675,40 +5661,36 @@ where
     if a.is_bigint() {
         if let Some(bi) = b.as_int() {
             let ra = unsafe { a.as_bigint_ref().unwrap() };
-            let tmp = BigInt::from(bi);
+            let tmp = Integer::from(bi);
             return Some(cmp(ra, &tmp));
         }
     }
     if b.is_bigint() {
         if let Some(ai) = a.as_int() {
             let rb = unsafe { b.as_bigint_ref().unwrap() };
-            let tmp = BigInt::from(ai);
+            let tmp = Integer::from(ai);
             return Some(cmp(&tmp, rb));
         }
     }
     None
 }
 
-/// Convert a Value (SmallInt, BigInt, or Float) to f64 for float promotion.
+/// Convert a Value to f64 for float promotion.
 #[inline]
 fn to_f64(v: Value) -> Option<f64> {
-    v.as_float()
-        .or_else(|| v.as_int().map(|i| i as f64))
-        .or_else(|| {
-            if v.is_bigint() {
-                unsafe { v.as_bigint_ref().unwrap().to_f64() }
-            } else {
-                None
-            }
-        })
+    v.as_float().or_else(|| v.as_int().map(|i| i as f64)).or_else(|| {
+        if v.is_bigint() {
+            Some(unsafe { v.as_bigint_ref().unwrap() }.to_f64())
+        } else {
+            None
+        }
+    })
 }
 
-/// Compare two Values in Rust when possible; returns None if Python fallback is required.
+/// Compare two Values in Rust when possible; returns None if Python fallback needed.
 #[inline]
 fn eq_without_python(a: Value, b: Value) -> Option<bool> {
-    // Bitwise identity for non-PyObject tags (int, bool, nil, struct, symbol, bigint).
-    // PyObjects excluded: could be float NaN (NaN != NaN) or custom __eq__.
-    if a.bits() == b.bits() && !a.is_pyobj() {
+    if a.bits() == b.bits() && !a.is_pyobj() && !a.is_float() {
         return Some(true);
     }
     if a.is_nil() || b.is_nil() {
@@ -5733,25 +5715,22 @@ fn eq_without_python(a: Value, b: Value) -> Option<bool> {
 
 #[inline]
 fn binary_add(a: Value, b: Value) -> VMResult<Value> {
-    // Fast path: both small ints
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(v) = Value::try_from_int(ai.wrapping_add(bi)) {
-            return Ok(v);
+        if let Some(sum) = ai.checked_add(bi) {
+            if let Some(v) = Value::try_from_int(sum) {
+                return Ok(v);
+            }
         }
-        return Ok(Value::from_bigint_or_demote(
-            BigInt::from(ai) + BigInt::from(bi),
-        ));
+        return Ok(Value::from_bigint_or_demote(Integer::from(ai) + Integer::from(bi)));
     }
-    // BigInt path (zero-clone via references)
     if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x + y) {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x + y)) {
             return Ok(v);
         }
         if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
             return Ok(Value::from_float(af + bf));
         }
     }
-    // Float path
     if let (Some(af), Some(bf)) = (a.as_float(), b.as_float()) {
         return Ok(Value::from_float(af + bf));
     }
@@ -5767,15 +5746,15 @@ fn binary_add(a: Value, b: Value) -> VMResult<Value> {
 #[inline]
 fn binary_sub(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(v) = Value::try_from_int(ai.wrapping_sub(bi)) {
-            return Ok(v);
+        if let Some(diff) = ai.checked_sub(bi) {
+            if let Some(v) = Value::try_from_int(diff) {
+                return Ok(v);
+            }
         }
-        return Ok(Value::from_bigint_or_demote(
-            BigInt::from(ai) - BigInt::from(bi),
-        ));
+        return Ok(Value::from_bigint_or_demote(Integer::from(ai) - Integer::from(bi)));
     }
     if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x - y) {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x - y)) {
             return Ok(v);
         }
         if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
@@ -5797,15 +5776,15 @@ fn binary_sub(a: Value, b: Value) -> VMResult<Value> {
 #[inline]
 fn binary_mul(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(v) = Value::try_from_int(ai.wrapping_mul(bi)) {
-            return Ok(v);
+        if let Some(prod) = ai.checked_mul(bi) {
+            if let Some(v) = Value::try_from_int(prod) {
+                return Ok(v);
+            }
         }
-        return Ok(Value::from_bigint_or_demote(
-            BigInt::from(ai) * BigInt::from(bi),
-        ));
+        return Ok(Value::from_bigint_or_demote(Integer::from(ai) * Integer::from(bi)));
     }
     if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x * y) {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x * y)) {
             return Ok(v);
         }
         if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
@@ -5825,87 +5804,64 @@ fn binary_mul(a: Value, b: Value) -> VMResult<Value> {
 }
 
 #[inline]
-fn binary_div(py: Python<'_>, op_truediv: &Py<PyAny>, a: Value, b: Value) -> VMResult<Value> {
-    // Division always returns float in Catnip (like Python 3)
+fn binary_div(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
         if bf == 0.0 {
             return Err(VMError::ZeroDivisionError("division by zero".into()));
         }
         return Ok(Value::from_float(af / bf));
     }
-    // Fallback to Python
-    inc(&PY_BINARY_DIV_FALLBACKS);
-    Ok(call_binary_op(py, op_truediv, a, b)?)
+    Err(VMError::TypeError("unsupported operand types for /".into()))
 }
 
 #[inline]
-fn binary_floordiv(py: Python<'_>, op_floordiv: &Py<PyAny>, a: Value, b: Value) -> VMResult<Value> {
+fn binary_floordiv(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError(
-                "integer division or modulo by zero".into(),
-            ));
+            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
         }
-        return Ok(Value::from_int(Integer::div_floor(&ai, &bi)));
+        return Ok(Value::from_int(i64_div_floor(ai, bi)));
     }
-    // BigInt // BigInt -> BigInt (zero-clone via bigint_binop)
     if a.is_bigint() || b.is_bigint() {
-        // Check zero divisor first
         if b.is_bigint() {
-            if unsafe { b.as_bigint_ref().unwrap().is_zero() } {
-                return Err(VMError::ZeroDivisionError(
-                    "integer division or modulo by zero".into(),
-                ));
+            if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
+                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError(
-                "integer division or modulo by zero".into(),
-            ));
+            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
         }
-        if let Some(v) = bigint_binop(a, b, |x, y| x.div_floor(y)) {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).div_floor(y)) {
             return Ok(v);
         }
     }
-    // Float paths
     let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError(
-                "float floor division by zero".into(),
-            ));
+            return Err(VMError::ZeroDivisionError("float floor division by zero".into()));
         }
         return Ok(Value::from_float((af / bf).floor()));
     }
-    // Fallback to Python
-    inc(&PY_BINARY_FLOORDIV_FALLBACKS);
-    Ok(call_binary_op(py, op_floordiv, a, b)?)
+    Err(VMError::TypeError("unsupported operand types for //".into()))
 }
 
 #[inline]
-fn binary_mod(py: Python<'_>, op_mod: &Py<PyAny>, a: Value, b: Value) -> VMResult<Value> {
+fn binary_mod(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError(
-                "integer division or modulo by zero".into(),
-            ));
+            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
         }
-        return Ok(Value::from_int(Integer::mod_floor(&ai, &bi)));
+        return Ok(Value::from_int(i64_mod_floor(ai, bi)));
     }
-    // BigInt % BigInt -> BigInt (zero-clone)
     if a.is_bigint() || b.is_bigint() {
         if b.is_bigint() {
-            if unsafe { b.as_bigint_ref().unwrap().is_zero() } {
-                return Err(VMError::ZeroDivisionError(
-                    "integer division or modulo by zero".into(),
-                ));
+            if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
+                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError(
-                "integer division or modulo by zero".into(),
-            ));
+            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
         }
-        if let Some(v) = bigint_binop(a, b, |x, y| x.mod_floor(y)) {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).rem_floor(y)) {
             return Ok(v);
         }
     }
@@ -5915,16 +5871,13 @@ fn binary_mod(py: Python<'_>, op_mod: &Py<PyAny>, a: Value, b: Value) -> VMResul
         if bf == 0.0 {
             return Err(VMError::ZeroDivisionError("float modulo by zero".into()));
         }
-        return Ok(Value::from_float(af % bf));
+        return Ok(Value::from_float(af - bf * (af / bf).floor()));
     }
-    // Fallback to Python (for string formatting, etc.)
-    inc(&PY_BINARY_MOD_FALLBACKS);
-    Ok(call_binary_op(py, op_mod, a, b)?)
+    Err(VMError::TypeError("unsupported operand types for %".into()))
 }
 
 #[inline]
 fn binary_pow(a: Value, b: Value) -> VMResult<Value> {
-    // SmallInt ** SmallInt fast path
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi >= 0 {
             if bi <= 64 {
@@ -5934,18 +5887,14 @@ fn binary_pow(a: Value, b: Value) -> VMResult<Value> {
                     }
                 }
             }
-            // Overflow or large exponent: BigInt ** u32
-            let base = BigInt::from(ai);
+            let base = Integer::from(ai);
             if let Ok(exp) = u32::try_from(bi) {
                 return Ok(Value::from_bigint_or_demote(base.pow(exp)));
             }
-            // Exponent too large for u32 -> float
             return Ok(Value::from_float((ai as f64).powf(bi as f64)));
         }
-        // Negative exponent -> float
         return Ok(Value::from_float((ai as f64).powf(bi as f64)));
     }
-    // BigInt ** SmallInt -> BigInt (positive exponent only)
     if a.is_bigint() || b.is_bigint() {
         if let (Some(base), Some(bi)) = (to_bigint(a), b.as_int()) {
             if bi >= 0 {
@@ -5953,25 +5902,20 @@ fn binary_pow(a: Value, b: Value) -> VMResult<Value> {
                     return Ok(Value::from_bigint_or_demote(base.pow(exp)));
                 }
             }
-            // Negative or huge exponent -> float
             if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
                 return Ok(Value::from_float(af.powf(bf)));
             }
         }
-        // BigInt ** BigInt or BigInt ** float -> float
         if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
             return Ok(Value::from_float(af.powf(bf)));
         }
     }
-    // Float paths
     let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_float(af.powf(bf)));
     }
-    Err(VMError::TypeError(
-        "unsupported operand types for **".into(),
-    ))
+    Err(VMError::TypeError("unsupported operand types for **".into()))
 }
 
 #[inline]
@@ -5980,194 +5924,16 @@ fn unary_neg(a: Value) -> VMResult<Value> {
         if let Some(v) = Value::try_from_int(-i) {
             return Ok(v);
         }
-        return Ok(Value::from_bigint_or_demote(-BigInt::from(i)));
+        return Ok(Value::from_bigint_or_demote(-Integer::from(i)));
     }
     if a.is_bigint() {
-        let n = unsafe { a.as_bigint_ref().unwrap().clone() };
-        return Ok(Value::from_bigint_or_demote(-n));
+        let n = unsafe { a.as_bigint_ref().unwrap() };
+        return Ok(Value::from_bigint_or_demote(Integer::from(-n)));
     }
     if let Some(f) = a.as_float() {
         return Ok(Value::from_float(-f));
     }
     Err(VMError::TypeError("bad operand type for unary -".into()))
-}
-
-// --- Struct operator dispatch ---
-
-/// Try to dispatch a binary operator on a struct instance.
-/// Returns Some((code, closure, args)) if the struct has the method, None otherwise.
-fn try_struct_binop(
-    registry: &StructRegistry,
-    py: Python<'_>,
-    a: Value,
-    b: Value,
-    method_name: &str,
-) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
-    let idx = a.as_struct_instance_idx()?;
-    let inst = registry.get_instance(idx)?;
-    let ty = registry.get_type(inst.type_id)?;
-    let func = ty.methods.get(method_name)?;
-    let func_bound = func.bind(py);
-    if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
-        let r = vm_func.borrow();
-        let code = Arc::clone(&r.vm_code.borrow(py).inner);
-        let closure = r.native_closure.clone();
-        drop(r);
-        Some((code, closure, vec![a, b]))
-    } else {
-        None
-    }
-}
-
-/// Try reverse dispatch: look up method on `b` (right operand) when `a` lacks it.
-/// Args are passed as (b, a) — the struct stays as self.
-fn try_struct_rbinop(
-    registry: &StructRegistry,
-    py: Python<'_>,
-    a: Value,
-    b: Value,
-    method_name: &str,
-) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
-    let idx = b.as_struct_instance_idx()?;
-    let inst = registry.get_instance(idx)?;
-    let ty = registry.get_type(inst.type_id)?;
-    let func = ty.methods.get(method_name)?;
-    let func_bound = func.bind(py);
-    if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
-        let r = vm_func.borrow();
-        let code = Arc::clone(&r.vm_code.borrow(py).inner);
-        let closure = r.native_closure.clone();
-        drop(r);
-        Some((code, closure, vec![b, a]))
-    } else {
-        None
-    }
-}
-
-/// Try to dispatch a unary operator on a struct instance.
-fn try_struct_unaryop(
-    registry: &StructRegistry,
-    py: Python<'_>,
-    a: Value,
-    method_name: &str,
-) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
-    let idx = a.as_struct_instance_idx()?;
-    let inst = registry.get_instance(idx)?;
-    let ty = registry.get_type(inst.type_id)?;
-    let func = ty.methods.get(method_name)?;
-    let func_bound = func.bind(py);
-    if let Ok(vm_func) = func_bound.cast::<RustVMFunction>() {
-        let r = vm_func.borrow();
-        let code = Arc::clone(&r.vm_code.borrow(py).inner);
-        let closure = r.native_closure.clone();
-        drop(r);
-        Some((code, closure, vec![a]))
-    } else {
-        None
-    }
-}
-
-// --- Bitwise operations ---
-
-#[inline]
-fn bitwise_or(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_int(ai | bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x | y) {
-            return Ok(v);
-        }
-    }
-    Err(VMError::TypeError("unsupported operand types for |".into()))
-}
-
-#[inline]
-fn bitwise_xor(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_int(ai ^ bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x ^ y) {
-            return Ok(v);
-        }
-    }
-    Err(VMError::TypeError("unsupported operand types for ^".into()))
-}
-
-#[inline]
-fn bitwise_and(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_int(ai & bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| x & y) {
-            return Ok(v);
-        }
-    }
-    Err(VMError::TypeError("unsupported operand types for &".into()))
-}
-
-#[inline]
-fn bitwise_not(a: Value) -> VMResult<Value> {
-    if let Some(i) = a.as_int() {
-        return Ok(Value::from_int(!i));
-    }
-    if a.is_bigint() {
-        let n = unsafe { a.as_bigint_ref().unwrap().clone() };
-        return Ok(Value::from_bigint_or_demote(!n));
-    }
-    Err(VMError::TypeError("bad operand type for unary ~".into()))
-}
-
-#[inline]
-fn bitwise_lshift(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if bi >= 0 {
-            if bi < 64 {
-                if let Some(v) = Value::try_from_int(ai << bi) {
-                    return Ok(v);
-                }
-            }
-            // Overflow or large shift: promote to BigInt
-            if let Ok(shift) = u64::try_from(bi) {
-                return Ok(Value::from_bigint_or_demote(BigInt::from(ai) << shift));
-            }
-        }
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let (Some(ba), Some(bi)) = (to_bigint(a), b.as_int()) {
-            if bi >= 0 {
-                if let Ok(shift) = u64::try_from(bi) {
-                    return Ok(Value::from_bigint_or_demote(ba << shift));
-                }
-            }
-        }
-    }
-    Err(VMError::TypeError(
-        "unsupported operand types for <<".into(),
-    ))
-}
-
-#[inline]
-fn bitwise_rshift(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if bi >= 0 && bi < 64 {
-            return Ok(Value::from_int(ai >> bi));
-        }
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let (Some(ba), Some(bi)) = (to_bigint(a), b.as_int()) {
-            if bi >= 0 {
-                if let Ok(shift) = u64::try_from(bi) {
-                    return Ok(Value::from_bigint_or_demote(ba >> shift));
-                }
-            }
-        }
-    }
-    Err(VMError::TypeError(
-        "unsupported operand types for >>".into(),
-    ))
 }
 
 // --- Comparison operations ---
@@ -6244,6 +6010,180 @@ fn compare_ge(a: Value, b: Value) -> VMResult<Value> {
     Err(VMError::TypeError("'>=' not supported".into()))
 }
 
+// --- Struct operator dispatch ---
+
+/// Try to dispatch a binary operator on a struct instance.
+/// Returns Some((code, closure, args)) if the struct has the method, None otherwise.
+fn try_struct_binop(
+    registry: &StructRegistry,
+    py: Python<'_>,
+    a: Value,
+    b: Value,
+    method_name: &str,
+) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
+    let idx = a.as_struct_instance_idx()?;
+    let inst = registry.get_instance(idx)?;
+    let ty = registry.get_type(inst.type_id)?;
+    let func = ty.methods.get(method_name)?;
+    let func_bound = func.bind(py);
+    if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
+        let r = vm_func.borrow();
+        let code = Arc::clone(&r.vm_code.borrow(py).inner);
+        let closure = r.native_closure.clone();
+        drop(r);
+        Some((code, closure, vec![a, b]))
+    } else {
+        None
+    }
+}
+
+/// Try reverse dispatch: look up method on `b` (right operand) when `a` lacks it.
+/// Args are passed as (b, a) - the struct stays as self.
+fn try_struct_rbinop(
+    registry: &StructRegistry,
+    py: Python<'_>,
+    a: Value,
+    b: Value,
+    method_name: &str,
+) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
+    let idx = b.as_struct_instance_idx()?;
+    let inst = registry.get_instance(idx)?;
+    let ty = registry.get_type(inst.type_id)?;
+    let func = ty.methods.get(method_name)?;
+    let func_bound = func.bind(py);
+    if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
+        let r = vm_func.borrow();
+        let code = Arc::clone(&r.vm_code.borrow(py).inner);
+        let closure = r.native_closure.clone();
+        drop(r);
+        Some((code, closure, vec![b, a]))
+    } else {
+        None
+    }
+}
+
+/// Try to dispatch a unary operator on a struct instance.
+fn try_struct_unaryop(
+    registry: &StructRegistry,
+    py: Python<'_>,
+    a: Value,
+    method_name: &str,
+) -> Option<(Arc<CodeObject>, Option<NativeClosureScope>, Vec<Value>)> {
+    let idx = a.as_struct_instance_idx()?;
+    let inst = registry.get_instance(idx)?;
+    let ty = registry.get_type(inst.type_id)?;
+    let func = ty.methods.get(method_name)?;
+    let func_bound = func.bind(py);
+    if let Ok(vm_func) = func_bound.cast::<VMFunction>() {
+        let r = vm_func.borrow();
+        let code = Arc::clone(&r.vm_code.borrow(py).inner);
+        let closure = r.native_closure.clone();
+        drop(r);
+        Some((code, closure, vec![a]))
+    } else {
+        None
+    }
+}
+
+// --- Bitwise operations ---
+
+#[inline]
+fn bitwise_or(a: Value, b: Value) -> VMResult<Value> {
+    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+        return Ok(Value::from_int(ai | bi));
+    }
+    if a.is_bigint() || b.is_bigint() {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x | y)) {
+            return Ok(v);
+        }
+    }
+    Err(VMError::TypeError("unsupported operand types for |".into()))
+}
+
+#[inline]
+fn bitwise_xor(a: Value, b: Value) -> VMResult<Value> {
+    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+        return Ok(Value::from_int(ai ^ bi));
+    }
+    if a.is_bigint() || b.is_bigint() {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x ^ y)) {
+            return Ok(v);
+        }
+    }
+    Err(VMError::TypeError("unsupported operand types for ^".into()))
+}
+
+#[inline]
+fn bitwise_and(a: Value, b: Value) -> VMResult<Value> {
+    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+        return Ok(Value::from_int(ai & bi));
+    }
+    if a.is_bigint() || b.is_bigint() {
+        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x & y)) {
+            return Ok(v);
+        }
+    }
+    Err(VMError::TypeError("unsupported operand types for &".into()))
+}
+
+#[inline]
+fn bitwise_not(a: Value) -> VMResult<Value> {
+    if let Some(i) = a.as_int() {
+        return Ok(Value::from_int(!i));
+    }
+    if a.is_bigint() {
+        let n = unsafe { a.as_bigint_ref().unwrap() };
+        return Ok(Value::from_bigint_or_demote(Integer::from(!n)));
+    }
+    Err(VMError::TypeError("bad operand type for unary ~".into()))
+}
+
+#[inline]
+fn bitwise_lshift(a: Value, b: Value) -> VMResult<Value> {
+    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+        if bi >= 0 {
+            if bi < 64 {
+                if let Some(v) = Value::try_from_int(ai << bi) {
+                    return Ok(v);
+                }
+            }
+            // Overflow or large shift: promote to BigInt
+            if let Ok(shift) = u32::try_from(bi) {
+                return Ok(Value::from_bigint_or_demote(Integer::from(ai) << shift));
+            }
+        }
+    }
+    if a.is_bigint() || b.is_bigint() {
+        if let (Some(ba), Some(bi)) = (to_bigint(a), b.as_int()) {
+            if bi >= 0 {
+                if let Ok(shift) = u32::try_from(bi) {
+                    return Ok(Value::from_bigint_or_demote(ba << shift));
+                }
+            }
+        }
+    }
+    Err(VMError::TypeError("unsupported operand types for <<".into()))
+}
+
+#[inline]
+fn bitwise_rshift(a: Value, b: Value) -> VMResult<Value> {
+    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+        if (0..64).contains(&bi) {
+            return Ok(Value::from_int(ai >> bi));
+        }
+    }
+    if a.is_bigint() || b.is_bigint() {
+        if let (Some(ba), Some(bi)) = (to_bigint(a), b.as_int()) {
+            if bi >= 0 {
+                if let Ok(shift) = u32::try_from(bi) {
+                    return Ok(Value::from_bigint_or_demote(ba >> shift));
+                }
+            }
+        }
+    }
+    Err(VMError::TypeError("unsupported operand types for >>".into()))
+}
+
 #[inline]
 fn compare_eq(py: Python<'_>, a: Value, b: Value) -> VMResult<Value> {
     if let Some(r) = eq_without_python(a, b) {
@@ -6253,7 +6193,7 @@ fn compare_eq(py: Python<'_>, a: Value, b: Value) -> VMResult<Value> {
     inc(&PY_COMPARE_EQ_FALLBACKS);
     let py_a = a.to_pyobject(py);
     let py_b = b.to_pyobject(py);
-    let result = py_a.bind(py).eq(&py_b)?;
+    let result = py_a.bind(py).eq(&py_b).to_vm(py)?;
     Ok(Value::from_bool(result))
 }
 
@@ -6266,7 +6206,7 @@ fn compare_ne(py: Python<'_>, a: Value, b: Value) -> VMResult<Value> {
     inc(&PY_COMPARE_NE_FALLBACKS);
     let py_a = a.to_pyobject(py);
     let py_b = b.to_pyobject(py);
-    let result = py_a.bind(py).ne(&py_b)?;
+    let result = py_a.bind(py).ne(&py_b).to_vm(py)?;
     Ok(Value::from_bool(result))
 }
 
@@ -6353,8 +6293,7 @@ fn vm_match_pattern(
                         }
                     }
                 }
-            } else {
-                let star_pos = star_idx.unwrap();
+            } else if let Some(star_pos) = star_idx {
                 if items.len() < non_star_count {
                     return Ok(None);
                 }
@@ -6388,10 +6327,8 @@ fn vm_match_pattern(
                 // Bind star variable
                 if let VMPatternElement::Star(slot) = &elements[star_pos] {
                     if *slot != usize::MAX {
-                        let star_items: Vec<Py<PyAny>> = items[n_before..after_start]
-                            .iter()
-                            .map(|v| v.to_pyobject(py))
-                            .collect();
+                        let star_items: Vec<Py<PyAny>> =
+                            items[n_before..after_start].iter().map(|v| v.to_pyobject(py)).collect();
                         let star_list = PyList::new(py, &star_items)?;
                         let star_val = Value::from_pyobject(py, &star_list.into_any())?;
                         bindings.push((*slot, star_val));
@@ -6464,7 +6401,7 @@ fn vm_match_assign_pattern(
                 Ok(iter) => {
                     let mut v = Vec::new();
                     for item in iter {
-                        v.push(Value::from_pyobject(py, &item?).map_err(VMError::from)?);
+                        v.push(Value::from_pyobject(py, &item.to_vm(py)?).to_vm(py)?);
                     }
                     v
                 }
@@ -6474,10 +6411,7 @@ fn vm_match_assign_pattern(
                         .name()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|_| "value".to_string());
-                    return Err(VMError::TypeError(format!(
-                        "Cannot unpack non-iterable {}",
-                        ty
-                    )));
+                    return Err(VMError::TypeError(format!("Cannot unpack non-iterable {}", ty)));
                 }
             };
 
@@ -6487,9 +6421,7 @@ fn vm_match_assign_pattern(
                 match elem {
                     VMPatternElement::Star(_) => {
                         if star_idx.is_some() {
-                            return Err(VMError::RuntimeError(
-                                "Cannot unpack assignment pattern".to_string(),
-                            ));
+                            return Err(VMError::RuntimeError("Cannot unpack assignment pattern".to_string()));
                         }
                         star_idx = Some(i);
                     }
@@ -6519,21 +6451,17 @@ fn vm_match_assign_pattern(
 
                 for (i, elem) in elements[(star_pos + 1)..].iter().enumerate() {
                     if let VMPatternElement::Pattern(sub) = elem {
-                        let sub_bindings =
-                            vm_match_assign_pattern(py, sub, items[after_start + i], registry)?;
+                        let sub_bindings = vm_match_assign_pattern(py, sub, items[after_start + i], registry)?;
                         bindings.extend(sub_bindings);
                     }
                 }
 
                 if let VMPatternElement::Star(slot) = elements[star_pos] {
                     if slot != usize::MAX {
-                        let star_items: Vec<Py<PyAny>> = items[n_before..after_start]
-                            .iter()
-                            .map(|v| v.to_pyobject(py))
-                            .collect();
-                        let star_list = PyList::new(py, &star_items).map_err(VMError::from)?;
-                        let star_val = Value::from_pyobject(py, &star_list.into_any())
-                            .map_err(VMError::from)?;
+                        let star_items: Vec<Py<PyAny>> =
+                            items[n_before..after_start].iter().map(|v| v.to_pyobject(py)).collect();
+                        let star_list = PyList::new(py, &star_items).to_vm(py)?;
+                        let star_val = Value::from_pyobject(py, &star_list.into_any()).to_vm(py)?;
                         bindings.push((slot, star_val));
                     }
                 }
@@ -6559,9 +6487,7 @@ fn vm_match_assign_pattern(
             // Assignment patterns compiled by VM should not produce these nodes.
             // Fallback to generic runtime mismatch.
             let _ = registry;
-            Err(VMError::RuntimeError(
-                "Cannot unpack assignment pattern".to_string(),
-            ))
+            Err(VMError::RuntimeError("Cannot unpack assignment pattern".to_string()))
         }
     }
 }
@@ -6917,21 +6843,21 @@ mod tests {
                 Instruction::new(OpCode::LoadConst, 0),  // 2
                 Instruction::new(OpCode::StoreLocal, 0), // 3
                 // loop start (ip=4)
-                Instruction::new(OpCode::LoadLocal, 0), // 4: i
-                Instruction::new(OpCode::LoadConst, 1), // 5: limit
-                Instruction::simple(OpCode::Lt),        // 6: i < 5
+                Instruction::new(OpCode::LoadLocal, 0),    // 4: i
+                Instruction::new(OpCode::LoadConst, 1),    // 5: limit
+                Instruction::simple(OpCode::Lt),           // 6: i < 5
                 Instruction::new(OpCode::JumpIfFalse, 17), // 7: Exit to ip=17 if false
                 // sum = sum + i
-                Instruction::new(OpCode::LoadLocal, 1), // 8: sum
-                Instruction::new(OpCode::LoadLocal, 0), // 9: i
-                Instruction::simple(OpCode::Add),       // 10: sum + i
+                Instruction::new(OpCode::LoadLocal, 1),  // 8: sum
+                Instruction::new(OpCode::LoadLocal, 0),  // 9: i
+                Instruction::simple(OpCode::Add),        // 10: sum + i
                 Instruction::new(OpCode::StoreLocal, 1), // 11: Store sum
                 // i = i + 1
-                Instruction::new(OpCode::LoadLocal, 0), // 12: i
-                Instruction::new(OpCode::LoadConst, 2), // 13: 1
-                Instruction::simple(OpCode::Add),       // 14: i + 1
+                Instruction::new(OpCode::LoadLocal, 0),  // 12: i
+                Instruction::new(OpCode::LoadConst, 2),  // 13: 1
+                Instruction::simple(OpCode::Add),        // 14: i + 1
                 Instruction::new(OpCode::StoreLocal, 0), // 15: Store i
-                Instruction::new(OpCode::Jump, 4),      // 16: Loop back to ip=4
+                Instruction::new(OpCode::Jump, 4),       // 16: Loop back to ip=4
                 // exit (ip=17)
                 Instruction::new(OpCode::LoadLocal, 1), // 17: Return sum
                 Instruction::simple(OpCode::Halt),      // 18: Halt
@@ -7008,16 +6934,23 @@ mod tests {
 
     /// Helper: register a struct type and map a Python object's pointer to it.
     /// Returns (py_obj_value, type_id) where py_obj_value can be used as the callable.
+    /// Install struct registry thread-local for a test VM.
+    fn install_test_tables(vm: &mut VM) {
+        crate::vm::value::set_struct_registry(&vm.struct_registry as *const _);
+        crate::vm::value::set_func_table(&vm.func_table as *const _);
+    }
+
     fn register_test_struct(
         py: Python<'_>,
         vm: &mut VM,
         name: &str,
         fields: Vec<StructField>,
     ) -> (Value, StructTypeId) {
+        install_test_tables(vm);
         let type_id = vm.struct_registry.register_type(
             name.into(),
             fields,
-            HashMap::new(),
+            IndexMap::new(),
             vec![],                 // implements
             vec![name.to_string()], // mro
         );
@@ -7191,12 +7124,7 @@ mod tests {
             );
 
             let mut code = CodeObject::new("test_too_many");
-            code.constants = vec![
-                struct_val,
-                Value::from_int(1),
-                Value::from_int(2),
-                Value::from_int(3),
-            ];
+            code.constants = vec![struct_val, Value::from_int(1), Value::from_int(2), Value::from_int(3)];
             code.instructions = vec![
                 Instruction::new(OpCode::LoadConst, 0),
                 Instruction::new(OpCode::LoadConst, 1),
@@ -7240,16 +7168,11 @@ mod tests {
 
             // CallKw encoding: (nargs << 8) | nkw
             // Point(10, y=20) -> nargs=1, nkw=1
-            let kw_names = PyTuple::new(py, &["y"]).unwrap();
+            let kw_names = PyTuple::new(py, ["y"]).unwrap();
             let kw_names_val = Value::from_pyobject(py, kw_names.as_any()).unwrap();
 
             let mut code = CodeObject::new("test_struct_callkw");
-            code.constants = vec![
-                struct_val,
-                Value::from_int(10),
-                Value::from_int(20),
-                kw_names_val,
-            ];
+            code.constants = vec![struct_val, Value::from_int(10), Value::from_int(20), kw_names_val];
             code.instructions = vec![
                 Instruction::new(OpCode::LoadConst, 0),         // struct type
                 Instruction::new(OpCode::LoadConst, 1),         // x=10 (positional)
@@ -7619,11 +7542,7 @@ mod tests {
             ];
 
             let result = vm.execute(py, Arc::new(code), &[]).unwrap();
-            assert!(
-                result.is_nil(),
-                "expected NIL for type mismatch, got {:?}",
-                result
-            );
+            assert!(result.is_nil(), "expected NIL for type mismatch, got {:?}", result);
         });
     }
 
@@ -7648,11 +7567,7 @@ mod tests {
             ];
 
             let result = vm.execute(py, Arc::new(code), &[]).unwrap();
-            assert!(
-                result.is_nil(),
-                "expected NIL for unknown field, got {:?}",
-                result
-            );
+            assert!(result.is_nil(), "expected NIL for unknown field, got {:?}", result);
         });
     }
 
@@ -7662,7 +7577,7 @@ mod tests {
         Python::attach(|py| {
             reset_vm_fallback_stats();
 
-            let n = BigInt::from(i64::MAX) * BigInt::from(1000_u32);
+            let n = Integer::from(i64::MAX) * Integer::from(1000_u32);
             let mut code = CodeObject::new("test_bigint_eq_no_fallback");
             code.constants = vec![Value::from_bigint(n.clone()), Value::from_bigint(n)];
             code.instructions = vec![
@@ -7687,7 +7602,7 @@ mod tests {
         Python::attach(|py| {
             reset_vm_fallback_stats();
 
-            let n = BigInt::from(i64::MAX) * BigInt::from(2000_u32);
+            let n = Integer::from(i64::MAX) * Integer::from(2000_u32);
             let mut code = CodeObject::new("test_match_bigint_literal");
             code.constants = vec![Value::from_bigint(n.clone())];
             code.patterns = vec![VMPattern::Literal(Value::from_bigint(n))];
@@ -7726,7 +7641,7 @@ mod tests {
                         default: Value::NIL,
                     },
                 ],
-                HashMap::new(),
+                IndexMap::new(),
                 vec![],               // implements
                 vec!["Point".into()], // mro
             );
@@ -7737,8 +7652,9 @@ mod tests {
                 .create_instance(type_id, vec![Value::from_int(10), Value::from_int(20)]);
             let struct_val = Value::from_struct_instance(idx);
 
-            // Install registry for to_pyobject
+            // Install registries for to_pyobject
             crate::vm::value::set_struct_registry(&vm.struct_registry as *const _);
+            crate::vm::value::set_func_table(&vm.func_table as *const _);
 
             let py_obj = struct_val.to_pyobject(py);
             let py_obj_bound = py_obj.bind(py);
@@ -7757,5 +7673,54 @@ mod tests {
 
             crate::vm::value::clear_struct_registry();
         });
+    }
+
+    // --- SmallInt overflow tests (regression: wrapping_add masked i64 overflow) ---
+
+    use catnip_core::nanbox::{SMALLINT_MAX as SMAX, SMALLINT_MIN as SMIN};
+
+    #[test]
+    fn test_add_smallint_overflow_to_bigint() {
+        let result = binary_add(Value::from_int(SMAX), Value::from_int(1)).unwrap();
+        assert!(result.is_bigint(), "SMAX + 1 must promote to BigInt");
+        let expected = Integer::from(SMAX) + Integer::from(1);
+        assert_eq!(unsafe { result.as_bigint_ref().unwrap() }, &expected);
+        result.decref();
+    }
+
+    #[test]
+    fn test_add_i64_overflow_to_bigint() {
+        // Sum overflows i64 -- checked_add returns None
+        let result = binary_add(Value::from_int(SMAX), Value::from_int(SMAX)).unwrap();
+        assert!(result.is_bigint(), "SMAX + SMAX must promote to BigInt");
+        let expected = Integer::from(SMAX) + Integer::from(SMAX);
+        assert_eq!(unsafe { result.as_bigint_ref().unwrap() }, &expected);
+        result.decref();
+    }
+
+    #[test]
+    fn test_sub_smallint_overflow_to_bigint() {
+        let result = binary_sub(Value::from_int(SMIN), Value::from_int(1)).unwrap();
+        assert!(result.is_bigint(), "SMIN - 1 must promote to BigInt");
+        result.decref();
+    }
+
+    #[test]
+    fn test_mul_smallint_overflow_to_bigint() {
+        let result = binary_mul(Value::from_int(SMAX), Value::from_int(2)).unwrap();
+        assert!(result.is_bigint(), "SMAX * 2 must promote to BigInt");
+        let expected = Integer::from(SMAX) * Integer::from(2);
+        assert_eq!(unsafe { result.as_bigint_ref().unwrap() }, &expected);
+        result.decref();
+    }
+
+    #[test]
+    fn test_mul_i64_overflow_to_bigint() {
+        // checked_mul returns None
+        let result = binary_mul(Value::from_int(SMAX), Value::from_int(SMAX)).unwrap();
+        assert!(result.is_bigint(), "SMAX^2 must promote to BigInt");
+        let expected = Integer::from((1_i64 << 46) - 1) * Integer::from((1_i64 << 46) - 1);
+        assert_eq!(unsafe { result.as_bigint_ref().unwrap() }, &expected);
+        result.decref();
     }
 }

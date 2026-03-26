@@ -1,122 +1,201 @@
-# Analyse des anomalies de température globale (NASA GISTEMP)
-# Dataset: 1880-2023, anomalies par rapport à la moyenne 1951-1980
-# Source: NASA GISS (domaine public)
-#
-# Exécuter: catnip numpy_climate.cat  (depuis ce dossier)
-# Ou:  catnip -m numpy numpy_climate.cat  (sans le import ci-dessous)
+#!/usr/bin/env catnip
+# Analyse comparative des températures globales (GISTEMP vs GCAG)
+# Dataset: anomalies annuelles moyennes, deux sources indépendantes
+# Sources: NASA GISTEMP (1880-2023) + NOAA GCAG (1850-2024)
+#   https://github.com/datasets/global-temp
 
-numpy = import("numpy")
+numpy = import('numpy')
+import('pathlib', 'Path')
 
-# Chargement des données
+# Chargement des données (3 colonnes: Source, Year, Mean)
 
-# Lire le CSV avec colonnes séparées
-csv_path = "docs/codex/data-analytics/nasa_temperature.csv"
-years = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=0)
-anomalies = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=1)
+data_dir  = Path(META.file).parent / "data"
+csv_path  = str(data_dir / "global-temp_annual.csv")
+sources   = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=0, dtype="U10")
+years_all = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=1)
+means_all = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=2)
 
-print("⇒ Dataset NASA GISTEMP")
-print("  Période:", int(years[0]), "-", int(years[-1]))
-print("  Nombre d'années:", len(years))
+# Séparation par source
 
-# Statistiques descriptives
+gi_mask = numpy.char.equal(sources, "GISTEMP")
+gc_mask = numpy.char.equal(sources, "gcag")
 
-print("\n⇒ Statistiques globales")
-print("  Moyenne:    ", round(numpy.mean(anomalies), 3), "°C")
-print("  Écart-type: ", round(numpy.std(anomalies), 3), "°C")
-print("  Min:        ", round(numpy.min(anomalies), 3), "°C")
-print("  Max:        ", round(numpy.max(anomalies), 3), "°C")
+gi_years = years_all[gi_mask]
+gi_means = means_all[gi_mask]
+gc_years = years_all[gc_mask]
+gc_means = means_all[gc_mask]
 
-# Analyse par période
+print("⇒ Dataset Annual Temperature Anomalies")
+print(f"  GISTEMP: {int(gi_years[0])}-{int(gi_years[-1])} ({len(gi_years)} années)")
+print(f"  GCAG:    {int(gc_years[0])}-{int(gc_years[-1])} ({len(gc_years)} années)")
 
-# Fonction pour stats sur une période
-period_stats = (start, end) => {
-    mask_start = numpy.greater_equal(years, start)
-    mask_end = numpy.less_equal(years, end)
-    mask = numpy.logical_and(mask_start, mask_end)
-    subset = anomalies[mask]
-    dict(start=start, end=end, mean=round(numpy.mean(subset), 3), std=round(numpy.std(subset), 3))
+# Statistiques par source
+
+struct SourceStats {
+    name; mean; std; min_val; max_val
+
+    display(self) => {
+        print(f"  {self.name}")
+        print(f"    Moyenne:    {self.mean} °C")
+        print(f"    Écart-type: {self.std} °C")
+        print(f"    Plage:      [{self.min_val}, {self.max_val}] °C")
+    }
 }
 
-print("\n⇒ Évolution par période")
+make_stats = (name, data) => {
+    SourceStats(
+        name,
+        round(numpy.mean(data), 3),
+        round(numpy.std(data), 3),
+        round(numpy.min(data), 3),
+        round(numpy.max(data), 3),
+    )
+}
 
-# Période 1: 1880-1920
-s1 = period_stats(1880, 1920)
-print("  ", s1["start"], "-", s1["end"], ": moyenne", s1["mean"], "°C (±", s1["std"], ")")
+print()
+print("⇒ Statistiques par source")
+make_stats("GISTEMP", gi_means).display()
+make_stats("GCAG", gc_means).display()
 
-# Période 2: 1921-1960
-s2 = period_stats(1921, 1960)
-print("  ", s2["start"], "-", s2["end"], ": moyenne", s2["mean"], "°C (±", s2["std"], ")")
+# Divergence entre sources (période commune 1880-2023)
 
-# Période 3: 1961-2000
-s3 = period_stats(1961, 2000)
-print("  ", s3["start"], "-", s3["end"], ": moyenne", s3["mean"], "°C (±", s3["std"], ")")
+gi_common = gi_means
+gc_common_mask = numpy.logical_and(
+    numpy.greater_equal(gc_years, gi_years[0]),
+    numpy.less_equal(gc_years, gi_years[-1]),
+)
+gc_common = gc_means[gc_common_mask]
+common_years = gi_years
 
-# Période 4: 2001-2023
-s4 = period_stats(2001, 2023)
-print("  ", s4["start"], "-", s4["end"], ": moyenne", s4["mean"], "°C (±", s4["std"], ")")
+divergence = numpy.subtract(gi_common, gc_common)
 
-# Détection des années extrêmes
+print(f"\n⇒ Divergence GISTEMP - GCAG ({int(common_years[0])}-{int(common_years[-1])})")
+print(f"  Divergence moyenne:  {round(numpy.mean(divergence), 4)} °C")
+abs_div = numpy.abs(divergence)
+print(f"  Divergence max:      {round(numpy.max(abs_div), 4)} °C")
+print(f"  Année de max écart:  {int(common_years[numpy.argmax(abs_div)])}")
 
-print("\n⇒ Années les plus chaudes")
-# Indices des 5 plus grandes anomalies
-sorted_idx = numpy.argsort(anomalies)
+# Analyse par période via struct
+
+struct Period {
+    start; end; gi_mean; gc_mean; diff
+
+    display(self) => {
+        f"  {self.start}-{self.end} : GI={self.gi_mean} / GC={self.gc_mean} (Δ {self.diff})"
+    }
+}
+
+period_stats = (start, end) => {
+    gi_m   = numpy.logical_and(numpy.greater_equal(gi_years, start), numpy.less_equal(gi_years, end))
+    gc_m   = numpy.logical_and(numpy.greater_equal(gc_years, start), numpy.less_equal(gc_years, end))
+    gi_val = round(numpy.mean(gi_means[gi_m]), 3)
+    gc_val = round(numpy.mean(gc_means[gc_m]), 3)
+    Period(start, end, gi_val, gc_val, round(gi_val - gc_val, 3))
+}
+
+periods = list(
+    period_stats(1880, 1920),
+    period_stats(1921, 1960),
+    period_stats(1961, 2000),
+    period_stats(2001, 2023),
+)
+
+print()
+print("⇒ Évolution par période (GISTEMP vs GCAG)")
+periods.[(p) => { print(p.display()) }]
+
+# Années extrêmes (GISTEMP comme référence)
+
+sorted_idx = numpy.argsort(gi_means)
+
+print()
+print("⇒ Top 5 années les plus chaudes (GISTEMP)")
 top5 = numpy.flip(sorted_idx[-5:])
 for i in top5 {
-    print("  ", int(years[i]), ":", round(anomalies[i], 3), "°C")
+    print(f"  {int(gi_years[i])} : {round(gi_means[i], 3)} °C")
 }
 
-print("\n⇒ Années les plus froides")
+print()
+print("⇒ Top 5 années les plus froides (GISTEMP)")
 bottom5 = sorted_idx[:5]
 for i in bottom5 {
-    print("  ", int(years[i]), ":", round(anomalies[i], 3), "°C")
+    print(f"  {int(gi_years[i])} : {round(gi_means[i], 3)} °C")
 }
 
-# Tendance linéaire
+# Classification des anomalies par match (moyenne des deux sources)
 
-# Régression linéaire simple avec numpy
-# Note: utiliser numpy.subtract() pour éviter modification in-place
-x_mean = numpy.mean(years)
-y_mean = numpy.mean(anomalies)
-years_centered = numpy.subtract(years, x_mean)
-anom_centered = numpy.subtract(anomalies, y_mean)
-numerator = numpy.sum(numpy.multiply(years_centered, anom_centered))
-denominator = numpy.sum(numpy.power(years_centered, 2))
-slope = numerator / denominator
-intercept = y_mean - slope * x_mean
+classify = (value) => {
+    match True {
+        _ if value > 0.5  => { "forte positive" }
+        _ if value > 0    => { "positive" }
+        _ if value < -0.3 => { "forte négative" }
+        _ if value < 0    => { "négative" }
+        _                 => { "neutre" }
+    }
+}
 
-print("\n⇒ Tendance linéaire")
-print("  Pente:", round(slope * 100, 3), "°C par siècle")
-print("  Projection 2050:", round(slope * 2050 + intercept, 2), "°C")
-print("  Projection 2100:", round(slope * 2100 + intercept, 2), "°C")
+print()
+print("⇒ Classification récente (moyenne des sources)")
+nc = len(common_years)
+for i in range(nc - 5, nc) {
+    avg = round((gi_common[i] + gc_common[i]) / 2, 3)
+    label = classify(avg)
+    print(f"  {int(common_years[i])} : {avg} °C → {label}")
+}
 
-# Moyenne mobile (fenêtre de 10 ans)
+# Tendances linéaires comparées
+
+linear_slope = (xs, ys) => {
+    x_mean = numpy.mean(xs)
+    y_mean = numpy.mean(ys)
+    xc     = numpy.subtract(xs, x_mean)
+    yc     = numpy.subtract(ys, y_mean)
+    numpy.sum(numpy.multiply(xc, yc)) / numpy.sum(numpy.power(xc, 2))
+}
+
+gi_slope = linear_slope(gi_years, gi_means)
+gc_slope = linear_slope(gc_years, gc_means)
+
+print()
+print("⇒ Tendances linéaires")
+print(f"  GISTEMP: {round(gi_slope * 100, 3)} °C/siècle")
+print(f"  GCAG:    {round(gc_slope * 100, 3)} °C/siècle")
+
+gi_intercept = numpy.mean(gi_means) - gi_slope * numpy.mean(gi_years)
+print(f"  Projection GISTEMP 2050: {round(gi_slope * 2050 + gi_intercept, 2)} °C")
+print(f"  Projection GISTEMP 2100: {round(gi_slope * 2100 + gi_intercept, 2)} °C")
+
+# Moyenne mobile comparée (fenêtre de 10 ans)
 
 window = 10
 kernel = numpy.ones(window) / window
-moving_avg = numpy.convolve(anomalies, kernel, mode="valid")
+gi_ma  = numpy.convolve(gi_means, kernel, mode="valid")
+gc_ma  = numpy.convolve(gc_means, kernel, mode="valid")
 
-print("\n⇒ Moyenne mobile (" + str(window) + " ans)")
-print("  1889:", round(moving_avg[0], 3), "°C")
-print("  1950:", round(moving_avg[61], 3), "°C")
-print("  2014:", round(moving_avg[-1], 3), "°C")
+print(f"\n⇒ Moyenne mobile ({window} ans)")
+print(f"  GISTEMP dernière valeur: {round(gi_ma[-1], 3)} °C")
+print(f"  GCAG dernière valeur:    {round(gc_ma[-1], 3)} °C")
 
 # Broadcasting: conversion en Fahrenheit
 
-anomalies_f = anomalies * 1.8  # Conversion directe via broadcasting
+gi_f = gi_common * 1.8
+gc_f = gc_common * 1.8
 
-print("\n⇒ Anomalies récentes en Fahrenheit")
-last = len(years) - 1
-print("  ", int(years[last-3]), ":", round(anomalies_f[last-3], 3), "°F")
-print("  ", int(years[last-2]), ":", round(anomalies_f[last-2], 3), "°F")
-print("  ", int(years[last-1]), ":", round(anomalies_f[last-1], 3), "°F")
-print("  ", int(years[last]), ":", round(anomalies_f[last], 3), "°F")
+print()
+print("⇒ Anomalies récentes en Fahrenheit")
+for i in range(nc - 4, nc) {
+    print(f"  {int(common_years[i])} : GI={round(gi_f[i], 3)} / GC={round(gc_f[i], 3)} °F")
+}
 
-# Comptage
+# Comptage: années au-dessus du seuil
 
 threshold = 0.5
-mask_above = numpy.greater(anomalies, threshold)
-above_threshold = numpy.sum(mask_above)
-first_above = int(years[numpy.argmax(mask_above)])
+gi_above = int(numpy.sum(numpy.greater(gi_means, threshold)))
+gc_above = int(numpy.sum(numpy.greater(gc_means, threshold)))
+gi_first = int(gi_years[numpy.argmax(numpy.greater(gi_means, threshold))])
+gc_first = int(gc_years[numpy.argmax(numpy.greater(gc_means, threshold))])
 
-print("\n⇒ Années avec anomalie >", threshold, "°C:", int(above_threshold))
-print("  Première année:", first_above)
+print()
+print(f"⇒ Années avec anomalie > {threshold} °C")
+print(f"  GISTEMP: {gi_above} années (première: {gi_first})")
+print(f"  GCAG:    {gc_above} années (première: {gc_first})")

@@ -40,9 +40,10 @@ pub fn global_dse(cfg: &ControlFlowGraph, ssa: &SSAContext) -> DSEResult {
                 continue;
             }
             for incoming in &param.incoming {
-                if let Some(val) = incoming {
-                    *use_counts.entry(*val).or_insert(0) += 1;
-                }
+                let Some(val) = incoming else {
+                    continue;
+                };
+                *use_counts.entry(*val).or_insert(0) += 1;
             }
         }
     }

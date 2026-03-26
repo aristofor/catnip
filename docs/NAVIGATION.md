@@ -8,6 +8,7 @@ ______________________________________________________________________
 
 - [INTRODUCTION](INTRODUCTION.md)
 - [CHANGELOG](CHANGELOG.md)
+- [META](META.md)
 
 ______________________________________________________________________
 
@@ -21,6 +22,17 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+## Gestes
+
+**[how-to/](how-to/)**
+
+- [PATTERN_MATCHING](how-to/PATTERN_MATCHING.md)
+- [ND_CONCURRENCY](how-to/ND_CONCURRENCY.md)
+- [CLICK_INTEGRATION](how-to/CLICK_INTEGRATION.md)
+- [INTERACTIVE_MENUS](how-to/INTERACTIVE_MENUS.md)
+
+______________________________________________________________________
+
 ## Interface
 
 **[user/](user/)**
@@ -30,6 +42,9 @@ ______________________________________________________________________
 - [EXTENDING_CONTEXT](user/EXTENDING_CONTEXT.md)
 - [CLI](user/CLI.md)
 - [REPL](user/REPL.md)
+- [RUN](user/RUN.md)
+- [CONFIG](user/CONFIG.md)
+- [SHEBANG_GUIDE](user/SHEBANG_GUIDE.md)
 - [MODULE_LOADING](user/MODULE_LOADING.md)
 
 ______________________________________________________________________
@@ -46,6 +61,12 @@ ______________________________________________________________________
 - [STRUCTURES](lang/STRUCTURES.md)
 - [PATTERN_MATCHING](lang/PATTERN_MATCHING.md)
 - [BROADCAST](lang/BROADCAST.md)
+- [BROADCAST_SPEC](lang/BROADCAST_SPEC.md)
+- [BROADCAST_RATIONALE](lang/BROADCAST_RATIONALE.md)
+- [BROADCAST_GUIDE](lang/BROADCAST_GUIDE.md)
+- [BROADCAST_RUNTIME](lang/BROADCAST_RUNTIME.md)
+- [COMPREHENSIONS](lang/COMPREHENSIONS.md)
+- [FOLD_GUIDE](lang/FOLD_GUIDE.md)
 - [SCOPES_AND_VARIABLES](lang/SCOPES_AND_VARIABLES.md)
 - [PRAGMAS](lang/PRAGMAS.md)
 - [TURING_COMPLETENESS](lang/TURING_COMPLETENESS.md)
@@ -65,10 +86,12 @@ ______________________________________________________________________
 - [broadcast/](examples/broadcast/)
 - [cfg/](examples/cfg/)
 - [module-loading/](examples/module-loading/)
+- [run/](examples/run/)
 - [codex/](codex/)
 - [advanced/](examples/advanced/)
 - [embedding/](examples/embedding/)
 - [tools/](examples/tools/)
+- [performance/](examples/performance/)
 
 ______________________________________________________________________
 
@@ -80,7 +103,11 @@ ______________________________________________________________________
 - [data-analytics/](codex/data-analytics/)
 - [web/](codex/web/)
 - [images-media/](codex/images-media/)
+- [geospatial/](codex/geospatial/)
 - [geometry/](codex/geometry/)
+- [symbolic-graphs/](codex/symbolic-graphs/)
+- [visualization/](codex/visualization/)
+- [utils/](codex/utils/)
 
 ______________________________________________________________________
 
@@ -88,9 +115,16 @@ ______________________________________________________________________
 
 **[dev/](dev/)**
 
+- [CONTRIBUTING](dev/CONTRIBUTING.md)
 - [ARCHITECTURE](dev/ARCHITECTURE.md)
 - [VM](dev/VM.md)
+- [JIT](dev/JIT.md)
 - [OPTIMIZATIONS](dev/OPTIMIZATIONS.md)
+- [ND_VM_ARCHITECTURE](dev/ND_VM_ARCHITECTURE.md)
+- [CACHE](dev/CACHE.md)
+- [CONSTANTS](dev/CONSTANTS.md)
+- [BENCHMARKING](dev/BENCHMARKING.md)
+- [TEST_STRATEGY](dev/TEST_STRATEGY.md)
 - [EXTENDING](dev/EXTENDING.md)
 
 ______________________________________________________________________
@@ -99,6 +133,7 @@ ______________________________________________________________________
 
 **[tools/](tools/)**
 
+- [mcp](tools/mcp.md)
 - [lint](tools/lint.md)
 - [debug](tools/debug.md)
 - [format](tools/format.md)

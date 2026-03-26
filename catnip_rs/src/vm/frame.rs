@@ -5,12 +5,15 @@
 
 use super::opcode::{Instruction, VMOpCode};
 use super::pattern::VMPattern;
+use super::structs::{StructRegistry, cascade_decref_fields};
 use super::value::Value;
-use crate::constants::VM_FRAME_POOL_SIZE;
+use crate::constants::*;
+use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub const NO_VARARG_IDX: i32 = -1;
@@ -32,7 +35,7 @@ pub struct CodeObject {
     /// Number of parameters (not including *args)
     pub nargs: usize,
     /// Default parameter values
-    pub defaults: Vec<Py<PyAny>>,
+    pub defaults: Vec<Value>,
     /// Function name
     pub name: String,
     /// Free variables (closure captures)
@@ -47,6 +50,11 @@ pub struct CodeObject {
     pub line_table: Vec<u32>,
     /// Pre-compiled VM-native patterns for match expressions
     pub patterns: Vec<VMPattern>,
+    /// Cached bytecode hash for JIT trace cache (computed once on demand)
+    pub(crate) bytecode_hash: std::sync::OnceLock<u64>,
+    /// Bincode-encoded IR body for ND worker IPC transport.
+    /// Populated during compile_lambda/compile_fn_def; None for top-level code.
+    pub encoded_ir: Option<Arc<Vec<u8>>>,
 }
 
 impl CodeObject {
@@ -68,7 +76,28 @@ impl CodeObject {
             complexity: 0,
             line_table: Vec::new(),
             patterns: Vec::new(),
+            bytecode_hash: std::sync::OnceLock::new(),
+            encoded_ir: None,
         }
+    }
+
+    /// Compute or retrieve cached bytecode hash (FNV-1a) for JIT trace cache.
+    pub fn bytecode_hash(&self) -> u64 {
+        *self.bytecode_hash.get_or_init(|| {
+            let mut bytes = Vec::with_capacity(self.instructions.len() * 5 + self.constants.len() * 8);
+            for i in &self.instructions {
+                bytes.push(i.op as u8);
+                bytes.extend_from_slice(&i.arg.to_le_bytes());
+            }
+            for c in &self.constants {
+                bytes.extend_from_slice(&c.to_raw().to_le_bytes());
+            }
+            for n in &self.names {
+                bytes.extend_from_slice(n.as_bytes());
+                bytes.push(0);
+            }
+            crate::jit::hash_bytecode(&bytes)
+        })
     }
 }
 
@@ -84,7 +113,7 @@ impl std::fmt::Debug for CodeObject {
 
 impl CodeObject {
     /// Clone with Python GIL for PyObject fields.
-    pub fn clone_with_py(&self, py: Python<'_>) -> Self {
+    pub fn clone_with_py(&self, _py: Python<'_>) -> Self {
         Self {
             instructions: self.instructions.clone(),
             constants: self.constants.clone(),
@@ -93,7 +122,7 @@ impl CodeObject {
             varnames: self.varnames.clone(),
             slotmap: self.slotmap.clone(),
             nargs: self.nargs,
-            defaults: self.defaults.iter().map(|d| d.clone_ref(py)).collect(),
+            defaults: self.defaults.clone(),
             name: self.name.clone(),
             freevars: self.freevars.clone(),
             vararg_idx: self.vararg_idx,
@@ -101,6 +130,8 @@ impl CodeObject {
             complexity: self.complexity,
             line_table: self.line_table.clone(),
             patterns: self.patterns.clone(),
+            bytecode_hash: std::sync::OnceLock::new(),
+            encoded_ir: self.encoded_ir.clone(),
         }
     }
 
@@ -141,10 +172,27 @@ pub struct PyCodeObject {
     pub inner: Arc<CodeObject>,
 }
 
+struct PyCodeObjectInit {
+    instructions: Vec<Instruction>,
+    constants: Vec<Value>,
+    names: Vec<String>,
+    nlocals: usize,
+    varnames: Vec<String>,
+    slotmap: HashMap<String, usize>,
+    nargs: usize,
+    defaults: Vec<Value>,
+    name: String,
+    freevars: Vec<String>,
+    vararg_idx: i32,
+    complexity: usize,
+    patterns: Vec<VMPattern>,
+}
+
 #[pymethods]
 impl PyCodeObject {
     #[new]
-    #[pyo3(signature = (bytecode, constants, names, nlocals, varnames, slotmap, nargs, defaults, name, freevars, vararg_idx))]
+    #[pyo3(signature = (bytecode, constants, names, nlocals, varnames, slotmap, nargs, defaults, name, freevars, vararg_idx, patterns=None))]
+    #[allow(clippy::too_many_arguments)]
     fn py_new(
         py: Python<'_>,
         bytecode: &Bound<'_, PyAny>,
@@ -158,6 +206,7 @@ impl PyCodeObject {
         name: String,
         freevars: &Bound<'_, PyAny>,
         vararg_idx: i32,
+        patterns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         // Parse bytecode (tuple of (opcode, arg) pairs)
         let bytecode_seq = bytecode.cast::<PyTuple>()?;
@@ -166,9 +215,8 @@ impl PyCodeObject {
             let pair = item.cast::<PyTuple>()?;
             let op = pair.get_item(0)?.extract::<u8>()?;
             let arg = pair.get_item(1)?.extract::<u32>()?;
-            let opcode = VMOpCode::from_u8(op).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!("Invalid opcode: {}", op))
-            })?;
+            let opcode = VMOpCode::from_u8(op)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid opcode: {}", op)))?;
             instructions.push(Instruction { op: opcode, arg });
         }
 
@@ -203,8 +251,10 @@ impl PyCodeObject {
 
         // Parse defaults
         let defaults_seq = defaults.cast::<PyTuple>()?;
-        let defaults_vec: Vec<Py<PyAny>> =
-            defaults_seq.iter().map(|d| d.clone().unbind()).collect();
+        let mut defaults_vec = Vec::new();
+        for item in defaults_seq.iter() {
+            defaults_vec.push(Value::from_pyobject(py, &item)?);
+        }
 
         // Parse freevars
         let freevars_seq = freevars.cast::<PyTuple>()?;
@@ -216,25 +266,24 @@ impl PyCodeObject {
         // Calculate complexity as instruction count
         let complexity = instructions.len();
 
-        Ok(Self {
-            inner: Arc::new(CodeObject {
-                instructions,
-                constants: constants_vec,
-                names: names_vec,
-                nlocals,
-                varnames: varnames_vec,
-                slotmap: slotmap_map,
-                nargs,
-                defaults: defaults_vec,
-                name,
-                freevars: freevars_vec,
-                vararg_idx,
-                is_pure: false,
-                complexity,
-                line_table: Vec::new(),
-                patterns: Vec::new(),
-            }),
-        })
+        Ok(Self::from_init(PyCodeObjectInit {
+            instructions,
+            constants: constants_vec,
+            names: names_vec,
+            nlocals,
+            varnames: varnames_vec,
+            slotmap: slotmap_map,
+            nargs,
+            defaults: defaults_vec,
+            name,
+            freevars: freevars_vec,
+            vararg_idx,
+            complexity,
+            patterns: match patterns {
+                Some(p) => vmpattern_vec_from_py(py, p)?,
+                None => Vec::new(),
+            },
+        }))
     }
 
     /// Bytecode as tuple of (opcode, arg) pairs.
@@ -255,12 +304,7 @@ impl PyCodeObject {
     /// Constant pool as tuple.
     #[getter]
     fn constants(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let items: Vec<Py<PyAny>> = self
-            .inner
-            .constants
-            .iter()
-            .map(|v| v.to_pyobject(py))
-            .collect();
+        let items: Vec<Py<PyAny>> = self.inner.constants.iter().map(|v| v.to_pyobject(py)).collect();
         Ok(PyTuple::new(py, items)?.into_any().unbind())
     }
 
@@ -301,12 +345,7 @@ impl PyCodeObject {
     /// Default parameter values tuple.
     #[getter]
     fn defaults(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let items: Vec<Py<PyAny>> = self
-            .inner
-            .defaults
-            .iter()
-            .map(|d| d.clone_ref(py))
-            .collect();
+        let items: Vec<Py<PyAny>> = self.inner.defaults.iter().map(|v| v.to_pyobject(py)).collect();
         Ok(PyTuple::new(py, items)?.into_any().unbind())
     }
 
@@ -366,7 +405,6 @@ impl PyCodeObject {
     }
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Return (class, (bytecode, constants, names, nlocals, varnames, slotmap, nargs, defaults, name, freevars, vararg_idx))
         let cls = py.get_type::<Self>();
         let args = PyTuple::new(
             py,
@@ -382,11 +420,10 @@ impl PyCodeObject {
                 self.name().into_pyobject(py)?.into_any().unbind(),
                 self.freevars(py)?,
                 self.vararg_idx().into_pyobject(py)?.into_any().unbind(),
+                vmpattern_vec_to_py(py, &self.inner.patterns)?,
             ],
         )?;
-        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?
-            .into_any()
-            .unbind())
+        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?.into_any().unbind())
     }
 
     /// Print bytecode disassembly to stdout.
@@ -448,9 +485,29 @@ impl PyCodeObject {
 impl PyCodeObject {
     /// Create a new PyCodeObject from a CodeObject.
     pub fn new(inner: CodeObject) -> Self {
-        Self {
-            inner: Arc::new(inner),
-        }
+        Self { inner: Arc::new(inner) }
+    }
+
+    fn from_init(init: PyCodeObjectInit) -> Self {
+        Self::new(CodeObject {
+            instructions: init.instructions,
+            constants: init.constants,
+            names: init.names,
+            nlocals: init.nlocals,
+            varnames: init.varnames,
+            slotmap: init.slotmap,
+            nargs: init.nargs,
+            defaults: init.defaults,
+            name: init.name,
+            freevars: init.freevars,
+            vararg_idx: init.vararg_idx,
+            is_pure: false,
+            complexity: init.complexity,
+            line_table: Vec::new(),
+            patterns: init.patterns,
+            bytecode_hash: std::sync::OnceLock::new(),
+            encoded_ir: None,
+        })
     }
 
     /// Get function name.
@@ -463,38 +520,63 @@ impl PyCodeObject {
 // NativeClosureScope - pure-Rust closure chain for captured variables
 // ---------------------------------------------------------------------------
 
+/// Shared Rust globals for standalone mode (no Python Context).
+pub type Globals = Rc<RefCell<IndexMap<String, Value>>>;
+
 /// Closure parent in the scope chain.
-pub(crate) enum ClosureParent {
+pub enum ClosureParent {
     /// No parent (top-level function without context)
     None,
     /// Parent is another native closure scope (nested closures)
     Native(NativeClosureScope),
     /// Terminal: module-level globals (only crossing left)
     PyGlobals(Py<PyDict>),
+    /// Terminal: Rust-owned globals (standalone, no Python Context)
+    Globals(Globals),
 }
 
 struct ClosureScopeInner {
-    captured: RefCell<HashMap<String, Value>>,
+    captured: RefCell<IndexMap<String, Value>>,
     parent: ClosureParent,
 }
 
 /// Pure-Rust closure scope eliminating Python boundary crossings for
-/// captured variable access. Uses `Arc` so closures from the same scope
-/// share captures (e.g. counter pattern), and `RefCell` for interior
-/// mutability (safe: VM is single-threaded).
+/// captured variable access. Uses `Rc` because sharing is single-threaded
+/// only, and `RefCell` for interior mutability.
 #[derive(Clone)]
 pub struct NativeClosureScope {
-    inner: Arc<ClosureScopeInner>,
+    inner: Rc<ClosureScopeInner>,
 }
 
 impl NativeClosureScope {
-    pub(crate) fn new(captured: HashMap<String, Value>, parent: ClosureParent) -> Self {
+    pub(crate) fn new(captured: IndexMap<String, Value>, parent: ClosureParent) -> Self {
         Self {
-            inner: Arc::new(ClosureScopeInner {
+            inner: Rc::new(ClosureScopeInner {
                 captured: RefCell::new(captured),
                 parent,
             }),
         }
+    }
+
+    /// Return all captured variable entries (name, value) in this scope only.
+    pub fn captured_entries(&self) -> Vec<(String, Value)> {
+        self.inner
+            .captured
+            .borrow()
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect()
+    }
+
+    /// Dump captured variables into a Python dict (for locals() intrinsic).
+    pub fn dump_into_dict(&self, py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+        let captured = self.inner.captured.borrow();
+        for (k, &v) in captured.iter() {
+            if !v.is_nil() {
+                dict.set_item(k, v.to_pyobject(py))?;
+            }
+        }
+        Ok(())
     }
 
     /// Pure Rust resolve. Returns `None` when the name is only in PyGlobals.
@@ -508,8 +590,21 @@ impl NativeClosureScope {
         drop(captured);
         match &self.inner.parent {
             ClosureParent::Native(parent) => parent.resolve(name),
+            ClosureParent::Globals(globals) => globals.borrow().get(name).copied(),
             _ => None,
         }
+    }
+
+    /// Resolve only from captured vars (no parent chain). O(1) HashMap lookup.
+    #[inline]
+    pub fn resolve_captured_only(&self, name: &str) -> Option<Value> {
+        let captured = self.inner.captured.borrow();
+        if let Some(&val) = captured.get(name) {
+            if !val.is_nil() {
+                return Some(val);
+            }
+        }
+        None
     }
 
     /// Resolve with PyGlobals fallback (needs GIL).
@@ -529,6 +624,7 @@ impl NativeClosureScope {
                 .ok()
                 .flatten()
                 .and_then(|v| Value::from_pyobject(py, &v).ok()),
+            ClosureParent::Globals(globals) => globals.borrow().get(name).copied(),
             ClosureParent::None => None,
         }
     }
@@ -543,6 +639,15 @@ impl NativeClosureScope {
         drop(captured);
         match &self.inner.parent {
             ClosureParent::Native(parent) => parent.set(name, value),
+            ClosureParent::Globals(globals) => {
+                let mut g = globals.borrow_mut();
+                if g.contains_key(name) {
+                    g.insert(name.to_string(), value);
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -565,31 +670,42 @@ impl NativeClosureScope {
                     false
                 }
             }
+            ClosureParent::Globals(globals) => {
+                let mut g = globals.borrow_mut();
+                if g.contains_key(name) {
+                    g.insert(name.to_string(), value);
+                    true
+                } else {
+                    false
+                }
+            }
             ClosureParent::None => false,
         }
     }
 
     /// Build a NativeClosureScope with a native parent.
-    pub fn with_native_parent(
-        captured: HashMap<String, Value>,
-        parent: NativeClosureScope,
-    ) -> Self {
+    pub fn with_native_parent(captured: IndexMap<String, Value>, parent: NativeClosureScope) -> Self {
         Self::new(captured, ClosureParent::Native(parent))
     }
 
     /// Build a NativeClosureScope with PyGlobals as terminal parent.
-    pub fn with_py_globals(captured: HashMap<String, Value>, globals: Py<PyDict>) -> Self {
+    pub fn with_py_globals(captured: IndexMap<String, Value>, globals: Py<PyDict>) -> Self {
         Self::new(captured, ClosureParent::PyGlobals(globals))
     }
 
     /// Build a NativeClosureScope with no parent.
-    pub fn without_parent(captured: HashMap<String, Value>) -> Self {
+    pub fn without_parent(captured: IndexMap<String, Value>) -> Self {
         Self::new(captured, ClosureParent::None)
+    }
+
+    /// Build a NativeClosureScope with Globals as terminal parent.
+    pub fn with_rust_globals(captured: IndexMap<String, Value>, globals: Globals) -> Self {
+        Self::new(captured, ClosureParent::Globals(globals))
     }
 }
 
 // SAFETY: VM is single-threaded. RefCell is only accessed from the VM thread.
-// The Arc is for shared ownership within the same thread (closures sharing captures).
+// The Rc is for shared ownership within the same thread (closures sharing captures).
 // Send+Sync needed because Frame lives inside #[pyclass] PyRustVM (PyO3 requirement).
 unsafe impl Send for NativeClosureScope {}
 unsafe impl Sync for NativeClosureScope {}
@@ -602,13 +718,13 @@ impl std::fmt::Debug for NativeClosureScope {
     }
 }
 
-/// Convert a Python ClosureScope (RustClosureScope) to NativeClosureScope.
+/// Convert a Python ClosureScope (ClosureScope) to NativeClosureScope.
 pub fn py_scope_to_native(py: Python<'_>, scope: &Py<PyAny>) -> PyResult<NativeClosureScope> {
     let scope_bound = scope.bind(py);
-    if let Ok(closure) = scope_bound.cast::<RustClosureScope>() {
+    if let Ok(closure) = scope_bound.cast::<ClosureScope>() {
         let cs = closure.borrow();
         let captured_dict = cs.captured.bind(py);
-        let mut captured = HashMap::new();
+        let mut captured = IndexMap::new();
         for (key, value) in captured_dict.iter() {
             let name: String = key.extract()?;
             let val = Value::from_pyobject(py, &value)?;
@@ -617,7 +733,7 @@ pub fn py_scope_to_native(py: Python<'_>, scope: &Py<PyAny>) -> PyResult<NativeC
         let parent = match &cs.parent {
             Some(p) => {
                 let p_bound = p.bind(py);
-                if p_bound.cast::<RustClosureScope>().is_ok() {
+                if p_bound.cast::<ClosureScope>().is_ok() {
                     ClosureParent::Native(py_scope_to_native(py, p)?)
                 } else if let Ok(dict) = p_bound.cast::<PyDict>() {
                     ClosureParent::PyGlobals(dict.clone().unbind())
@@ -635,7 +751,7 @@ pub fn py_scope_to_native(py: Python<'_>, scope: &Py<PyAny>) -> PyResult<NativeC
     }
 }
 
-/// Convert a NativeClosureScope to a Python RustClosureScope.
+/// Convert a NativeClosureScope to a Python ClosureScope.
 pub fn native_scope_to_py(py: Python<'_>, scope: &NativeClosureScope) -> PyResult<Py<PyAny>> {
     let captured = scope.inner.captured.borrow();
     let dict = PyDict::new(py);
@@ -646,13 +762,21 @@ pub fn native_scope_to_py(py: Python<'_>, scope: &NativeClosureScope) -> PyResul
 
     let parent: Option<Py<PyAny>> = match &scope.inner.parent {
         ClosureParent::Native(p) => Some(native_scope_to_py(py, p)?),
-        // Pass the dict directly (not wrapped in RustClosureScope) so that
+        // Pass the dict directly (not wrapped in ClosureScope) so that
         // py_scope_to_native detects it as PyGlobals and keeps the live reference.
         ClosureParent::PyGlobals(g) => Some(g.clone_ref(py).into_any()),
+        ClosureParent::Globals(globals) => {
+            // Convert to PyDict for serialization
+            let d = PyDict::new(py);
+            for (k, &v) in globals.borrow().iter() {
+                d.set_item(k, v.to_pyobject(py))?;
+            }
+            Some(d.unbind().into_any())
+        }
         ClosureParent::None => None,
     };
 
-    let closure = RustClosureScope::create(dict.unbind(), parent);
+    let closure = ClosureScope::create(dict.unbind(), parent);
     Ok(Py::new(py, closure)?.into_any())
 }
 
@@ -684,7 +808,7 @@ impl Frame {
     /// Create a new empty frame.
     pub fn new() -> Self {
         Self {
-            stack: Vec::with_capacity(32),
+            stack: Vec::with_capacity(crate::constants::VM_FRAME_STACK_CAPACITY),
             locals: Vec::new(),
             ip: 0,
             code: None,
@@ -710,7 +834,7 @@ impl Frame {
             },
         );
         Self {
-            stack: Vec::with_capacity(32),
+            stack: Vec::with_capacity(crate::constants::VM_FRAME_STACK_CAPACITY),
             locals,
             ip: 0,
             code: Some(code),
@@ -756,10 +880,7 @@ impl Frame {
     #[inline]
     pub fn peek(&self) -> Value {
         if cfg!(debug_assertions) {
-            *self
-                .stack
-                .last()
-                .expect("VM stack underflow (peek on empty)")
+            *self.stack.last().expect("VM stack underflow (peek on empty)")
         } else {
             *self.stack.last().unwrap_or(&Value::NIL)
         }
@@ -771,6 +892,12 @@ impl Frame {
     pub fn set_local(&mut self, slot: usize, value: Value) {
         if slot < self.locals.len() {
             self.locals[slot] = value;
+        } else {
+            debug_assert!(
+                false,
+                "set_local: slot {slot} out of bounds (len={})",
+                self.locals.len()
+            );
         }
     }
 
@@ -779,23 +906,14 @@ impl Frame {
         if slot < self.locals.len() {
             self.locals[slot]
         } else if cfg!(debug_assertions) {
-            panic!(
-                "get_local: slot {} out of bounds (nlocals={})",
-                slot,
-                self.locals.len()
-            )
+            panic!("get_local: slot {} out of bounds (nlocals={})", slot, self.locals.len())
         } else {
             Value::NIL
         }
     }
 
     /// Bind function arguments to local slots.
-    pub fn bind_args(
-        &mut self,
-        py: Python<'_>,
-        args: &[Value],
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) {
+    pub fn bind_args(&mut self, py: Python<'_>, args: &[Value], kwargs: Option<&Bound<'_, PyDict>>) {
         let code = match &self.code {
             Some(c) => c,
             None => return,
@@ -809,23 +927,16 @@ impl Frame {
             let vararg_idx = vararg_idx as usize;
 
             // Bind args before vararg
-            for i in 0..nargs_given.min(vararg_idx) {
-                self.locals[i] = args[i];
-            }
+            self.locals[..nargs_given.min(vararg_idx)].copy_from_slice(&args[..nargs_given.min(vararg_idx)]);
 
             // Collect excess args into vararg slot
             if nargs_given > vararg_idx {
-                let excess: Vec<Py<PyAny>> = args[vararg_idx..]
-                    .iter()
-                    .map(|v| v.to_pyobject(py))
-                    .collect();
+                let excess: Vec<Py<PyAny>> = args[vararg_idx..].iter().map(|v| v.to_pyobject(py)).collect();
                 let list = PyList::new(py, excess).unwrap();
-                self.locals[vararg_idx] =
-                    Value::from_pyobject(py, &list.into_any()).unwrap_or(Value::NIL);
+                self.locals[vararg_idx] = Value::from_pyobject(py, &list.into_any()).unwrap_or(Value::NIL);
             } else {
                 let empty = PyList::empty(py);
-                self.locals[vararg_idx] =
-                    Value::from_pyobject(py, &empty.into_any()).unwrap_or(Value::NIL);
+                self.locals[vararg_idx] = Value::from_pyobject(py, &empty.into_any()).unwrap_or(Value::NIL);
             }
 
             // Bind kwargs
@@ -833,25 +944,39 @@ impl Frame {
                 for (key, value) in kw.iter() {
                     if let Ok(k) = key.extract::<String>() {
                         if let Some(&slot) = code.slotmap.get(&k) {
-                            self.locals[slot] =
-                                Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
+                            self.locals[slot] = Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
                         }
+                    }
+                }
+            }
+
+            // Fill defaults for params before vararg (skip if already bound)
+            let ndefaults = code.defaults.len();
+            if ndefaults > 0 {
+                let nparams_before_vararg = vararg_idx;
+                let default_start = nparams_before_vararg.saturating_sub(ndefaults);
+                for i in nargs_given.max(default_start)..nparams_before_vararg {
+                    if !self.locals[i].is_nil() && !self.locals[i].is_invalid() {
+                        continue;
+                    }
+                    let default_idx = i - default_start;
+                    if default_idx < ndefaults {
+                        let val = code.defaults[default_idx];
+                        val.clone_refcount();
+                        self.locals[i] = val;
                     }
                 }
             }
         } else {
             // No variadic parameter
-            for i in 0..nargs_given.min(nparams) {
-                self.locals[i] = args[i];
-            }
+            self.locals[..nargs_given.min(nparams)].copy_from_slice(&args[..nargs_given.min(nparams)]);
 
             // Bind kwargs
             if let Some(kw) = kwargs {
                 for (key, value) in kw.iter() {
                     if let Ok(k) = key.extract::<String>() {
                         if let Some(&slot) = code.slotmap.get(&k) {
-                            self.locals[slot] =
-                                Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
+                            self.locals[slot] = Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
                         }
                     }
                 }
@@ -868,9 +993,9 @@ impl Frame {
                     }
                     let default_idx = i - default_start;
                     if default_idx < ndefaults {
-                        let default_obj = code.defaults[default_idx].bind(py);
-                        self.locals[i] =
-                            Value::from_pyobject(py, default_obj).unwrap_or(Value::NIL);
+                        let val = code.defaults[default_idx];
+                        val.clone_refcount();
+                        self.locals[i] = val;
                     }
                 }
             }
@@ -908,18 +1033,8 @@ impl Default for Frame {
 
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self
-            .code
-            .as_ref()
-            .map(|c| c.name.as_str())
-            .unwrap_or("<no code>");
-        write!(
-            f,
-            "<Frame {} ip={} stack_depth={}>",
-            name,
-            self.ip,
-            self.stack.len()
-        )
+        let name = self.code.as_ref().map(|c| c.name.as_str()).unwrap_or("<no code>");
+        write!(f, "<Frame {} ip={} stack_depth={}>", name, self.ip, self.stack.len())
     }
 }
 
@@ -939,13 +1054,58 @@ impl FramePool {
 
     #[cfg(test)]
     pub fn alloc(&mut self) -> Frame {
-        self.frames.pop().unwrap_or_else(Frame::new)
+        self.frames.pop().unwrap_or_default()
     }
 
-    pub fn free(&mut self, mut frame: Frame) {
+    /// Get a frame from the pool (or allocate a new one) and initialize with code.
+    pub fn alloc_with_code(&mut self, code: Arc<CodeObject>) -> Frame {
+        if let Some(mut frame) = self.frames.pop() {
+            let nlocals = code.nlocals;
+            // Reuse existing Vec capacity
+            frame.locals.clear();
+            let fill = if cfg!(debug_assertions) {
+                Value::INVALID
+            } else {
+                Value::NIL
+            };
+            frame.locals.resize(nlocals, fill);
+            frame.code = Some(code);
+            frame.ip = 0;
+            frame
+        } else {
+            Frame::with_code(code)
+        }
+    }
+
+    pub fn free(&mut self, mut frame: Frame, registry: &mut StructRegistry) {
+        decref_frame_values(&frame, registry);
         if self.frames.len() < self.max_size {
             frame.reset();
             self.frames.push(frame);
+        }
+    }
+}
+
+/// Decref all heap values (BigInt + Struct) in a frame's stack and locals.
+pub fn decref_frame_values(frame: &Frame, registry: &mut StructRegistry) {
+    for &val in &frame.stack {
+        if val.is_bigint() {
+            val.decref_bigint();
+        } else if val.is_struct_instance() {
+            let idx = val.as_struct_instance_idx().unwrap();
+            if let Some(fields) = registry.decref(idx) {
+                cascade_decref_fields(registry, fields);
+            }
+        }
+    }
+    for &val in &frame.locals {
+        if val.is_bigint() {
+            val.decref_bigint();
+        } else if val.is_struct_instance() {
+            let idx = val.as_struct_instance_idx().unwrap();
+            if let Some(fields) = registry.decref(idx) {
+                cascade_decref_fields(registry, fields);
+            }
         }
     }
 }
@@ -959,9 +1119,29 @@ impl Default for FramePool {
 /// VM function wrapper for CodeObject.
 ///
 /// Provides the vm_code attribute that the VM CALL handler looks for.
+/// Build a `Globals` map from a Python context's globals dict.
+///
+/// Used by `VMFunction.__call__` when invoked from external code (e.g.
+/// pandas.apply) where no parent VM globals are available.
+fn build_globals_from_context(py: Python<'_>, ctx: &Py<PyAny>) -> PyResult<Globals> {
+    let globals: Globals = Rc::new(RefCell::new(IndexMap::new()));
+    let ctx_globals = ctx.bind(py).getattr("globals")?;
+    if let Ok(dict) = ctx_globals.cast::<PyDict>() {
+        let mut g = globals.borrow_mut();
+        for (key, value) in dict.iter() {
+            if let Ok(name) = key.extract::<String>() {
+                if let Ok(val) = super::value::Value::from_pyobject(py, &value) {
+                    g.insert(name, val);
+                }
+            }
+        }
+    }
+    Ok(globals)
+}
+
 /// Also captures closure scope for nested functions.
-#[pyclass(name = "VMFunction", module = "catnip._rs")]
-pub struct RustVMFunction {
+#[pyclass(module = "catnip._rs")]
+pub struct VMFunction {
     /// Compiled bytecode
     #[pyo3(get)]
     pub vm_code: Py<PyCodeObject>,
@@ -974,9 +1154,11 @@ pub struct RustVMFunction {
     pub name: String,
     /// Context reference for direct calls
     context: Option<Py<PyAny>>,
+    /// Index in the VM's FunctionTable (for TAG_VMFUNC round-trip)
+    pub func_table_idx: Option<u32>,
 }
 
-impl RustVMFunction {
+impl VMFunction {
     /// Create from Rust with native closure (MakeFunction hot path).
     pub fn create_native(
         py: Python<'_>,
@@ -991,6 +1173,7 @@ impl RustVMFunction {
             py_closure_scope: None,
             name,
             context,
+            func_table_idx: None,
         }
     }
 
@@ -1001,9 +1184,7 @@ impl RustVMFunction {
         closure_scope: Option<Py<PyAny>>,
         context: Option<Py<PyAny>>,
     ) -> Self {
-        let native_closure = closure_scope
-            .as_ref()
-            .and_then(|cs| py_scope_to_native(py, cs).ok());
+        let native_closure = closure_scope.as_ref().and_then(|cs| py_scope_to_native(py, cs).ok());
         let name = code.borrow(py).get_name().to_string();
         Self {
             vm_code: code,
@@ -1011,34 +1192,28 @@ impl RustVMFunction {
             py_closure_scope: closure_scope,
             name,
             context,
+            func_table_idx: None,
         }
     }
 }
 
 #[pymethods]
-impl RustVMFunction {
+impl VMFunction {
     #[new]
     #[pyo3(signature = (code, closure_scope=None, context=None))]
-    fn new(
-        code: Py<PyCodeObject>,
-        closure_scope: Option<Py<PyAny>>,
-        context: Option<Py<PyAny>>,
-    ) -> PyResult<Self> {
+    fn new(code: Py<PyCodeObject>, closure_scope: Option<Py<PyAny>>, context: Option<Py<PyAny>>) -> PyResult<Self> {
         let name = Python::attach(|py| {
             let n = code.borrow(py).get_name().to_string();
             n
         });
-        let native_closure = Python::attach(|py| {
-            closure_scope
-                .as_ref()
-                .and_then(|cs| py_scope_to_native(py, cs).ok())
-        });
+        let native_closure = Python::attach(|py| closure_scope.as_ref().and_then(|cs| py_scope_to_native(py, cs).ok()));
         Ok(Self {
             vm_code: code,
             native_closure,
             py_closure_scope: closure_scope,
             name,
             context,
+            func_table_idx: None,
         })
     }
 
@@ -1070,42 +1245,103 @@ impl RustVMFunction {
                 py.None(),
             ],
         )?;
-        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?
-            .into_any()
-            .unbind())
+        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?.into_any().unbind())
     }
 
     #[pyo3(signature = (*args, **kwargs))]
+    #[allow(unused_variables)]
     fn __call__(
         &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let ctx = self.context.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyTypeError::new_err(
-                "VMFunction cannot be called directly without context",
-            )
-        })?;
+        // Always use the standalone VM path. Previously, when called from
+        // external code (e.g. pandas.apply), a new VMExecutor was created per
+        // call -- with empty registries and a Python import per invocation.
+        // This caused segfaults (invalid func_table/struct_registry indices)
+        // and massive overhead on repeated callbacks.
+        let parent_globals = super::host::take_vm_globals();
 
-        let registry = ctx.bind(py).getattr("_registry")?;
-        let rust_bridge = py.import("catnip.vm.rust_bridge")?;
-        let executor_class = rust_bridge.getattr("VMExecutor")?;
-        let executor = executor_class.call1((registry, ctx.bind(py)))?;
+        {
+            use super::host::VMHost;
+            use super::value::{FuncSlot, Value};
 
-        let execute_kwargs = PyDict::new(py);
-        execute_kwargs.set_item("sync_globals", false)?;
-        if let Some(cs) = self.closure_scope(py)? {
-            execute_kwargs.set_item("closure_scope", cs.bind(py))?;
+            let code = std::sync::Arc::clone(&self.vm_code.borrow(py).inner);
+
+            // Resolve globals: parent VM > Python context > fresh builtins
+            let mut host = if let Some(globals) = parent_globals {
+                VMHost::with_globals(py, globals)
+            } else if let Some(ctx) = &self.context {
+                let globals = build_globals_from_context(py, ctx)?;
+                VMHost::with_globals(py, globals)
+            } else {
+                VMHost::new(py)
+            }
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?;
+
+            // Inject context for @pass_context functions
+            if let Some(ctx) = &self.context {
+                host.set_context(ctx.clone_ref(py));
+            }
+
+            // Save parent's thread-local pointers (nested call must not clobber them)
+            let saved_registry = super::value::save_struct_registry();
+            let saved_func_table = super::value::save_func_table();
+
+            let mut vm = super::core::VM::new();
+
+            // Copy parent's func_table entries so VmFunc indices in closures remain valid
+            if !saved_func_table.is_null() {
+                let parent_table = unsafe { &*saved_func_table };
+                for slot in &parent_table.slots {
+                    vm.func_table.insert(FuncSlot {
+                        code: std::sync::Arc::clone(&slot.code),
+                        closure: slot.closure.clone(),
+                        code_py: slot.code_py.clone_ref(py),
+                        context: slot.context.as_ref().map(|c| c.clone_ref(py)),
+                    });
+                }
+            }
+
+            // Copy parent's struct types and instances so struct indices remain valid
+            if !saved_registry.is_null() {
+                let parent_registry = unsafe { &*saved_registry };
+                vm.struct_registry.clone_from_parent(py, parent_registry);
+            }
+            super::value::set_struct_registry(&vm.struct_registry as *const _);
+            // Set func_table AFTER copying parent entries so new VmFunc indices
+            // created during execution go to this table, while inherited indices
+            // remain valid.
+            super::value::set_func_table(&vm.func_table as *const _);
+
+            let mut arg_values = Vec::with_capacity(args.len());
+            for item in args.iter() {
+                arg_values.push(Value::from_pyobject(py, &item).map_err(pyo3::exceptions::PyRuntimeError::new_err)?);
+            }
+
+            let closure = self.native_closure.clone();
+            let result = vm
+                .execute_with_host(py, code, &arg_values, &host, closure)
+                .map_err(|e| {
+                    // Restore parent pointers on error
+                    super::value::restore_struct_registry(saved_registry);
+                    super::value::restore_func_table(saved_func_table);
+                    // During ND abort, skip Debug formatting to avoid quadratic
+                    // string growth (each level would wrap the previous error).
+                    if crate::nd::check_nd_abort() {
+                        pyo3::exceptions::PyRecursionError::new_err("maximum ND recursion depth exceeded")
+                    } else {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e))
+                    }
+                })?;
+
+            // Restore parent pointers
+            super::value::restore_struct_registry(saved_registry);
+            super::value::restore_func_table(saved_func_table);
+
+            Ok(result.to_pyobject(py))
         }
-
-        let result = executor.call_method(
-            "execute",
-            (self.vm_code.bind(py), args, kwargs),
-            Some(&execute_kwargs),
-        )?;
-
-        Ok(result.unbind())
     }
 }
 
@@ -1113,15 +1349,15 @@ impl RustVMFunction {
 ///
 /// Provides _resolve() and _set() methods compatible with Scope chain lookup.
 /// Falls back to parent scope if name not found in captured values.
-#[pyclass(name = "ClosureScope", module = "catnip._rs")]
-pub struct RustClosureScope {
+#[pyclass(module = "catnip._rs")]
+pub struct ClosureScope {
     /// Captured variable values
     captured: Py<PyDict>,
     /// Parent scope for chain lookup
     parent: Option<Py<PyAny>>,
 }
 
-impl RustClosureScope {
+impl ClosureScope {
     /// Create from Rust code.
     pub fn create(captured: Py<PyDict>, parent: Option<Py<PyAny>>) -> Self {
         Self { captured, parent }
@@ -1129,7 +1365,7 @@ impl RustClosureScope {
 }
 
 #[pymethods]
-impl RustClosureScope {
+impl ClosureScope {
     #[new]
     #[pyo3(signature = (captured, parent=None))]
     fn new(captured: Py<PyDict>, parent: Option<Py<PyAny>>) -> Self {
@@ -1161,10 +1397,10 @@ impl RustClosureScope {
         }
 
         // Raise NameError
-        let exc_module = py.import("catnip.exc")?;
+        let exc_module = py.import(PY_MOD_EXC)?;
         let name_error = exc_module.getattr("CatnipNameError")?;
         Err(PyErr::from_value(
-            name_error.call1((format!("name '{name}' is not defined"),))?,
+            name_error.call1((catnip_core::constants::format_name_error(name),))?,
         ))
     }
 
@@ -1198,11 +1434,7 @@ impl RustClosureScope {
 
     fn __repr__(&self, py: Python<'_>) -> String {
         let captured = self.captured.bind(py);
-        let keys: Vec<String> = captured
-            .keys()
-            .iter()
-            .filter_map(|k| k.extract().ok())
-            .collect();
+        let keys: Vec<String> = captured.keys().iter().filter_map(|k| k.extract().ok()).collect();
         format!("<ClosureScope captured={:?}>", keys)
     }
 
@@ -1217,9 +1449,151 @@ impl RustClosureScope {
                 py.None(), // parent set to None - will be recreated on unpickle
             ],
         )?;
-        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?
-            .into_any()
-            .unbind())
+        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?.into_any().unbind())
+    }
+}
+
+// === VMPattern pickle serialization ===
+
+use super::pattern::VMPatternElement;
+
+/// Convert Vec<VMPattern> to a Python list of dicts for pickling.
+fn vmpattern_vec_to_py(py: Python<'_>, patterns: &[VMPattern]) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty(py);
+    for pat in patterns {
+        list.append(vmpattern_to_py(py, pat)?)?;
+    }
+    Ok(list.into_any().unbind())
+}
+
+fn vmpattern_to_py(py: Python<'_>, pat: &VMPattern) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    match pat {
+        VMPattern::Wildcard => {
+            dict.set_item("t", "w")?;
+        }
+        VMPattern::Literal(val) => {
+            dict.set_item("t", "l")?;
+            dict.set_item("v", val.to_pyobject(py))?;
+        }
+        VMPattern::Var(slot) => {
+            dict.set_item("t", "v")?;
+            dict.set_item("s", *slot)?;
+        }
+        VMPattern::Or(subs) => {
+            dict.set_item("t", "o")?;
+            dict.set_item("p", vmpattern_vec_to_py(py, subs)?)?;
+        }
+        VMPattern::Tuple(elems) => {
+            dict.set_item("t", "tp")?;
+            let list = PyList::empty(py);
+            for elem in elems {
+                list.append(vmpattern_elem_to_py(py, elem)?)?;
+            }
+            dict.set_item("e", list)?;
+        }
+        VMPattern::Struct { name, field_slots } => {
+            dict.set_item("t", "s")?;
+            dict.set_item("n", name.as_str())?;
+            let fields = PyList::empty(py);
+            for (fname, slot) in field_slots {
+                fields.append(PyTuple::new(
+                    py,
+                    [fname.into_pyobject(py)?.into_any(), slot.into_pyobject(py)?.into_any()],
+                )?)?;
+            }
+            dict.set_item("f", fields)?;
+        }
+    }
+    Ok(dict.into_any().unbind())
+}
+
+fn vmpattern_elem_to_py(py: Python<'_>, elem: &VMPatternElement) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    match elem {
+        VMPatternElement::Pattern(p) => {
+            dict.set_item("k", "p")?;
+            dict.set_item("p", vmpattern_to_py(py, p)?)?;
+        }
+        VMPatternElement::Star(slot) => {
+            dict.set_item("k", "s")?;
+            dict.set_item("s", *slot)?;
+        }
+    }
+    Ok(dict.into_any().unbind())
+}
+
+/// Reconstruct Vec<VMPattern> from Python list of dicts.
+fn vmpattern_vec_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<VMPattern>> {
+    let list = obj.cast::<PyList>()?;
+    let mut patterns = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        patterns.push(vmpattern_from_py(py, &item)?);
+    }
+    Ok(patterns)
+}
+
+fn vmpattern_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<VMPattern> {
+    let dict = obj.cast::<PyDict>()?;
+    let tag: String = dict.get_item("t")?.unwrap().extract()?;
+    match tag.as_str() {
+        "w" => Ok(VMPattern::Wildcard),
+        "l" => {
+            let val = dict.get_item("v")?.unwrap();
+            Ok(VMPattern::Literal(Value::from_pyobject(py, &val)?))
+        }
+        "v" => {
+            let slot: usize = dict.get_item("s")?.unwrap().extract()?;
+            Ok(VMPattern::Var(slot))
+        }
+        "o" => {
+            let subs = dict.get_item("p")?.unwrap();
+            Ok(VMPattern::Or(vmpattern_vec_from_py(py, &subs)?))
+        }
+        "tp" => {
+            let elems_list = dict.get_item("e")?.unwrap();
+            let list = elems_list.cast::<PyList>()?;
+            let mut elems = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                elems.push(vmpattern_elem_from_py(py, &item)?);
+            }
+            Ok(VMPattern::Tuple(elems))
+        }
+        "s" => {
+            let name: String = dict.get_item("n")?.unwrap().extract()?;
+            let fields_list = dict.get_item("f")?.unwrap().cast::<PyList>()?.clone();
+            let mut field_slots = Vec::new();
+            for item in fields_list.iter() {
+                let pair = item.cast::<PyTuple>()?;
+                let fname: String = pair.get_item(0)?.extract()?;
+                let slot: usize = pair.get_item(1)?.extract()?;
+                field_slots.push((fname, slot));
+            }
+            Ok(VMPattern::Struct { name, field_slots })
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown pattern tag: {}",
+            tag
+        ))),
+    }
+}
+
+fn vmpattern_elem_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<VMPatternElement> {
+    let dict = obj.cast::<PyDict>()?;
+    let kind: String = dict.get_item("k")?.unwrap().extract()?;
+    match kind.as_str() {
+        "p" => {
+            let p = dict.get_item("p")?.unwrap();
+            Ok(VMPatternElement::Pattern(vmpattern_from_py(py, &p)?))
+        }
+        "s" => {
+            let slot: usize = dict.get_item("s")?.unwrap().extract()?;
+            Ok(VMPatternElement::Star(slot))
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown element kind: {}",
+            kind
+        ))),
     }
 }
 
@@ -1256,12 +1630,13 @@ mod tests {
     #[test]
     fn test_frame_pool() {
         let mut pool = FramePool::new(2);
+        let mut registry = StructRegistry::new();
 
         let frame1 = pool.alloc();
         let frame2 = pool.alloc();
 
-        pool.free(frame1);
-        pool.free(frame2);
+        pool.free(frame1, &mut registry);
+        pool.free(frame2, &mut registry);
 
         assert_eq!(pool.frames.len(), 2);
     }

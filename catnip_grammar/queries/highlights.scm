@@ -6,6 +6,8 @@
 ; Numbers
 (integer) @number
 (float) @number
+(decimal) @number
+(imaginary) @number
 
 ; Strings
 (string) @string

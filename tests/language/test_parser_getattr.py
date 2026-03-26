@@ -1,9 +1,11 @@
 # FILE: tests/language/test_parser_getattr.py
 import unittest
 
+from catnip._rs import Op
+
 from catnip.nodes import Ref
 from catnip.parser import Parser
-from catnip.transformer import IR, Call, OpCode
+from catnip.transformer import OpCode
 
 parser = Parser()
 parse = parser.parse
@@ -16,7 +18,7 @@ class TestParserAttributeAccess(unittest.TestCase):
         self.assertIsInstance(ast, list)
         self.assertEqual(len(ast), 1)
         node = ast[0]
-        self.assertIsInstance(node, IR)
+        self.assertIsInstance(node, Op)
         self.assertEqual(node.ident, OpCode.GETATTR)
         # Arguments should be: (Ref("a"), "b")
         self.assertEqual(len(node.args), 2)
@@ -33,12 +35,12 @@ class TestParserAttributeAccess(unittest.TestCase):
         self.assertIsInstance(ast, list)
         self.assertEqual(len(ast), 1)
         node = ast[0]
-        self.assertIsInstance(node, IR)
+        self.assertIsInstance(node, Op)
         self.assertEqual(node.ident, OpCode.GETATTR)
         self.assertEqual(len(node.args), 2)
         # First argument should be a GETATTR IR for "a.b"
         inner = node.args[0]
-        self.assertIsInstance(inner, IR)
+        self.assertIsInstance(inner, Op)
         self.assertEqual(inner.ident, OpCode.GETATTR)
         self.assertEqual(len(inner.args), 2)
         self.assertIsInstance(inner.args[0], Ref)
@@ -55,12 +57,13 @@ class TestParserAttributeAccess(unittest.TestCase):
         self.assertIsInstance(ast, list)
         self.assertEqual(len(ast), 1)
         node = ast[0]
-        self.assertIsInstance(node, IR)
+        self.assertIsInstance(node, Op)
         self.assertEqual(node.ident, OpCode.GETATTR)
         self.assertEqual(len(node.args), 2)
-        # First element should be a Call representing "a.b()"
+        # First element should be an Op(CALL) representing "a.b()"
         call_node = node.args[0]
-        self.assertIsInstance(call_node, Call)
+        self.assertIsInstance(call_node, Op)
+        self.assertEqual(call_node.ident, OpCode.CALL)
         # Second argument should be "c"
         self.assertEqual(node.args[1], "c")
 

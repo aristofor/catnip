@@ -101,15 +101,17 @@ W200 compare chaque ligne avec la sortie du formatter Rust. W201 détecte les es
 
 ### Sémantique - Noms (E3xx/W3xx)
 
-| Code | Sévérité | Description                                     |
-| ---- | -------- | ----------------------------------------------- |
-| E300 | Error    | Name 'x' is not defined                         |
-| W310 | Warning  | Variable 'x' is defined but never used          |
-| W311 | Warning  | Wild import returns None; assignment is useless |
+| Code | Sévérité | Description                                               |
+| ---- | -------- | --------------------------------------------------------- |
+| E300 | Error    | Name 'x' is not defined                                   |
+| W310 | Warning  | Variable 'x' is defined but never used (local scope only) |
+| W311 | Warning  | Wild import returns None; assignment is useless           |
 
 E300 détecte les références à des noms non définis dans le scope courant. W310 signale les variables assignées mais
-jamais lues (ignoré si le nom commence par `_`). W311 avertit qu'assigner le retour d'un `import("...", wild=True)` est
-inutile puisque le wild import retourne `None`.
+jamais lues dans un **scope local** (lambda, for, match). Les variables au scope global sont ignorées : elles peuvent
+constituer l'API publique d'un module consommée par un appelant externe. Le warning est aussi ignoré si le nom commence
+par `_`. W311 avertit qu'assigner le retour d'un `import("...", wild=True)` est inutile puisque le wild import retourne
+`None`.
 
 ```bash
 ⇒ echo 'y = x * 2' | catnip lint --
@@ -117,8 +119,8 @@ inutile puisque le wild import retourne `None`.
 ```
 
 ```bash
-⇒ echo 'x = 42' | catnip lint --
-<stdin>:1:1: warning [W310]: Variable 'x' is defined but never used
+⇒ echo 'f = () => { y = 1; 2 }' | catnip lint --
+<stdin>:1:13: warning [W310]: Variable 'y' is defined but never used
 ```
 
 ### Sémantique - Hints (I1xx)
@@ -162,13 +164,15 @@ broken.cat:3:1: error [E100]: Syntax error at line 3, column ...
 
 ```bash
 ⇒ cat issues.cat
-x = 42
-y = z + 1
-result = x * 2
+compute = (x) => {
+    y = x + 1
+    temp = z * 2
+    y
+}
 
 ⇒ catnip lint issues.cat
-issues.cat:2:5: error [E300]: Name 'z' is not defined
-issues.cat:2:1: warning [W310]: Variable 'y' is defined but never used
+issues.cat:3:12: error [E300]: Name 'z' is not defined
+issues.cat:3:5: warning [W310]: Variable 'temp' is defined but never used
 ```
 
 ### Code propre
@@ -289,7 +293,7 @@ for diag in result.diagnostics:
 ## Architecture interne
 
 Le linter est implémenté en Rust (`catnip_tools/src/linter.rs`) avec un wrapper Python léger (`catnip/tools/linter.py`).
-Les trois phases s'exécutent séquentiellement dans le même appel Rust.
+Les quatre phases s'exécutent séquentiellement dans le même appel Rust.
 
 ### Phase 1 : Analyse syntaxique
 
@@ -337,24 +341,28 @@ Parcourt le CST (Concrete Syntax Tree) directement en Rust avec un `ScopeTracker
 - Détecte les références à des noms non définis
 - Collecte les variables non utilisées
 - Gère les lambdas, for loops, match/case avec scopes imbriqués
+- Reconnaît les noms importés via `import("mod", "name")` et les alias `import("mod", "name:alias")`
 
-Détection additionnelle (passes globales sur l'AST) :
+La liste des builtins connus est générée automatiquement depuis `context.py` (source de vérité) par
+`catnip_tools/gen_builtins.py`. Les builtins ne déclenchent pas d'erreur E300. `make check-builtins` vérifie la
+synchronisation en CI.
+
+### Phase 4 : Suggestions d'amélioration
+
+Passes globales sur le CST, indépendantes de l'analyse sémantique :
 
 - Appels récursifs hors position terminale (I100)
 - Comparaisons redondantes avec booléens (I101)
 - Auto-assignations (I102)
 
-> L'analyseur sémantique connaît les builtins Python (`print`, `len`, `range`, etc.) et les builtins Catnip (`pragma`).
-> Ils ne déclenchent pas d'erreur E300.
-
 ## Différences avec l'exécution
 
-| Aspect                      | Linter                   | Runtime                         |
-| --------------------------- | ------------------------ | ------------------------------- |
-| **Variables non définies**  | Détecté statiquement     | `CatnipNameError` à l'exécution |
-| **Variables non utilisées** | Warning W310             | Ignoré                          |
-| **Tail position**           | Hint I100                | TCO appliqué silencieusement    |
-| **Performance**             | Rapide (pas d'exécution) | Dépend du code                  |
+| Aspect                      | Linter                     | Runtime                         |
+| --------------------------- | -------------------------- | ------------------------------- |
+| **Variables non définies**  | Détecté statiquement       | `CatnipNameError` à l'exécution |
+| **Variables non utilisées** | Warning W310 (local scope) | Ignoré                          |
+| **Tail position**           | Hint I100                  | TCO appliqué silencieusement    |
+| **Performance**             | Rapide (pas d'exécution)   | Dépend du code                  |
 
 Le linter détecte les problèmes *certains* (variables non définies) et les problèmes *probables* (variables non
 utilisées). Il ne peut pas détecter les erreurs qui dépendent des valeurs runtime.

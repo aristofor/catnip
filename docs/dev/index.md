@@ -10,21 +10,22 @@ on optimise, puis on exécute.
 
 ```mermaid
 flowchart TD
-    A["Source text"] --> B["Parser (Tree-sitter)"]
-    B --> C["Parse Tree (CST)"]
-    C --> D["Transformer (modules Rust)"]
-    D --> E["IR (Intermediate Representation avec IROpCode)"]
-    E --> F["Semantic Analyzer + passes d'optimisation"]
-    F --> G["Op (Optimized AST avec OpCode final)"]
-
-    G --> H{"Mode d'exécution"}
-    H -->|"VM on"| I["Compiler Bytecode"]
-    I --> J["VM Stack-based"]
-    J --> K["Result"]
-
-    H -->|"VM off"| L["Registry Direct Execution"]
-    L --> K
+    A["Source text"] --> B["Pipeline.prepare()"]
+    B --> C["IR (prepared_ir)"]
+    C --> D{"Mode"}
+    D -->|"VM (défaut)"| E["UnifiedCompiler"]
+    E --> F["VM Stack-based"]
+    F --> G["Result"]
+    D -->|"AST (interne)"| H["prepared_ir_to_op()"]
+    H --> I["Registry exec_stmt()"]
+    I --> G
+    D -->|"Inspection (-p 1/2)"| K["get_prepared_ir_nodes()"]
+    K --> L["PyIRNode (lecture seule)"]
 ```
+
+Un seul parse via `Pipeline.prepare()` produit l'IR. La VM compile et exécute le bytecode (chemin par défaut). Le mode
+AST (`-x ast`, interne) interprète les Op nodes via le Registry -- il sert d'oracle de référence pour valider la VM.
+L'inspection retourne des `PyIRNode` pour `-p 1/2` et le MCP.
 
 L'architecture est hybride **Rust + Python** : Rust gère le "gros œuvre" (performance et sécurité), Python expose une
 API simple côté application.
@@ -41,17 +42,18 @@ Détails de chaque étape : voir [Architecture](ARCHITECTURE.md).
 | **Transformer** | Parse tree → IR (Intermediate Repr.)      | Rust                    | IROpCode |
 | **Semantic**    | Analyse et optimisation IR → Op           | Rust                    | OpCode   |
 | **CFG**         | Control Flow Graph pour analyse           | Rust (dominance, loops) | -        |
-| **Compiler**    | Op → Bytecode (mode VM uniquement)        | Rust                    | -        |
+| **Compiler**    | IR → Bytecode                             | Rust                    | -        |
 | **VM**          | Exécution bytecode stack-based            | Rust (NaN-boxing, JIT)  | -        |
-| **Registry**    | Dispatch direct des opérations (mode AST) | Rust                    | -        |
+| **Registry**    | Dispatch direct des Op (mode AST interne) | Rust                    | -        |
 | **Scope**       | Gestion des variables O(1)                | Rust                    | -        |
 | **Context**     | Environnement d'exécution, pragmas        | Python                  | -        |
 
 ## Documents de cette section
 
+- **[CONTRIBUTING](CONTRIBUTING.md)** - Setup environnement de dev, boucle de dev, commandes de test
 - **[ARCHITECTURE](ARCHITECTURE.md)** - Pipeline complet, parsing, analyse sémantique, scopes
 - **[VM](VM.md)** - Machine virtuelle Rust, NaN-boxing, modes d'exécution
-- **[ND_VM_ARCHITECTURE](ND_VM_ARCHITECTURE.md)** - Opérations ND dans le VM (\~~, ~>, ~[])
+- **[ND_VM_ARCHITECTURE](ND_VM_ARCHITECTURE.md)** - Opérations ND dans la VM (\~~, ~>, ~[])
 - **[JIT](JIT.md)** - Compilation Just-In-Time trace-based, Cranelift backend, hot detection
 - **[OPTIMIZATIONS](OPTIMIZATIONS.md)** - Passes d'optimisation, niveaux, quand les activer
 - **[CACHE](CACHE.md)** - Système de cache multi-niveaux, backends intégrés, protocole custom
@@ -69,6 +71,7 @@ catnip_rs/          # coeur Rust
 catnip_grammar/     # Grammaire Tree-sitter
 catnip_repl/        # REPL
 catnip_tools/       # outils format, linter
+catnip_lsp/         # serveur LSP
 catnip_mcp/         # serveur mcp
 ```
 

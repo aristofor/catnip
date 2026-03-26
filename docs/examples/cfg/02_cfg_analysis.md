@@ -211,11 +211,11 @@ def analyze_cfg(code, name):
     print(f'⇒ CFG: {name}' )
     print(f'Blocks: {cfg.num_blocks}')
     print(f'Edges: {cfg.num_edges}')
-    print()
 
     # Dominance
     cfg.compute_dominators()
 
+    print()
     print('Dominance:')
     for block_id in sorted(cfg.get_reachable_blocks()):
         doms = cfg.get_dominators(block_id)
@@ -225,10 +225,10 @@ def analyze_cfg(code, name):
         print(f'    Dominators: {sorted(doms)}')
         print(f'    Immediate dominator: {idom}')
         print(f'    Dominates: {sorted(dominated)}')
-    print()
 
     # Boucles
     loops = cfg.detect_loops()
+    print()
     print(f'Loops: {len(loops)}')
     for i, (header, blocks) in enumerate(loops):
         print(f'  Loop {i}: header={header}, blocks={sorted(blocks)}')

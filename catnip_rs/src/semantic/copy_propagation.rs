@@ -9,8 +9,10 @@
 //! Uses RefCell for interior mutability (state accumulates during traversal).
 //! Does not eliminate the copy itself (that's dead code elimination's job).
 
+use super::extract_var_name;
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -29,6 +31,12 @@ impl CopyPropagationPass {
         CopyPropagationPass {
             copies: RwLock::new(HashMap::new()),
         }
+    }
+}
+
+impl Default for CopyPropagationPass {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -62,7 +70,7 @@ impl OptimizationPass for CopyPropagationPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -74,20 +82,15 @@ impl OptimizationPass for CopyPropagationPass {
                     let args = visited_bound.getattr("args")?;
                     let args_tuple = args.cast::<PyTuple>()?;
                     if args_tuple.len() >= 2 {
-                        if let Ok(dest_name) = args_tuple.get_item(0)?.extract::<String>() {
+                        if let Some(dest_name) = extract_var_name(&args_tuple.get_item(0)?) {
                             let source = args_tuple.get_item(1)?;
                             // Check if source is a Ref node
                             if let Ok(source_type) = source.get_type().name() {
                                 if let Ok(type_str) = source_type.to_str() {
                                     if type_str == catnip::REF {
-                                        if let Ok(source_ident) =
-                                            source.getattr("ident")?.extract::<String>()
-                                        {
+                                        if let Ok(source_ident) = source.getattr("ident")?.extract::<String>() {
                                             // Found a copy: dest = source
-                                            self.copies
-                                                .write()
-                                                .unwrap()
-                                                .insert(dest_name, source_ident);
+                                            self.copies.write().unwrap().insert(dest_name, source_ident);
                                         }
                                     }
                                 }
@@ -118,23 +121,12 @@ impl OptimizationPass for CopyPropagationPass {
 
             // If we found a mapping, create new Ref with source name
             if current != ident {
-                let ref_class = py.import("catnip.nodes")?.getattr("Ref")?;
+                let ref_class = py.import(PY_MOD_NODES)?.getattr("Ref")?;
                 return Ok(ref_class.call1((current,))?.unbind());
             }
         }
 
         Ok(node.clone().unbind())
-    }
-}
-
-impl CopyPropagationPass {
-    /// Check if a value is a simple reference to another variable
-    #[allow(dead_code)]
-    fn is_simple_ref(&self, _py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let obj_type = obj.get_type();
-        let type_name_obj = obj_type.name()?;
-        let type_name = type_name_obj.to_str()?;
-        Ok(type_name == catnip::REF)
     }
 }
 
@@ -152,14 +144,8 @@ mod tests {
     fn test_copy_chain_resolution() {
         let pass = CopyPropagationPass::new();
         // Simulate copy chain: x → y, y → z
-        pass.copies
-            .write()
-            .unwrap()
-            .insert("x".to_string(), "y".to_string());
-        pass.copies
-            .write()
-            .unwrap()
-            .insert("y".to_string(), "z".to_string());
+        pass.copies.write().unwrap().insert("x".to_string(), "y".to_string());
+        pass.copies.write().unwrap().insert("y".to_string(), "z".to_string());
         assert_eq!(pass.copies.read().unwrap().len(), 2);
 
         // The visit_ref method should follow x → y → z

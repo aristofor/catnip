@@ -47,11 +47,7 @@ pub struct NDFuture {
 impl NDFuture {
     #[new]
     #[pyo3(signature = (task=None, dependencies=None))]
-    fn new(
-        py: Python<'_>,
-        task: Option<Py<PyAny>>,
-        dependencies: Option<Bound<'_, PyList>>,
-    ) -> PyResult<Self> {
+    fn new(py: Python<'_>, task: Option<Py<PyAny>>, dependencies: Option<Bound<'_, PyList>>) -> PyResult<Self> {
         let deps_list = match dependencies {
             Some(d) => d.clone().unbind(),
             None => PyList::empty(py).unbind(),

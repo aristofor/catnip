@@ -4,16 +4,51 @@ Ce document explique comment les opérations non-déterministes (\~~, ~>, ~[]) p
 
 ## Vue d'ensemble
 
-Les opérations ND sont compilées en opcodes VM dédiés qui délèguent l'exécution au Registry Rust. L'architecture
-garantit :
+Les opérations ND sont compilées en opcodes VM dédiés qui délèguent l'exécution au `VmHost`. L'architecture garantit :
 
 - **Cohérence sémantique** : même comportement en AST et en VM
 - **Performance** : dispatch O(1) via opcodes dédiés
-- **Réutilisation** : délégation au NDScheduler existant (modes sequential/thread/process)
+- **Abstraction** : le trait `VmHost` permet deux chemins d'exécution (ContextHost via Registry/NDScheduler, VMHost via
+  rayon/WorkerPool natif)
+
+```mermaid
+flowchart TD
+    SRC["Source ~~, ~>, ~[]"] --> COMP["VM Compiler"]
+    COMP --> OPC{"Opcode"}
+    OPC --> ND_EMPTY["NdEmptyTopos"]
+    OPC --> ND_REC["NdRecursion"]
+    OPC --> ND_MAP["NdMap"]
+    OPC --> ND_BC["Broadcast (flags ND)"]
+
+    ND_REC --> HOST{"VmHost"}
+    ND_MAP --> HOST
+    ND_BC --> HOST
+
+    HOST --> PY["ContextHost (Context)"]
+    HOST --> RS["VMHost (Standalone)"]
+    HOST --> PURE["PureVM (catnip_vm)"]
+
+    PY --> REG["Registry Rust"]
+    REG --> SCHED["NDScheduler"]
+    SCHED --> SEQ["Sequential"]
+    SCHED --> THR["ThreadPool"]
+    SCHED --> PROC["ProcessPool"]
+
+    RS --> ND_CFG{"NdMode"}
+    ND_CFG --> SEQ2["Sequential"]
+    ND_CFG --> RAY["Rayon (par_iter)"]
+    ND_CFG --> PROC_TRY{"Freezable?"}
+    PROC_TRY -->|oui| POOL["WorkerPool (Rust IPC)"]
+    PROC_TRY -->|non| PROC2["ProcessPoolExecutor (Python)"]
+    POOL --> WORKER["catnip worker"]
+
+    PURE --> BC_MOD["broadcast.rs"]
+    BC_MOD --> BC_SEQ["Sequential (call_vmfunc_sync)"]
+```
 
 ## Opcodes VM
 
-### NdEmptyTopos (66)
+### NdEmptyTopos
 
 Singleton vide `~[]` - élément identité des opérations ND.
 
@@ -34,7 +69,7 @@ OpCode::NdEmptyTopos => {
 NdEmptyTopos 0
 ```
 
-### NdRecursion (67)
+### NdRecursion
 
 Opérateur `~~` - récursion non-déterministe avec 2 formes.
 
@@ -59,12 +94,16 @@ OpCode::NdRecursion => {
         let result = registry.execute_nd_recursion_py(seed, lambda)
         frame.push(result)
     } else {
-        // Declaration: pop lambda, push back (no-op)
+        // Declaration: pop lambda, wrap in NDDeclaration
         let lambda = frame.pop()
-        frame.push(lambda)
+        let decl = NDDeclaration::new(lambda, ctx)
+        frame.push(decl)
     }
 }
 ```
+
+`NDDeclaration` est un wrapper callable : quand `f(seed)` est appelé, il crée un `NDScheduler` et dispatche vers
+`execute_sync`/`execute_thread`/`execute_process` selon les pragmas du contexte.
 
 **Bytecode** :
 
@@ -74,13 +113,13 @@ LoadConst 0        # Push 5
 LoadConst 1        # Push lambda
 NdRecursion 0      # Execute combinator
 
-# Declaration: countdown = ~~ (n, r) => n - 1
+# Declaration: countdown = ~~(n, r) => n - 1
 LoadConst 0        # Push lambda
-NdRecursion 1      # Declaration (no-op)
+NdRecursion 1      # Wrap in NDDeclaration
 StoreLocal 0       # Store countdown
 ```
 
-### NdMap (68)
+### NdMap
 
 Opérateur `~>` - map non-déterministe avec 2 formes.
 
@@ -171,24 +210,21 @@ fn compile_broadcast(node: Broadcast) {
 
 ### Exécution Broadcast ND
 
-Le handler VM détecte les flags ND et itère manuellement :
+Le handler VM détecte les flags ND et délègue au `VmHost` :
 
 ```rust
 OpCode::Broadcast => {
     if flags & FLAG_ND_RECURSION {
         let lambda = frame.pop()
         let target = frame.pop()
-        let results = []
-
-        for elem in target {
-            result = registry.execute_nd_recursion_py(elem, lambda)
-            results.append(result)
-        }
-
-        frame.push(results)  // Preserve tuple type if needed
+        let result = host.broadcast_nd_recursion(py, target, lambda)?
+        frame.push(result)
     }
     else if flags & FLAG_ND_MAP {
-        // Similar for ND map
+        let func = frame.pop()
+        let target = frame.pop()
+        let result = host.broadcast_nd_map(py, target, func)?
+        frame.push(result)
     }
     else {
         // Regular broadcast via registry._apply_broadcast
@@ -199,26 +235,35 @@ OpCode::Broadcast => {
 **Bytecode** :
 
 ```
-# list(5,3,7).[~~ (n, r) => if n <= 1 { 1 } else { n * r(n-1) }]
+# list(5,3,7).[~~(n, r) => if n <= 1 { 1 } else { n * r(n-1) }]
 BuildList 3        # Push [5,3,7]
 LoadConst 0        # Push lambda
 Broadcast 4        # FLAG_ND_RECURSION
 ```
 
-## Délégation au Registry
+## Délégation au VmHost
 
-Les opcodes ND délèguent au Registry Rust qui appelle le NDScheduler :
+Les opcodes ND et le broadcast ND délèguent au trait `VmHost`. Le trait définit deux méthodes avec implémentation par
+défaut (séquentielle) :
+
+```rust
+// vm/host.rs
+trait VmHost {
+    fn broadcast_nd_recursion(&mut self, py, target, lambda) -> Result<...>;
+    fn broadcast_nd_map(&mut self, py, target, func) -> Result<...>;
+}
+```
+
+Deux implémentations :
+
+### ContextHost (Context Python)
+
+Délègue au Registry Rust puis au NDScheduler :
 
 ```rust
 // Registry (catnip_rs/src/core/registry/nd.rs)
 pub fn execute_nd_recursion_py(seed, lambda) -> result {
-    // Get NDScheduler from context (modes: sequential/thread/process)
     let scheduler = context.nd_scheduler
-
-    // Wrap lambda if needed (make callable)
-    let callable = wrap_function_for_nd(lambda)
-
-    // Dispatch based on mode
     match scheduler.mode {
         "thread" => scheduler.execute_thread(seed, callable),
         "process" => scheduler.execute_process(seed, callable),
@@ -231,14 +276,69 @@ Le NDScheduler gère :
 
 - **Memoization** : cache des résultats (si `pragma("nd_memoize", True)`)
 - **Concurrence** : ThreadPoolExecutor ou ProcessPoolExecutor
-- **Batching** : traitement par lots (si `pragma("nd_batch_size", N)`)
+
+### VMHost (Standalone)
+
+Exécution directe avec trois modes configurables via `NdConfig` :
+
+- **Sequential** : boucle simple, `NDVmDecl`/`NDVmRecur` (memoization `RefCell<HashMap>`)
+- **Thread (rayon)** : parallélisme via `par_iter().map_with()`, `NDParallelDecl`/`NDParallelRecur` (memoization
+  `Arc<Mutex<HashMap>>`, depth `AtomicUsize`)
+- **Process** : pool de workers Rust natifs (`catnip worker`) avec IPC bincode. Si la lambda et ses captures ne sont pas
+  freezables, fallback vers `ProcessPoolExecutor` Python avec `_worker_execute_simple`
+
+```rust
+// vm/host.rs - VMHost
+fn broadcast_nd_recursion(&self, py, target, lambda) -> Result<...> {
+    match self.nd_config.mode {
+        NdMode::Sequential => { /* boucle simple */ }
+        NdMode::Thread => {
+            // rayon par_iter, GIL release, thread-local globals
+        }
+        NdMode::Process => {
+            // 1. Tenter le chemin natif Rust
+            if let Some(results) = self.try_native_nd_recursion(py, &elements, lambda)? {
+                return Ok(results);  // WorkerPool IPC bincode
+            }
+            // 2. Fallback Python ProcessPoolExecutor
+        }
+    }
+}
+```
+
+Configuration : `Pipeline.set_nd_mode("thread" | "sequential" | "process")`
+
+**Optimisation NDVmRecur** : `NDVmDecl.__call__` extrait `vm_code`/`vm_closure` du `VMFunction` lambda. Le VM Call
+opcode détecte `NDVmRecur` avec `vm_code` et pousse un frame sur la stack courante au lieu de créer une VM par appel
+récursif. Tracking via `NdRecurEntry` dans `nd_recur_stack` (depth guard, memoization cache, cleanup sur frame pop et
+error path).
+
+### PureVM (catnip_vm)
+
+La PureVM (`catnip_vm/src/vm/broadcast.rs`) implémente broadcast et ND en Rust pur, sans PyO3. Exécution séquentielle
+uniquement.
+
+**Broadcast** : `apply_broadcast()` itère sur les éléments d'une liste/tuple et applique l'opérateur (string binaire ou
+VMFunc) via `apply_single()`. Deep broadcast automatique : si un élément est lui-même une collection, récursion. Type
+preservation : list→list, tuple→tuple. Filter par condition ou masque booléen.
+
+**Appel synchrone** : `call_vmfunc_sync()` sauvegarde le frame_stack (`std::mem::take`), crée un nouveau frame, exécute
+`dispatch()`, puis restaure le frame_stack. Permet d'appeler des VMFunc depuis la logique broadcast sans modifier la
+boucle de dispatch.
+
+**ND recursion** : `nd_recursion_call()` utilise un sentinel `"__nd_recur__"` comme handle `recur`. Le lambda reçoit
+`(seed, recur)`, et le Call opcode intercepte les appels au sentinel pour déclencher la récursion. Stack de lambdas ND
+(`nd_lambda_stack`) pour supporter la récursion imbriquée. Depth guard à 10k.
+
+**ND declaration** : `~~(lambda)` et `~>(func)` produisent des wrappers NativeTuple (`("__nd_decl__", lambda)`,
+`("__nd_lift__", func)`) reconnus par le Call opcode.
 
 ## Pragmas Supportés
 
 Les pragmas ND sont lus par le Context Python et passés au NDScheduler :
 
 ```python
-pragma("nd_mode", "sequential")  # ou "thread", "process"
+pragma("nd_mode", ND.sequential)  # ou ND.thread, ND.process
 pragma("nd_workers", 8)          # nombre de workers
 pragma("nd_memoize", True)       # activer memoization
 pragma("nd_batch_size", 100)     # taille des batches
@@ -281,7 +381,7 @@ if ~[] { 1 } else { 2 }  # Returns 2 (NDTopos is falsy)
 
 ### Dispatch O(1)
 
-Les opcodes ND utilisent le dispatch direct du VM (jump table) :
+Les opcodes ND utilisent le dispatch direct de la VM (jump table) :
 
 ```rust
 match opcode {
@@ -295,11 +395,11 @@ Coût : ~5-10 ns par dispatch (vs ~100-200 ns pour lookup Python dict).
 
 ### Allocation Minimale
 
-Les formes declaration/lift sont des no-ops qui évitent toute allocation :
+La forme lift est un no-op (0 alloc). La forme declaration alloue un `NDDeclaration` wrapper (1 alloc) :
 
 ```rust
 // Declaration: ~~ lambda
-NdRecursion 1      # Pop + Push same lambda (0 alloc)
+NdRecursion 1      # Pop lambda, wrap in NDDeclaration (1 alloc)
 
 // Lift: ~> f
 NdMap 1            # Pop + Push same func (0 alloc)
@@ -309,11 +409,12 @@ NdMap 1            # Pop + Push same func (0 alloc)
 
 Les opérations ND actuelles ne sont pas JIT-compilables car elles :
 
-1. Appellent du code Python (NDScheduler)
-1. Peuvent bloquer (modes thread/process)
+1. Peuvent bloquer (modes thread/process/rayon)
 1. Ont des side-effects (memoization)
+1. Le chemin ContextHost appelle du code Python (NDScheduler)
 
-Pistes d'optimisation futures :
+Le chemin VMHost (standalone) est plus proche du JIT : la boucle séquentielle est du Rust pur. Pistes d'optimisation
+futures :
 
 - **Inline sequential mode** : compiler la récursion directement en loop
 - **Specialize pure functions** : détection + compilation native
@@ -326,13 +427,15 @@ AST et VM.
 
 ## Références
 
-- `catnip_rs/src/vm/` : opcodes, compilation, handlers VM
-- `catnip_rs/src/core/registry/` : logique ND (AST + VM)
-- `catnip/nd.py` : NDScheduler, NDTopos, NDRecur
-- `docs/lang/ND_RECURSION.md` : spécification langage
+- `catnip_rs/src/vm/host.rs` : trait `VmHost`, `NdMode`, `NdConfig`, broadcast ND delegation
+- `catnip_rs/src/vm/core.rs` : handlers VM (opcodes ND, dispatch au host)
+- `catnip_rs/src/nd/` : `NDScheduler`, `NDVmDecl`, `NDParallelDecl`, `NDRecur`
+- `catnip_rs/src/core/registry/nd.rs` : logique ND AST (Registry)
+- `catnip_vm/src/vm/broadcast.rs` : broadcast et ND en PureVM (Rust pur, sans PyO3)
+- `catnip_vm/src/vm/core.rs` : dispatch loop PureVM (opcodes Broadcast, NdRecursion, NdMap, NdEmptyTopos)
+- `catnip/nd.py` : NDTopos, worker functions (process mode)
+- `docs/lang/PRAGMAS.md` : spécification langage (section ND-récursion)
 
-> Cette architecture unifie les modes AST et VM via une délégation au Registry. L'utilisateur ne voit aucune différence
-> de comportement, seule la performance change.
->
-> Le VM évite l'overhead de l'interprétation AST (~10-20x plus rapide) tout en conservant la flexibilité du NDScheduler
-> pour les modes parallèles.
+> Cette architecture unifie les modes AST et VM via le trait `VmHost`. L'utilisateur ne voit aucune différence de
+> comportement, seul le backend d'exécution change. La VM standalone supporte le parallélisme rayon sans dépendance au
+> NDScheduler Python.

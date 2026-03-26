@@ -3,6 +3,7 @@
 //!
 //! Port of catnip/semantic/optimizer.pyx
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
@@ -28,11 +29,7 @@ pub trait OptimizationPass {
 }
 
 /// Default visit implementation - dispatches based on type
-pub fn default_visit(
-    pass: &dyn OptimizationPass,
-    py: Python<'_>,
-    node: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
+pub fn default_visit(pass: &dyn OptimizationPass, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // Handle lists recursively
     if node.is_instance_of::<PyList>() {
         let list = node.cast::<PyList>()?;
@@ -61,8 +58,8 @@ pub fn default_visit(
     let type_name_str = type_name.to_str()?;
 
     match type_name_str {
-        "IR" => pass.visit_ir(py, node),
-        "Op" => pass.visit_op(py, node),
+        // IR and Op are the same class (IR = Op alias in transformer.py)
+        "IR" | "Op" => pass.visit_ir(py, node),
         "Ref" => pass.visit_ref(py, node),
         _ => {
             // Literals and other nodes pass through unchanged
@@ -72,11 +69,7 @@ pub fn default_visit(
 }
 
 /// Default visit_ir implementation - visits args and kwargs recursively
-pub fn default_visit_ir(
-    pass: &dyn OptimizationPass,
-    py: Python<'_>,
-    node: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
+pub fn default_visit_ir(pass: &dyn OptimizationPass, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // Visit args
     let args = node.getattr("args")?;
     let mut visited_args = Vec::new();
@@ -115,18 +108,14 @@ pub fn default_visit_ir(
     }
 
     // Create new IR with visited children
-    let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+    let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
     let ident = node.getattr("ident")?;
     let new_node = ir_class.call1((ident, visited_args_tuple, visited_kwargs))?;
     Ok(new_node.unbind())
 }
 
 /// Default visit_op implementation - visits args and kwargs recursively
-pub fn default_visit_op(
-    pass: &dyn OptimizationPass,
-    py: Python<'_>,
-    node: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
+pub fn default_visit_op(pass: &dyn OptimizationPass, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // Visit args
     let args = node.getattr("args")?;
     let mut visited_args = Vec::new();
@@ -165,7 +154,7 @@ pub fn default_visit_op(
     }
 
     // Create new Op with visited children
-    let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+    let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
     let ident = node.getattr("ident")?;
     let new_node = op_class.call1((ident, visited_args_tuple, visited_kwargs))?;
     Ok(new_node.unbind())

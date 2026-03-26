@@ -7,11 +7,7 @@ use pyo3::types::PyTuple;
 
 impl Registry {
     /// Get an attribute from an object: getattr(parent, ident)
-    pub(crate) fn op_getattr(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_getattr(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "getattr requires 2 arguments: parent, ident",
@@ -32,11 +28,7 @@ impl Registry {
     }
 
     /// Get an item from an object: obj[index]
-    pub(crate) fn op_getitem(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_getitem(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "getitem requires 2 arguments: obj, index",
@@ -54,11 +46,7 @@ impl Registry {
     }
 
     /// Set an attribute on an object: setattr(obj, attr, value)
-    pub(crate) fn op_setattr(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_setattr(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 3 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "setattr requires 3 arguments: obj, attr, value",
@@ -84,11 +72,7 @@ impl Registry {
     }
 
     /// Set an item in an object: obj[index] = value
-    pub(crate) fn op_setitem(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_setitem(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 3 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "setitem requires 3 arguments: obj, index, value",
@@ -111,11 +95,7 @@ impl Registry {
     }
 
     /// Create a slice object: slice(start, stop, step)
-    pub(crate) fn op_slice(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_slice(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 3 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "slice requires 3 arguments: start, stop, step",

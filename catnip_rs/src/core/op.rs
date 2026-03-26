@@ -1,4 +1,5 @@
 // FILE: catnip_rs/src/core/op.rs
+use crate::constants::*;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -76,17 +77,17 @@ impl Op {
             // Handle common aliases for backward compatibility
             let normalized = match str_val.to_lowercase().as_str() {
                 "set_local" => "SET_LOCALS".to_string(),
-                "inv" => "BNOT".to_string(), // inv is alias for bitwise NOT
+                "inv" => "BNOT".to_string(),             // inv is alias for bitwise NOT
                 "not" | "bool_not" => "NOT".to_string(), // logical NOT
                 "and" | "bool_and" => "AND".to_string(), // logical AND
-                "or" | "bool_or" => "OR".to_string(), // logical OR
-                "bit_and" => "BAND".to_string(), // bitwise AND
-                "bit_or" => "BOR".to_string(), // bitwise OR
-                "bit_xor" => "BXOR".to_string(), // bitwise XOR
+                "or" | "bool_or" => "OR".to_string(),    // logical OR
+                "bit_and" => "BAND".to_string(),         // bitwise AND
+                "bit_or" => "BOR".to_string(),           // bitwise OR
+                "bit_xor" => "BXOR".to_string(),         // bitwise XOR
                 _ => str_val.to_uppercase(),
             };
 
-            let opcode_module = py.import("catnip.semantic.opcode")?;
+            let opcode_module = py.import(PY_MOD_SEMANTIC_OPCODE)?;
             let opcode_class = opcode_module.getattr("OpCode")?;
             let opcode_attr = opcode_class.getattr(normalized.as_str())?;
             opcode_attr.extract::<i32>()?
@@ -134,13 +135,11 @@ impl Op {
             let kwargs_repr = self.kwargs.bind(py).repr()?;
 
             // Convert opcode integer to name via Python OpCode enum
-            let ident_repr = match py.import("catnip.semantic.opcode") {
+            let ident_repr = match py.import(PY_MOD_SEMANTIC_OPCODE) {
                 Ok(opcode_module) => match opcode_module.getattr("OpCode") {
                     Ok(opcode_class) => match opcode_class.call1((self.ident,)) {
                         Ok(opcode) => match opcode.getattr("name") {
-                            Ok(name) => name
-                                .extract::<String>()
-                                .unwrap_or_else(|_| self.ident.to_string()),
+                            Ok(name) => name.extract::<String>().unwrap_or_else(|_| self.ident.to_string()),
                             Err(_) => self.ident.to_string(),
                         },
                         Err(_) => self.ident.to_string(),

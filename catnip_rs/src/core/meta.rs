@@ -20,10 +20,8 @@ pub struct CatnipMeta {
 #[pymethods]
 impl CatnipMeta {
     #[new]
-    fn new() -> Self {
-        Self {
-            attrs: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self { attrs: HashMap::new() }
     }
 
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
@@ -107,11 +105,7 @@ impl CatnipMeta {
     /// Validate and resolve META.exports against a globals dict.
     ///
     /// Returns a dict of {name: value} if exports is set, or None if not.
-    fn resolve_exports(
-        &self,
-        py: Python<'_>,
-        globals: &Bound<'_, PyDict>,
-    ) -> PyResult<Option<Py<PyDict>>> {
+    fn resolve_exports(&self, py: Python<'_>, globals: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyDict>>> {
         let exports_val = match self.attrs.get("exports") {
             Some(v) => v.bind(py),
             None => return Ok(None),
@@ -134,11 +128,13 @@ impl CatnipMeta {
             let name: String = item
                 .extract()
                 .map_err(|_| PyTypeError::new_err("META.exports entries must be strings"))?;
-            match globals.get_item(&name)? {
-                Some(value) => {
-                    result.set_item(&name, value)?;
+            // Support both dict and dict-like objects (GlobalsProxy)
+            let value = globals.get_item(&name);
+            match value {
+                Ok(v) => {
+                    result.set_item(&name, v)?;
                 }
-                None => {
+                Err(_) => {
                     return Err(PyAttributeError::new_err(format!(
                         "META.exports references unknown symbol: '{name}'"
                     )));
@@ -147,6 +143,12 @@ impl CatnipMeta {
         }
 
         Ok(Some(result.unbind()))
+    }
+}
+
+impl Default for CatnipMeta {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

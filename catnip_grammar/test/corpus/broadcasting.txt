@@ -10,7 +10,13 @@ xs.[+ 10]
   (statement
     (chained
       (identifier)
-      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+      (broadcast
+        (broadcast_op
+          (broadcast_binary
+            (bcast_op)
+            (literal
+              (number
+                (integer)))))))))
 
 ================================================================================
 Broadcasting comparison
@@ -24,7 +30,13 @@ xs.[> 0]
   (statement
     (chained
       (identifier)
-      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+      (broadcast
+        (broadcast_op
+          (broadcast_binary
+            (bcast_op)
+            (literal
+              (number
+                (integer)))))))))
 
 ================================================================================
 Broadcasting unary operation
@@ -38,7 +50,10 @@ xs.[abs]
   (statement
     (chained
       (identifier)
-      (broadcast (broadcast_op (broadcast_unary (bcast_unary_op)))))))
+      (broadcast
+        (broadcast_op
+          (broadcast_unary
+            (bcast_unary_op)))))))
 
 ================================================================================
 Broadcasting with filter
@@ -54,7 +69,12 @@ xs.[if > 0]
       (identifier)
       (broadcast
         (broadcast_op
-          (broadcast_if (broadcast_binary (bcast_op) (integer))))))))
+          (broadcast_if
+            (broadcast_binary
+              (bcast_op)
+              (literal
+                (number
+                  (integer))))))))))
 
 ================================================================================
 Chained broadcasting
@@ -68,8 +88,20 @@ xs.[+ 1].[* 2]
   (statement
     (chained
       (identifier)
-      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer))))
-      (broadcast (broadcast_op (broadcast_binary (bcast_op) (integer)))))))
+      (broadcast
+        (broadcast_op
+          (broadcast_binary
+            (bcast_op)
+            (literal
+              (number
+                (integer))))))
+      (broadcast
+        (broadcast_op
+          (broadcast_binary
+            (bcast_op)
+            (literal
+              (number
+                (integer)))))))))
 
 ================================================================================
 Broadcasting with lambda
@@ -86,8 +118,17 @@ xs.[(x) => { x * 2 }]
       (broadcast
         (broadcast_op
           (lambda_expr
-            (lambda_params (lambda_param name: (identifier)))
-            (block (statement (multiplicative (identifier) (mul_div_op) (integer))))))))))
+            (lambda_params
+              (lambda_param
+                name: (identifier)))
+            (block
+              (statement
+                (multiplicative
+                  (identifier)
+                  (mul_div_op)
+                  (literal
+                    (number
+                      (integer))))))))))))
 
 ================================================================================
 Full slice
@@ -101,4 +142,11 @@ xs.[1:5]
   (statement
     (chained
       (identifier)
-      (fullslice (slice_range (integer) (integer))))))
+      (fullslice
+        (slice_range
+          (literal
+            (number
+              (integer)))
+          (literal
+            (number
+              (integer))))))))

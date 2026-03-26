@@ -6,47 +6,18 @@
 
 use super::edge::EdgeType;
 use super::graph::ControlFlowGraph;
+use crate::constants::*;
 use crate::core::op::Op;
 use crate::ir::opcode::IROpCode;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
-use std::collections::{HashMap, HashSet};
-
-/// Type of control flow region.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-enum RegionType {
-    /// Sequential block of instructions
-    Sequence,
-    /// If-then-else with optional elif branches
-    IfThenElse {
-        branches: Vec<(usize, usize)>, // (condition_block, body_block)
-        else_block: Option<usize>,
-    },
-    /// While loop
-    While { header: usize, body: usize },
-    /// For loop (currently treated as while)
-    For { header: usize, body: usize },
-}
-
-/// A control flow region with its entry, exit, and nested regions.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct Region {
-    entry: usize,
-    exit: usize,
-    region_type: RegionType,
-    blocks: HashSet<usize>,
-}
+use std::collections::HashSet;
 
 /// Region-based CFG reconstructor.
 pub struct RegionReconstructor<'py> {
     py: Python<'py>,
     cfg: &'py ControlFlowGraph,
     visited: HashSet<usize>,
-    /// Map from block to its region
-    #[allow(dead_code)]
-    block_regions: HashMap<usize, usize>,
 }
 
 impl<'py> RegionReconstructor<'py> {
@@ -64,7 +35,6 @@ impl<'py> RegionReconstructor<'py> {
             py,
             cfg,
             visited: HashSet::new(),
-            block_regions: HashMap::new(),
         }
     }
 
@@ -146,14 +116,16 @@ impl<'py> RegionReconstructor<'py> {
                         }
                     } else {
                         // Regular if/else structure
-                        // Extract condition from last instruction
-                        let (condition, other_instrs) = self.extract_condition_from_block(block);
+                        // Use preserved condition from CFG construction
+                        let condition = block.condition.clone();
 
-                        // Add other instructions (Nops already filtered by extract_condition)
+                        // Add block instructions (filter Nops)
                         result.extend(
-                            other_instrs
-                                .into_iter()
-                                .filter(|op| op.ident != IROpCode::Nop as i32),
+                            block
+                                .instructions
+                                .iter()
+                                .filter(|op| op.ident != IROpCode::Nop as i32)
+                                .cloned(),
                         );
 
                         // Reconstruct if statement
@@ -178,49 +150,6 @@ impl<'py> RegionReconstructor<'py> {
         }
 
         Ok(result)
-    }
-
-    /// Extract condition from block instructions.
-    /// Returns (condition_op, remaining_instructions).
-    fn extract_condition_from_block(
-        &self,
-        block: &crate::cfg::basic_block::BasicBlock,
-    ) -> (Option<Op>, Vec<Op>) {
-        if block.instructions.is_empty() {
-            return (None, Vec::new());
-        }
-
-        // The last instruction might be the condition for an if statement
-        // Check if it's a comparison or boolean expression
-        let last_idx = block.instructions.len() - 1;
-        let last_op = &block.instructions[last_idx];
-
-        // Check if this looks like a condition (comparison, boolean op, etc.)
-        let is_condition = matches!(
-            last_op.ident,
-            op if op == IROpCode::Eq as i32
-                || op == IROpCode::Ne as i32
-                || op == IROpCode::Lt as i32
-                || op == IROpCode::Le as i32
-                || op == IROpCode::Gt as i32
-                || op == IROpCode::Ge as i32
-                || op == IROpCode::And as i32
-                || op == IROpCode::Or as i32
-                || op == IROpCode::Not as i32
-        );
-
-        if is_condition {
-            // Last op is the condition
-            let condition = last_op.clone();
-            let other_instrs = block.instructions[..last_idx].to_vec();
-            (Some(condition), other_instrs)
-        } else {
-            // No clear condition - might be a variable reference
-            // Use the last instruction as condition
-            let condition = last_op.clone();
-            let other_instrs = block.instructions[..last_idx].to_vec();
-            (Some(condition), other_instrs)
-        }
     }
 
     /// Reconstruct an if/elif/else structure with extracted condition.
@@ -279,8 +208,8 @@ impl<'py> RegionReconstructor<'py> {
         // Find loop exit (not used yet, but might be needed for more complex loops)
         let _loop_exit = self.find_loop_exit(header)?;
 
-        // Extract condition from header block
-        let (condition, _other_instrs) = self.extract_condition_from_block(header_block);
+        // Use preserved condition from CFG construction
+        let condition = header_block.condition.clone();
 
         // Find loop body (the target of the ConditionalTrue edge from header)
         let body_block = self.find_loop_body(header)?;
@@ -292,11 +221,8 @@ impl<'py> RegionReconstructor<'py> {
             Vec::new()
         };
 
-        // Build while Op
-        let condition_op = condition.unwrap_or_else(|| {
-            // Fallback to True if no condition found
-            self.create_placeholder_condition().unwrap()
-        });
+        // Build while Op (fall back to True only if condition truly missing)
+        let condition_op = condition.unwrap_or_else(|| self.create_placeholder_condition().unwrap());
 
         let while_op = self.build_while_op(condition_op, body_ops)?;
 
@@ -391,12 +317,7 @@ impl<'py> RegionReconstructor<'py> {
     }
 
     /// Find merge point where two branches converge.
-    fn find_merge_point(
-        &self,
-        branch1: usize,
-        branch2: usize,
-        default_end: usize,
-    ) -> PyResult<usize> {
+    fn find_merge_point(&self, branch1: usize, branch2: usize, default_end: usize) -> PyResult<usize> {
         // Use post-dominance: find the first block that post-dominates both branches
         let successors1 = self.get_all_successors(branch1);
         let successors2 = self.get_all_successors(branch2);
@@ -444,7 +365,7 @@ impl<'py> RegionReconstructor<'py> {
         let builtins = self.py.import("builtins")?;
         let true_val = builtins.getattr("True")?;
 
-        let op_class = self.py.import("catnip._rs")?.getattr("Op")?;
+        let op_class = self.py.import(PY_MOD_RS)?.getattr("Op")?;
         let ident = IROpCode::Nop as i32;
         let args = PyTuple::new(self.py, vec![true_val])?;
         let kwargs = PyDict::new(self.py);
@@ -455,11 +376,7 @@ impl<'py> RegionReconstructor<'py> {
     }
 
     /// Build an if Op from branches and else block.
-    fn build_if_op_with_branches(
-        &self,
-        branches: Vec<(Op, Vec<Op>)>,
-        else_ops: Vec<Op>,
-    ) -> PyResult<Op> {
+    fn build_if_op_with_branches(&self, branches: Vec<(Op, Vec<Op>)>, else_ops: Vec<Op>) -> PyResult<Op> {
         // Build branches list: [(condition, block), ...]
         let py_branches = PyList::empty(self.py);
 
@@ -468,10 +385,7 @@ impl<'py> RegionReconstructor<'py> {
             let condition_py: Py<PyAny> = Py::new(self.py, condition)?.into();
             let body_py: Py<PyAny> = Py::new(self.py, body_block)?.into();
 
-            let branch_tuple = PyTuple::new(
-                self.py,
-                vec![condition_py.bind(self.py), body_py.bind(self.py)],
-            )?;
+            let branch_tuple = PyTuple::new(self.py, vec![condition_py.bind(self.py), body_py.bind(self.py)])?;
             py_branches.append(branch_tuple)?;
         }
 
@@ -479,16 +393,13 @@ impl<'py> RegionReconstructor<'py> {
         let args_tuple = if !else_ops.is_empty() {
             let else_block = self.build_block_op(else_ops)?;
             let else_py: Py<PyAny> = Py::new(self.py, else_block)?.into();
-            PyTuple::new(
-                self.py,
-                vec![&py_branches as &Bound<'_, PyAny>, else_py.bind(self.py)],
-            )?
+            PyTuple::new(self.py, vec![&py_branches as &Bound<'_, PyAny>, else_py.bind(self.py)])?
         } else {
             PyTuple::new(self.py, vec![&py_branches as &Bound<'_, PyAny>])?
         };
 
         // Create if Op
-        let op_class = self.py.import("catnip._rs")?.getattr("Op")?;
+        let op_class = self.py.import(PY_MOD_RS)?.getattr("Op")?;
         let ident = IROpCode::OpIf as i32;
         let kwargs = PyDict::new(self.py);
 
@@ -504,13 +415,10 @@ impl<'py> RegionReconstructor<'py> {
         let condition_py: Py<PyAny> = Py::new(self.py, condition)?.into();
         let body_py: Py<PyAny> = Py::new(self.py, body_block)?.into();
 
-        let args_tuple = PyTuple::new(
-            self.py,
-            vec![condition_py.bind(self.py), body_py.bind(self.py)],
-        )?;
+        let args_tuple = PyTuple::new(self.py, vec![condition_py.bind(self.py), body_py.bind(self.py)])?;
 
         // Create while Op
-        let op_class = self.py.import("catnip._rs")?.getattr("Op")?;
+        let op_class = self.py.import(PY_MOD_RS)?.getattr("Op")?;
         let ident = IROpCode::OpWhile as i32;
         let kwargs = PyDict::new(self.py);
 
@@ -526,12 +434,11 @@ impl<'py> RegionReconstructor<'py> {
             .map(|op| -> PyResult<Py<PyAny>> { Ok(Py::new(self.py, op)?.into()) })
             .collect::<PyResult<_>>()?;
 
-        let bound_ops: Vec<&Bound<'_, PyAny>> =
-            py_ops.iter().map(|py_obj| py_obj.bind(self.py)).collect();
+        let bound_ops: Vec<&Bound<'_, PyAny>> = py_ops.iter().map(|py_obj| py_obj.bind(self.py)).collect();
 
         let args_tuple = PyTuple::new(self.py, bound_ops)?;
 
-        let op_class = self.py.import("catnip._rs")?.getattr("Op")?;
+        let op_class = self.py.import(PY_MOD_RS)?.getattr("Op")?;
         let ident = IROpCode::OpBlock as i32;
         let kwargs = PyDict::new(self.py);
 

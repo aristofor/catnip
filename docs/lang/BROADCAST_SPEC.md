@@ -1,6 +1,6 @@
 # BROADCAST_SPEC
 
-Voir aussi : [BROADCAST_RATIONALE.md](./BROADCAST_RATIONALE.md) pour la motivation et les comparaisons.
+Voir aussi : [BROADCAST_RATIONALE](BROADCAST_RATIONALE.md) pour la motivation et les comparaisons.
 
 ## Le Concept
 
@@ -122,14 +122,14 @@ Le broadcasting supporte deux modes distincts :
 
 ```catnip
 data = list(3, 8, 2, 9, 5)
-masks = data.[> 5]      # [False, True, False, True, False]
+masks = data.[> 5]      # → [False, True, False, True, False]
 ```
 
 **Filter (filtrage)** : Ne garde que les éléments qui satisfont une condition
 
 ```catnip
 data = list(3, 8, 2, 9, 5)
-filtered = data.[if > 5]  # [8, 9]
+filtered = data.[if > 5]  # → [8, 9]
 ```
 
 La différence est critique pour le chaînage d'opérations :
@@ -151,7 +151,7 @@ Un masque booléen (liste/tuple de bool) peut être utilisé pour filtrer :
 ```catnip
 data = list(10, 20, 30, 40)
 mask = list(True, False, True, False)
-result = data.[mask]    # [10, 30]
+result = data.[mask]    # → [10, 30]
 ```
 
 Workflow suggéré : générer un masque puis le réutiliser
@@ -270,16 +270,16 @@ a = list(1, 2, 3)
 b = list(10, 20, 30)
 
 # Addition élément par élément
-a.[+ b]        # [11, 22, 33]
+a.[+ b]        # → [11, 22, 33]
 
 # Multiplication élément par élément
-a.[* b]        # [10, 40, 90]
+a.[* b]        # → [10, 40, 90]
 
 # Division élément par élément
-b.[/ a]        # [10.0, 10.0, 10.0]
+b.[/ a]        # → [10.0, 10.0, 10.0]
 
 # Puissance élément par élément
-a.[** b]       # [1**10, 2**20, 3**30]
+a.[** b]       # → [1**10, 2**20, 3**30]
 ```
 
 Les deux collections doivent avoir la même taille, sinon le résultat s'arrête à la plus courte (comportement `zip`).
@@ -418,16 +418,16 @@ consommés à plat et produisent une `list`.
 
 ```catnip
 # set : itéré, résultat en list
-set(10, 20, 30).[* 2]         # [20, 40, 60]
+set(10, 20, 30).[* 2]         # → [20, 40, 60]
 
 # dict : itère sur les clés (strings), pas les valeurs
-dict(a=1).[* 3]                # ["aaa"]
+dict(a=1).[* 3]               # → ['aaa']
 
 # range : consommé comme itérable
-range(4).[+ 10]               # [10, 11, 12, 13]
+range(4).[+ 10]               # → [10, 11, 12, 13]
 
 # string : scalaire, pas itéré caractère par caractère
-"hello".[* 3]                  # "hellohellohello"
+"hello".[* 3]                 # → "hellohellohello"
 ```
 
 > Les dicts itèrent sur les clés, pas les valeurs. C'est le comportement standard de `for k in dict` en Python. Si on
@@ -441,29 +441,56 @@ appliquée qu'aux valeurs terminales ; la structure (shape) est préservée.
 ```catnip
 # Broadcast deep : descente automatique
 matrix = list(list(1, 2), list(3, 4))
-matrix.[* 2]  # [[2, 4], [6, 8]]
+matrix.[* 2]  # → [[2, 4], [6, 8]]
 
 # Profondeur mixte
-list(1, list(2, 3)).[+ 10]  # [11, [12, 13]]
+list(1, list(2, 3)).[+ 10]  # → [11, [12, 13]]
 
 # Tensor 3D
 cube = list(
     list(list(1, 2), list(3, 4)),
     list(list(5, 6), list(7, 8))
 )
-cube.[+ 10]  # [[[11, 12], [13, 14]], [[15, 16], [17, 18]]]
+cube.[+ 10]  # → [[[11, 12], [13, 14]], [[15, 16], [17, 18]]]
 ```
+
+### Operand Vectoriel
+
+Quand l'operand est une collection (liste ou tuple), le broadcast adapte son comportement selon la profondeur du target
+:
+
+- **Target plat** : zip élément par élément (même sémantique que les opérations binaires vectorielles ci-dessus)
+- **Target imbriqué** : l'operand est propagé dans chaque sous-collection, puis zippé au niveau le plus bas
+
+```catnip
+# Target plat : zip
+list(1, 2, 3).[+ list(10, 20, 30)]
+# → [11, 22, 33]
+
+# Target imbriqué : propagation puis zip par ligne
+matrix = list(list(1, 2, 3), list(4, 5, 6))
+matrix.[+ list(10, 20, 30)]
+# → [[11, 22, 33], [14, 25, 36]]
+
+# Facteurs par colonne
+matrix.[* list(1, 0.9, 1)]
+# → [[1, 1.8, 3], [4, 4.5, 6]]
+```
+
+La détection se fait sur le premier élément du target : si c'est une liste ou un tuple, le broadcast récurse ; sinon, il
+zippe.
 
 Les opérateurs ND (`~>` et `~~`) suivent la même sémantique de descente implicite :
 
 ```catnip
 # ND-map implicite
 matrix = list(list(-1, 2), list(-3, 4))
-matrix.[~> abs]  # [[1, 2], [3, 4]]
+matrix.[~> abs]  # → [[1, 2], [3, 4]]
 
 # ND-recursion implicite
 nums = list(3, 5)
-nums.[~~ (n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]  # [6, 120]
+nums.[~~(n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]
+# → [6, 120]
 ```
 
 ### Forme Explicite
@@ -480,6 +507,8 @@ puisque le broadcast descend automatiquement.
    feuilles changent.
 1. **Composition** : pour fonctions pures, `A.[f].[g] == A.[(x) => { g(f(x)) }]`.
 1. **Déterminisme** : pour fonctions pures, l'ordre de parcours interne n'affecte pas le résultat.
+
+<!-- check: no-check -->
 
 ```catnip
 # Invariant 3: shape conservé
@@ -509,3 +538,61 @@ A.[~> f].[~> g] == A.[~> (x) => { g(f(x)) }]
 - La forme du tensor (dimensions, imbrication) est préservée
 - Nombre de dimensions constant
 - Seules les valeurs scalaires changent
+
+## Pièges Possibles
+
+### Broadcast sur des listes de dicts ou de tuples
+
+Le broadcast descend récursivement dans tous les itérables (listes, tuples, dicts, sets) jusqu'aux feuilles scalaires.
+Cela signifie que broadcaster sur une liste de dicts ou de tuples ne passe **pas** le dict/tuple entier à la fonction --
+il descend dedans.
+
+<!-- check: no-check -->
+
+```catnip
+# Piège : on veut passer chaque dict à f, mais le broadcast descend dans les clés
+specs = list(dict(label="A", value=1), dict(label="B", value=2))
+specs.[some_function]  # some_function reçoit "label", "value" (les clés), pas les dicts
+
+# Même piège avec les tuples : le broadcast descend dans les éléments
+rows = list(tuple(1, "Alice"), tuple(2, "Bob"))
+rows.[some_function]   # some_function reçoit 1, "Alice", 2, "Bob" (les éléments)
+```
+
+**Pourquoi ?** Les dicts et tuples sont itérables. Le broadcast les traverse comme il traverse les listes imbriquées.
+Seuls les **scalaires** (`int`, `float`, `str`, `bool`, `None`) et les **structs** sont des feuilles.
+
+**Solution : utiliser des structs**
+
+Les structs ne sont pas itérables -- le broadcast les traite comme des feuilles et les passe entiers à la fonction :
+
+```catnip
+struct Metric {
+    label
+    value
+
+    display(self) => { f"{self.label}: {self.value}" }
+}
+
+metrics = list(Metric("A", 1), Metric("B", 2))
+metrics.[(m) => { m.display() }]  # chaque Metric est passé entier à la lambda
+# → ['A: 1', 'B: 2']
+```
+
+**Solution alternative : boucle `for`**
+
+Quand les données viennent d'une source externe (SQL, JSON) sous forme de tuples ou dicts, une boucle `for` est plus
+directe qu'un broadcast :
+
+<!-- check: no-check -->
+
+```catnip
+rows = db.execute("SELECT name, price FROM products").fetchall()
+for row in rows {
+    print(f"{row[0]} : {row[1]} EUR")
+}
+```
+
+> Le broadcast est un opérateur dimensionnel, pas un `map`. Il traverse la structure jusqu'aux scalaires. Si l'élément
+> qu'on veut traiter est lui-même une structure traversable, il faut soit le rendre opaque (struct), soit ne pas
+> utiliser le broadcast.

@@ -24,26 +24,26 @@ ______________________________________________________________________
 ### 1. Créer un script avec shebang
 
 ```bash
-cat > hello.cat << 'EOF'
+cat > born_to_segfault.cat << 'EOF'
 #!/usr/bin/env catnip
-# Hello World script
+# BORN TO SEGFAULT script
 
 name = 'World'
-print('Hello, ' + name + '!')
+print('BORN TO SEGFAULT,' + name + '!')
 EOF
 ```
 
 ### 2. Rendre le script exécutable
 
 ```bash
-chmod +x hello.cat
+chmod +x born_to_segfault.cat
 ```
 
 ### 3. Exécuter
 
 ```bash
-./hello.cat
-# Output: Hello, World!
+./born_to_segfault.cat
+# Output: BORN TO SEGFAULT, World!
 ```
 
 ______________________________________________________________________
@@ -109,11 +109,11 @@ print('Processing ' + input_file)
 
 ```bash
 ./process-data.cat data.json
-# ⇒ Processing data.json
+# → Processing data.json
 
 # Ou sans shebang :
 catnip process-data.cat data.json
-# ⇒ Processing data.json
+# → Processing data.json
 ```
 
 `argv[0]` contient le chemin du script, les arguments suivent à partir de `argv[1]`.
@@ -182,7 +182,6 @@ ______________________________________________________________________
 ```bash
 #!/usr/bin/env catnip
 # Valider des fichiers de configuration
-# Usage: validate-config
 
 config = dict(
     port=8080,
@@ -211,7 +210,6 @@ validate-config  # Utiliser n'importe où
 ```bash
 #!/usr/bin/env catnip
 # Calculatrice rapide
-# Usage: calc
 
 fib = (n) => {
     if n <= 1 { n }
@@ -227,7 +225,6 @@ print('Fibonacci(20) = ' + str(fib(20)))
 ```bash
 #!/usr/bin/env catnip
 # Statistiques sur données
-# Usage: data-stats
 
 numbers = list(10, 20, 30, 40, 50)
 
@@ -326,7 +323,7 @@ result = catnip.execute()
 
 Catnip standalone ne peut pas faire `import requests`.
 
-**Workaround** : Embedded mode avec `import()`
+**Workaround** : mode DSL avec `import()`
 
 ```python
 #!/usr/bin/env catnip
@@ -354,19 +351,23 @@ catnip.execute()
 
 ______________________________________________________________________
 
-## Quand utiliser shebang vs embedded
+## Quand utiliser shebang vs DSL
 
-| Use Case                | Shebang Standalone | Embedded     |
-| ----------------------- | ------------------ | ------------ |
-| Script personnel        | ✓ Simple           | ▲✓ Overhead  |
-| Pre-commit hook         | ✓ Direct           | ▲✓ Complexe  |
-| Cron job                | ✓ Facile           | ▲✓ Setup     |
-| Calculs rapides         | ✓ Optimal          | ✗ Trop lourd |
-| Règles métier app       | ✗ Pas flexible     | ✓ Idéal      |
-| Scripts utilisateur web | ✗ Pas sécurisé     | ✓ Sandbox    |
-| Workflows complexes     | ✗ Limitations      | ✓ Extensible |
+Utilise cette grille de décision :
 
-**Règle** : Shebang pour scripts personnels simples, Embedded pour intégration applicative.
+| Critère                                                | Shebang standalone          | DSL (intégré via API `Catnip`)    |
+| ------------------------------------------------------ | --------------------------- | --------------------------------- |
+| Exécution locale rapide (CLI, cron, hook)              | ✓ Excellent choix           | ▲ Possible mais plus lourd        |
+| Besoin de libs Python externes (`requests`, DB, SDK)   | ✗ Non (hors stdlib Catnip)  | ✓ Oui, via l'hôte Python          |
+| Code Catnip fourni par des utilisateurs                | ✗ Risqué sans contrôle fort | ✓ Préféré avec sandbox/validation |
+| Intégration à une application (web, workers, pipeline) | ▲ Possible mais limité      | ✓ Conçu pour ça                   |
+| Observabilité (logs structurés, traces, métriques)     | ▲ Basique                   | ✓ Plus facile à industrialiser    |
+| Contrôle d'exécution (timeouts, quotas, politique)     | ▲ Limité                    | ✓ Contrôlable côté hôte           |
+
+**Raccourci pratique** :
+
+- `Shebang` si tu veux juste exécuter un script Catnip local et simple.
+- `DSL` si Catnip fait partie d'un système applicatif ou d'un flux multi-services.
 
 ______________________________________________________________________
 
@@ -417,7 +418,7 @@ ______________________________________________________________________
 
 ## Exemples complets
 
-Voir [`docs/examples/standalone/`](../examples/standalone/) pour 5 exemples de scripts avec shebang :
+Voir [`docs/examples/run/`](../examples/run/) pour 5 exemples de scripts avec shebang :
 
 1. **transform_csv.cat** - Transformation de données
 1. **config_validator.cat** - Validation de config
@@ -432,5 +433,5 @@ ______________________________________________________________________
 ## Ressources
 
 - [CLI Documentation](CLI.md) - Options CLI complètes
-- [Standalone Examples](../examples/standalone/) - Scripts exemples
+- [Standalone Examples](../examples/run/) - Scripts exemples
 - [Embedding Guide](EMBEDDING_GUIDE.md) - Alternative pour scripts complexes

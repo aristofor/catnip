@@ -5,12 +5,62 @@ import os
 import sys
 from pathlib import Path
 
+# Capture before Click rewrites sys.argv
+_p = Path(sys.argv[0]) if sys.argv and not sys.argv[0].startswith('-') else None
+_CATNIP_EXECUTABLE = str(_p.resolve()) if _p and _p.exists() else None
+
 import click
+from click.shell_completion import CompletionItem
 
 from .. import __version__
 from ..colors import Theme
 from ..config import ConfigManager
 from .plugins import discover_plugins, load_plugin
+
+
+def _version_callback(ctx, param, value):
+    if not value or ctx.resilient_parsing:
+        return
+    from .._version import __build_date__, __commit__
+
+    if '--full' in sys.argv:
+        lines = [f"Catnip {__version__}"]
+        if __commit__:
+            lines.append(f"  commit  {__commit__}")
+        if __build_date__:
+            lines.append(f"  build   {__build_date__}")
+        click.echo("\n".join(lines))
+    else:
+        click.echo(f"Catnip {__version__}")
+    ctx.exit()
+
+
+def _complete_optimize(ctx, param, incomplete):
+    """Complete -o values from Rust-defined optimization keys."""
+    try:
+        from .._rs import optimization_completions
+
+        values = optimization_completions()
+    except ImportError:
+        values = [
+            'tco',
+            'tco:on',
+            'tco:off',
+            'jit',
+            'jit:on',
+            'jit:off',
+            'level:0',
+            'level:1',
+            'level:2',
+            'level:3',
+            'memory:',
+        ]
+    return [CompletionItem(v) for v in values if v.startswith(incomplete)]
+
+
+def _complete_parsing(ctx, param, incomplete):
+    """Complete --parsing values (0-3)."""
+    return [CompletionItem(str(i)) for i in range(4) if str(i).startswith(incomplete)]
 
 
 def _default_executor():
@@ -19,11 +69,11 @@ def _default_executor():
     Env var: CATNIP_EXECUTOR
     Accepts: vm (default), ast
     """
-    value = (os.environ.get("CATNIP_EXECUTOR") or "vm").lower()
-    if value in {"vm", "ast"}:
+    value = (os.environ.get('CATNIP_EXECUTOR') or 'vm').lower()
+    if value in {'vm', 'ast'}:
         return value
     else:
-        return "vm"
+        return 'vm'
 
 
 class CatnipGroup(click.Group):
@@ -59,6 +109,13 @@ class CatnipGroup(click.Group):
             return load_plugin(self.plugins[cmd_name])
 
         return None
+
+    def shell_complete(self, ctx, incomplete):
+        """Add file/dir completion for the script positional argument."""
+        completions = super().shell_complete(ctx, incomplete)
+        if not incomplete.startswith('-'):
+            completions.append(CompletionItem(incomplete, type='file'))
+        return completions
 
     def make_context(self, info_name, args, parent=None, **extra):
         """Create context, preserve script args.
@@ -96,7 +153,6 @@ class CatnipGroup(click.Group):
                     '--executor',
                     '--theme',
                     '--format',
-                    '--policy-file',
                     '--policy',
                 ):
                     i += 2  # skip option + value
@@ -121,7 +177,9 @@ class CatnipGroup(click.Group):
         return ctx
 
 
-def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None, cli_module_policy=None):
+def setup_catnip(
+    verbose, no_color, optimizations, modules, config_manager=None, cli_module_policy=None, mode=None, executable=None
+):
     """Configure and return a Catnip instance.
 
     Uses ConfigManager for unified config handling with source tracking.
@@ -145,17 +203,10 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
     if config_manager.get('no_color'):
         Theme.disable()
 
-    try:
-        from ..parser import Parser as TreeSitterParser
-
-        parser_class = TreeSitterParser
-    except ImportError:
-        click.echo("Tree-sitter parser not available. Run: make compile", err=True)
-        sys.exit(1)
-
     # Create Catnip with executor from config
-    vm_mode_map = {"vm": "on", "ast": "off"}
-    vm_mode = vm_mode_map.get(config_manager.get('executor'), "on")
+    from ..config import executor_to_vm_mode
+
+    vm_mode = executor_to_vm_mode(config_manager.get('executor') or 'vm')
 
     # Setup cache if enabled
     cache = None
@@ -164,7 +215,10 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
 
         cache = CatnipCache(backend=DiskCache())
 
-    catnip = Catnip(parser_class=parser_class, vm_mode=vm_mode, cache=cache)
+    catnip = Catnip(vm_mode=vm_mode, cache=cache)
+
+    if executable:
+        catnip.context.globals['_executable'] = executable
 
     # Apply config to pragma_context
     catnip.pragma_context.jit_enabled = config_manager.get('jit')
@@ -179,19 +233,22 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
     # Store manager for debug access
     catnip._config_manager = config_manager
 
-    # Apply module policy (CLI overrides config)
-    if cli_module_policy is not None:
-        catnip.context.module_policy = cli_module_policy
-    else:
-        policy = config_manager.get_module_policy()
-        if policy is not None:
-            catnip.context.module_policy = policy
+    # Apply module policy (CLI --policy overrides config default)
+    policy = cli_module_policy or config_manager.get_module_policy()
+    if policy is not None:
+        catnip.context.module_policy = policy
 
-    if modules:
+    # Collect auto-import modules from config (per-mode with fallback)
+    auto_mode = {'repl': 'repl', 'standalone': 'cli'}.get(mode, 'cli') if mode else 'cli'
+    auto = list(config_manager.get_auto_modules(auto_mode))
+
+    # Merge with CLI -m (deduplicated, preserving order)
+    all_modules = list(dict.fromkeys(auto + list(modules or [])))
+    if all_modules:
         from ..loader import ModuleLoader
 
         loader = ModuleLoader(catnip.context, verbose=verbose)
-        loader.load_modules(modules)
+        loader.load_modules(all_modules)
 
     return catnip
 
@@ -200,88 +257,87 @@ def setup_catnip(verbose, no_color, optimizations, modules, config_manager=None,
     cls=CatnipGroup,
     invoke_without_command=True,
     context_settings={
-        "help_option_names": ["-h", "--help"],
-        "ignore_unknown_options": True,
-        "allow_extra_args": True,
-        "allow_interspersed_args": False,
+        'help_option_names': ['-h', '--help'],
+        'ignore_unknown_options': True,
+        'allow_extra_args': True,
+        'allow_interspersed_args': False,
     },
 )
 @click.pass_context
-@click.option("-c", "--command", "cmd", type=str, help="Evaluate command and display result")
+@click.option('-c', '--command', 'cmd', type=str, help="Evaluate command and display result")
 @click.option(
-    "-p",
-    "--parsing",
+    '--parsing',
     type=int,
     default=3,
+    shell_complete=_complete_parsing,
     help="Parsing level: 0=tree, 1=IR, 2=exec IR, 3=run",
 )
-@click.option("-v", "--verbose", is_flag=True, help="Show detailed pipeline stages")
-@click.option("--no-color", is_flag=True, help="Disable colored output")
-@click.option("--no-cache", is_flag=True, help="Disable disk cache for parsing/bytecode")
+@click.option('-v', '--verbose', is_flag=True, help="Show detailed pipeline stages")
+@click.option('-q', '--quiet', is_flag=True, help="Suppress result display")
+@click.option('--no-color', is_flag=True, help="Disable colored output")
+@click.option('--no-cache', is_flag=True, help="Disable disk cache for parsing/bytecode")
 @click.option(
-    "--config",
-    "config_path",
+    '--config',
+    'config_path',
     type=click.Path(exists=True),
     help="Use alternate config file instead of ~/.config/catnip/catnip.toml",
 )
 @click.option(
-    "-o",
-    "--optimize",
-    "optimizations",
+    '-o',
+    '--optimize',
+    'optimizations',
     multiple=True,
     type=str,
+    shell_complete=_complete_optimize,
     help="Optimizations: tco[:on|off], level[:0-3], jit[:on|off], memory[:MB]",
 )
 @click.option(
-    "-m",
-    "--module",
-    "modules",
+    '-m',
+    '--module',
+    'modules',
     multiple=True,
     type=str,
     help="Load Python module as namespace (e.g., -m math, -m numpy)",
 )
 @click.option(
-    "-x",
-    "--executor",
-    "executor",
-    type=click.Choice(["vm", "ast"], case_sensitive=False),
+    '-x',
+    '--executor',
+    'executor',
+    type=click.Choice(['vm', 'ast'], case_sensitive=False),
     default=_default_executor,
     help="Execution mode: vm=bytecode VM (default), ast=AST interpreter",
 )
 @click.option(
-    "--theme",
-    "theme",
-    type=click.Choice(["auto", "dark", "light"], case_sensitive=False),
+    '--theme',
+    'theme',
+    type=click.Choice(['auto', 'dark', 'light'], case_sensitive=False),
     default=None,
     help="Color theme: auto=detect terminal background, dark, light",
 )
 @click.option(
-    "--format",
-    "output_format",
-    type=click.Choice(["text", "json", "repr"], case_sensitive=False),
-    default="text",
+    '--format',
+    'output_format',
+    type=click.Choice(['text', 'json', 'repr'], case_sensitive=False),
+    default='text',
     help="Output format: text=compact JSON (default), json=verbose serde JSON, repr=Python repr",
 )
 @click.option(
-    "--policy-file",
-    "policy_file",
-    type=click.Path(exists=True),
-    default=None,
-    help="TOML file with named module policies (requires --policy)",
-)
-@click.option(
-    "--policy",
-    "policy_name",
+    '--policy',
+    'policy_name',
     type=str,
     default=None,
-    help="Policy profile name from --policy-file or catnip.toml [modules.profiles]",
+    help="Policy profile name from [modules.policies.<name>] in catnip.toml",
 )
-@click.version_option(__version__, prog_name="Catnip")
+@click.option(
+    '-V', '--version', is_flag=True, is_eager=True, expose_value=False, callback=_version_callback, help="Show version"
+)
+@click.option('--full', is_flag=True, hidden=True, help="Show full version info (use with --version)")
 def main(
     ctx,
     cmd,
     parsing,
     verbose,
+    quiet,
     no_color,
     no_cache,
     config_path,
@@ -290,24 +346,25 @@ def main(
     executor,
     theme,
     output_format,
-    policy_file,
     policy_name,
+    full,
 ):
     """
-    Catnip - A sandboxed scripting language embedded in Python
+    Catnip - A sandboxed scripting language beyond Python
 
     \b
     Usage:
-      catnip                           # Interactive REPL (VM mode by default)
-      catnip script.cat                # Run a script file
-      catnip -c "2 + 3 * 4"           # Evaluate a command
-      catnip -x ast script.cat         # Use AST interpreter instead of VM
+      catnip                              # Interactive REPL (VM mode by default)
+      catnip script.cat                   # Run a script file
+      catnip -c "2 + 3 * 4"               # Evaluate a command
+      catnip -x ast script.cat            # Use AST interpreter instead of VM
       catnip --config my.toml script.cat  # Use custom config file
 
     \b
     Environment:
       CATNIP_OPTIMIZE       Optimizations (same as -o): jit,tco:off,level:2
       CATNIP_EXECUTOR       Execution mode: vm, ast
+      CATNIP_QUIET          Suppress result display (same as -q)
       CATNIP_THEME          Color theme: auto, dark, light
       NO_COLOR              Disable colors (freedesktop.org standard)
 
@@ -321,6 +378,9 @@ def main(
       plugins   Inspect registered plugins
       repl      Start interactive REPL (explicit)
     """
+    # Merge --quiet flag with CATNIP_QUIET env var
+    quiet = quiet or os.environ.get('CATNIP_QUIET', '').lower() in ('1', 'true', 'on')
+
     # Build ConfigManager with full precedence chain
     config_manager = ConfigManager()
     if config_path:
@@ -339,22 +399,16 @@ def main(
     if theme is not None:
         config_manager.apply_cli_theme(theme)
 
-    # Apply CLI module policy (overrides config [modules])
+    # Apply named policy from config (--policy <name>)
     cli_module_policy = None
-    if policy_file and policy_name:
-        from .._rs import ModulePolicy
-
-        try:
-            cli_module_policy = ModulePolicy.from_file(policy_file, policy_name)
-        except (KeyError, ValueError, FileNotFoundError) as e:
-            click.echo(f"Error loading policy: {e}", err=True)
+    if policy_name:
+        cli_module_policy = config_manager.get_module_policy(policy_name)
+        if cli_module_policy is None:
+            available = config_manager.list_policy_profiles()
+            click.echo(f"Error: policy '{policy_name}' not found in config", err=True)
+            if available:
+                click.echo(f"Available: {', '.join(available)}", err=True)
             sys.exit(1)
-    elif policy_file and not policy_name:
-        click.echo("Error: --policy-file requires --policy <profile>", err=True)
-        sys.exit(1)
-    elif policy_name and not policy_file:
-        click.echo("Error: --policy requires --policy-file <path>", err=True)
-        sys.exit(1)
 
     # Store options in context for subcommands
     ctx.ensure_object(dict)
@@ -363,6 +417,7 @@ def main(
             cmd=cmd,
             parsing=parsing,
             verbose=verbose,
+            quiet=quiet,
             config_path=config_path,
             optimizations=optimizations,
             modules=modules,
@@ -419,7 +474,7 @@ def _try_rust_repl(verbose=False):
         try:
             result = subprocess.run([repl_path])
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
     return False
 
@@ -447,6 +502,7 @@ def _run_default_mode(ctx):
     cmd = opts['cmd']
     parsing = opts['parsing']
     verbose = opts['verbose']
+    quiet = opts.get('quiet', False)
     optimizations = opts['optimizations']
     modules = opts['modules']
     config_manager = opts['config_manager']
@@ -463,7 +519,7 @@ def _run_default_mode(ctx):
         first_arg = extra_args[0]
         if first_arg == '--':
             if len(extra_args) < 2:
-                click.echo("Error: '--' requires a script file after it", err=True)
+                click.echo("Error: -- requires a script file after it", err=True)
                 sys.exit(1)
             script_path = Path(extra_args[1])
             script_args = extra_args[2:]  # Args after '--' and script path
@@ -481,22 +537,31 @@ def _run_default_mode(ctx):
 
     # Setup catnip using ConfigManager (CLI optimizations applied here)
     no_color = config_manager.get('no_color')
-    catnip = setup_catnip(verbose, no_color, optimizations, modules, config_manager, cli_module_policy)
-    vm_mode = catnip._config_manager.get('executor')
-    vm_mode_map = {"vm": "on", "ast": "off"}
-    vm_mode = vm_mode_map.get(vm_mode, "on")
+    catnip = setup_catnip(
+        verbose,
+        no_color,
+        optimizations,
+        modules,
+        config_manager,
+        cli_module_policy,
+        mode=mode,
+        executable=_CATNIP_EXECUTABLE,
+    )
+    from ..config import executor_to_vm_mode
+
+    vm_mode = executor_to_vm_mode(catnip._config_manager.get('executor') or 'vm')
 
     # Inject script arguments into global context (accessible as 'argv')
     if script_path:
         catnip.context.globals['argv'] = [str(script_path)] + script_args
-        meta = catnip.context.globals.get("META")
+        meta = catnip.context.globals.get('META')
         if meta is not None:
-            meta.path = str(script_path.resolve())
+            meta.file = str(script_path.resolve())
 
     # Command mode (-c)
     if cmd:
         try:
-            process_input(catnip, cmd, parsing, verbose, vm_mode=vm_mode, output_format=output_format)
+            process_input(catnip, cmd, parsing, verbose, vm_mode=vm_mode, output_format=output_format, quiet=quiet)
             sys.exit(0)
         except Exception as e:
             from ..colors import print_exception
@@ -515,7 +580,7 @@ def _run_default_mode(ctx):
             sys.exit(1)
         text = _strip_shebang(script_path.read_text())
         try:
-            process_input(catnip, text, parsing, verbose, vm_mode=vm_mode, output_format=output_format)
+            process_input(catnip, text, parsing, verbose, vm_mode=vm_mode, output_format=output_format, quiet=quiet)
             sys.exit(0)
         except Exception as e:
             from ..colors import print_exception
@@ -531,7 +596,7 @@ def _run_default_mode(ctx):
     elif not sys.stdin.isatty():
         text = _strip_shebang(sys.stdin.read())
         try:
-            process_input(catnip, text, parsing, verbose, vm_mode=vm_mode, output_format=output_format)
+            process_input(catnip, text, parsing, verbose, vm_mode=vm_mode, output_format=output_format, quiet=quiet)
             sys.exit(0)
         except Exception as e:
             from ..colors import print_exception

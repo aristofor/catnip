@@ -9,7 +9,7 @@ use common::assert_output;
 /// Régression: VMFunction retournait la string 'xx' au lieu du résultat int
 ///
 /// Bug: Le transformer générait `Identifier("x")` pour les paramètres de lambda
-/// dans le corps de la fonction. Lors de la conversion IRPure → Op Python,
+/// dans le corps de la fonction. Lors de la conversion IR → Op Python,
 /// `Identifier` était converti en PyString au lieu de Ref, ce qui générait
 /// LoadConst au lieu de LoadLocal dans le bytecode.
 ///
@@ -39,10 +39,7 @@ fn test_closure_captures_outer_variable() {
     assert_output("x = 10; f = () => { x }; f()", "10");
 
     // Closure avec paramètre et capture
-    assert_output(
-        "multiplier = 3; times = (n) => { n * multiplier }; times(4)",
-        "12",
-    );
+    assert_output("multiplier = 3; times = (n) => { n * multiplier }; times(4)", "12");
 
     // Closure nested
     assert_output(

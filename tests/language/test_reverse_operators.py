@@ -21,7 +21,7 @@ def val(cat, code):
 
 
 # ---------------------------------------------------------------------------
-# 1. Commutative ops — result is identical to forward
+# 1. Commutative ops - result is identical to forward
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +105,7 @@ r = 0xFF ^ S(0x0F); r.val""",
 
 
 # ---------------------------------------------------------------------------
-# 2. Non-commutative ops — self is always the struct
+# 2. Non-commutative ops - self is always the struct
 # ---------------------------------------------------------------------------
 
 
@@ -215,7 +215,7 @@ r = S(10) + 5; r.val""",
     def test_no_reverse_without_op(self, cat):
         """No op defined => reverse also fails."""
         cat.parse("""\
-struct S { val }
+struct S { val; }
 5 + S(10)""")
         with pytest.raises((TypeError, CatnipTypeError)):
             cat.execute()
@@ -234,7 +234,7 @@ r = A(1) + B(2); r.val""",
         )
 
     def test_both_structs_no_reverse_needed(self, cat):
-        """When both have op+, left wins — no reverse dispatch."""
+        """When both have op+, left wins - no reverse dispatch."""
         assert (
             val(
                 cat,
@@ -263,7 +263,7 @@ r = 2 * (3 * S(5)); r.val""",
                 cat,
                 """\
 struct Vec2 {
-    x, y
+    x; y;
     op +(self, rhs) => { Vec2(self.x + rhs, self.y + rhs) }
 }
 r = 10 + Vec2(1, 2)

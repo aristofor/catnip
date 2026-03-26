@@ -53,7 +53,7 @@ class TestNDModeSequential:
     def test_explicit_sequential_mode(self):
         """Explicit pragma for sequential mode."""
         code = """
-        pragma("nd_mode", "sequential")
+        pragma("nd_mode", ND.sequential)
 
         ~~(7, (n, recur) => {
             if n <= 1 { 1 }
@@ -66,7 +66,7 @@ class TestNDModeSequential:
     def test_sequential_alias_seq(self):
         """'seq' alias for sequential mode."""
         code = """
-        pragma("nd_mode", "sequential")
+        pragma("nd_mode", ND.sequential)
 
         ~~(5, (n, recur) => {
             if n <= 1 { 1 }
@@ -83,7 +83,7 @@ class TestNDModeThreads:
     def test_factorial_thread(self):
         """Factorial with threads mode."""
         code = """
-        pragma("nd_mode", "thread")
+        pragma("nd_mode", ND.thread)
 
         ~~(10, (n, recur) => {
             if n <= 1 { 1 }
@@ -96,7 +96,7 @@ class TestNDModeThreads:
     def test_thread_alias_thread(self):
         """'thread' alias for threads mode."""
         code = """
-        pragma("nd_mode", "thread")
+        pragma("nd_mode", ND.thread)
 
         ~~(6, (n, recur) => {
             if n <= 1 { 1 }
@@ -109,7 +109,7 @@ class TestNDModeThreads:
     def test_broadcast_thread(self):
         """Broadcast with threads mode."""
         code = """
-        pragma("nd_mode", "thread")
+        pragma("nd_mode", ND.thread)
 
         list(5, 6, 7, 8).[~~ (n, recur) => {
             if n <= 1 { 1 }
@@ -122,8 +122,8 @@ class TestNDModeThreads:
     def test_memoization_thread(self):
         """Memoization should be shared across threads."""
         code = """
-        pragma("nd_mode", "thread")
-        pragma("nd_memoize", "on")
+        pragma("nd_mode", ND.thread)
+        pragma("nd_memoize", True)
 
         # Fibonacci benefits from memoization
         ~~(10, (n, recur) => {
@@ -141,7 +141,7 @@ class TestNDModeProcesses:
     def test_factorial_process(self):
         """Factorial with processes mode."""
         code = """
-        pragma("nd_mode", "process")
+        pragma("nd_mode", ND.process)
 
         ~~(10, (n, recur) => {
             if n <= 1 { 1 }
@@ -154,7 +154,7 @@ class TestNDModeProcesses:
     def test_process_alias_process(self):
         """'process' alias for processes mode."""
         code = """
-        pragma("nd_mode", "process")
+        pragma("nd_mode", ND.process)
 
         ~~(8, (n, recur) => {
             if n <= 1 { 1 }
@@ -167,7 +167,7 @@ class TestNDModeProcesses:
     def test_process_alias_parallel(self):
         """'parallel' alias for processes mode (backwards compat)."""
         code = """
-        pragma("nd_mode", "process")
+        pragma("nd_mode", ND.process)
 
         ~~(5, (n, recur) => {
             if n <= 1 { 1 }
@@ -180,7 +180,7 @@ class TestNDModeProcesses:
     def test_process_alias_par(self):
         """'par' alias for processes mode."""
         code = """
-        pragma("nd_mode", "process")
+        pragma("nd_mode", ND.process)
 
         ~~(6, (n, recur) => {
             if n <= 1 { 1 }
@@ -251,7 +251,7 @@ class TestNDPragmas:
     def test_pragma_nd_workers(self):
         """nd_workers pragma configures worker count."""
         code = """
-        pragma("nd_workers", "8")
+        pragma("nd_workers", 8)
 
         ~~(10, (n, recur) => {
             if n <= 1 { 1 }
@@ -264,8 +264,8 @@ class TestNDPragmas:
     def test_pragma_nd_mode_with_workers(self):
         """Combined nd_mode and nd_workers pragmas."""
         code = """
-        pragma("nd_mode", "thread")
-        pragma("nd_workers", "4")
+        pragma("nd_mode", ND.thread)
+        pragma("nd_workers", 4)
 
         list(5, 6, 7).[~~ (n, recur) => {
             if n <= 1 { 1 }
@@ -282,7 +282,7 @@ class TestNDDeterminism:
     def test_all_modes_same_result(self):
         """All 3 modes should produce identical results."""
         factorial_code = """
-        pragma("nd_mode", "{mode}")
+        pragma("nd_mode", ND.{mode})
 
         ~~(8, (n, recur) => {{
             if n <= 1 {{ 1 }}
@@ -300,7 +300,7 @@ class TestNDDeterminism:
     def test_broadcast_all_modes(self):
         """Broadcast should work identically in all modes."""
         broadcast_code = """
-        pragma("nd_mode", "{mode}")
+        pragma("nd_mode", ND.{mode})
 
         list(3, 4, 5).[~~ (n, recur) => {{
             if n <= 1 {{ 1 }}

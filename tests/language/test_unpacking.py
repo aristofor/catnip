@@ -20,7 +20,7 @@ class TestBasicUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == 10
-        assert cat.context.globals["b"] == 20
+        assert cat.context.globals['b'] == 20
 
     def test_list_unpacking_with_parens(self):
         """Unpacking list with parentheses: (x, y) = list(1, 2)"""
@@ -32,7 +32,7 @@ class TestBasicUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == 200
-        assert cat.context.globals["x"] == 100
+        assert cat.context.globals['x'] == 100
 
     def test_unpacking_without_parens(self):
         """Unpacking without parentheses: a, b = list(1, 2)"""
@@ -44,8 +44,8 @@ class TestBasicUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == 2
-        assert cat.context.globals["x"] == 1
-        assert cat.context.globals["z"] == 3
+        assert cat.context.globals['x'] == 1
+        assert cat.context.globals['z'] == 3
 
     def test_unpacking_three_values(self):
         """Unpacking three values"""
@@ -72,7 +72,7 @@ class TestStarOperator:
         cat.parse(code)
         result = cat.execute()
         assert result == 1
-        assert cat.context.globals["rest"] == [2, 3, 4, 5]
+        assert cat.context.globals['rest'] == [2, 3, 4, 5]
 
     def test_star_at_beginning(self):
         """Star operator at beginning: (*init, last) = ..."""
@@ -84,7 +84,7 @@ class TestStarOperator:
         cat.parse(code)
         result = cat.execute()
         assert result == 40
-        assert cat.context.globals["init"] == [10, 20, 30]
+        assert cat.context.globals['init'] == [10, 20, 30]
 
     def test_star_in_middle(self):
         """Star operator in middle: (a, *mid, z) = ..."""
@@ -96,8 +96,8 @@ class TestStarOperator:
         cat.parse(code)
         result = cat.execute()
         assert result == 5
-        assert cat.context.globals["a"] == 1
-        assert cat.context.globals["middle"] == [2, 3, 4]
+        assert cat.context.globals['a'] == 1
+        assert cat.context.globals['middle'] == [2, 3, 4]
 
     def test_star_with_minimal_values(self):
         """Star captures empty list when minimal values"""
@@ -109,8 +109,8 @@ class TestStarOperator:
         cat.parse(code)
         result = cat.execute()
         assert result == []
-        assert cat.context.globals["a"] == 10
-        assert cat.context.globals["b"] == 20
+        assert cat.context.globals['a'] == 10
+        assert cat.context.globals['b'] == 20
 
     def test_star_captures_many_values(self):
         """Star captures many values"""
@@ -122,8 +122,8 @@ class TestStarOperator:
         cat.parse(code)
         result = cat.execute()
         assert result == 9
-        assert cat.context.globals["x"] == 1
-        assert cat.context.globals["ys"] == [2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert cat.context.globals['x'] == 1
+        assert cat.context.globals['ys'] == [2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
 class TestNestedUnpacking:
@@ -139,8 +139,8 @@ class TestNestedUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == 200
-        assert cat.context.globals["i"] == 100
-        assert cat.context.globals["k"] == 300
+        assert cat.context.globals['i'] == 100
+        assert cat.context.globals['k'] == 300
 
     def test_deeply_nested(self):
         """Deeply nested pattern: (a, (b, (c, d))) = ..."""
@@ -152,9 +152,9 @@ class TestNestedUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == 3
-        assert cat.context.globals["a"] == 1
-        assert cat.context.globals["b"] == 2
-        assert cat.context.globals["d"] == 4
+        assert cat.context.globals['a'] == 1
+        assert cat.context.globals['b'] == 2
+        assert cat.context.globals['d'] == 4
 
     def test_star_in_nested_pattern(self):
         """Star in nested pattern: (a, *mid, (x, y)) = ..."""
@@ -166,9 +166,9 @@ class TestNestedUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == [2, 3, 4]
-        assert cat.context.globals["a"] == 1
-        assert cat.context.globals["x"] == 10
-        assert cat.context.globals["y"] == 20
+        assert cat.context.globals['a'] == 1
+        assert cat.context.globals['x'] == 10
+        assert cat.context.globals['y'] == 20
 
     def test_nested_with_star_inside(self):
         """Star inside nested pattern: ((a, *rest), b) = ..."""
@@ -180,8 +180,8 @@ class TestNestedUnpacking:
         cat.parse(code)
         result = cat.execute()
         assert result == [2, 3]
-        assert cat.context.globals["p"] == 1
-        assert cat.context.globals["r"] == 4
+        assert cat.context.globals['p'] == 1
+        assert cat.context.globals['r'] == 4
 
     def test_multiple_nested_levels(self):
         """Multiple levels of nesting"""
@@ -333,7 +333,7 @@ class TestUnpackingEdgeCases:
         cat.parse(code)
         result = cat.execute()
         assert result == 0
-        assert cat.context.globals["rest"] == []
+        assert cat.context.globals['rest'] == []
 
     def test_unpacking_range(self):
         """Unpack from range() result"""
@@ -358,4 +358,4 @@ class TestUnpackingEdgeCases:
         cat.parse(code)
         result = cat.execute()
         assert result == 20
-        assert cat.context.globals["b"] == 10
+        assert cat.context.globals['b'] == 10

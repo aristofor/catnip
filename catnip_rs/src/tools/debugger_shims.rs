@@ -19,10 +19,11 @@ pub enum PyDebugCommandKind {
     Vars = 7,
     List = 8,
     Backtrace = 9,
-    Quit = 10,
-    Help = 11,
-    Repeat = 12,
-    Unknown = 13,
+    Repl = 10,
+    Quit = 11,
+    Help = 12,
+    Repeat = 13,
+    Unknown = 14,
 }
 
 /// Result of parsing a debug command.
@@ -109,6 +110,11 @@ impl From<catnip_tools::debugger::DebugCommand> for PyParsedDebugCommand {
             },
             DebugCommand::Backtrace => Self {
                 kind: PyDebugCommandKind::Backtrace,
+                arg_int: 0,
+                arg_str: String::new(),
+            },
+            DebugCommand::Repl => Self {
+                kind: PyDebugCommandKind::Repl,
                 arg_int: 0,
                 arg_str: String::new(),
             },

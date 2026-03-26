@@ -20,78 +20,80 @@ classifiers = [
     "Topic :: Software Development :: Interpreters",
 ]
 dependencies = [
-    "click>=8.3.1,<9",
-    "xxhash>=3.6.0,<4",
+    "click>=8.3,<9",
+    "xxhash>=3.0",
 ]
 
 [project.optional-dependencies]
 mcp = [
-    "mcp>=1.24.0",
+    "mcp>=1.26",
 ]
 test = [
     "pytest>=9.0,<10",
     "pytest-xdist>=3.8,<4",
-    "pytest-rerunfailures>=15.0,<16",
+    "pytest-rerunfailures>=16.0,<17",
 ]
 dev = [
     "catnip-lang[test]",
-    "cibuildwheel>=3.2,<4",
-    "build>=1.3,<2",
-    "ruff>=0.14,<1",
+    "cibuildwheel>=3.4,<4",
+    "build>=1.4,<2",
+    "ruff>=0.15,<1",
     "numpy>=2.4,<3",
-    "pandas>=2.3,<4",
+    "pandas>=3.0,<4",
     "markdown>=3.10,<4",
     "pygments>=2.19,<3",
     "httpx[http2]>=0.28,<1",
-    "setuptools-rust>=1.11,<2"
+    "setuptools-rust>=1.12,<2"
 ]
 
 # Exemples d'intégration par catégorie
 examples-data = [
     "numpy>=2.4,<3",
-    "pandas>=2.3,<4",
+    "pandas>=3.0,<4",
     "duckdb>=1.4,<2",
-    "polars>=1.37,<2",
-    "pyarrow>=22,<23"
+    "duckdb-engine>=0.17",
+    "sqlalchemy>=2.0,<3",
+    "polars>=1.38,<2",
+    "pyarrow>=23,<24"
 ]
 examples-files = [
     "pyyaml>=6.0,<7",
     "lxml>=6.0,<7",
-    "jmespath>=1.0,<2"
+    "jmespath>=1.1,<2"
 ]
 examples-web = [
     "httpx[http2]>=0.28,<1",
-    "selectolax>=0.4.6,<0.5",
-    "redis>=7.1,<8"
+    "selectolax>=0.4.7,<0.5",
+    "redis>=7.3,<8"
 ]
 examples-viz = [
-    "matplotlib<4",
-    "seaborn<1",
-    "plotly<6"
+    "matplotlib>=3.10,<4",
+    "seaborn>=0.13,<1",
+    "plotly>=6.6,<7"
 ]
 examples-nlp = [
-    "textblob<1",
-    "spacy<4"
+    "textblob>=0.19,<1",
+    "spacy>=3.8,<4"
 ]
 examples-images = [
-    "pillow<12"
+    "pillow>=12.1,<13"
 ]
 examples-ml = [
-    "scikit-learn<2",
-    "torch<3"
+    "scikit-learn>=1.8,<2",
+    "torch>=2.10,<3"
 ]
 examples-geometry = [
-    "shapely<3",
-    "scipy<2"
+    "shapely>=2.1,<3",
+    "scipy>=1.17,<2"
 ]
 examples-geospatial = [
-    "geopy<3",
-    "pyproj<4",
-    "shapely<3"
+    "geopy>=2.4,<3",
+    "pyproj>=3.7,<4",
+    "shapely>=2.1,<3"
 ]
 examples-symbolic = [
-    "sympy<2",
-    "networkx<4"
+    "sympy>=1.14,<2",
+    "networkx>=3.6,<4"
 ]
 
 # Toutes les dépendances exemples
@@ -106,11 +108,33 @@ examples-all = [
     "catnip-lang[examples-geometry]",
     "catnip-lang[examples-geospatial]",
     "catnip-lang[examples-symbolic]",
-    "tqdm<5"
+    "tqdm>=4.67,<5"
 ]
 
+[dependency-groups]
+dev = [
+    "setuptools>=75",
+    "setuptools-rust>=1.12,<2",
+    "wheel",
+    "pytest>=9.0,<10",
+    "pytest-xdist>=3.8,<4",
+    "pytest-rerunfailures>=16.0,<17",
+    "ruff>=0.15,<1",
+    "pygments>=2.19,<3",
+    "markdown>=3.10,<4",
+    "pyyaml>=6.0,<7",
+    "selectolax>=0.4.7,<0.5",
+]
+
+[tool.uv]
+managed = true
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
 [build-system]
-requires = ["setuptools", "wheel", "setuptools-rust>=1.10.0"]
+requires = ["setuptools", "wheel", "setuptools-rust>=1.12"]
 build-backend = "setuptools.build_meta"
 
 # Liste explicite des packages
@@ -124,7 +148,6 @@ packages = [
     "catnip.tools",
     "catnip.semantic",
     "catnip.vm",
-    "catnip_mcp",
 ]
 include-package-data = true
 
@@ -152,19 +175,20 @@ catnip = ["*.pyx", "*.pxd", "bin/*"]
 #--- DEV-ONLY-END ---
 
 [project.scripts]
-catnip = "catnip.cli:main"
-catnip-standalone = "catnip.bin_wrappers:catnip_standalone"
 catnip-repl = "catnip.bin_wrappers:catnip_repl"
 
 [project.entry-points."catnip.commands"]
 cache = "catnip.cli.commands.cache:cmd_cache"
 commands = "catnip.cli.commands.commands:cmd_commands"
+completion = "catnip.cli.commands.completion:cmd_completion"
 config = "catnip.cli.commands.config:cmd_config"
 debug = "catnip.cli.commands.debug:cmd_debug"
+extensions = "catnip.cli.commands.extensions:cmd_extensions"
 format = "catnip.cli.commands.format:cmd_format"
 lint = "catnip.cli.commands.lint:cmd_lint"
 module = "catnip.cli.commands.module:cmd_module"
 plugins = "catnip.cli.commands.plugins:cmd_plugins"
+lsp = "catnip.cli.commands.lsp:cmd_lsp"
 repl = "catnip.cli.commands.repl:cmd_repl"
 
 [tool.pytest.ini_options]
@@ -179,6 +203,9 @@ addopts = [
     "--ignore=tests/apps",           # Optional integration tests, run separately per module
     "--ignore=tests/jit_functions"    # Standalone JIT scripts, not pytest tests
 ]
+filterwarnings = [
+    "ignore:This process.*use of fork:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 120
@@ -191,16 +218,14 @@ ignore = ["E501"]  # Line too long (handled by formatter)
 
 [tool.ruff.lint.per-file-ignores]
 # Allow unused imports in __init__.py (public API re-exports)
-"__init__.py" = ["F401"]
+"__init__.py" = ["F401", "E402"]
 # Allow unused imports in nodes.py (Rust implementation re-exports)
 "catnip/nodes.py" = ["F401", "E402"]
 # Allow unused imports in registry.py (may be re-exported)
 "catnip/registry.py" = ["F401"]
 # Allow unused imports and variables in tests (pytest fixtures, test setup, etc.)
 # Also allow True/False comparisons for explicit test assertions
-"tests/**" = ["F401", "F841", "E712"]
-# Allow unused imports in MCP servers
-"catnip_mcp/**" = ["F401"]
+"tests/**" = ["F401", "F841", "E712", "E402"]
 
 [tool.black]
 line-length = 120
@@ -209,12 +234,12 @@ target-version = ["py312"]
 
 [tool.cibuildwheel]
 build = "cp313-*"
-skip = "*-musllinux_* *-manylinux_aarch64"
+skip = "*-musllinux_* *-manylinux_aarch64 *-manylinux_i686"
 build-verbosity = 0
 before-all = [
     # Install Rust with minimal profile (saves ~200MB download)
     "curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal",
-    "rm -rf /project/target /project/build",  # Clean all build artifacts to avoid host glibc symbols
+    "rm -rf /project/target /project/build /project/.cargo/config.toml",  # Clean build artifacts + local cargo config (mold/sccache)
 ]
 # Note: Binaries are NOT included in manylinux wheels due to static Python limitation
 # They are available via: make install-bins, GitHub releases, or local wheel builds

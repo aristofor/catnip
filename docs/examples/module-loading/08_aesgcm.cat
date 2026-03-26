@@ -1,43 +1,43 @@
-# check: no-check
-# AES-GCM : chiffrement authentifié via module Python
-# Requires:
-#   uv pip install cryptography
-# Run:
-#   catnip docs/examples/module-loading/08_aesgcm.cat
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 08_aesgcm.cat
+# AES-GCM : chiffrement authentifié via import sélectif Python
+# DEPS: cryptography
 
-aes = import("08_aesgcm.py")
-os  = import("os")
-b64 = import("base64")
+import('cryptography.hazmat.primitives.ciphers.aead', 'AESGCM')
+os  = import('os')
+b64 = import('base64')
 
 NONCE_SIZE = 12
 
 # seal/open : packaging nonce(12) || ciphertext+tag
 
 seal = (key, clear, aad=None) => {
-    nonce = os.urandom(NONCE_SIZE)
-    ct = aes.encrypt(key, nonce, clear, aad)
+    nonce  = os.urandom(NONCE_SIZE)
+    cipher = AESGCM(key)
+    ct     = cipher.encrypt(nonce, clear, aad)
     nonce + ct
 }
 
 open = (key, blob, aad=None) => {
-    nonce = blob[:NONCE_SIZE]
-    ct    = blob[NONCE_SIZE:]
-    aes.decrypt(key, nonce, ct, aad)
+    nonce  = blob[:NONCE_SIZE]
+    ct     = blob[NONCE_SIZE:]
+    cipher = AESGCM(key)
+    cipher.decrypt(nonce, ct, aad)
 }
 
 # Variantes base64 pour transport (URL, JSON, headers)
 
 seal_b64 = (key, clear, aad=None) => {
-    b64.b64encode(seal(key, clear, aad)).decode("ascii")
+    b64.b64encode(seal(key, clear, aad)).decode('ascii')
 }
 
 open_b64 = (key, token, aad=None) => {
-    open(key, b64.b64decode(token.encode("ascii")), aad)
+    open(key, b64.b64decode(token.encode('ascii')), aad)
 }
 
 # Démo
 
-key   = aes.make_key()
+key   = AESGCM.generate_key(bit_length=256)
 clear = b"texte clair"
 aad   = b"ctx:v1"
 
@@ -47,8 +47,4 @@ print("token:", token)
 roundtrip = open_b64(key, token, aad)
 print("roundtrip:", roundtrip)
 
-# Mauvaise clé → cryptography.exceptions.InvalidTag
-# l'exception Python remonte telle quelle à travers Catnip
-
-bad_key = aes.make_key()
-result = open_b64(bad_key, token, aad)
+# ⇒ Done

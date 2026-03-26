@@ -20,20 +20,13 @@ Le broadcasting Catnip (`.[op]`) complète NumPy : même idiome pour les listes 
 
 ## Données
 
-- `nasa_temperature.csv` - Anomalies de température globale (source NASA GISS)
+- `data/global-temp_annual.csv` - Anomalies de température globale (source NASA GISS + NOAA GCAG)
 
 ## Exécution
 
 ```bash
-# NumPy
-catnip -m numpy data-analytics/numpy_climate.cat
-
-# DuckDB
-catnip -m duckdb data-analytics/duckdb_analytics.cat
-
-# SQLAlchemy + DuckDB
-catnip -m sqlalchemy -m duckdb data-analytics/sqlalchemy_duckdb.cat
-
-# Polars (ND-map parallel)
-catnip -m polars -m tempfile -m pathlib data-analytics/polars_parallel_ingest.cat
+catnip data-analytics/numpy_climate.cat
+catnip data-analytics/duckdb_analytics.cat
+catnip data-analytics/sqlalchemy_duckdb.cat
+catnip data-analytics/polars_parallel_ingest.cat
 ```

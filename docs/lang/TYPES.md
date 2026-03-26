@@ -1,13 +1,5 @@
 # Types de données
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 Catnip supporte les types de données suivants :
 
 ## Nombres
@@ -34,34 +26,34 @@ oct_val = 0o755
 # Grands entiers (promotion automatique)
 fact50 = 30414093201713378043612608166064768844377641568960512000000000000
 big = 2 ** 100
-# ⇒ 1267650600228229401496703205376
+# → 1267650600228229401496703205376
 ```
 
 ### Grands entiers
 
-L'arithmétique sur les entiers est en précision arbitraire. Les petits entiers (48-bit signés, de -2^47 a 2^47-1) sont
-stockés inline sans allocation. Au-dela, la VM promeut automatiquement en BigInt (`Arc<BigInt>` via `num-bigint`). La
-demotion inverse se fait si le resultat retombe dans la plage SmallInt.
+L'arithmétique sur les entiers est en précision arbitraire. Les petits entiers (47-bit signés, de -2^46 à 2^46-1) sont
+stockés inline sans allocation. Au-delà, la VM promeut automatiquement en BigInt (`Arc<GmpInt>` via `rug`/GMP). La
+demotion inverse se fait si le résultat retombe dans la plage SmallInt.
 
 ```catnip
 # Promotion transparente
 2 ** 100
-# ⇒ 1267650600228229401496703205376
+# → 1267650600228229401496703205376
 
 # Factorielle de grands nombres
 fact = (n) => { if n <= 1 { 1 } else { n * fact(n - 1) } }
 fact(50)
-# ⇒ 30414093201713378043612608166064768844377641568960512000000000000
+# → 30414093201713378043612608166064768844377641568960512000000000000
 
 # Arithmétique mixte SmallInt/BigInt
 (2 ** 100) + 1
-# ⇒ 1267650600228229401496703205377
+# → 1267650600228229401496703205377
 ```
 
 Toutes les opérations arithmétiques (`+`, `-`, `*`, `//`, `%`, `**`) et de comparaison (`<`, `>`, `==`, etc.)
-fonctionnent de maniere uniforme sur SmallInt et BigInt. La division `/` promeut en float.
+fonctionnent de manière uniforme sur SmallInt et BigInt. La division `/` promeut en float.
 
-> Les entiers Catnip ne debordent jamais. Ils grandissent jusqu'a ce que la RAM s'ennuie.
+> Les entiers Catnip ne débordent jamais. Ils grandissent jusqu'à ce que la RAM s'ennuie.
 
 ### Décimales exactes
 
@@ -73,19 +65,25 @@ Résout le problème classique IEEE 754 : `0.1 + 0.2 != 0.3` en float.
 prix = 99.99d
 taxe = 0.08d
 total = prix + prix * taxe
-# ⇒ 107.9892d
+# → 107.9892d
 
 # Le test canonique
 0.1d + 0.2d == 0.3d
-# ⇒ True (faux en float)
+# → True (faux en float)
 
 # Promotion entier → Decimal
 2 + 0.5d
-# ⇒ 2.5d
+# → 2.5d
+```
 
-# Builtin Decimal()
+Catnip possède sa propre implémentation des littéraux décimaux via le suffixe `d` - pas besoin d'import. L'exemple
+ci-dessous est purement démonstratif : il montre qu'on peut aussi utiliser Python comme DSL.
+
+```catnip
+# python Decimal (démonstratif, préférer le suffixe d)
+import("decimal", "Decimal")
 Decimal("3.14")
-# ⇒ 3.14d
+# → 3.14d
 ```
 
 Règles de mélange :
@@ -107,29 +105,29 @@ standard.
 ```catnip
 # Imaginaire pur
 2j
-# ⇒ 2j
+# → 2j
 
 # Complexe via addition
 1 + 2j
-# ⇒ (1+2j)
+# → (1+2j)
 
 # Arithmétique
 (1+2j) * (3+4j)
-# ⇒ (-5+10j)
+# → (-5+10j)
 
 # Attributs
 (1+2j).real
-# ⇒ 1.0
+# → 1.0
 (1+2j).imag
-# ⇒ 2.0
+# → 2.0
 (1+2j).conjugate()
-# ⇒ (1-2j)
+# → (1-2j)
 abs(3+4j)
-# ⇒ 5.0
+# → 5.0
 
 # Builtin complex()
 complex(1, 2)
-# ⇒ (1+2j)
+# → (1+2j)
 ```
 
 Règles de mélange :
@@ -256,7 +254,7 @@ pi = 3.14159
 f"{pi:.2f}"    # → "3.14" (2 décimales)
 f"{pi:.4f}"    # → "3.1416" (4 décimales, arrondi)
 f"{pi:8.2f}"   # → "    3.14" (largeur 8, 2 décimales)
-f"{pi:e}"      # → "3.14159e+00" (notation scientifique)
+f"{pi:e}"      # → "3.141590e+00" (notation scientifique)
 ```
 
 **Pourcentages** :
@@ -390,24 +388,60 @@ Catnip utilise les mêmes règles de truthiness que Python. Toute valeur peut ê
 ```catnip
 x = 0
 if x { "jamais" } else { "zero est falsy" }
-# ⇒ "zero est falsy"
+# → "zero est falsy"
 
 s = ""
 if s { "jamais" } else { "chaine vide est falsy" }
-# ⇒ "chaine vide est falsy"
+# → "chaine vide est falsy"
 
 data = list(1)
 if data { "liste non vide est truthy" }
-# ⇒ "liste non vide est truthy"
+# → "liste non vide est truthy"
 
 # Court-circuit : and/or retournent un booléen (pas la valeur opérande)
-0 or "fallback"        # ⇒ True  (pas "fallback" comme en Python)
-"ok" and 42            # ⇒ True  (pas 42 comme en Python)
-False and "nope"       # ⇒ False
+0 or "fallback"        # → True  (pas "fallback" comme en Python)
+"ok" and 42            # → True  (pas 42 comme en Python)
+False and "nope"       # → False
 ```
 
 > La truthiness est déléguée au protocole Python (`__bool__` / `__len__`). Les structs Catnip sont toujours truthy, sauf
 > si quelqu'un implémente un jour un struct quantique dans un état superposé vrai-faux, ce qui n'est pas prévu.
+
+### Nil-coalescing (`??`)
+
+`a ?? b` retourne `a` si `a` n'est pas `None`, sinon évalue et retourne `b`.
+
+```catnip
+42 ?? 0              # → 42
+None ?? 0            # → 0
+None ?? None ?? 3    # → 3
+```
+
+`??` teste uniquement `None`, pas la truthiness. Les valeurs falsy sont conservées :
+
+```catnip
+0 ?? 99              # → 0
+False ?? 99          # → False
+"" ?? 99             # → ""
+```
+
+Trois niveaux distincts de sélection de valeur :
+
+- `and`/`or` - logique pure, retourne un booléen
+- `??` - nil-check, retourne la valeur si non-`None`, sinon le RHS
+- `if x { x } else { y }` - contrôle de flux, teste la truthiness
+
+Code équivalent explosé :
+
+<!-- check: no-check -->
+
+```catnip
+# a ?? b
+{ v = a; if v is None { b } else { v } }
+```
+
+> `??` est le seul opérateur qui distingue `None` de `False`. Les autres s'en remettent à la truthiness, qui ne fait pas
+> de différence entre les deux.
 
 ## Listes
 
@@ -442,8 +476,8 @@ last = scores_de_licorne[2]    # 3
 last = scores_de_licorne[-1]   # 5 (indexation négative)
 
 # Slicing
-scores_de_licorne[1:3]         # list(2, 3)
-scores_de_licorne[::-1]        # list(5, 4, 3, 2, 1)
+scores_de_licorne[1:3]         # → list(2, 3)
+scores_de_licorne[::-1]        # → list(5, 4, 3, 2, 1)
 
 # Itération
 for n in scores_de_licorne {
@@ -451,8 +485,8 @@ for n in scores_de_licorne {
 }
 
 # Avec fonctions Python
-total = sum(list(1, 2, 3, 4, 5))   # 15
-length = len(crew)                 # 3
+total = sum(list(1, 2, 3, 4, 5))   # → 15
+length = len(crew)                 # → 3
 ```
 
 **Note** : La syntaxe `list(…)` évite la confusion avec la notation de broadcast `.[…]`.
@@ -467,13 +501,13 @@ Règle déterministe :
 - **1+ arguments** : un argument = un élément (pas de consommation implicite d'itérable)
 
 ```catnip
-list()                          # []
-list(range(5))                  # [range(0, 5)]
-list(list(1, 2, 3))            # [[1, 2, 3]]
-list("hello")                   # ["hello"]
-list(42)                        # [42]
-list(1, 2, 3)                   # [1, 2, 3]
-list("hello", "world")          # ["hello", "world"]
+list()                          # → []
+list(range(5))                  # → [range(0, 5)]
+list(list(1, 2, 3))             # → [[1, 2, 3]]
+list("hello")                   # → ["hello"]
+list(42)                        # → [42]
+list(1, 2, 3)                   # → [1, 2, 3]
+list("hello", "world")          # → ["hello", "world"]
 ```
 
 Même principe pour `tuple()` et `set()`.
@@ -481,10 +515,10 @@ Même principe pour `tuple()` et `set()`.
 L'expansion est explicite via `*` (et `**` pour `dict`) :
 
 ```catnip
-list(*list(1, 2), 3, *tuple(4, 5))     # [1, 2, 3, 4, 5]
-tuple(*list(1, 2), 3)                  # (1, 2, 3)
-set(*list(1, 2, 2), 3)                 # {1, 2, 3}
-dict(**dict(a=1), ("b", 2), c=3)       # {"a": 1, "b": 2, "c": 3}
+list(*list(1, 2), 3, *tuple(4, 5))     # → [1, 2, 3, 4, 5]
+tuple(*list(1, 2), 3)                  # → (1, 2, 3)
+set(*list(1, 2, 2), 3)                 # → {1, 2, 3}
+dict(**dict(a=1), ("b", 2), c=3)       # → {"a": 1, "b": 2, "c": 3}
 ```
 
 ## Sets
@@ -499,14 +533,14 @@ empty = set()
 numbers = set(1, 2, 3, 4, 5)
 
 # Les doublons sont automatiquement supprimés
-unique = set(1, 2, 2, 3, 3, 3)  # {1, 2, 3}
+unique = set(1, 2, 2, 3, 3, 3)  # → {1, 2, 3}
 
 # Opérations sur les sets (via Python)
 a = set(1, 2, 3, 4)
 b = set(3, 4, 5, 6)
-union = a.union(b)           # {1, 2, 3, 4, 5, 6}
-intersection = a.intersection(b)  # {3, 4}
-difference = a.difference(b)      # {1, 2}
+union = a.union(b)                # → {1, 2, 3, 4, 5, 6}
+intersection = a.intersection(b)  # → {3, 4}
+difference = a.difference(b)      # → {1, 2}
 ```
 
 ## Dictionnaires
@@ -536,13 +570,13 @@ data = dict(
 )
 
 # Accès aux valeurs
-nom_capitaine = pirate["name"]  # "Capitaine Whiskers"
+nom_capitaine = pirate["name"]  # → "Capitaine Whiskers"
 
 # Avec virgule finale (optionnel)
 config = dict(debug=True, port=8080,)
 ```
 
-**Note** : La syntaxe `dict(...)` utilise des paires ou des kwargs car `{…}` est réservé pour les blocs de code. Les
+**Note** : La syntaxe `dict(…)` utilise des paires ou des kwargs car `{…}` est réservé pour les blocs de code. Les
 kwargs convertissent l'identifiant en clé string au parse time.
 
 ## Tuples
@@ -557,8 +591,8 @@ empty = tuple()
 coords_lune = tuple(10, 20)
 
 # Accès par index
-coords_lune[0]   # 10
-coords_lune[-1]  # 20
+coords_lune[0]   # → 10
+coords_lune[-1]  # → 20
 
 # Unpacking dans for
 for (x, y) in list(tuple(1, 2), tuple(3, 4)) {
@@ -578,8 +612,61 @@ for i in range(1, 10) {
     print(i)  # 1 à 9
 }
 
-list(range(5))    # [range(0, 5)] (littéral à 1 élément)
+list(range(5))    # → [range(0, 5)] (littéral à 1 élément)
 ```
+
+## Introspection de type
+
+`typeof(expr)` retourne le nom du type comme chaîne de caractères. Contrairement au `type()` Python qui retourne un
+objet classe, Catnip retourne directement une string exploitable.
+
+```catnip
+typeof(42)             # → "int"
+typeof(3.14)           # → "float"
+typeof(8.9d)           # → "decimal"
+typeof(True)           # → "bool"
+typeof(None)           # → "nil"
+typeof("hello")        # → "string"
+typeof(list(1, 2))     # → "list"
+typeof(tuple(1, 2))    # → "tuple"
+typeof(() => { 1 })    # → "function"
+```
+
+Pour les structs, `typeof()` retourne le nom du type :
+
+```catnip
+struct Point { x; y }
+typeof(Point(1, 2))    # → "Point"
+```
+
+Les grands entiers retournent `"int"` (même type logique que les petits entiers) :
+
+```catnip
+typeof(2 ** 100)       # → "int"
+```
+
+| Valeur             | Retour                    |
+| ------------------ | ------------------------- |
+| entier             | `"int"`                   |
+| flottant           | `"float"`                 |
+| décimal            | `"decimal"`               |
+| booléen            | `"bool"`                  |
+| `None`             | `"nil"`                   |
+| chaîne             | `"string"`                |
+| liste              | `"list"`                  |
+| tuple              | `"tuple"`                 |
+| dictionnaire       | `"dict"`                  |
+| set                | `"set"`                   |
+| fonction / lambda  | `"function"`              |
+| instance de struct | nom du type               |
+| objet Python       | nom de classe (lowercase) |
+
+`typeof()` est un intrinsic du langage, pas une fonction first-class. L'expression `f = typeof` ne fonctionne pas. Pour
+accéder au `type` Python original : `import("builtins").type`.
+
+> `typeof()` inspecte directement le tag NaN-boxed de la valeur (4 bits, O(1)). Les types natifs ne passent jamais par
+> Python. Les PyObjects font un lookup par type pointer pour les cas courants, et retournent le `qualname` de la classe
+> Python en lowercase pour le reste.
 
 ## Différences avec Python
 
@@ -587,7 +674,6 @@ Quelques types et syntaxes Python qui n'existent pas en Catnip :
 
 - **Pas de séparateur `_` dans les nombres** : `1_000_000` n'est pas reconnu, écrire `1000000`
 - **Pas de raw strings** : pas de préfixe `r"..."`, les séquences d'échappement sont toujours interprétées
-- **Pas d'opérateur `in`** : `x in collection` n'existe pas, utiliser `collection.__contains__(x)`
 - **Pas de concaténation implicite** de chaînes adjacentes (voir plus haut)
 
 ### `list()` / `tuple()` / `set()` : littéraux purs
@@ -620,7 +706,44 @@ ______________________________________________________________________
 
 ```catnip
 empty = ~[]
-len(empty)         # 0
-list(empty)        # [~[]]
-if empty { 1 } else { 2 }  # 2
+len(empty)                 # → 0
+list(empty)                # → [~[]]
+if empty { 1 } else { 2 }  # → 2
+```
+
+______________________________________________________________________
+
+## Namespaces builtin
+
+Catnip fournit des namespaces en lecture seule, accessibles sans import. Ils suivent la convention CAPS (`META`, `ND`,
+`INT`).
+
+### META
+
+Métadonnées du module en cours d'exécution.
+
+- `META.file` -- chemin du fichier source (ou `"<input>"`)
+- `META.main` -- `True` si exécuté directement, `False` si importé
+
+### ND
+
+Constantes pour les modes d'exécution ND-récursion. Évite les fautes de frappe sur les strings.
+
+```catnip
+ND.sequential   # → "sequential"
+ND.thread       # → "thread"
+ND.process      # → "process"
+
+pragma("nd_mode", ND.thread)
+```
+
+### INT
+
+Bornes du type entier immédiat (SmallInt, 47 bits signés). Au-delà, promotion automatique en BigInt.
+
+```catnip
+INT.max   # → 70368744177663  (2^46 - 1)
+INT.min   # → -70368744177664 (-2^46)
+
+INT.max + 1   # → BigInt, toujours exact
 ```

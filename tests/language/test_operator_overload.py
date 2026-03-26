@@ -11,7 +11,7 @@ from catnip.exc import CatnipTypeError
 
 def test_add(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op +(self, rhs) => { Vec2(self.x + rhs.x, self.y + rhs.y) }
 }
 a = Vec2(1, 2)
@@ -24,7 +24,7 @@ list(c.x, c.y)"""
 
 def test_sub(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op -(self, rhs) => { Vec2(self.x - rhs.x, self.y - rhs.y) }
 }
 a = Vec2(5, 8)
@@ -37,7 +37,7 @@ list(c.x, c.y)"""
 
 def test_mul_scalar(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op *(self, rhs) => { Vec2(self.x * rhs, self.y * rhs) }
 }
 a = Vec2(2, 3)
@@ -49,7 +49,7 @@ list(b.x, b.y)"""
 
 def test_div(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op /(self, rhs) => { Vec2(self.x / rhs, self.y / rhs) }
 }
 a = Vec2(10, 20)
@@ -61,7 +61,7 @@ list(b.x, b.y)"""
 
 def test_floordiv(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op //(self, rhs) => { Vec2(self.x // rhs, self.y // rhs) }
 }
 a = Vec2(7, 11)
@@ -73,7 +73,7 @@ list(b.x, b.y)"""
 
 def test_mod(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op %(self, rhs) => { Vec2(self.x % rhs, self.y % rhs) }
 }
 a = Vec2(7, 11)
@@ -85,7 +85,7 @@ list(b.x, b.y)"""
 
 def test_pow(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op **(self, rhs) => { Vec2(self.x ** rhs, self.y ** rhs) }
 }
 a = Vec2(2, 3)
@@ -100,7 +100,7 @@ list(b.x, b.y)"""
 
 def test_neg(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op -(self) => { Vec2(-self.x, -self.y) }
 }
 a = Vec2(3, -5)
@@ -112,7 +112,7 @@ list(b.x, b.y)"""
 
 def test_pos(cat):
     code = """struct Val {
-    x
+    x;
     op +(self) => { Val(abs(self.x)) }
 }
 a = Val(-7)
@@ -127,7 +127,7 @@ b.x"""
 
 def test_chaining(cat):
     code = """struct Vec2 {
-    x, y
+    x; y;
     op +(self, rhs) => { Vec2(self.x + rhs.x, self.y + rhs.y) }
 }
 a = Vec2(1, 1)
@@ -142,7 +142,7 @@ list(d.x, d.y)"""
 def test_print_between_ops(cat):
     """Regression: print() between operator calls must not corrupt struct values."""
     code = """struct Vec2 {
-    x, y
+    x; y;
     op +(self, rhs) => { Vec2(self.x + rhs.x, self.y + rhs.y) }
     op -(self, rhs) => { Vec2(self.x - rhs.x, self.y - rhs.y) }
 }
@@ -166,7 +166,7 @@ def test_no_overload_builtins(cat):
 
 
 def test_struct_without_overload(cat):
-    code = """struct Point { x, y }
+    code = """struct Point { x; y; }
 a = Point(1, 2)
 1 + 2"""
     cat.parse(code)
@@ -178,7 +178,7 @@ a = Point(1, 2)
 
 def test_inherited_op(cat):
     code = """struct Base {
-    x, y
+    x; y;
     op +(self, rhs) => { Base(self.x + rhs.x, self.y + rhs.y) }
 }
 struct Child extends(Base) { }
@@ -195,7 +195,7 @@ list(c.x, c.y)"""
 
 def test_eq(cat):
     code = """struct Money {
-    amount, currency
+    amount; currency;
     op ==(self, rhs) => { self.amount == rhs.amount and self.currency == rhs.currency }
 }
 a = Money(100, "EUR")
@@ -208,7 +208,7 @@ list(a == b, a == c)"""
 
 def test_ne(cat):
     code = """struct Money {
-    amount, currency
+    amount; currency;
     op !=(self, rhs) => { self.amount != rhs.amount or self.currency != rhs.currency }
 }
 a = Money(100, "EUR")
@@ -220,7 +220,7 @@ a != b"""
 
 def test_lt(cat):
     code = """struct Money {
-    amount
+    amount;
     op <(self, rhs) => { self.amount < rhs.amount }
 }
 a = Money(50)
@@ -232,7 +232,7 @@ a < b"""
 
 def test_le(cat):
     code = """struct Money {
-    amount
+    amount;
     op <=(self, rhs) => { self.amount <= rhs.amount }
 }
 a = Money(100)
@@ -244,7 +244,7 @@ a <= b"""
 
 def test_gt(cat):
     code = """struct Money {
-    amount
+    amount;
     op >(self, rhs) => { self.amount > rhs.amount }
 }
 a = Money(200)
@@ -256,7 +256,7 @@ a > b"""
 
 def test_ge(cat):
     code = """struct Money {
-    amount
+    amount;
     op >=(self, rhs) => { self.amount >= rhs.amount }
 }
 a = Money(100)
@@ -268,7 +268,7 @@ a >= b"""
 
 def test_structural_eq_fallback(cat):
     """Without op ==, structural equality is used."""
-    code = """struct Point { x, y }
+    code = """struct Point { x; y; }
 a = Point(1, 2)
 b = Point(1, 2)
 c = Point(3, 4)
@@ -282,7 +282,7 @@ list(a == b, a == c)"""
 
 def test_band(cat):
     code = """struct Mask {
-    bits
+    bits;
     op &(self, rhs) => { Mask(self.bits % rhs.bits) }
 }
 a = Mask(7)
@@ -295,7 +295,7 @@ c.bits"""
 
 def test_bor(cat):
     code = """struct Mask {
-    bits
+    bits;
     op |(self, rhs) => { Mask(self.bits + rhs.bits) }
 }
 a = Mask(4)
@@ -308,7 +308,7 @@ c.bits"""
 
 def test_bxor(cat):
     code = """struct Mask {
-    bits
+    bits;
     op ^(self, rhs) => { Mask(self.bits + rhs.bits) }
 }
 a = Mask(5)
@@ -321,7 +321,7 @@ c.bits"""
 
 def test_lshift(cat):
     code = """struct Bits {
-    val
+    val;
     op <<(self, rhs) => { Bits(self.val * (2 ** rhs)) }
 }
 a = Bits(1)
@@ -333,7 +333,7 @@ b.val"""
 
 def test_rshift(cat):
     code = """struct Bits {
-    val
+    val;
     op >>(self, rhs) => { Bits(self.val // (2 ** rhs)) }
 }
 a = Bits(16)
@@ -345,7 +345,7 @@ b.val"""
 
 def test_bnot(cat):
     code = """struct Bits {
-    val
+    val;
     op ~(self) => { Bits(-self.val - 1) }
 }
 a = Bits(5)
@@ -361,7 +361,7 @@ b.val"""
 def test_unary_binary_disambiguation(cat):
     """op - with 1 param = unary neg, op - with 2 params = binary sub."""
     code = """struct Num {
-    x
+    x;
     op -(self) => { Num(-self.x) }
     op -(self, rhs) => { Num(self.x - rhs.x) }
 }
@@ -378,7 +378,7 @@ list(c.x, d.x)"""
 
 
 def test_missing_binop_returns_type_error(cat):
-    code = """struct Empty { x }
+    code = """struct Empty { x; }
 a = Empty(1)
 a + 42"""
     cat.parse(code)
@@ -387,7 +387,7 @@ a + 42"""
 
 
 def test_missing_unaryop_raises_type_error(cat):
-    code = """struct Empty { x }
+    code = """struct Empty { x; }
 a = Empty(1)
 -a"""
     cat.parse(code)

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip comme moteur de règles métier.
 
@@ -8,48 +9,13 @@ Montre comment :
 4. Composer des règles complexes
 
 Use case : Moteur de règles pour pricing dynamique, éligibilité client, calcul de remises.
+
+Note : les montants sont en Decimal pour éviter les erreurs d'arrondi flottant.
 """
 
-from catnip import Catnip, Context, pass_context
+from decimal import Decimal
 
-
-class RuleContext(Context):
-    """
-    Contexte d'évaluation de règles métier.
-
-    Stocke les données d'entrée et les résultats de l'évaluation.
-    """
-
-    def __init__(self, input_data: dict, **kwargs):
-        super().__init__(**kwargs)
-        self._input = input_data
-        self._results = {}
-        self._applied_rules = []
-
-        # Expose les données d'entrée
-        self.globals['input'] = input_data
-        self.globals['results'] = self._results
-
-    @property
-    def input_data(self) -> dict:
-        return self._input
-
-    @property
-    def results(self) -> dict:
-        return self._results
-
-    @property
-    def applied_rules(self) -> list:
-        return self._applied_rules
-
-    def set_result(self, key: str, value):
-        """Enregistre un résultat de règle."""
-        self._results[key] = value
-        self.globals['results'][key] = value
-
-    def mark_rule_applied(self, rule_name: str, details: str = ''):
-        """Marque une règle comme appliquée."""
-        self._applied_rules.append({'rule': rule_name, 'details': details})
+from catnip import Catnip, pass_context
 
 
 class RuleEngine(Catnip):
@@ -59,58 +25,58 @@ class RuleEngine(Catnip):
     Évalue des règles métier sur des données d'entrée.
     """
 
-    @staticmethod
-    def _set_result(ctx, key: str, value):
-        """Définit un résultat."""
-        ctx.set_result(key, value)
-        return value
-
-    @staticmethod
-    def _mark_applied(ctx, rule_name: str, details: str = ''):
-        """Marque une règle comme appliquée."""
-        ctx.mark_rule_applied(rule_name, details)
-        return True
-
-    @staticmethod
-    def _get_input(ctx, key: str, default=None):
-        """Récupère une valeur d'entrée."""
-        return ctx.input_data.get(key, default)
-
-    @staticmethod
-    def _has_field(ctx, key: str):
-        """Vérifie si un champ existe dans l'entrée."""
-        return key in ctx.input_data
-
-    @staticmethod
-    def _calculate_percentage(ctx, base, percent):
-        """Calcule un pourcentage."""
-        return base * percent / 100
-
-    @staticmethod
-    def _apply_discount(ctx, price, discount_percent):
-        """Applique une remise en pourcentage."""
-        return price * (1 - discount_percent / 100)
-
-    @staticmethod
-    def _clamp(ctx, value, min_val, max_val):
-        """Limite une valeur entre min et max."""
-        return max(min_val, min(max_val, value))
-
-    # Fonctions DSL injectées
-    RULE_FUNCTIONS = dict(
-        set_result=pass_context(_set_result),
-        mark_applied=pass_context(_mark_applied),
-        get_input=pass_context(_get_input),
-        has_field=pass_context(_has_field),
-        calculate_percentage=pass_context(_calculate_percentage),
-        apply_discount=pass_context(_apply_discount),
-        clamp=pass_context(_clamp),
-    )
-
     def __init__(self, input_data: dict, **kwargs):
-        context = RuleContext(input_data)
-        super().__init__(context=context, **kwargs)
-        self.context.globals.update(self.RULE_FUNCTIONS)
+        super().__init__(**kwargs)
+        self._input = input_data
+        self._results = {}
+        self._applied_rules = []
+
+        self.context.globals['input'] = input_data
+        self.context.globals['results'] = self._results
+        self.context.globals['Decimal'] = Decimal
+        self.context.globals.update(self._rule_functions())
+
+    def _rule_functions(self):
+        @pass_context
+        def set_result(ctx, key: str, value):
+            self._results[key] = value
+            ctx.globals['results'][key] = value
+            return value
+
+        @pass_context
+        def mark_applied(_ctx, rule_name: str, details: str = ''):
+            self._applied_rules.append({'rule': rule_name, 'details': details})
+            return True
+
+        @pass_context
+        def get_input(_ctx, key: str, default=None):
+            return self._input.get(key, default)
+
+        @pass_context
+        def has_field(_ctx, key: str):
+            return key in self._input
+
+        @pass_context
+        def calculate_percentage(_ctx, base, percent):
+            return base * Decimal(percent) / 100
+
+        @pass_context
+        def apply_discount(_ctx, price, discount_percent):
+            return price * (1 - Decimal(discount_percent) / 100)
+
+        @pass_context
+        def clamp(_ctx, value, min_val, max_val):
+            return max(min_val, min(max_val, value))
+
+        return dict(
+            set_result=set_result,
+            mark_applied=mark_applied,
+            get_input=get_input,
+            has_field=has_field,
+            calculate_percentage=calculate_percentage,
+            apply_discount=apply_discount,
+            clamp=clamp,
+        )
 
     def evaluate(self, rules_script: str) -> dict:
         """
@@ -123,9 +89,9 @@ class RuleEngine(Catnip):
         self.execute()
 
         return {
-            'input': self.context.input_data,
-            'results': self.context.results,
-            'applied_rules': self.context.applied_rules,
+            'input': self._input,
+            'results': self._results,
+            'applied_rules': self._applied_rules,
         }
 
 
@@ -138,7 +104,7 @@ if __name__ == '__main__':
     # Données client et commande
     order_data = {
         'customer_type': 'premium',
-        'order_amount': 1000,
+        'order_amount': Decimal('1000'),
         'items_count': 5,
         'first_order': False,
     }
@@ -174,16 +140,16 @@ if __name__ == '__main__':
 
     print("Données d'entrée :")
     print(f"  Type client : {result['input']['customer_type']}")
-    print(f"  Montant : ${result['input']['order_amount']}")
+    print(f"  Montant : {result['input']['order_amount']}€")
     print(f"  Articles : {result['input']['items_count']}")
     print()
     print("Résultats :")
-    print(f"  Prix de base : ${result['results']['base_price']}")
+    print(f"  Prix de base : {result['results']['base_price']}€")
     if 'premium_discount' in result['results']:
-        print(f"  Remise premium : -${result['results']['premium_discount']}")
+        print(f"  Remise premium : -{result['results']['premium_discount']}€")
     if 'volume_discount' in result['results']:
-        print(f"  Remise volume : -${result['results']['volume_discount']}")
-    print(f"  Prix final : ${result['results']['final_price']}")
+        print(f"  Remise volume : -{result['results']['volume_discount']}€")
+    print(f"  Prix final : {result['results']['final_price']}€")
     print()
     print("Règles appliquées :")
     for rule in result['applied_rules']:
@@ -195,7 +161,7 @@ if __name__ == '__main__':
 
     applicant_data = {
         'age': 28,
-        'income': 45000,
+        'income': Decimal('45000'),
         'credit_score': 720,
         'employment_years': 3,
         'existing_loans': 1,
@@ -234,18 +200,18 @@ if __name__ == '__main__':
     # Calculer limite de crédit si éligible
     if eligible {
         # Formule : revenu * 0.3, limité entre 5000 et 50000
-        base_limit = input['income'] * 0.3
-        credit_limit = clamp(base_limit, 5000, 50000)
+        base_limit = input['income'] * Decimal('0.3')
+        credit_limit = clamp(base_limit, Decimal('5000'), Decimal('50000'))
 
         # Bonus pour bon score
         if input['credit_score'] > 750 {
-            credit_limit = credit_limit * 1.2
+            credit_limit = credit_limit * Decimal('1.2')
             mark_applied('high_credit_score', 'Bonus 20% pour score > 750')
         }
 
         # Pénalité si prêts existants
         if input['existing_loans'] > 0 {
-            penalty = input['existing_loans'] * 1000
+            penalty = input['existing_loans'] * Decimal('1000')
             credit_limit = credit_limit - penalty
             mark_applied('existing_loans_penalty', 'Pénalité 1000 par prêt existant')
         }
@@ -259,22 +225,22 @@ if __name__ == '__main__':
 
     print("Demandeur :")
     print(f"  Âge : {result['input']['age']} ans")
-    print(f"  Revenu : ${result['input']['income']}")
+    print(f"  Revenu : {result['input']['income']}€")
     print(f"  Score crédit : {result['input']['credit_score']}")
     print(f"  Années d'emploi : {result['input']['employment_years']}")
     print(f"  Prêts existants : {result['input']['existing_loans']}")
     print()
 
     if result['results']['eligible']:
-        print("✓ Éligible au crédit")
-        print(f"  Limite accordée : ${result['results']['credit_limit']:.2f}")
+        print("Éligible au crédit")
+        print(f"  Limite accordée : {result['results']['credit_limit']:.2f}€")
         if result['applied_rules']:
             print()
             print("  Ajustements :")
             for rule in result['applied_rules']:
                 print(f"    - {rule['rule']}: {rule['details']}")
     else:
-        print("✗ Non éligible")
+        print("Non éligible")
         print(f"  Raison : {result['results']['rejection_reason']}")
 
     print()
@@ -283,33 +249,33 @@ if __name__ == '__main__':
 
     shipping_data = {
         'destination': 'international',
-        'weight_kg': 5.5,
+        'weight_kg': Decimal('5.5'),
         'express': True,
-        'value': 200,
+        'value': Decimal('200'),
     }
 
     shipping_rules = """
     # Frais de base selon destination
-    base_fee = 0
+    base_fee = Decimal('0')
     if input['destination'] == 'local' {
-        base_fee = 5
+        base_fee = Decimal('5')
         mark_applied('local_shipping', 'Frais de base local')
     }
     if input['destination'] == 'national' {
-        base_fee = 15
+        base_fee = Decimal('15')
         mark_applied('national_shipping', 'Frais de base national')
     }
     if input['destination'] == 'international' {
-        base_fee = 50
+        base_fee = Decimal('50')
         mark_applied('international_shipping', 'Frais de base international')
     }
 
     set_result('base_shipping', base_fee)
 
-    # Frais selon poids (2$/kg)
-    weight_fee = input['weight_kg'] * 2
+    # Frais selon poids (2€/kg)
+    weight_fee = input['weight_kg'] * Decimal('2')
     set_result('weight_fee', weight_fee)
-    mark_applied('weight_fee', '2$/kg')
+    mark_applied('weight_fee', '2€/kg')
 
     # Supplément express (50%)
     total = base_fee + weight_fee
@@ -320,12 +286,12 @@ if __name__ == '__main__':
         mark_applied('express_shipping', '+50% pour livraison express')
     }
 
-    # Assurance (1% de la valeur si > 100$)
-    if input['value'] > 100 {
+    # Assurance (1% de la valeur si > 100€)
+    if input['value'] > Decimal('100') {
         insurance = calculate_percentage(input['value'], 1)
         set_result('insurance', insurance)
         total = total + insurance
-        mark_applied('insurance', '1% assurance pour valeur > 100$')
+        mark_applied('insurance', '1% assurance pour valeur > 100€')
     }
 
     set_result('total_shipping', total)
@@ -338,16 +304,16 @@ if __name__ == '__main__':
     print(f"  Destination : {result['input']['destination']}")
     print(f"  Poids : {result['input']['weight_kg']} kg")
     print(f"  Express : {'Oui' if result['input']['express'] else 'Non'}")
-    print(f"  Valeur : ${result['input']['value']}")
+    print(f"  Valeur : {result['input']['value']}€")
     print()
     print("Frais de livraison :")
-    print(f"  Base : ${result['results']['base_shipping']}")
-    print(f"  Poids : ${result['results']['weight_fee']}")
+    print(f"  Base : {result['results']['base_shipping']}€")
+    print(f"  Poids : {result['results']['weight_fee']}€")
     if 'express_fee' in result['results']:
-        print(f"  Express : ${result['results']['express_fee']}")
+        print(f"  Express : {result['results']['express_fee']}€")
     if 'insurance' in result['results']:
-        print(f"  Assurance : ${result['results']['insurance']}")
-    print(f"  Total : ${result['results']['total_shipping']:.2f}")
+        print(f"  Assurance : {result['results']['insurance']}€")
+    print(f"  Total : {result['results']['total_shipping']:.2f}€")
     print()
     print("Règles appliquées :")
     for rule in result['applied_rules']:

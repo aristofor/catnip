@@ -73,7 +73,7 @@ class TestExecutionErrors(unittest.TestCase):
             catnip.execute()
 
         # Error should mention the missing variable
-        self.assertIn("y", str(cm.exception))
+        self.assertIn('y', str(cm.exception))
 
     def test_type_error_incompatible_operation(self):
         """Incompatible operation should raise TypeError."""
@@ -91,7 +91,7 @@ class TestExecutionErrors(unittest.TestCase):
         """Accessing a missing attribute should raise AttributeError."""
         catnip = Catnip()
         # Use a literal string properly
-        catnip.context.globals["text"] = "hello"
+        catnip.context.globals['text'] = "hello"
         catnip.parse("x = text.invalid_method")
 
         with self.assertRaises(AttributeError) as cm:
@@ -102,9 +102,9 @@ class TestExecutionErrors(unittest.TestCase):
     def test_index_error_out_of_bounds(self):
         """Out-of-bounds access should raise IndexError."""
         catnip = Catnip()
-        catnip.context.globals["data"] = [1, 2, 3]
+        catnip.context.globals['data'] = [1, 2, 3]
         # Use a method that raises IndexError
-        catnip.context.globals["get_item"] = lambda lst, i: lst[i]
+        catnip.context.globals['get_item'] = lambda lst, i: lst[i]
         catnip.parse("y = get_item(data, 10)")
 
         with self.assertRaises(IndexError) as cm:
@@ -116,8 +116,8 @@ class TestExecutionErrors(unittest.TestCase):
     def test_key_error_missing_dict_key(self):
         """Missing key access should raise KeyError."""
         catnip = Catnip()
-        catnip.context.globals["data"] = {"a": 1, "b": 2}
-        catnip.context.globals["get_key"] = lambda d, k: d[k]
+        catnip.context.globals['data'] = {"a": 1, "b": 2}
+        catnip.context.globals['get_key'] = lambda d, k: d[k]
         catnip.parse('y = get_key(data, "missing")')
 
         with self.assertRaises(KeyError) as cm:
@@ -129,11 +129,11 @@ class TestExecutionErrors(unittest.TestCase):
 class TestFunctionErrors(unittest.TestCase):
     """Function-related error tests."""
 
-    def test_too_many_arguments(self):
-        """Too many arguments with variadic does not raise - test skipped."""
-        # Note: with variadic support, too many args no longer raise TypeError
-        # Test is disabled because expected behavior changed
-        pass
+    def test_too_many_arguments_variadic(self):
+        """Variadic functions absorb extra arguments without error."""
+        catnip = Catnip()
+        catnip.parse("f = (*args) => { len(args) }; f(1, 2, 3, 4, 5)")
+        assert catnip.execute() == 5
 
     def test_missing_required_argument(self):
         """Missing required argument becomes None and raises TypeError if used."""
@@ -245,7 +245,7 @@ class TestErrorPositionAccuracy(unittest.TestCase):
 
     def test_semantic_error_position(self):
         """Semantic error (pragma) reports correct line."""
-        code = 'x = 1\npragma("nonexistent", "on")'
+        code = 'x = 1\npragma("nonexistent", True)'
         with self.assertRaises(CatnipSemanticError) as cm:
             Catnip().parse(code)
         self.assertEqual(cm.exception.line, 2)
@@ -281,7 +281,7 @@ class TestErrorSuggestions(unittest.TestCase):
         """AttributeError on struct should suggest similar attribute."""
         catnip = Catnip()
         catnip.parse("""
-            struct Config { name, value, debug }
+            struct Config { name; value; debug; }
             c = Config("a", 1, False)
             c.naem
         """)
@@ -297,7 +297,7 @@ class TestErrorSuggestions(unittest.TestCase):
         """AttributeError on struct should not suggest when nothing is close."""
         catnip = Catnip()
         catnip.parse("""
-            struct Point { x, y }
+            struct Point { x; y; }
             p = Point(1, 2)
             p.zzzzzzz
         """)
@@ -330,7 +330,7 @@ class TestErrorSuggestions(unittest.TestCase):
         """Semantic errors should include line/column when available."""
         catnip = Catnip()
         with self.assertRaises(CatnipSemanticError) as cm:
-            catnip.parse('pragma("nonexistent", "on")')
+            catnip.parse('pragma("nonexistent", True)')
 
         exc = cm.exception
         # Should have location info enriched from SourceMap
@@ -340,7 +340,7 @@ class TestErrorSuggestions(unittest.TestCase):
     def test_python_string_method_suggestion(self):
         """Typo on string method suggests correct name."""
         catnip = Catnip()
-        catnip.context.globals["text"] = "hello"
+        catnip.context.globals['text'] = "hello"
         catnip.parse("text.uper()")
         with self.assertRaises((AttributeError, CatnipRuntimeError)) as cm:
             catnip.execute()
@@ -351,7 +351,7 @@ class TestErrorSuggestions(unittest.TestCase):
     def test_python_list_method_suggestion(self):
         """Typo on list method suggests correct name."""
         catnip = Catnip()
-        catnip.context.globals["data"] = [1, 2, 3]
+        catnip.context.globals['data'] = [1, 2, 3]
         catnip.parse("data.apend(4)")
         with self.assertRaises((AttributeError, CatnipRuntimeError)) as cm:
             catnip.execute()
@@ -362,7 +362,7 @@ class TestErrorSuggestions(unittest.TestCase):
     def test_python_object_no_suggestion_when_distant(self):
         """No suggestion when attribute name is too different."""
         catnip = Catnip()
-        catnip.context.globals["text"] = "hello"
+        catnip.context.globals['text'] = "hello"
         catnip.parse("text.zzzzzzz")
         with self.assertRaises((AttributeError, CatnipRuntimeError)):
             catnip.execute()

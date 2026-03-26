@@ -105,9 +105,7 @@ pub fn gvn(cfg: &ControlFlowGraph, ssa: &SSAContext) -> GVNResult {
 
             // Only process SetLocals with a pure RHS op
             let rhs_opcode = extract_rhs_opcode(op);
-            let is_pure_setlocals = rhs_opcode
-                .map(|opc| pure_ops.contains(&opc))
-                .unwrap_or(false);
+            let is_pure_setlocals = rhs_opcode.map(|opc| pure_ops.contains(&opc)).unwrap_or(false);
 
             if !is_pure_setlocals {
                 // Non-pure or non-SetLocals: unique VN
@@ -153,11 +151,7 @@ pub fn gvn(cfg: &ControlFlowGraph, ssa: &SSAContext) -> GVNResult {
 
 fn find_def_value(ssa: &SSAContext, block_id: usize, instr_idx: usize) -> Option<SSAValue> {
     for (value, def) in &ssa.value_defs {
-        if let ValueDef::Instruction {
-            block,
-            instr_idx: idx,
-        } = def
-        {
+        if let ValueDef::Instruction { block, instr_idx: idx } = def {
             if *block == block_id && *idx == instr_idx {
                 return Some(*value);
             }

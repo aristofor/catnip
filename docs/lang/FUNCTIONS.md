@@ -1,18 +1,10 @@
 # Functions
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 ## Fonctions
 
 ### Définition de fonctions
 
-En Catnip, les fonctions sont des valeurs. On les crée avec la syntaxe `(params) => { body }` et on les assigne a un nom
+En Catnip, les fonctions sont des valeurs. On les crée avec la syntaxe `(params) => { body }` et on les assigne à un nom
 :
 
 ```catnip
@@ -198,7 +190,7 @@ Les **constructeurs de struct** (dataclasses) restent stricts : un argument manq
 <!-- check: no-check -->
 
 ```catnip
-struct Point { x, y }
+struct Point { x; y; }
 Point(1)        # Error: missing 1 required positional argument: 'y'
 Point(1, 2, 3)  # Error: takes 3 positional arguments but 4 were given
 ```
@@ -304,12 +296,12 @@ Un appel est en **position terminale** si :
 1. C'est dans la dernière branche d'un `if`/`match`
 1. C'est la dernière expression d'un bloc
 
-### ✓ Exemples de tail calls
+### Exemples de tail calls
 
 ```catnip
 # Factorielle tail-recursive (avec accumulateur)
 factorial = (n, acc=1) => {
-    if n <= 1 { acc } else { factorial(n-1, n*acc) }  # ✓ Tail call
+    if n <= 1 { acc } else { factorial(n-1, n*acc) }  # Tail call
 }
 
 # Compteur à rebours
@@ -317,7 +309,7 @@ countdown = (n) => {
     if n == 0 {
         "Terminé!"
     } else {
-        countdown(n - 1)  # ✓ Tail call
+        countdown(n - 1)  # Tail call
     }
 }
 
@@ -325,13 +317,11 @@ countdown = (n) => {
 chercher = (liste, valeur) => {
     if len(liste) == 0 {
         return False
-    } else {
-        if liste[0] == valeur {
-            return True
-        } else {
-            return chercher(liste[1:], valeur)  # ✓ Tail call
-        }
     }
+    if liste[0] == valeur {
+        return True
+    }
+    return chercher(liste[1:], valeur)  # Tail call
 }
 ```
 
@@ -379,28 +369,24 @@ Pour profiter de l'optimisation, transformez vos fonctions récursives en tail-r
 
 **Avant (non-tail) :**
 
-<!-- check: no-check -->
-
 ```catnip
 sum_list = (liste) => {
-    if liste == [] {
+    if len(liste) == 0 {
         0
     } else {
-        liste.get(0) + sum_list(liste.slice(1))  # ✗ Addition après
+        liste[0] + sum_list(liste[1:])  # ✗ Addition après
     }
 }
 ```
 
 **Après (tail-recursive) :**
 
-<!-- check: no-check -->
-
 ```catnip
 sum_list = (liste, acc=0) => {
-    if liste == [] {
+    if len(liste) == 0 {
         acc
     } else {
-        sum_list(liste.slice(1), acc + liste.get(0))  # ✓ Tail call
+        sum_list(liste[1:], acc + liste[0])  # Tail call
     }
 }
 ```
@@ -423,9 +409,8 @@ write("TO", " ", "SEGFAULT")              # Écrit "TO SEGFAULT"
 # write_err : écrire sur stderr (bas niveau, sans séparateur ni newline)
 write_err("Error: ", code)                # Écrit sur stderr
 
-# print : fonction de haut niveau (builtin, implémentée en Python)
+# print : fourni par le module io (auto-importé en CLI/REPL, auto-import configurable)
 # Joint les arguments avec des espaces et ajoute un newline
-# Implémentée en utilisant write() sous le capot
 print("Message:", valeur)                 # Écrit "Message: <valeur>\n"
 print("A", "B", 42)                       # Écrit "A B 42\n"
 print()                                   # Écrit juste "\n"
@@ -527,3 +512,65 @@ for x in filter(est_pair, list(1, 2, 3, 4, 5, 6)) {
     print(x)  # 2, 4, 6
 }
 ```
+
+### Agrégation : fold et reduce
+
+Voir [FOLD_GUIDE](FOLD_GUIDE.md) pour le guide complet avec patterns de composition broadcast + fold.
+
+`fold` et `reduce` sont les primitives d'agrégation de Catnip. Là où broadcast distribue une opération sur une structure
+(en préservant la forme), fold la consomme en une seule valeur.
+
+#### fold
+
+```catnip
+# fold(iterable, init, f) -> valeur
+# Applique f(acc, x) de gauche à droite, en partant de init
+fold(list(1, 2, 3, 4), 0, (acc, x) => { acc + x })  # 10
+
+# Concaténation de chaînes
+fold(list("a", "b", "c"), "", (acc, x) => { acc + x })  # "abc"
+
+# Produit
+fold(list(1, 2, 3, 4), 1, (acc, x) => { acc * x })  # 24
+```
+
+Sur une collection vide, `fold` retourne `init` -- l'opération est totale :
+
+```catnip
+fold(list(), 0, (acc, x) => { acc + x })  # 0
+```
+
+`fold` agrège **un seul niveau** de structure. Il n'effectue pas de descente récursive (broadcast s'en charge) :
+
+```catnip
+# Compter les éléments des sous-listes (un niveau)
+fold(list(list(1, 2), list(3, 4)), 0, (acc, row) => { acc + len(row) })  # 4
+```
+
+#### reduce
+
+`reduce` est la variante sans valeur initiale. Le premier élément sert d'accumulateur :
+
+```catnip
+# reduce(iterable, f) -> valeur
+reduce(list(1, 2, 3), (acc, x) => { acc + x })  # 6
+
+# Maximum artisanal
+reduce(list(3, 1, 4, 1, 5, 9), (acc, x) => {
+    if x > acc { x } else { acc }
+})  # 9
+```
+
+Sur une collection vide, `reduce` lève une erreur (`fold` est préférable quand le cas vide est possible).
+
+#### Composition avec broadcast
+
+Les deux primitives se composent : broadcast transforme, fold agrège.
+
+```catnip
+# Multiplier par 10, puis sommer
+fold(list(1, 2, 3).[* 10], 0, (acc, x) => { acc + x })  # 60
+```
+
+> `broadcast` distribue. `fold` rassemble. La pipeline `broadcast -> fold` est le chemin aller-retour complet d'une
+> valeur à travers une structure.

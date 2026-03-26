@@ -5,6 +5,8 @@
 //! These operations delegate to Python NDScheduler and NDTopos for actual execution.
 
 use super::Registry;
+use crate::constants::*;
+use crate::nd::NDDeclaration;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -12,13 +14,9 @@ impl Registry {
     /// Return the empty topos singleton ~[]
     ///
     /// The empty topos is the identity element for ND operations.
-    pub(crate) fn op_nd_empty_topos(
-        &self,
-        py: Python<'_>,
-        _args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_nd_empty_topos(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         // Import NDTopos and return singleton
-        let nd_module = py.import("catnip.nd")?;
+        let nd_module = py.import(PY_MOD_ND)?;
         let nd_topos_class = nd_module.getattr("NDTopos")?;
         let instance = nd_topos_class.call_method0("instance")?;
         Ok(instance.unbind())
@@ -34,11 +32,7 @@ impl Registry {
     /// Args:
     ///     data_or_seed: First argument (data or seed, unevaluated)
     ///     lambda_node: Lambda expression (unevaluated)
-    pub(crate) fn op_nd_recursion(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_nd_recursion(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "nd_recursion requires 2 arguments: data_or_seed, lambda_node",
@@ -62,7 +56,9 @@ impl Registry {
 
             if nd_lambda.is_none() {
                 // Declaration form: ~~ lambda (data_or_seed is actually the lambda)
-                return Ok(data);
+                // Wrap so calling f(seed) executes ND-recursion
+                let decl = Py::new(py, NDDeclaration::new(data, self.ctx.clone_ref(py)))?;
+                return Ok(decl.into_any());
             }
 
             // Execute ND-recursion on data
@@ -71,11 +67,12 @@ impl Registry {
 
         // Declaration form: ~~ lambda (seed is None)
         if let Some(lambda) = nd_lambda {
-            return Ok(lambda);
+            let decl = Py::new(py, NDDeclaration::new(lambda, self.ctx.clone_ref(py)))?;
+            return Ok(decl.into_any());
         }
 
         // Return empty topos
-        let nd_module = py.import("catnip.nd")?;
+        let nd_module = py.import(PY_MOD_ND)?;
         let nd_topos_class = nd_module.getattr("NDTopos")?;
         let instance = nd_topos_class.call_method0("instance")?;
         Ok(instance.unbind())
@@ -84,12 +81,7 @@ impl Registry {
     /// Validate ND lambda/function arity.
     /// Checks `.params` (AST Function/Lambda) or `.vm_code.nargs` (VMFunction).
     /// Skips silently for Python builtins that expose neither.
-    fn validate_nd_arity(
-        py: Python<'_>,
-        func: &Py<PyAny>,
-        expected: usize,
-        op_name: &str,
-    ) -> PyResult<()> {
+    fn validate_nd_arity(py: Python<'_>, func: &Py<PyAny>, expected: usize, op_name: &str) -> PyResult<()> {
         let func_bound = func.bind(py);
 
         // AST mode: Function/Lambda expose .params (PyList)
@@ -98,22 +90,15 @@ impl Registry {
         }
         // VM mode: VMFunction expose .vm_code.nargs
         else if let Ok(vm_code) = func_bound.getattr("vm_code") {
-            vm_code
-                .getattr("nargs")
-                .ok()
-                .and_then(|a| a.extract::<usize>().ok())
+            vm_code.getattr("nargs").ok().and_then(|a| a.extract::<usize>().ok())
         } else {
             None
         };
 
         if let Some(n) = arity {
             if n != expected {
-                let label = if expected == 2 {
-                    "(value, recur)"
-                } else {
-                    "(value)"
-                };
-                let exc_module = py.import("catnip.exc")?;
+                let label = if expected == 2 { "(value, recur)" } else { "(value)" };
+                let exc_module = py.import(PY_MOD_EXC)?;
                 let catnip_type_error = exc_module.getattr("CatnipTypeError")?;
                 return Err(PyErr::from_value(catnip_type_error.call1((format!(
                     "{} expects a function with {} parameters {}, got {}",
@@ -142,28 +127,27 @@ impl Registry {
 
         // Get or create scheduler from context
         // NOTE: pragma values are already synced to Context in Catnip.execute()
-        let nd_scheduler =
-            if !ctx.hasattr("nd_scheduler")? || ctx.getattr("nd_scheduler")?.is_none() {
-                // Create scheduler with mode from context (via pragmas)
-                let n_workers = ctx
-                    .getattr("nd_workers")
-                    .unwrap_or_else(|_| 0_i32.into_pyobject(py).unwrap().into_any());
-                let sched_mode = ctx
-                    .getattr("nd_mode")
-                    .unwrap_or_else(|_| "sequential".into_pyobject(py).unwrap().into_any());
-                let memoize = ctx
-                    .getattr("nd_memoize")
-                    .unwrap_or_else(|_| false.into_pyobject(py).unwrap().to_owned().into_any());
+        let nd_scheduler = if !ctx.hasattr("nd_scheduler")? || ctx.getattr("nd_scheduler")?.is_none() {
+            // Create scheduler with mode from context (via pragmas)
+            let n_workers = ctx
+                .getattr("nd_workers")
+                .unwrap_or_else(|_| 0_i32.into_pyobject(py).unwrap().into_any());
+            let sched_mode = ctx
+                .getattr("nd_mode")
+                .unwrap_or_else(|_| "sequential".into_pyobject(py).unwrap().into_any());
+            let memoize = ctx
+                .getattr("nd_memoize")
+                .unwrap_or_else(|_| false.into_pyobject(py).unwrap().to_owned().into_any());
 
-                let nd_module = py.import("catnip.nd")?;
-                let nd_scheduler_class = nd_module.getattr("NDScheduler")?;
-                let scheduler = nd_scheduler_class.call1((n_workers, sched_mode, memoize))?;
+            let nd_module = py.import(PY_MOD_ND)?;
+            let nd_scheduler_class = nd_module.getattr("NDScheduler")?;
+            let scheduler = nd_scheduler_class.call1((n_workers, sched_mode, memoize))?;
 
-                ctx.setattr("nd_scheduler", scheduler.clone())?;
-                scheduler
-            } else {
-                ctx.getattr("nd_scheduler")?
-            };
+            ctx.setattr("nd_scheduler", scheduler.clone())?;
+            scheduler
+        } else {
+            ctx.getattr("nd_scheduler")?
+        };
 
         // Wrap Catnip Function to make it callable if needed
         let callable_lambda = self.wrap_function_for_nd(py, nd_lambda)?;
@@ -174,13 +158,11 @@ impl Registry {
 
         match sched_mode.as_str() {
             "thread" => {
-                let result =
-                    nd_scheduler.call_method1("execute_thread", (seed, &callable_lambda))?;
+                let result = nd_scheduler.call_method1("execute_thread", (seed, &callable_lambda))?;
                 Ok(result.unbind())
             }
             "process" => {
-                let result =
-                    nd_scheduler.call_method1("execute_process", (seed, &callable_lambda))?;
+                let result = nd_scheduler.call_method1("execute_process", (seed, &callable_lambda))?;
                 Ok(result.unbind())
             }
             _ => {
@@ -220,11 +202,7 @@ impl Registry {
     /// Args:
     ///     data_or_func: First argument (data or function, unevaluated)
     ///     func_node: Function expression (unevaluated)
-    pub(crate) fn op_nd_map(
-        &self,
-        py: Python<'_>,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_nd_map(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         if args.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "nd_map requires 2 arguments: data_or_func, func_node",
@@ -260,7 +238,7 @@ impl Registry {
         }
 
         // Return empty topos
-        let nd_module = py.import("catnip.nd")?;
+        let nd_module = py.import(PY_MOD_ND)?;
         let nd_topos_class = nd_module.getattr("NDTopos")?;
         let instance = nd_topos_class.call_method0("instance")?;
         Ok(instance.unbind())
@@ -268,66 +246,9 @@ impl Registry {
 
     /// Execute ND-map on data
     ///
-    /// Sequential implementation. Concurrency handled by NDScheduler.
-    pub(crate) fn execute_nd_map(
-        &self,
-        py: Python<'_>,
-        data: &Py<PyAny>,
-        func: &Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    /// Validates arity, then delegates to shared nd_map.
+    pub(crate) fn execute_nd_map(&self, py: Python<'_>, data: &Py<PyAny>, func: &Py<PyAny>) -> PyResult<Py<PyAny>> {
         Self::validate_nd_arity(py, func, 1, "~>")?;
-
-        let data_bound = data.bind(py);
-        let func_bound = func.bind(py);
-
-        // Check if data is iterable (but not string or bytes)
-        let data_type = data_bound.get_type();
-        let type_name = data_type.name()?;
-        let type_str = type_name.to_str()?;
-
-        if type_str == "str" || type_str == "bytes" {
-            // For scalars/strings, just apply func
-            if func_bound.is_callable() {
-                let result = func_bound.call1((data,))?;
-                return Ok(result.unbind());
-            }
-            return Ok(data.clone_ref(py));
-        }
-
-        // Try to iterate
-        match data_bound.try_iter() {
-            Ok(iter) => {
-                // Map func over each element
-                let mut results = Vec::new();
-                for item_result in iter {
-                    let item = item_result?;
-                    if func_bound.is_callable() {
-                        let mapped = func_bound.call1((item.clone(),))?;
-                        results.push(mapped.unbind());
-                    } else {
-                        results.push(item.unbind());
-                    }
-                }
-
-                // Preserve type
-                if type_str == "tuple" {
-                    let result_tuple = PyTuple::new(py, &results)?;
-                    Ok(result_tuple.unbind().into())
-                } else {
-                    // Return as list
-                    let py_list = pyo3::types::PyList::new(py, &results)?;
-                    Ok(py_list.unbind().into())
-                }
-            }
-            Err(_) => {
-                // Not iterable, treat as scalar
-                if func_bound.is_callable() {
-                    let result = func_bound.call1((data,))?;
-                    Ok(result.unbind())
-                } else {
-                    Ok(data.clone_ref(py))
-                }
-            }
-        }
+        crate::core::broadcast::nd_map(py, data.bind(py), func.bind(py))
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "catnip-io"
+version = "0.0.7"
+edition = "2021"
+
+[lib]
+name = "catnip_io"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+embedded = ["pyo3/auto-initialize"]
+
+[dependencies]
+pyo3 = { version = "0.28", default-features = false, features = ["macros"] }

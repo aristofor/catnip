@@ -24,12 +24,12 @@ def summarize_junit(path: Path) -> Tuple[int, int, int, int]:
     tree = ET.parse(path)
     root = tree.getroot()
 
-    if root.tag == "testsuite":
+    if root.tag == 'testsuite':
         suites = [root]
-    elif root.tag == "testsuites":
-        suites = list(root.findall("testsuite"))
+    elif root.tag == 'testsuites':
+        suites = list(root.findall('testsuite'))
     else:
-        suites = list(root.findall(".//testsuite"))
+        suites = list(root.findall('.//testsuite'))
 
     if not suites:
         return 0, 0, 0, 0
@@ -39,10 +39,10 @@ def summarize_junit(path: Path) -> Tuple[int, int, int, int]:
     skipped = 0
 
     for suite in suites:
-        tests = int(suite.attrib.get("tests", 0))
-        failures = int(suite.attrib.get("failures", 0))
-        errors = int(suite.attrib.get("errors", 0))
-        skips = int(suite.attrib.get("skipped", 0))
+        tests = int(suite.attrib.get('tests', 0))
+        failures = int(suite.attrib.get('failures', 0))
+        errors = int(suite.attrib.get('errors', 0))
+        skips = int(suite.attrib.get('skipped', 0))
 
         total += tests
         failed += failures + errors
@@ -55,22 +55,22 @@ def summarize_junit(path: Path) -> Tuple[int, int, int, int]:
 def make_badge(total: int, passed: int, failed: int, skipped: int) -> dict:
     """Build the JSON structure expected by Shields.io."""
     if total <= 0:
-        message = "0/0"
-        color = "lightgrey"
+        message = '0/0'
+        color = 'lightgrey'
     else:
         message = f"{passed}/{total}"
         if failed:
-            color = "red"
+            color = 'red'
         elif skipped:
-            color = "yellow"
+            color = 'yellow'
         else:
-            color = "brightgreen"
+            color = 'brightgreen'
 
     return {
-        "schemaVersion": 1,
-        "label": "tests",
-        "message": message,
-        "color": color,
+        'schemaVersion': 1,
+        'label': 'tests',
+        'message': message,
+        'color': color,
     }
 
 

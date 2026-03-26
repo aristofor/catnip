@@ -1,6 +1,7 @@
-# Example of using break in a loop
+#!/usr/bin/env catnip
+# Exemple d'utilisation de `break` dans une boucle
 
-# Search for a number in a list
+# Rechercher un nombre dans une liste
 target = 42
 found = False
 position = -1
@@ -12,7 +13,7 @@ for num in numbers {
     if num == target {
         found = True
         position = i
-        break  # Exit as soon as we find it
+        break  # Sort dès qu'on le trouve
     }
     i = i + 1
 }
@@ -23,7 +24,7 @@ if found {
     print("Not found")
 }
 
-# Example with while and break
+# Exemple avec `while` et `break`
 print("Search for first divisor > 1:")
 n = 24
 divisor = 2
@@ -36,7 +37,7 @@ while divisor < n {
     divisor = divisor + 1
 }
 
-# Nested loops - break only exits the inner loop
+# Boucles imbriquées : `break` ne sort que de la boucle interne
 print("Matrix - search for zero:")
 matrix = list(list(1, 2, 3), list(4, 0, 6), list(7, 8, 9))
 
@@ -50,7 +51,7 @@ for line in matrix {
         if val == 0 {
             row_found = row
             col_found = col
-            break  # Only exits the inner loop
+            break  # Sort uniquement de la boucle interne
         }
         col = col + 1
     }

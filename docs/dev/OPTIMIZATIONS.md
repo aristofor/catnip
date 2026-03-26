@@ -8,12 +8,12 @@ Catnip supporte 4 niveaux d'optimisation (0-3) contrôlables via pragma, CLI ou 
 
 **Défaut** : `optimize=0` (aucune optimisation)
 
-| Niveau | Alias                  | Description              | Passes actives                                                           |
-| ------ | ---------------------- | ------------------------ | ------------------------------------------------------------------------ |
-| **0**  | none, off (défaut)     | Aucune optimisation      | Aucune                                                                   |
-| **1**  | basic, low             | Optimisations légères    | Constant folding (IR)                                                    |
-| **2**  | medium                 | Optimisations standard   | Constant folding, Strength reduction, Block flattening (IR)              |
-| **3**  | aggressive, high, full | Optimisations agressives | Toutes passes IR + CFG (dead code, merge, empty, branches), 5 itérations |
+| Niveau | Alias              | Description              | Passes actives                                                           |
+| ------ | ------------------ | ------------------------ | ------------------------------------------------------------------------ |
+| **0**  | none, off (défaut) | Aucune optimisation      | Aucune                                                                   |
+| **1**  | low                | Optimisations légères    | Constant folding (IR)                                                    |
+| **2**  | medium             | Optimisations standard   | Constant folding, Strength reduction, Block flattening (IR)              |
+| **3**  | high               | Optimisations agressives | Toutes passes IR + CFG (dead code, merge, empty, branches), 5 itérations |
 
 ## Quand Activer les Optimisations
 
@@ -85,7 +85,12 @@ if catnip.optimize > 0 {
 
 ## Passes Disponibles
 
-Catnip applique deux types de passes complémentaires :
+Catnip applique deux types de passes complémentaires.
+
+Les passes IR existent en deux implémentations : PyO3 (`catnip_rs/src/semantic/`) opérant sur `Op` (pipeline Standard)
+et pure Rust (`catnip_core/src/semantic/passes/`) opérant directement sur `IR` (pipeline Standalone). Le trait
+`PurePass` et le `PureOptimizer` appliquent les passes itérativement jusqu'au point fixe (max 10 itérations, détection
+par `PartialEq`).
 
 ### Passes IR (Niveau Expression)
 
@@ -110,17 +115,15 @@ Optimisations locales sur expressions et statements :
    - Code après `return`
    - Branches `if False`
 
-1. **Common Subexpression Elimination (CSE)** - Réutilise calculs identiques
-
-   - `a*b + a*b` → `temp = a*b; temp + temp`
-
 1. **Blunt Code Simplification** - Simplifie patterns maladroits
 
    - `not not x` → `x`
    - `x == True` → `x`
    - `not (a < b)` → `a >= b` (inversion de comparaison)
-   - `x and x` → `x` (idempotence)
    - `x and (not x)` → `False` (complement)
+   - Les simplifications `and`/`or` avec constantes (`x and False` → `False`, `x or True` → `True`) ne s'appliquent que
+     quand les deux opérandes sont des `Bool`. En Catnip, `and`/`or` retournent toujours un booléen — simplifier avec un
+     opérande non-bool changerait le type de retour
 
 1. **Constant/Copy Propagation** - Propage valeurs connues
 
@@ -162,8 +165,7 @@ flowchart TD
         B5["StrengthRed"]
         B6["BlockFlat"]
         B7["DeadCode"]
-        B8["CSE"]
-        B1 --> B2 --> B3 --> B4 --> B5 --> B6 --> B7 --> B8
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6 --> B7
     end
 
     subgraph GLOBAL["Passes globales · inter-blocs"]
@@ -188,7 +190,7 @@ flowchart TD
 
 **Ordre d'exécution** :
 
-1. Passes IR (9 passes) sur l'IR brut
+1. Passes IR (8 passes) sur l'IR brut
 1. CFG construction depuis IR optimisé
 1. Analyse de dominance + construction SSA (Braun)
 1. Passes SSA (4 passes) sur le graphe en forme SSA
@@ -215,5 +217,9 @@ fact = (n, acc) => {
 **Détection** : automatique par l'analyseur sémantique (appels en dernière position)
 
 **Implémentation** : trampoline pattern (pas de frame empilée)
+
+**Boucles** : `visit_while` et `visit_for` forcent `in_tail_position = false` avant de visiter le body. Les appels dans
+le corps d'une boucle ne sont jamais marqués comme tail calls, même quand la boucle est le dernier statement d'une
+fonction.
 
 Voir [ARCHITECTURE](ARCHITECTURE.md) section TCO pour détails.

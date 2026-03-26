@@ -6,7 +6,7 @@ Ce document définit les concepts clés et la terminologie utilisée dans Catnip
 
 ### HostApp (application hôte)
 
-L'**application hôte** est le programme Python qui intègre et utilise Catnip comme langage embarqué. Elle fournit :
+L'**application hôte** est le programme Python qui intègre et utilise Catnip comme DSL. Elle fournit :
 
 - Le contexte d'exécution
 - Les fonctions et objets Python accessibles depuis Catnip
@@ -88,8 +88,8 @@ Exécution des Op nodes via le Registry, par interprétation directe de l'arbre.
 ```python
 OpCode.ADD = 1
 OpCode.SUB = 2
-OpCode.OP_IF = 10     # Préfixe OP_ pour mots-clés Python réservés
-OpCode.OP_WHILE = 11
+OpCode.OP_IF = 50     # Préfixe OP_ pour mots-clés Python réservés
+OpCode.OP_WHILE = 51
 ```
 
 **Convention** : Les opcodes correspondant à des mots-clés Python réservés (`if`, `while`, `for`, etc.) sont préfixés
@@ -284,7 +284,7 @@ Graph"
 **Directives supportées**:
 
 - `tco`: Tail-call optimization (`True`/`False`)
-- `optimize`: Niveau d'optimisation (0-3 ou "none"/"full")
+- `optimize`: Niveau d'optimisation (0-3 ou "none"/"high")
 - `cache`: Cache de parsing (`True`/`False`)
 - `debug`: Mode debug (`True`/`False`)
 - `feature`: (**deprecated**, remplace par `import()`) Charger un module Catnip ou Python (pur ou binaire) par nom ou
@@ -296,10 +296,10 @@ Graph"
 
 ```catnip
 pragma("tco", True)
-pragma("optimize", "3")
+pragma("optimize", 3)
 json = import("json")
 pd = import("pandas")
-tools = import("./toolbox.cat")
+tools = import("toolbox")
 ```
 
 **Module**: `pragma.py`
@@ -488,7 +488,21 @@ Environnement d'exécution **isolé** qui limite les actions possibles du code.
 
 ### `.cat`
 
-Extension de fichier pour les scripts Catnip.
+Extension de fichier pour les scripts Catnip (code source).
+
+### `.catf`
+
+Extension de fichier pour le format binaire **frozen** : IR compilé ou données sérialisées via `freeze`/`thaw`.
+
+### Freeze/Thaw
+
+**Persistance binaire** de code IR ou de données Catnip au format `.catf`.
+
+- `encode` / `decode` : bincode brut pour transport (IPC workers, in-memory)
+- `freeze` / `thaw` : builtins Catnip (`freeze(value) -> bytes`, `thaw(bytes) -> value`)
+- Format `.catf` : header (magic, opcode_hash, source_hash) + bincode, pour le cache disque avec auto-invalidation
+
+**Module** : `catnip_core/src/freeze/`, `catnip_rs/src/freeze.rs`
 
 ## Interfaces et Outils
 
@@ -585,7 +599,7 @@ factorial = jit((n) => { ... })          # Builtin
 3. **JIT forcé global** :
 
 ```catnip
-pragma("jit", "all")  # Compile TOUT à la définition
+pragma("jit", "all")  # Compile tout à la définition
 ```
 
 **Limitations** : Seules les fonctions tail-récursives simples (1-3 paramètres entiers) sont compilables. Les autres
@@ -606,6 +620,7 @@ s'exécutent normalement via l'interpréteur.
 - **SSA**: Static Single Assignment (Assignation Statique Unique)
 - **JIT**: Just-In-Time Compilation (Compilation à la Volée)
 - **Op**: Operation (Opération exécutable)
+- **CATF**: Catnip Frozen Format (Format Binaire Frozen)
 - **CSE**: Common Subexpression Elimination (Élimination des Sous-Expressions Communes)
 - **DCE**: Dead Code Elimination (Élimination de Code Mort)
 - **DSE**: Dead Store Elimination (Élimination des Écritures Mortes)
@@ -635,15 +650,14 @@ s'exécutent normalement via l'interpréteur.
 ```mermaid
 flowchart TD
     A["HostApp"] --> B["Runtime"]
-    B --> C["Parser"]
-    C --> C1["IR(OpCode) - sortie du transformer"]
-    B --> D["Optimizer"]
-    D --> D1["IR optimisé"]
-    B --> E["Semantic Analyzer"]
-    E --> E1["Op(OpCode) - nœuds exécutables"]
-    B --> F["Executor"]
+    B --> C["Pipeline"]
+    C --> C1["Parser → IR(OpCode)"]
+    C1 --> C2["SemanticAnalyzer → IR optimisé"]
+    C2 --> D{"Execution"}
+    D -->|"VM"| E["UnifiedCompiler → VM bytecode"]
+    D -->|"AST"| F["prepared_ir_to_op() → Op nodes"]
     F --> G["Registry (résolution des opérations)"]
-    F --> H["Context (scopes, variables, fonctions, JIT, cache)"]
+    B --> H["Context (scopes, variables, fonctions, JIT, cache)"]
 ```
 
 ## Exemples d'usage
@@ -670,7 +684,7 @@ result = cat.parse('db.query("SELECT * FROM users")').execute()
 
 ```catnip
 pragma("tco", True)
-pragma("optimize", "3")
+pragma("optimize", 3)
 json = import("json")
 
 factorial = (n, acc=1) => {
@@ -686,6 +700,6 @@ json_str = json.dumps(data)
 
 ```catnip
 numbers = list(1, 2, 3, 4, 5)
-doubled = numbers.[* 2]        # [2, 4, 6, 8, 10]
-squares = numbers.[(x) => { x ** 2 }]  # [1, 4, 9, 16, 25]
+doubled = numbers.[* 2]                # → [2, 4, 6, 8, 10]
+squares = numbers.[(x) => { x ** 2 }]  # → [1, 4, 9, 16, 25]
 ```

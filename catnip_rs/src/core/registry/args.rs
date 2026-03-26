@@ -7,11 +7,7 @@ use pyo3::types::{PyList, PyTuple};
 
 impl Registry {
     /// Helper: unwrap args and apply a conversion function (eval or passthrough).
-    fn unwrap_args_with<F>(
-        &self,
-        items: &Bound<'_, PyTuple>,
-        mut convert: F,
-    ) -> PyResult<Vec<Py<PyAny>>>
+    fn unwrap_args_with<F>(&self, items: &Bound<'_, PyTuple>, mut convert: F) -> PyResult<Vec<Py<PyAny>>>
     where
         F: FnMut(Bound<'_, PyAny>) -> PyResult<Py<PyAny>>,
     {
@@ -37,9 +33,7 @@ impl Registry {
         if items.len() == 1 && first_arg.is_instance_of::<PyTuple>() {
             let tuple = first_arg.cast::<PyTuple>()?;
             // Only unwrap if it looks like wrapped args (multiple elements or elements are AST nodes)
-            if tuple.len() > 1
-                || (tuple.len() == 1 && !tuple.get_item(0)?.is_instance_of::<PyTuple>())
-            {
+            if tuple.len() > 1 || (tuple.len() == 1 && !tuple.get_item(0)?.is_instance_of::<PyTuple>()) {
                 let mut result = Vec::with_capacity(tuple.len());
                 for item in tuple.iter() {
                     result.push(convert(item)?);
@@ -58,11 +52,7 @@ impl Registry {
     }
 
     /// Helper: unwrap and evaluate arguments from tuple.
-    pub(crate) fn unwrap_and_eval_args(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
+    pub(crate) fn unwrap_and_eval_args(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Vec<Py<PyAny>>> {
         self.unwrap_args_with(items, |item| self.exec_stmt_impl(py, item.unbind()))
     }
 

@@ -1,4 +1,5 @@
-# Exemple 03 : Comparaisons vectorisées
+#!/usr/bin/env catnip
+# Exemple : Comparaisons vectorisées
 # Filtrage et sélection basés sur des conditions
 
 print("⇒ Comparaisons vectorisées")
@@ -13,7 +14,8 @@ print("Supérieur à 10:", sup_10)
 inf_eq_10 = nombres.[<= 10]
 print("Inférieur ou égal à 10:", inf_eq_10)
 
-print("\n⇒ Égalité et différence\n")
+print()
+print("⇒ Égalité et différence\n")
 
 valeurs = list(1, 2, 3, 2, 1, 2, 3)
 print("Valeurs:", valeurs)
@@ -24,7 +26,8 @@ print("Égal à 2:", est_deux)
 pas_deux = valeurs.[!= 2]
 print("Différent de 2:", pas_deux)
 
-print("\n⇒ Comparaison de deux listes\n")
+print()
+print("⇒ Comparaison de deux listes\n")
 
 a = list(1, 5, 3, 8, 2)
 b = list(2, 4, 3, 7, 3)
@@ -37,7 +40,8 @@ print("a > b (élément par élément):", a_sup_b)
 a_eq_b = a.[== b]
 print("a == b (élément par élément):", a_eq_b)
 
-print("\n⇒ Filtrage avec comparaisons\n")
+print()
+print("⇒ Filtrage avec comparaisons\n")
 
 # Simuler un filtrage (en attendant une fonction filter native)
 temperatures = list(15, 22, 18, 25, 30, 12, 28)
@@ -50,12 +54,13 @@ print("Températures > 20°C:", chaudes)
 # Marquer les températures dans la plage [18, 25)
 min_confort = 18
 max_confort = 25
-sup_min = temperatures.[>= min_confort]
-inf_max = temperatures.[<= max_confort]
+sup_min     = temperatures.[>= min_confort]
+inf_max     = temperatures.[<= max_confort]
 print("Températures >= 18:", sup_min)
 print("Températures <= 25:", inf_max)
 
-print("\n⇒ Validation de données\n")
+print()
+print("⇒ Validation de données\n")
 
 # Scores entre 0 et 100
 scores = list(85, 120, 95, -5, 70, 100)

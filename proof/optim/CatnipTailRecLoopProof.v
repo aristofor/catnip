@@ -1,5 +1,5 @@
 (* FILE: proof/optim/CatnipTailRecLoopProof.v *)
-(* CatnipTailRecLoopProof.v — Tail recursion to loop transformation
+(* CatnipTailRecLoopProof.v - Tail recursion to loop transformation
  *
  * Source of truth:
  *   catnip_rs/src/semantic/tail_recursion_to_loop.rs
@@ -406,7 +406,7 @@ Example ex_two_phase_swap :
 Proof. reflexivity. Qed.
 
 (* Sequential swap: x := y updates x first, then y := x sees new x *)
-(* Both end up with value 2 — the swap is broken *)
+(* Both end up with value 2 - the swap is broken *)
 Example ex_sequential_swap :
   sequential nat swap_env [0; 1] [RVar nat 1; RVar nat 0] =
     Some [(1, 2); (0, 2); (0, 1); (1, 2)].

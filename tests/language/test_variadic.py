@@ -14,7 +14,7 @@ class TestVariadicLambdas:
         c = Catnip()
         c.parse("f = (*args) => { args }; result = f(1, 2, 3)")
         c.execute()
-        assert c.context.globals["result"] == [1, 2, 3]
+        assert c.context.globals['result'] == [1, 2, 3]
 
     def test_variadic_lambda_sum(self):
         """Test variadic lambda that sums all arguments."""
@@ -30,14 +30,14 @@ class TestVariadicLambdas:
             result = somme(1, 2, 3, 4, 5)
         """)
         c.execute()
-        assert c.context.globals["result"] == 15
+        assert c.context.globals['result'] == 15
 
     def test_variadic_lambda_no_args(self):
         """Test calling variadic lambda with no arguments."""
         c = Catnip()
         c.parse("f = (*args) => { args }; result = f()")
         c.execute()
-        assert c.context.globals["result"] == []
+        assert c.context.globals['result'] == []
 
     def test_mixed_params_lambda(self):
         """Test lambda with regular and variadic parameters."""
@@ -49,7 +49,7 @@ class TestVariadicLambdas:
             result = f(1, 2, 3, 4)
         """)
         c.execute()
-        assert c.context.globals["result"] == {"first": 1, "rest": [2, 3, 4]}
+        assert c.context.globals['result'] == {'first': 1, 'rest': [2, 3, 4]}
 
     def test_multiple_regular_params_with_variadic(self):
         """Test lambda with multiple regular + variadic parameters."""
@@ -61,7 +61,7 @@ class TestVariadicLambdas:
             result = f(1, 2, 3, 4, 5)
         """)
         c.execute()
-        assert c.context.globals["result"] == {"a": 1, "b": 2, "rest": [3, 4, 5]}
+        assert c.context.globals['result'] == {'a': 1, 'b': 2, 'rest': [3, 4, 5]}
 
     def test_variadic_with_list_operations(self):
         """Test using Python list operations on variadic args."""
@@ -71,7 +71,7 @@ class TestVariadicLambdas:
             result = get_length("a", "b", "c", "d")
         """)
         c.execute()
-        assert c.context.globals["result"] == 4
+        assert c.context.globals['result'] == 4
 
     def test_variadic_with_min_max(self):
         """Test finding min/max of variadic args."""
@@ -83,7 +83,7 @@ class TestVariadicLambdas:
             result = find_range(5, 2, 8, 1, 9, 3)
         """)
         c.execute()
-        assert c.context.globals["result"] == {"min": 1, "max": 9}
+        assert c.context.globals['result'] == {'min': 1, 'max': 9}
 
 
 class TestVariadicFunctions:
@@ -99,7 +99,7 @@ class TestVariadicFunctions:
             result = collect(1, 2, 3)
         """)
         c.execute()
-        assert c.context.globals["result"] == [1, 2, 3]
+        assert c.context.globals['result'] == [1, 2, 3]
 
     def test_variadic_function_sum(self):
         """Test variadic function that computes sum."""
@@ -115,7 +115,7 @@ class TestVariadicFunctions:
             result = sum_all(10, 20, 30, 40)
         """)
         c.execute()
-        assert c.context.globals["result"] == 100
+        assert c.context.globals['result'] == 100
 
     def test_mixed_params_function(self):
         """Test function with regular and variadic parameters."""
@@ -128,11 +128,9 @@ class TestVariadicFunctions:
                 }
                 result
             }
-            result = greet("Hello", "Alice", "Bob", "Charlie")
+            greet("Hello", "Alice", "Bob", "Charlie")
         """)
-        c.execute()
-        # Note: string concatenation with + should work if implemented
-        # This test may need adjustment based on string handling
+        assert c.execute() == ["Hello Alice", "Hello Bob", "Hello Charlie"]
 
     def test_variadic_with_defaults(self):
         """Test mixing default parameters with variadic."""
@@ -142,11 +140,10 @@ class TestVariadicFunctions:
                 list(prefix) + list(items)
             }
             result1 = make_list(100, 1, 2, 3)
-            result2 = make_list(1, 2, 3)
+            result2 = make_list()
+            list(result1, result2)
         """)
-        c.execute()
-        # Assuming + operator works for list concatenation
-        # May need adjustment
+        assert c.execute() == [[100, [1, 2, 3]], [0, []]]
 
 
 class TestVariadicEdgeCases:
@@ -162,7 +159,7 @@ class TestVariadicEdgeCases:
             result = f(42)
         """)
         c.execute()
-        assert c.context.globals["result"] == {"required": 42, "optional": []}
+        assert c.context.globals['result'] == {'required': 42, 'optional': []}
 
     def test_variadic_single_arg(self):
         """Test variadic with exactly one vararg."""
@@ -172,7 +169,7 @@ class TestVariadicEdgeCases:
             result = f(1, 2)
         """)
         c.execute()
-        assert c.context.globals["result"] == [2]
+        assert c.context.globals['result'] == [2]
 
     def test_nested_variadic_calls(self):
         """Test calling one variadic function from another."""
@@ -183,7 +180,7 @@ class TestVariadicEdgeCases:
             result = outer(1, 2, 3, 4)
         """)
         c.execute()
-        assert c.context.globals["result"] == 2
+        assert c.context.globals['result'] == 2
 
 
 class TestVariadicWithLiterals:
@@ -197,7 +194,7 @@ class TestVariadicWithLiterals:
             result = wrap(1, 2, 3)
         """)
         c.execute()
-        assert c.context.globals["result"] == [[1, 2, 3]]
+        assert c.context.globals['result'] == [[1, 2, 3]]
 
     def test_variadic_with_dict_result(self):
         """Test variadic function returning dict with args."""
@@ -209,15 +206,13 @@ class TestVariadicWithLiterals:
             result = make_info(10, 20, 30)
         """)
         c.execute()
-        assert c.context.globals["result"] == {"count": 3, "values": [10, 20, 30]}
+        assert c.context.globals['result'] == {'count': 3, 'values': [10, 20, 30]}
 
-    def test_list_literal_to_variadic(self):
-        """Test passing list literal elements to variadic function."""
+    def test_variadic_sum(self):
+        """Test variadic function with sum."""
         c = Catnip()
         c.parse("""
             f = (*args) => { sum(args) }
-            nums = list(1, 2, 3, 4, 5)
-            # Note: This would require spread operator which isn't implemented yet
-            # Just documenting expected behavior
+            f(1, 2, 3, 4, 5)
         """)
-        # Skip for now - spread operator not implemented
+        assert c.execute() == 15

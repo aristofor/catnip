@@ -97,22 +97,10 @@ pub fn detect_ivs(cfg: &mut ControlFlowGraph, ssa: &SSAContext) -> IVResult {
         }
 
         // Detect DIVs in loop body
-        detect_divs(
-            cfg,
-            ssa,
-            *header,
-            loop_blocks,
-            &bivs,
-            loop_bivs_start,
-            &mut divs,
-        );
+        detect_divs(cfg, ssa, *header, loop_blocks, &bivs, loop_bivs_start, &mut divs);
     }
 
-    IVResult {
-        bivs,
-        divs,
-        preheaders,
-    }
+    IVResult { bivs, divs, preheaders }
 }
 
 /// Detect Basic Induction Variables at a loop header.
@@ -134,14 +122,13 @@ fn detect_bivs(
     }
 
     // Classify predecessors
-    let (outside_idx, inside_idx) =
-        if !loop_blocks.contains(&preds[0]) && loop_blocks.contains(&preds[1]) {
-            (0, 1)
-        } else if loop_blocks.contains(&preds[0]) && !loop_blocks.contains(&preds[1]) {
-            (1, 0)
-        } else {
-            return; // Can't classify
-        };
+    let (outside_idx, inside_idx) = if !loop_blocks.contains(&preds[0]) && loop_blocks.contains(&preds[1]) {
+        (0, 1)
+    } else if loop_blocks.contains(&preds[0]) && !loop_blocks.contains(&preds[1]) {
+        (1, 0)
+    } else {
+        return; // Can't classify
+    };
 
     for param in &live_params {
         // Get incoming values
@@ -289,18 +276,14 @@ fn extract_init_value(cfg: &ControlFlowGraph, ssa: &SSAContext, init_ssa: SSAVal
         let args_bound = args.bind(py);
         let args_tuple = match args_bound.cast::<PyTuple>() {
             Ok(t) => t,
-            Err(_) => {
-                return IVInit::Variable(ssa.vars.name(init_ssa.var).unwrap_or("?").to_string())
-            }
+            Err(_) => return IVInit::Variable(ssa.vars.name(init_ssa.var).unwrap_or("?").to_string()),
         };
         if args_tuple.len() < 2 {
             return IVInit::Variable(ssa.vars.name(init_ssa.var).unwrap_or("?").to_string());
         }
         let rhs = match args_tuple.get_item(1) {
             Ok(r) => r,
-            Err(_) => {
-                return IVInit::Variable(ssa.vars.name(init_ssa.var).unwrap_or("?").to_string())
-            }
+            Err(_) => return IVInit::Variable(ssa.vars.name(init_ssa.var).unwrap_or("?").to_string()),
         };
 
         // Direct integer literal
@@ -505,9 +488,7 @@ pub fn apply_iv_strength_reduction(cfg: &mut ControlFlowGraph, result: &IVResult
                 IVInit::Variable(_) => {
                     // Can't pre-compute init * scale at compile time
                     // Insert Mul(Ref(var), scale) in preheader instead
-                    if let Ok(init_op) =
-                        create_set_locals_mul(py, &div.var_name, &biv.var_name, div.scale)
-                    {
+                    if let Ok(init_op) = create_set_locals_mul(py, &div.var_name, &biv.var_name, div.scale) {
                         if let Some(ph_block) = cfg.get_block_mut(preheader) {
                             let pos = find_insert_position(ph_block);
                             ph_block.instructions.insert(pos, init_op);
@@ -534,12 +515,7 @@ pub fn apply_iv_strength_reduction(cfg: &mut ControlFlowGraph, result: &IVResult
 }
 
 /// Nop the original multiplication and insert the addition update at end of body.
-fn nop_and_insert_update(
-    cfg: &mut ControlFlowGraph,
-    py: Python<'_>,
-    div: &DerivedIV,
-    effective_step: i64,
-) {
+fn nop_and_insert_update(cfg: &mut ControlFlowGraph, py: Python<'_>, div: &DerivedIV, effective_step: i64) {
     // Nop the original Mul instruction
     if let Some(block) = cfg.get_block_mut(div.block) {
         if div.instr_idx < block.instructions.len() {
@@ -575,7 +551,7 @@ fn find_insert_position(block: &crate::cfg::basic_block::BasicBlock) -> usize {
 
 /// Create SetLocals(("var",), literal_int)
 fn create_set_locals_literal(py: Python<'_>, var_name: &str, value: i64) -> PyResult<Op> {
-    let names = PyTuple::new(py, &[var_name])?;
+    let names = PyTuple::new(py, [var_name])?;
     let value_py = value.into_pyobject(py)?.into_any();
     let args = PyTuple::new(py, vec![names.into_any(), value_py])?;
     let kwargs = PyDict::new(py);
@@ -615,7 +591,7 @@ fn create_set_locals_add(py: Python<'_>, var_name: &str, step: i64) -> PyResult<
     );
 
     // Wrap in SetLocals
-    let names = PyTuple::new(py, &[var_name])?;
+    let names = PyTuple::new(py, [var_name])?;
     let add_py = Py::new(py, add_op)?;
     let args = PyTuple::new(py, vec![names.into_any(), add_py.into_bound(py).into_any()])?;
     let kwargs = PyDict::new(py);
@@ -631,12 +607,7 @@ fn create_set_locals_add(py: Python<'_>, var_name: &str, step: i64) -> PyResult<
 }
 
 /// Create SetLocals(("var",), Mul(Ref("src_var"), scale))
-fn create_set_locals_mul(
-    py: Python<'_>,
-    var_name: &str,
-    src_var: &str,
-    scale: i64,
-) -> PyResult<Op> {
+fn create_set_locals_mul(py: Python<'_>, var_name: &str, src_var: &str, scale: i64) -> PyResult<Op> {
     let ref_node = Py::new(
         py,
         Ref {
@@ -658,7 +629,7 @@ fn create_set_locals_mul(
         -1,
     );
 
-    let names = PyTuple::new(py, &[var_name])?;
+    let names = PyTuple::new(py, [var_name])?;
     let mul_py = Py::new(py, mul_op)?;
     let args = PyTuple::new(py, vec![names.into_any(), mul_py.into_bound(py).into_any()])?;
     let kwargs = PyDict::new(py);

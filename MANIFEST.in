@@ -1,10 +1,12 @@
 recursive-include catnip *.py
 recursive-include catnip_rs *.rs *.toml *.js *.json *.c *.h *.py
+recursive-include catnip_core *.rs *.toml
+recursive-include catnip_tools *.rs *.toml
+recursive-include catnip_grammar *.rs *.toml *.js *.json *.c *.h
+recursive-include catnip_repl *.rs *.toml
+recursive-include catnip_libs *.rs *.toml
 include README.md LICENSE Cargo.toml
 graft tests
-graft docs
-recursive-include proof *.v
-include proof/Makefile.coq proof/Makefile.coq.conf proof/_CoqProject
 prune tests/serial/jit/.pytest_cache
 global-exclude __pycache__
 global-exclude *.pyc

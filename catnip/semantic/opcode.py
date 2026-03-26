@@ -1,5 +1,5 @@
 # FILE: catnip/semantic/opcode.py
-# GENERATED FROM catnip_rs/src/ir/opcode.rs
+# GENERATED FROM catnip_core/src/ir/opcode.rs
 # Do not edit the enum manually. Run: python catnip_rs/gen_opcodes.py
 """
 OpCode enumeration for efficient integer-based operation representation.
@@ -61,34 +61,42 @@ class OpCode(IntEnum):
     ND_EMPTY_TOPOS = 29
     NOP = 30
     BREAKPOINT = 31
-    OP_IF = 32
-    OP_WHILE = 33
-    OP_FOR = 34
-    OP_MATCH = 35
-    OP_BLOCK = 36
-    OP_RETURN = 37
-    OP_BREAK = 38
-    OP_CONTINUE = 39
-    CALL = 40
-    OP_LAMBDA = 41
-    FN_DEF = 42
-    SET_LOCALS = 43
-    SLICE = 44
-    DIV = 45
-    TRUEDIV = 46
-    AND = 47
-    OR = 48
-    LIST_LITERAL = 49
-    TUPLE_LITERAL = 50
-    SET_LITERAL = 51
-    DICT_LITERAL = 52
-    PUSH = 53
-    POP = 54
-    PUSH_PEEK = 55
-    FSTRING = 56
-    PRAGMA = 57
-    OP_STRUCT = 58
-    TRAIT_DEF = 59
+    DIV = 32
+    TRUEDIV = 33
+    AND = 34
+    OR = 35
+    IN = 36
+    NOT_IN = 37
+    IS = 38
+    IS_NOT = 39
+    NULL_COALESCE = 40
+    LIST_LITERAL = 41
+    TUPLE_LITERAL = 42
+    SET_LITERAL = 43
+    DICT_LITERAL = 44
+    PUSH = 45
+    POP = 46
+    PUSH_PEEK = 47
+    FSTRING = 48
+    SLICE = 49
+    OP_IF = 50
+    OP_WHILE = 51
+    OP_FOR = 52
+    OP_MATCH = 53
+    OP_BLOCK = 54
+    OP_RETURN = 55
+    OP_BREAK = 56
+    OP_CONTINUE = 57
+    CALL = 58
+    OP_LAMBDA = 59
+    FN_DEF = 60
+    SET_LOCALS = 61
+    OP_STRUCT = 62
+    TRAIT_DEF = 63
+    PRAGMA = 64
+    TYPE_OF = 65
+    GLOBALS = 66
+    LOCALS = 67
 
 
 # Set of opcodes where arguments should not be evaluated immediately

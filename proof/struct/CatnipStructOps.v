@@ -1,5 +1,5 @@
 (* FILE: proof/struct/CatnipStructOps.v *)
-(* CatnipStructOps.v — Operations and proofs on structs and traits.
+(* CatnipStructOps.v - Operations and proofs on structs and traits.
  *
  * Source of truth:
  *   catnip_rs/src/vm/structs.rs   (extends, method merge, construction)

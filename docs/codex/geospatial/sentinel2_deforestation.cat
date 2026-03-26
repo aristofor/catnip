@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Détection de déforestation Sentinel-2 via STAC
 # Pipeline : recherche STAC → lecture COG → NDVI → perte de végétation → surface
 #
@@ -10,23 +11,32 @@
 # Ref: https://en.wikipedia.org/wiki/Normalized_difference_vegetation_index
 # Ref: https://stacspec.org/
 #
-# Installation :
-#   uv pip install rasterio numpy pystac-client shapely pyproj matplotlib
-#
-# Exécuter :
-#   catnip docs/codex/geospatial/sentinel2_deforestation.cat
+# DEPS: pyproj pystac_client rasterio shapely
 
-rasterio = import("rasterio")
-numpy = import("numpy")
-rio_windows = import("rasterio.windows")
-stac_client = import("pystac_client")
-shapely_geo = import("shapely.geometry")
-pyproj_mod = import("pyproj")
-importlib_util = import("importlib.util")
-tempfile = import("tempfile")
-os = import("os")
-sys = import("sys")
-rio_warp = import("rasterio.warp")
+warnings = import('warnings')
+import('builtins', 'RuntimeWarning')
+warnings.filterwarnings("ignore", message="invalid value", category=RuntimeWarning)
+
+rasterio = import('rasterio')
+numpy = import('numpy')
+rio_windows = import('rasterio.windows')
+stac_client = import('pystac_client')
+shapely_geo = import('shapely.geometry')
+pyproj_mod = import('pyproj')
+tempfile = import('tempfile')
+os = import('os')
+sys = import('sys')
+rio_warp = import('rasterio.warp')
+
+# ── Structures ─────────────────────────────────────────────────────────
+
+struct BandData {
+    array; crs; transform;
+}
+
+struct Severity {
+    label; min_thresh; max_thresh;
+}
 
 # ── Configuration ───────────────────────────────────────────────────────
 
@@ -47,8 +57,8 @@ max_cloud = 20
 threshold = -0.2
 cleanup_outputs = False
 
-print("  T1  :", date_before, " T2 :", date_after)
-print("  AOI :", aoi_name, aoi.bounds)
+print(f"  T1  : {date_before}  T2 : {date_after}")
+print(f"  AOI : {aoi_name} {aoi.bounds}")
 
 # ── Fonctions ───────────────────────────────────────────────────────────
 
@@ -57,34 +67,31 @@ normalized_diff = (a, b) => {
     numpy.divide(numpy.subtract(a, b), numpy.maximum(numpy.add(a, b), 1e-10))
 }
 
+# Couverture nuageuse d'un item (défaut 100% si absent)
+cloud_cover = (item) => { item.properties['eo:cloud_cover'] ?? 100 }
+
 # Filtre les items par couverture nuageuse
 filter_by_cloud = (items, max_cc) => {
     kept = list()
     for item in items {
-        cc = item.properties.get("eo:cloud_cover", 100)
-        if cc < max_cc {
+        if cloud_cover(item) < max_cc {
             kept.append(item)
         }
     }
     kept
 }
 
-# Sélectionne l'item le moins nuageux (min linéaire)
+# Sélectionne l'item le moins nuageux (fold min)
 pick_clearest = (items) => {
     if len(items) == 0 {
         print("    -> aucune scène disponible après filtre nuage")
         None
     } else {
-        best = items[0]
-        best_cc = best.properties.get("eo:cloud_cover", 100)
-        for item in items {
-            cc = item.properties.get("eo:cloud_cover", 100)
-            if cc < best_cc {
-                best = item
-                best_cc = cc
-            }
-        }
-        print("    -> ", best.id, " (cloud:", round(best_cc, 1), "%)")
+        best = fold(items, items[0], (acc, item) => {
+                if cloud_cover(item) < cloud_cover(acc) { item } else { acc }
+            })
+        cc = cloud_cover(best)
+        print(f"    -> {best.id} (cloud: {round(cc, 1)}%)")
         best
     }
 }
@@ -127,8 +134,8 @@ read_band = (item, band_key, aoi_geom) => {
     ll = proj.transform(aoi_geom.bounds[0], aoi_geom.bounds[1])
     ur = proj.transform(aoi_geom.bounds[2], aoi_geom.bounds[3])
 
-    win = rio_windows.from_bounds(ll[0], ll[1], ur[0], ur[1], transform=ds.transform)
-    arr = ds.read(1, window=win).astype(numpy.float32)
+    win        = rio_windows.from_bounds(ll[0], ll[1], ur[0], ur[1], transform=ds.transform)
+    arr        = ds.read(1, window=win, out_dtype=numpy.float32)
     valid_mask = ds.read_masks(1, window=win)
 
     nodata = ds.nodata
@@ -137,38 +144,38 @@ read_band = (item, band_key, aoi_geom) => {
     ds.close()
 
     # Nodata → NaN
-    if nodata != None {
+    if nodata is not None {
         arr = numpy.where(numpy.equal(arr, nodata), numpy.nan, arr)
     }
     # Masque interne raster (0 = invalide) → NaN
     arr = numpy.where(numpy.equal(valid_mask, 0), numpy.nan, arr)
 
-    dict(array=arr, crs=raster_crs, transform=win_t)
+    BandData(arr, raster_crs, win_t)
 }
 
 # Stats compactes d'un array (NaN-safe)
 show_stats = (label, arr) => {
-    print("    ", label, ": [", round(float(numpy.nanmin(arr)), 3), ",",
-        round(float(numpy.nanmax(arr)), 3), "]  mean =", round(float(numpy.nanmean(arr)), 3))
+    print(
+        f"    {label} : [{round(float(numpy.nanmin(arr)), 3)}, {round(float(numpy.nanmax(arr)), 3)}]  mean = {round(float(numpy.nanmean(arr)), 3)}")
 }
 
 # ── Recherche STAC ──────────────────────────────────────────────────────
 
-print("\n⇒ Recherche STAC (" + stac_url + ")")
+print(f"\n⇒ Recherche STAC ({stac_url})")
 
 catalog = stac_client.Client.open(stac_url)
 
 # Collecte + filtre pour chaque date
 search_and_filter = (label, date_range) => {
-    print("  " + label + " : " + date_range)
+    print(f"  {label} : {date_range}")
     search = catalog.search(collections=list(collection), intersects=aoi, datetime=date_range, max_items=50)
     raw = list()
     for item in search.items() {
         raw.append(item)
     }
-    print("    Scènes brutes :", len(raw))
+    print(f"    Scènes brutes : {len(raw)}")
     filtered = filter_by_cloud(raw, max_cloud)
-    print("    Cloud <", max_cloud, "% :", len(filtered))
+    print(f"    Cloud < {max_cloud}% : {len(filtered)}")
     filtered
 }
 
@@ -178,7 +185,7 @@ items2 = search_and_filter("T2", date_after)
 best1 = pick_clearest(items1)
 best2 = pick_clearest(items2)
 
-if best1 == None or best2 == None {
+if best1 is None or best2 is None {
     print("\n✗ Impossible de continuer: aucune scène exploitable pour T1 ou T2.")
     print("  Actions: élargir les dates et/ou augmenter max_cloud.")
     sys.exit(1)
@@ -186,39 +193,41 @@ if best1 == None or best2 == None {
 
 # ── Lecture des bandes ──────────────────────────────────────────────────
 
-print("\n⇒ Lecture COG (fenêtre partielle sur AOI)")
+print()
+print("⇒ Lecture COG (fenêtre partielle sur AOI)")
 
 print("  T1 :")
 red1 = read_band(best1, band_red, aoi)
 nir1 = read_band(best1, band_nir, aoi)
-print("    ", red1["array"].shape, "pixels chargés")
+print(f"    {red1.array.shape} pixels chargés")
 
 print("  T2 :")
 red2 = read_band(best2, band_red, aoi)
 nir2 = read_band(best2, band_nir, aoi)
-print("    ", red2["array"].shape, "pixels chargés")
+print(f"    {red2.array.shape} pixels chargés")
 
 # ── NDVI ────────────────────────────────────────────────────────────────
 
-print("\n⇒ Calcul NDVI")
+print()
+print("⇒ Calcul NDVI")
 
 # Les DN Sentinel-2 sont en réflectance ×10000, mais NDVI est scale-invariant
-ndvi1 = normalized_diff(nir1["array"], red1["array"])
-ndvi2 = normalized_diff(nir2["array"], red2["array"])
+ndvi1 = normalized_diff(nir1.array, red1.array)
+ndvi2 = normalized_diff(nir2.array, red2.array)
 
 show_stats("NDVI T1", ndvi1)
 show_stats("NDVI T2", ndvi2)
 
 # ── Détection de perte ──────────────────────────────────────────────────
 
-print("\n⇒ Détection de perte")
+print()
+print("⇒ Détection de perte")
 
-need_align = (ndvi2.shape != ndvi1.shape or red2["crs"] != red1["crs"] or red2["transform"] != red1["transform"])
+need_align = (ndvi2.shape != ndvi1.shape or red2.crs != red1.crs or red2.transform != red1.transform)
 
 if need_align {
     print("  Alignement T2 -> grille T1 (reprojection/rééchantillonnage)")
-    ndvi2_aligned = align_to_ref_grid(ndvi2, red2["transform"], red2["crs"], ndvi1.shape, red1["transform"], red1["crs"]
-        )
+    ndvi2_aligned = align_to_ref_grid(ndvi2, red2.transform, red2.crs, ndvi1.shape, red1.transform, red1.crs)
 } else {
     ndvi2_aligned = ndvi2
 }
@@ -230,70 +239,81 @@ loss = numpy.less(delta, threshold)
 loss_px = int(numpy.nansum(loss))
 valid_px = int(numpy.sum(numpy.logical_not(numpy.isnan(delta))))
 
-print("  Seuil :", threshold)
-print("  Perte :", loss_px, "/", valid_px, "valides (", round(loss_px * 100 / max(valid_px, 1), 1), "%)")
+print(f"  Seuil : {threshold}")
+print(f"  Perte : {loss_px} / {valid_px} valides ({round(loss_px * 100 / max(valid_px, 1), 1)}%)")
 
 # ── Surface ─────────────────────────────────────────────────────────────
 
-print("\n⇒ Surface perdue")
+print()
+print("⇒ Surface perdue")
 
 # Résolution en mètres (CRS UTM → px = 10m pour bandes 10m)
-pixel_w = abs(red1["transform"].a)
-pixel_h = abs(red1["transform"].e)
+pixel_w       = abs(red1.transform.a)
+pixel_h       = abs(red1.transform.e)
 pixel_area_ha = (pixel_w * pixel_h) / 10000
 
-print("  Résolution :", pixel_w, "x", pixel_h, "m")
+print(f"  Résolution : {pixel_w} x {pixel_h} m")
 
 loss_ha = round(loss_px * pixel_area_ha, 2)
-print("  Perte estimée :", loss_ha, "ha (", round(loss_ha / 100, 4), "km2 )")
+print(f"  Perte estimée : {loss_ha} ha ({round(loss_ha / 100, 4)} km2)")
 
 # ── Sévérité ────────────────────────────────────────────────────────────
 
-print("\n⇒ Sévérité")
+print()
+print("⇒ Sévérité")
 
-moderate = numpy.logical_and(numpy.less(delta, -0.2), numpy.greater_equal(delta, -0.35))
-severe = numpy.logical_and(numpy.less(delta, -0.35), numpy.greater_equal(delta, -0.5))
-critical = numpy.less(delta, -0.5)
+severities = list(
+    Severity("Modérée", 0.20, 0.35),
+    Severity("Sévère", 0.35, 0.50),
+    Severity("Critique", 0.50, 999.0),
+)
 
-print("  Modérée  (0.20-0.35) :", int(numpy.nansum(moderate)), "px")
-print("  Sévère   (0.35-0.50) :", int(numpy.nansum(severe)), "px")
-print("  Critique (> 0.50)    :", int(numpy.nansum(critical)), "px")
+severities.[(s) => {
+        mask=if s.max_thresh >= 999.0 {
+            numpy.less(delta, -s.min_thresh)
+        } else {
+            numpy.logical_and(numpy.less(delta, -s.min_thresh), numpy.greater_equal(delta, -s.max_thresh))
+        }
+        print(f"  {s.label} : {int(numpy.nansum(mask))} px")
+    }]
 
 if loss_px > 0 {
-    print("  Drop moyen :", round(float(numpy.nanmean(delta[loss])), 3))
+    print(f"  Drop moyen : {round(float(numpy.nanmean(delta[loss])), 3)}")
 }
 
 # ── Export ──────────────────────────────────────────────────────────────
 
-rows = delta.shape[0]
-cols = delta.shape[1]
+rows       = delta.shape[0]
+cols       = delta.shape[1]
 loss_uint8 = loss.astype(numpy.uint8)
 
 # Masque binaire
 out_mask = safe_temp_path("_loss_mask.tif", "catnip_")
-dst = rasterio.open(out_mask, "w", driver="GTiff", height=rows, width=cols, count=1, dtype="uint8",
-    crs=red1["crs"], transform=red1["transform"])
+dst = rasterio.open(out_mask, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='uint8',
+    crs=red1.crs, transform=red1.transform)
 dst.write(loss_uint8, 1)
 dst.close()
 
 # Delta NDVI (valeurs continues)
 out_delta = safe_temp_path("_delta_ndvi.tif", "catnip_")
-dst = rasterio.open(out_delta, "w", driver="GTiff", height=rows, width=cols, count=1, dtype="float32",
-    crs=red1["crs"], transform=red1["transform"])
+dst = rasterio.open(out_delta, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='float32',
+    crs=red1.crs, transform=red1.transform)
 dst.write(delta.astype(numpy.float32), 1)
 dst.close()
 
-print("\n⇒ Export GeoTIFF")
-print("  Masque :", out_mask)
-print("  Delta  :", out_delta)
+print()
+print("⇒ Export GeoTIFF")
+print(f"  Masque : {out_mask}")
+print(f"  Delta  : {out_delta}")
 
 # ── Visualisation (matplotlib optionnel) ────────────────────────────────
 
-if importlib_util.find_spec("matplotlib") != None {
-    print("\n⇒ Visualisation")
+if import('importlib.util').find_spec('matplotlib') is not None {
+    print()
+    print("⇒ Visualisation")
 
-    plt = import("matplotlib.pyplot")
-    mcolors = import("matplotlib.colors")
+    plt = import('matplotlib.pyplot')
+    mcolors = import('matplotlib.colors')
 
     fig = plt.figure(figsize=tuple(16, 4))
 
@@ -320,7 +340,7 @@ if importlib_util.find_spec("matplotlib") != None {
     plot_path = safe_temp_path("_deforestation.png", "catnip_")
     plt.savefig(plot_path, dpi=150)
     plt.close()
-    print("  Figure :", plot_path)
+    print(f"  Figure : {plot_path}")
 } else {
     print("\n  matplotlib absent, visualisation ignorée")
 }

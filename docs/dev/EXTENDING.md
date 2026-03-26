@@ -356,7 +356,7 @@ catnip_rs/src/
 ├── vm/opcode.rs           # OpCodes VM (source de vérité)
 ├── parser/
 │   ├── core.rs            # TreeSitterParser principal
-│   └── transforms/        # Transformateurs par catégorie
+│   └── transforms.rs      # Transformateurs par catégorie
 ├── semantic/
 │   ├── analyzer.rs        # Semantic analyzer
 │   └── *.rs               # Passes d'optimisation

@@ -11,6 +11,11 @@ test_cache_file.txt
 .venv/
 *.log
 .DS_Store
+# Example outputs and caches
+docs/examples/**/cache/
+docs/examples/**/output/
+docs/codex/**/cache/
+docs/codex/**/output/
 # Coq artifacts
 proof/Makefile
 proof/Makefile.conf

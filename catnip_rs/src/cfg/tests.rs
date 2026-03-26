@@ -39,8 +39,8 @@ where
 /// Helper to create an assignment node.
 /// Note: Using SetLocals which is the IR opcode for assignment (x = value).
 fn assign_node(py: Python<'_>, name: &str, value: Py<PyAny>) -> Op {
-    let names_tuple = PyTuple::new(py, &[name]).unwrap();
-    let values_tuple = PyTuple::new(py, &[value]).unwrap();
+    let names_tuple = PyTuple::new(py, [name]).unwrap();
+    let values_tuple = PyTuple::new(py, [value]).unwrap();
     create_op(
         py,
         IROpCode::SetLocals,
@@ -87,7 +87,7 @@ fn test_cfg_linear_sequence() {
     });
 }
 
-// Removed: test_cfg_dominance_linear — proven by entry_dom_all + dom_trans (CatnipDominanceProof.v:104,142)
+// Removed: test_cfg_dominance_linear - proven by entry_dom_all + dom_trans (CatnipDominanceProof.v:104,142)
 
 #[test]
 fn test_cfg_unreachable_blocks() {
@@ -103,11 +103,7 @@ fn test_cfg_unreachable_blocks() {
         let unreachable = cfg.get_unreachable_blocks();
 
         assert_eq!(unreachable.len(), 0, "No unreachable blocks in simple code");
-        assert_eq!(
-            reachable.len(),
-            cfg.blocks.len(),
-            "All blocks should be reachable"
-        );
+        assert_eq!(reachable.len(), cfg.blocks.len(), "All blocks should be reachable");
     });
 }
 
@@ -123,10 +119,7 @@ fn test_cfg_to_dot_basic() {
 
         let dot = cfg.to_dot();
 
-        assert!(
-            dot.contains("digraph"),
-            "DOT should have digraph declaration"
-        );
+        assert!(dot.contains("digraph"), "DOT should have digraph declaration");
         assert!(dot.contains("test"), "DOT should include CFG name");
         assert!(dot.contains("entry"), "DOT should show entry block");
         assert!(dot.contains("exit"), "DOT should show exit block");

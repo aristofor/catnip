@@ -11,7 +11,7 @@ from .opcodes import STACK_EFFECT, VMOp
 __all__ = ('STACK_EFFECT', 'VMOp')
 
 
-# Lazy imports
+# Lazy imports (used by Rust debug modules via py.import)
 def __getattr__(name):
     if name == 'CodeObject':
         from catnip._rs import CodeObject

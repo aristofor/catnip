@@ -12,8 +12,10 @@
 //! Subsequent passes (CopyProp, ConstFold, BlockFlat, DCE) clean up the
 //! introduced Block and bindings.
 
+use super::extract_var_name;
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, default_visit_op, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir, default_visit_op};
+use crate::constants::*;
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -53,6 +55,12 @@ impl FunctionInliningPass {
     }
 }
 
+impl Default for FunctionInliningPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
 impl FunctionInliningPass {
     #[new]
@@ -79,7 +87,7 @@ impl OptimizationPass for FunctionInliningPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != catnip::IR {
+        if type_name != catnip::IR && type_name != catnip::OP {
             return Ok(visited);
         }
 
@@ -94,10 +102,10 @@ impl OptimizationPass for FunctionInliningPass {
 
         match opcode {
             OpCode::SET_LOCALS => {
-                self.try_record_function(py, &visited_bound)?;
+                self.try_record_function(py, visited_bound)?;
                 Ok(visited)
             }
-            OpCode::CALL => match self.try_inline_call(py, &visited_bound)? {
+            OpCode::CALL => match self.try_inline_call(py, visited_bound)? {
                 Some(inlined) => Ok(inlined),
                 None => Ok(visited),
             },
@@ -123,10 +131,10 @@ impl FunctionInliningPass {
             return Ok(());
         }
 
-        // args[0] = function name (string for simple assignment)
-        let func_name = match args_tuple.get_item(0)?.extract::<String>() {
-            Ok(name) => name,
-            Err(_) => return Ok(()),
+        // args[0] = function name (Lvalue/Ref node or string)
+        let func_name = match extract_var_name(&args_tuple.get_item(0)?) {
+            Some(name) => name,
+            None => return Ok(()),
         };
 
         // args[1] = value (must be OpLambda)
@@ -194,11 +202,7 @@ impl FunctionInliningPass {
     }
 
     /// Replace a Call node with the inlined function body.
-    fn try_inline_call(
-        &self,
-        py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    fn try_inline_call(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let args = node.getattr("args")?;
         let args_tuple = args.cast::<PyTuple>()?;
         if args_tuple.is_empty() {
@@ -239,7 +243,7 @@ impl FunctionInliningPass {
         }
 
         // Build: Block(SetLocals(p1, a1), SetLocals(p2, a2), ..., body_clone)
-        let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+        let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
         let empty_kwargs = PyDict::new(py);
 
         let mut block_children: Vec<Py<PyAny>> = Vec::new();
@@ -248,8 +252,7 @@ impl FunctionInliningPass {
             let arg_value = args_tuple.get_item(i + 1)?;
             let name_py = param_name.as_str().into_pyobject(py)?.into_any();
             let set_args = PyTuple::new(py, vec![name_py.unbind(), arg_value.unbind()])?;
-            let set_locals =
-                ir_class.call1((OpCode::SET_LOCALS as i32, set_args, &empty_kwargs))?;
+            let set_locals = ir_class.call1((OpCode::SET_LOCALS as i32, set_args, &empty_kwargs))?;
             block_children.push(set_locals.unbind());
         }
 
@@ -298,13 +301,13 @@ fn has_defaults(params: &Bound<'_, PyAny>) -> PyResult<bool> {
 }
 
 /// Count Op/IR nodes recursively.
-fn count_ops(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<usize> {
+fn count_ops(_py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<usize> {
     let type_name = node.get_type().name()?;
     match type_name.to_str()? {
         "IR" | "Op" => {
             let mut count = 1;
             for arg in node.getattr("args")?.try_iter()? {
-                count += count_ops(py, &arg?)?;
+                count += count_ops(_py, &arg?)?;
             }
             Ok(count)
         }
@@ -313,7 +316,7 @@ fn count_ops(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<usize> {
 }
 
 /// Check if any forbidden opcode appears in the tree.
-fn contains_forbidden_op(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+fn contains_forbidden_op(_py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     let type_name = node.get_type().name()?;
     match type_name.to_str()? {
         "IR" | "Op" => {
@@ -325,7 +328,7 @@ fn contains_forbidden_op(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<bo
                 }
             }
             for arg in node.getattr("args")?.try_iter()? {
-                if contains_forbidden_op(py, &arg?)? {
+                if contains_forbidden_op(_py, &arg?)? {
                     return Ok(true);
                 }
             }
@@ -336,7 +339,7 @@ fn contains_forbidden_op(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<bo
 }
 
 /// Check if Ref("name") appears anywhere in the tree.
-fn contains_ref_to(py: Python<'_>, node: &Bound<'_, PyAny>, name: &str) -> PyResult<bool> {
+fn contains_ref_to(_py: Python<'_>, node: &Bound<'_, PyAny>, name: &str) -> PyResult<bool> {
     let type_name = node.get_type().name()?;
     match type_name.to_str()? {
         "Ref" => {
@@ -345,7 +348,7 @@ fn contains_ref_to(py: Python<'_>, node: &Bound<'_, PyAny>, name: &str) -> PyRes
         }
         "IR" | "Op" => {
             for arg in node.getattr("args")?.try_iter()? {
-                if contains_ref_to(py, &arg?, name)? {
+                if contains_ref_to(_py, &arg?, name)? {
                     return Ok(true);
                 }
             }
@@ -376,7 +379,7 @@ fn clone_tree(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                 }
             }
 
-            let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+            let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
             Ok(ir_class.call1((ident, args_tuple, cloned_kwargs))?.unbind())
         }
         "Op" => {
@@ -396,7 +399,7 @@ fn clone_tree(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                 }
             }
 
-            let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+            let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
             Ok(op_class.call1((ident, args_tuple, cloned_kwargs))?.unbind())
         }
         _ => {
@@ -431,7 +434,8 @@ mod tests {
     #[test]
     fn test_max_inline_ops_threshold() {
         // Sanity: threshold is reasonable
-        assert!(MAX_INLINE_OPS > 0);
-        assert!(MAX_INLINE_OPS <= 50);
+        let threshold = std::hint::black_box(MAX_INLINE_OPS);
+        assert!(threshold > 0);
+        assert!(threshold <= 50);
     }
 }

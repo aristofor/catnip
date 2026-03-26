@@ -10,7 +10,8 @@
 //! - x / 1 → x, x // 1 → x
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyTuple};
 
@@ -44,7 +45,7 @@ impl OptimizationPass for StrengthReductionPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -95,13 +96,11 @@ impl StrengthReductionPass {
         if self.is_op_match(&ident, OpCode::POW)? {
             // x ** 2 → x * x (multiplication is faster)
             if self.is_value(&arg1, 2)? {
-                let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+                let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
                 let mul_ident = (OpCode::MUL as i32).into_pyobject(py)?.into_any();
                 let new_args = PyTuple::new(py, &[arg0.clone().unbind(), arg0.unbind()])?;
                 let empty_dict = py.import("builtins")?.getattr("dict")?.call0()?;
-                return ir_class
-                    .call1((mul_ident, new_args, empty_dict))
-                    .map(|n| n.unbind());
+                return ir_class.call1((mul_ident, new_args, empty_dict)).map(|n| n.unbind());
             }
             // x ** 1 → x
             if self.is_value(&arg1, 1)? {

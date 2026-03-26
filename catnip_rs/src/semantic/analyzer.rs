@@ -20,8 +20,10 @@
 //! - Optimization (delegates to Optimizer)
 
 use crate::cfg::builder_ir::IRCFGBuilder;
+use crate::constants::*;
 use crate::core::op::Op;
 use crate::ir::opcode::IROpCode;
+use crate::pragma::PragmaType;
 use crate::semantic::optimizer::OptimizationPass;
 use crate::semantic::tail_recursion_to_loop::TailRecursionToLoopPass;
 use crate::types::catnip;
@@ -88,15 +90,10 @@ impl<'a> Drop for TailPositionGuard<'a> {
 impl Semantic {
     #[new]
     #[pyo3(signature = (registry, context, optimize=true))]
-    fn new(
-        py: Python<'_>,
-        registry: Py<PyAny>,
-        context: Py<PyAny>,
-        optimize: bool,
-    ) -> PyResult<Self> {
+    fn new(py: Python<'_>, registry: Py<PyAny>, context: Py<PyAny>, optimize: bool) -> PyResult<Self> {
         // Create optimizer if optimization is enabled
         let optimizer = if optimize {
-            let optimizer_class = py.import("catnip.semantic")?.getattr("Optimizer")?;
+            let optimizer_class = py.import(PY_MOD_SEMANTIC)?.getattr("Optimizer")?;
             Some(optimizer_class.call0()?.into())
         } else {
             None
@@ -124,10 +121,7 @@ impl Semantic {
         let mut ast_obj = ast.clone().unbind();
         if self.optimize {
             if let Some(ref optimizer) = self.optimizer {
-                ast_obj = optimizer
-                    .bind(py)
-                    .call_method1("optimize", (ast_obj,))?
-                    .unbind();
+                ast_obj = optimizer.bind(py).call_method1("optimize", (ast_obj,))?.unbind();
             }
         }
 
@@ -144,12 +138,11 @@ impl Semantic {
         let result = if ast_bound.is_instance_of::<PyList>() {
             // Handle list of statements
             let list = ast_bound.cast::<PyList>()?;
-            let visited_items: Result<Vec<_>, _> =
-                list.iter().map(|node| self.visit(py, &node)).collect();
+            let visited_items: Result<Vec<_>, _> = list.iter().map(|node| self.visit(py, &node)).collect();
             let visited_items = visited_items?;
 
             // Filter out _SKIP sentinel (from pragmas)
-            let nodes_module = py.import("catnip.nodes")?;
+            let nodes_module = py.import(PY_MOD_NODES)?;
             let skip_sentinel = nodes_module.getattr("_SKIP")?;
             let filtered_items: Vec<_> = visited_items
                 .into_iter()
@@ -343,7 +336,7 @@ impl Semantic {
 impl Semantic {
     /// Check if node is a pattern node (PatternLiteral, PatternVar, PatternWildcard, PatternOr)
     fn is_pattern_node(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let nodes_module = py.import("catnip.nodes")?;
+        let nodes_module = py.import(PY_MOD_NODES)?;
         let pattern_types = [
             nodes_module.getattr("PatternLiteral")?,
             nodes_module.getattr("PatternVar")?,
@@ -360,12 +353,7 @@ impl Semantic {
     }
 
     /// Check if node is an iterable (but not string or bytes)
-    fn is_iterable_not_string(
-        &self,
-        py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-        type_name: &str,
-    ) -> PyResult<bool> {
+    fn is_iterable_not_string(&self, py: Python<'_>, node: &Bound<'_, PyAny>, type_name: &str) -> PyResult<bool> {
         // Exclude strings and bytes
         if type_name == "str" || type_name == "bytes" {
             return Ok(false);
@@ -419,6 +407,9 @@ impl Semantic {
             x if x == IROpCode::OpReturn as i32 => self.visit_return(py, node),
             x if x == IROpCode::Fstring as i32 => self.visit_fstring(py, node),
             x if x == IROpCode::OpStruct as i32 => self.visit_struct(py, node),
+            x if x == IROpCode::Call as i32 => self.visit_call_op(py, node),
+            // Intrinsics: no args to visit, pass through as-is
+            x if x == IROpCode::Globals as i32 || x == IROpCode::Locals as i32 => self.visit_ir_default(py, node),
             _ => self.visit_ir_default(py, node), // All other opcodes
         }?;
 
@@ -460,7 +451,7 @@ impl Semantic {
         let registry = self.registry.bind(py);
         let internals = registry.getattr("internals")?;
         if !internals.contains(&ident)? {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let semantic_error = exc_module.getattr("CatnipSemanticError")?;
             let kwargs = PyDict::new(py);
             if let Ok(sb) = node.getattr("start_byte") {
@@ -474,8 +465,7 @@ impl Semantic {
         // Visit args
         let args_tuple = node.getattr("args")?;
         let args_list = args_tuple.cast::<PyTuple>()?;
-        let visited_args: Result<Vec<_>, _> =
-            args_list.iter().map(|arg| self.visit(py, &arg)).collect();
+        let visited_args: Result<Vec<_>, _> = args_list.iter().map(|arg| self.visit(py, &arg)).collect();
         let visited_args = visited_args?;
         let new_args = PyTuple::new(py, &visited_args)?;
 
@@ -490,17 +480,15 @@ impl Semantic {
         }
 
         // Create new Op node
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
-        op_class
-            .call1((ident, new_args, new_kwargs))
-            .map(|obj| obj.unbind())
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
+        op_class.call1((ident, new_args, new_kwargs)).map(|obj| obj.unbind())
     }
 
     /// Visit identifier - convert to Ref (variable reference)
     fn visit_identifier(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // Identifier is a str subclass - use it directly as the name
         let name = node.extract::<String>()?;
-        let ref_class = py.import("catnip.nodes")?.getattr("Ref")?;
+        let ref_class = py.import(PY_MOD_NODES)?.getattr("Ref")?;
         ref_class.call1((name,)).map(|obj| obj.unbind())
     }
 
@@ -545,10 +533,8 @@ impl Semantic {
             let visited_value = self.visit(py, &value)?;
 
             // Create new PatternLiteral with visited value
-            let pattern_literal = py.import("catnip.nodes")?.getattr("PatternLiteral")?;
-            return pattern_literal
-                .call1((visited_value,))
-                .map(|obj| obj.unbind());
+            let pattern_literal = py.import(PY_MOD_NODES)?.getattr("PatternLiteral")?;
+            return pattern_literal.call1((visited_value,)).map(|obj| obj.unbind());
         }
 
         // Other patterns pass through unchanged
@@ -567,12 +553,9 @@ impl Semantic {
         let visited_operand = self.visit(py, &operand)?;
 
         // Operator is now visited (converts IR lambdas to Op nodes)
-        let broadcast_class = py.import("catnip.nodes")?.getattr("Broadcast")?;
+        let broadcast_class = py.import(PY_MOD_NODES)?.getattr("Broadcast")?;
         broadcast_class
-            .call(
-                (visited_target, visited_operator, visited_operand, is_filter),
-                None,
-            )
+            .call((visited_target, visited_operator, visited_operand, is_filter), None)
             .map(|obj| obj.unbind())
     }
 
@@ -592,14 +575,14 @@ impl Semantic {
     }
 
     fn visit_pragma(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let pragma_module = py.import("catnip.pragma")?;
-        let pragma_type_enum = pragma_module.getattr("PragmaType")?;
+        let pragma_module = py.import(PY_MOD_PRAGMA)?;
+        // PragmaType resolved via Rust enum, no Python lookup needed
 
         let args_obj = node.getattr("args")?;
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() < 2 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
             return Err(PyErr::from_value(arity_error.call1((
                 "pragma",
@@ -640,34 +623,100 @@ impl Semantic {
         let directive_str = directive.extract::<String>()?;
         let directive_lower = directive_str.to_lowercase();
 
-        let pragma_type = match directive_lower.as_str() {
-            "optimize" | "opt" => pragma_type_enum.getattr("OPTIMIZE")?,
-            "warning" | "warn" => pragma_type_enum.getattr("WARNING")?,
-            "inline" => pragma_type_enum.getattr("INLINE")?,
-            "pure" => pragma_type_enum.getattr("PURE")?,
-            "cache" => pragma_type_enum.getattr("CACHE")?,
-            "debug" => pragma_type_enum.getattr("DEBUG")?,
-            "tco" | "tailcall" | "tail" => pragma_type_enum.getattr("TCO")?,
-            "jit" => pragma_type_enum.getattr("JIT")?,
-            "nd_mode" | "nd" => pragma_type_enum.getattr("ND_MODE")?,
-            "nd_workers" | "ndworkers" => pragma_type_enum.getattr("ND_WORKERS")?,
-            "nd_memoize" | "ndmemoize" | "memoize" => pragma_type_enum.getattr("ND_MEMOIZE")?,
-            "nd_batch_size" | "ndbatchsize" | "batch_size" => {
-                pragma_type_enum.getattr("ND_BATCH_SIZE")?
-            }
-            _ => {
-                let exc_module = py.import("catnip.exc")?;
+        let pt = match PragmaType::from_directive(&directive_lower) {
+            Some(pt) => pt,
+            None => {
+                let exc_module = py.import(PY_MOD_EXC)?;
                 let semantic_error = exc_module.getattr("CatnipSemanticError")?;
                 let err_kwargs = PyDict::new(py);
                 if let Ok(sb) = node.getattr("start_byte") {
                     let _ = err_kwargs.set_item("start_byte", sb);
                 }
+                let known = PragmaType::all_directives().join(", ");
                 return Err(PyErr::from_value(semantic_error.call(
-                    (format!("Unknown pragma directive: {}", directive_str),),
+                    (format!(
+                        "Unknown pragma directive: '{}'. Known: {}",
+                        directive_str, known
+                    ),),
                     Some(&err_kwargs),
                 )?));
             }
         };
+        let pragma_type = pt.into_pyobject(py)?;
+
+        // Validate pragma value early (before pragma_context check)
+        // so that invalid values are caught even without a PragmaContext
+        let exc_module_lazy = || py.import(PY_MOD_EXC);
+        let pragma_err = |msg: String| -> PyResult<Py<PyAny>> {
+            let exc_module = exc_module_lazy()?;
+            let pragma_error_cls = exc_module.getattr("CatnipPragmaError")?;
+            let err_kwargs = PyDict::new(py);
+            if let Ok(sb) = node.getattr("start_byte") {
+                let _ = err_kwargs.set_item("start_byte", sb);
+            }
+            Err(PyErr::from_value(pragma_error_cls.call((msg,), Some(&err_kwargs))?))
+        };
+
+        match pt {
+            PragmaType::Tco | PragmaType::Cache | PragmaType::Debug | PragmaType::Warning | PragmaType::NdMemoize => {
+                if value.extract::<bool>().is_err() {
+                    return pragma_err(format!("Pragma '{}' requires True or False", directive_str));
+                }
+            }
+            PragmaType::Optimize => match value.extract::<i32>() {
+                Ok(level) if !(0..=3).contains(&level) => {
+                    return pragma_err(format!("Optimization level must be 0-3, got {}", level));
+                }
+                Err(_) => {
+                    return pragma_err("Pragma 'optimize' requires an integer 0-3".to_string());
+                }
+                _ => {}
+            },
+            PragmaType::NdMode => match value.extract::<String>() {
+                Ok(mode) => {
+                    let m = mode.to_lowercase();
+                    if !PragmaType::nd_mode_values().contains(&m.as_str()) {
+                        return pragma_err(format!(
+                            "Unknown ND mode: '{}'. Use ND.sequential, ND.thread, or ND.process",
+                            mode
+                        ));
+                    }
+                }
+                Err(_) => {
+                    return pragma_err("Pragma 'nd_mode' requires ND.sequential, ND.thread, or ND.process".to_string());
+                }
+            },
+            PragmaType::NdWorkers => match value.extract::<i32>() {
+                Ok(n) if n < 0 => {
+                    return pragma_err(format!("ND workers must be non-negative, got {}", n));
+                }
+                Err(_) => {
+                    return pragma_err("Pragma 'nd_workers' requires an integer".to_string());
+                }
+                _ => {}
+            },
+            PragmaType::NdBatchSize => match value.extract::<i32>() {
+                Ok(n) if n < 0 => {
+                    return pragma_err(format!("ND batch size must be non-negative, got {}", n));
+                }
+                Err(_) => {
+                    return pragma_err("Pragma 'nd_batch_size' requires an integer".to_string());
+                }
+                _ => {}
+            },
+            PragmaType::Jit => {
+                if value.extract::<bool>().is_err() {
+                    if let Ok(s) = value.extract::<String>() {
+                        if s != "all" {
+                            return pragma_err("Pragma 'jit' requires True, False, or \"all\"".to_string());
+                        }
+                    } else {
+                        return pragma_err("Pragma 'jit' requires True, False, or \"all\"".to_string());
+                    }
+                }
+            }
+            _ => {} // Inline, Pure: validated elsewhere
+        }
 
         let pragma_class = pragma_module.getattr("Pragma")?;
         let kwargs = PyDict::new(py);
@@ -683,7 +732,7 @@ impl Semantic {
         }
 
         // Return sentinel object _SKIP instead of None to distinguish from None literals
-        let nodes_module = py.import("catnip.nodes")?;
+        let nodes_module = py.import(PY_MOD_NODES)?;
         nodes_module.getattr("_SKIP").map(|obj| obj.unbind())
     }
 
@@ -692,7 +741,7 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() < 2 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
             return Err(PyErr::from_value(arity_error.call1((
                 "getattr",
@@ -707,10 +756,7 @@ impl Semantic {
         let attr_name = args.get_item(1)?;
         let attr_str = attr_name.to_string();
 
-        let mut visited_args = vec![
-            visited_obj,
-            attr_str.into_pyobject(py)?.to_owned().unbind().into(),
-        ];
+        let mut visited_args = vec![visited_obj, attr_str.into_pyobject(py)?.to_owned().unbind().into()];
 
         for i in 2..args.len() {
             let arg = args.get_item(i)?;
@@ -727,11 +773,9 @@ impl Semantic {
         }
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &visited_args)?;
-        op_class
-            .call1((ident, new_args, new_kwargs))
-            .map(|obj| obj.unbind())
+        op_class.call1((ident, new_args, new_kwargs)).map(|obj| obj.unbind())
     }
 
     fn visit_setattr(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -739,13 +783,9 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 3 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "setattr",
-                3,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("setattr", 3, args.len()))?));
         }
 
         let obj = args.get_item(0)?;
@@ -757,7 +797,7 @@ impl Semantic {
         let attr_str = attr_name.to_string();
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(
             py,
             &[
@@ -776,13 +816,9 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 3 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "setitem",
-                3,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("setitem", 3, args.len()))?));
         }
 
         let obj = args.get_item(0)?;
@@ -794,7 +830,7 @@ impl Semantic {
         let visited_value = self.visit(py, &value)?;
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &[visited_obj, visited_index, visited_value])?;
         op_class
             .call1((ident, new_args, PyDict::new(py)))
@@ -806,7 +842,7 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() < 2 || args.len() > 3 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
             return Err(PyErr::from_value(arity_error.call1((
                 "set_locals",
@@ -863,7 +899,7 @@ impl Semantic {
         };
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
 
         // Add explicit_unpack as 3rd argument if True
         let new_args = if explicit_unpack {
@@ -883,7 +919,7 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.is_empty() {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
             return Err(PyErr::from_value(arity_error.call1(("if", (1, 2), 0))?));
         }
@@ -891,11 +927,7 @@ impl Semantic {
         let saved_tail_position = self.state.lock().unwrap().in_tail_position;
 
         let branches = args.get_item(0)?;
-        let else_block = if args.len() > 1 {
-            Some(args.get_item(1)?)
-        } else {
-            None
-        };
+        let else_block = if args.len() > 1 { Some(args.get_item(1)?) } else { None };
 
         let mut visited_branches = Vec::new();
         if let Ok(branches_iter) = branches.try_iter() {
@@ -932,7 +964,7 @@ impl Semantic {
         let new_args = PyTuple::new(py, &new_args_vec)?;
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         op_class
             .call1((ident, new_args, PyDict::new(py)))
             .map(|obj| obj.unbind())
@@ -943,23 +975,24 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 2 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "while",
-                2,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("while", 2, args.len()))?));
         }
 
         let condition = args.get_item(0)?;
         let block = args.get_item(1)?;
 
+        let saved_tail_position = self.state.lock().unwrap().in_tail_position;
+        self.state.lock().unwrap().in_tail_position = false;
+
         let visited_condition = self.visit(py, &condition)?;
         let visited_block = self.visit(py, &block)?;
 
+        self.state.lock().unwrap().in_tail_position = saved_tail_position;
+
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &[visited_condition, visited_block])?;
         op_class
             .call1((ident, new_args, PyDict::new(py)))
@@ -971,24 +1004,25 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 3 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "for",
-                3,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("for", 3, args.len()))?));
         }
 
         let identifier = args.get_item(0)?;
         let iterable = args.get_item(1)?;
         let block = args.get_item(2)?;
 
+        let saved_tail_position = self.state.lock().unwrap().in_tail_position;
+        self.state.lock().unwrap().in_tail_position = false;
+
         let visited_iterable = self.visit(py, &iterable)?;
         let visited_block = self.visit(py, &block)?;
 
+        self.state.lock().unwrap().in_tail_position = saved_tail_position;
+
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &[identifier.unbind(), visited_iterable, visited_block])?;
         op_class
             .call1((ident, new_args, PyDict::new(py)))
@@ -1000,13 +1034,9 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 2 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "match",
-                2,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("match", 2, args.len()))?));
         }
 
         let saved_tail_position = self.state.lock().unwrap().in_tail_position;
@@ -1043,7 +1073,7 @@ impl Semantic {
         self.state.lock().unwrap().in_tail_position = saved_tail_position;
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let cases_tuple = PyTuple::new(py, &visited_cases)?;
         let new_args = PyTuple::new(py, &[visited_value, cases_tuple.unbind().into()])?;
         op_class
@@ -1056,13 +1086,9 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         if args.len() != 2 {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "lambda",
-                2,
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("lambda", 2, args.len()))?));
         }
 
         let _guard = TailPositionGuard::new(&self.state);
@@ -1119,25 +1145,19 @@ impl Semantic {
 
                     if first_stmt_type_name == catnip::OP {
                         let first_stmt_ident = first_stmt.getattr("ident")?;
-                        let first_stmt_ident_int: i32 =
-                            if let Ok(val) = first_stmt_ident.extract::<i32>() {
-                                val
-                            } else {
-                                let builtins = py.import("builtins")?;
-                                let int_func = builtins.getattr("int")?;
-                                int_func.call1((first_stmt_ident,))?.extract::<i32>()?
-                            };
+                        let first_stmt_ident_int: i32 = if let Ok(val) = first_stmt_ident.extract::<i32>() {
+                            val
+                        } else {
+                            let builtins = py.import("builtins")?;
+                            let int_func = builtins.getattr("int")?;
+                            int_func.call1((first_stmt_ident,))?.extract::<i32>()?
+                        };
 
                         if first_stmt_ident_int == IROpCode::OpIf as i32 {
-                            let op_class = py.import("catnip.nodes")?.getattr("Op")?;
-                            let block_opcode = py
-                                .import("catnip.semantic")?
-                                .getattr("OpCode")?
-                                .getattr("OP_BLOCK")?;
+                            let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
+                            let block_opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr("OP_BLOCK")?;
                             let wrapped_args = PyTuple::new(py, &[visited_block])?;
-                            visited_block = op_class
-                                .call1((block_opcode, wrapped_args, PyDict::new(py)))?
-                                .unbind();
+                            visited_block = op_class.call1((block_opcode, wrapped_args, PyDict::new(py)))?.unbind();
                         }
                     }
                 }
@@ -1145,7 +1165,7 @@ impl Semantic {
         }
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let params_tuple = PyTuple::new(py, &visited_params)?;
         let new_args = PyTuple::new(py, &[params_tuple.unbind().into(), visited_block])?;
         op_class
@@ -1162,15 +1182,14 @@ impl Semantic {
 
         for (i, stmt) in args.iter().enumerate() {
             let is_last = i == args.len() - 1;
-            self.state.lock().unwrap().in_tail_position =
-                if is_last { saved_tail_position } else { false };
+            self.state.lock().unwrap().in_tail_position = if is_last { saved_tail_position } else { false };
             visited_statements.push(self.visit(py, &stmt)?);
         }
 
         self.state.lock().unwrap().in_tail_position = saved_tail_position;
 
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &visited_statements)?;
         op_class
             .call1((ident, new_args, PyDict::new(py)))
@@ -1183,7 +1202,7 @@ impl Semantic {
         let args_obj = node.getattr("args")?;
         let args = args_obj.cast::<PyTuple>()?;
         let ident = node.getattr("ident")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
 
         let result = if args.is_empty() {
             let new_args = PyTuple::new(py, &[py.None()])?;
@@ -1195,13 +1214,9 @@ impl Semantic {
             let new_args = PyTuple::new(py, &[visited_value])?;
             op_class.call1((ident, new_args, PyDict::new(py)))?
         } else {
-            let exc_module = py.import("catnip.exc")?;
+            let exc_module = py.import(PY_MOD_EXC)?;
             let arity_error = exc_module.getattr("CatnipArityError")?;
-            return Err(PyErr::from_value(arity_error.call1((
-                "return",
-                (0, 1),
-                args.len(),
-            ))?));
+            return Err(PyErr::from_value(arity_error.call1(("return", (0, 1), args.len()))?));
         };
 
         self.state.lock().unwrap().in_tail_position = saved_tail_position;
@@ -1214,76 +1229,33 @@ impl Semantic {
         let args = args_obj.cast::<PyTuple>()?;
 
         let mut visited_parts: Vec<Py<PyAny>> = Vec::new();
-        let parser_module = py.import("catnip.parser")?;
-        let parser_class = parser_module.getattr("Parser")?;
-        let mut fstring_parser: Option<Bound<'_, PyAny>> = None;
 
         for part in args.iter() {
-            let part_type = part.get_item(0)?;
-            let part_value = part.get_item(1)?;
-            let part_type_str = part_type.extract::<String>()?;
+            // String → text part, pass through
+            let type_name = part.get_type().name()?;
+            let type_str = type_name.to_str()?;
 
-            if part_type_str == "text" {
-                let part_tuple = PyTuple::new(py, &[part_type, part_value])?;
-                visited_parts.push(part_tuple.unbind().into());
-            } else if part_type_str == "expr" {
-                // part_value is (expr_code, format_spec_or_none)
-                let expr_code = part_value.get_item(0)?;
-                let format_spec = part_value.get_item(1)?;
+            if type_str == "str" {
+                visited_parts.push(part.unbind());
+            } else if part.is_instance_of::<PyTuple>() {
+                // Tuple([expr, Int(conv), spec]) → visit expr, keep conv and spec
+                let tuple = part.cast::<PyTuple>()?;
+                let expr = tuple.get_item(0)?;
+                let conv = tuple.get_item(1)?;
+                let spec = tuple.get_item(2)?;
 
-                if fstring_parser.is_none() {
-                    fstring_parser = Some(parser_class.call0()?);
-                }
+                let visited_expr = self.visit(py, &expr)?;
 
-                let parser = fstring_parser.as_ref().unwrap();
-                let expr_str = expr_code.extract::<String>()?;
-
-                match parser.call_method1("parse", (expr_str.clone(),)) {
-                    Ok(expr_ast_obj) => {
-                        let mut expr_ast = expr_ast_obj;
-
-                        if expr_ast.is_instance_of::<PyList>() {
-                            let list = expr_ast.cast::<PyList>()?;
-                            if !list.is_empty() {
-                                expr_ast = list.get_item(0)?;
-                            }
-                        }
-
-                        let visited_expr = self.visit(py, &expr_ast)?;
-                        let expr_key: Bound<'_, PyAny> = "expr".into_pyobject(py)?.into_any();
-
-                        // Reconstruct tuple (visited_expr, format_spec)
-                        let value_tuple =
-                            PyTuple::new(py, &[visited_expr.into_bound(py), format_spec])?;
-                        let part_tuple = PyTuple::new(py, &[expr_key, value_tuple.into_any()])?;
-                        visited_parts.push(part_tuple.unbind().into());
-                    }
-                    Err(e) => {
-                        return Err(PyErr::new::<pyo3::exceptions::PySyntaxError, _>(format!(
-                            "Invalid expression in f-string: {:?}: {}",
-                            expr_str, e
-                        )));
-                    }
-                }
+                let new_tuple = PyTuple::new(py, &[visited_expr.into_bound(py), conv, spec])?;
+                visited_parts.push(new_tuple.unbind().into());
             } else {
-                let exc_module = py.import("catnip.exc")?;
-                let semantic_error = exc_module.getattr("CatnipSemanticError")?;
-                let err_kwargs = PyDict::new(py);
-                if let Ok(sb) = node.getattr("start_byte") {
-                    let _ = err_kwargs.set_item("start_byte", sb);
-                }
-                return Err(PyErr::from_value(semantic_error.call(
-                    (format!("Unknown fstring part type: {}", part_type_str),),
-                    Some(&err_kwargs),
-                )?));
+                // Other types (e.g. int from Rust IR) pass through
+                visited_parts.push(part.unbind());
             }
         }
 
-        let fstring_opcode = py
-            .import("catnip.semantic")?
-            .getattr("OpCode")?
-            .getattr("FSTRING")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let fstring_opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr("FSTRING")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &visited_parts)?;
         op_class
             .call1((fstring_opcode, new_args, PyDict::new(py)))
@@ -1299,15 +1271,42 @@ impl Semantic {
         // Intercept breakpoint() calls and emit Breakpoint opcode
         if let Ok(func_name) = func.getattr("ident").and_then(|n| n.extract::<String>()) {
             if func_name == "breakpoint" {
-                let bp_opcode = py
-                    .import("catnip.semantic")?
-                    .getattr("OpCode")?
-                    .getattr("BREAKPOINT")?;
-                let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+                let bp_opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr("BREAKPOINT")?;
+                let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
                 let empty_args = PyTuple::empty(py);
-                return Ok(op_class
-                    .call1((bp_opcode, empty_args, PyDict::new(py)))?
-                    .unbind());
+                return Ok(op_class.call1((bp_opcode, empty_args, PyDict::new(py)))?.unbind());
+            }
+
+            // Intercept typeof(expr) calls and emit TypeOf opcode
+            if func_name == "typeof" {
+                let args_list: Vec<Bound<'_, PyAny>> = call_args
+                    .try_iter()
+                    .ok()
+                    .map(|iter| iter.filter_map(|a| a.ok()).collect())
+                    .unwrap_or_default();
+                if args_list.len() == 1 {
+                    let visited_arg = self.visit(py, &args_list[0])?;
+                    let typeof_opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr("TYPE_OF")?;
+                    let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
+                    let args_tuple = PyTuple::new(py, &[visited_arg])?;
+                    return Ok(op_class.call1((typeof_opcode, args_tuple, PyDict::new(py)))?.unbind());
+                }
+            }
+
+            // Intercept globals()/locals() calls and emit intrinsic opcodes
+            if func_name == "globals" || func_name == "locals" {
+                let args_list: Vec<Bound<'_, PyAny>> = call_args
+                    .try_iter()
+                    .ok()
+                    .map(|iter| iter.filter_map(|a| a.ok()).collect())
+                    .unwrap_or_default();
+                if args_list.is_empty() {
+                    let opcode_name = if func_name == "globals" { "GLOBALS" } else { "LOCALS" };
+                    let opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr(opcode_name)?;
+                    let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
+                    let empty_args = PyTuple::empty(py);
+                    return Ok(op_class.call1((opcode, empty_args, PyDict::new(py)))?.unbind());
+                }
             }
         }
 
@@ -1337,11 +1336,8 @@ impl Semantic {
             }
         }
 
-        let call_opcode = py
-            .import("catnip.semantic")?
-            .getattr("OpCode")?
-            .getattr("CALL")?;
-        let op_class = py.import("catnip.nodes")?.getattr("Op")?;
+        let call_opcode = py.import(PY_MOD_SEMANTIC)?.getattr("OpCode")?.getattr("CALL")?;
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
         let new_args = PyTuple::new(py, &visited_args)?;
         let result = op_class.call1((call_opcode, new_args, visited_kwargs))?;
 
@@ -1349,16 +1345,10 @@ impl Semantic {
 
         let args_slice = &visited_args[1..];
         let args_tuple = PyTuple::new(py, args_slice)?;
-        let has_self_call_in_args =
-            self.contains_self_call(py, args_tuple.as_any(), current_function.as_deref())?;
-        let has_self_call_in_func =
-            self.contains_self_call(py, visited_func.bind(py), current_function.as_deref())?;
+        let has_self_call_in_args = self.contains_self_call(py, args_tuple.as_any(), current_function.as_deref())?;
+        let has_self_call_in_func = self.contains_self_call(py, visited_func.bind(py), current_function.as_deref())?;
 
-        if saved_tail_position
-            && current_function.is_some()
-            && !has_self_call_in_args
-            && !has_self_call_in_func
-        {
+        if saved_tail_position && current_function.is_some() && !has_self_call_in_args && !has_self_call_in_func {
             result.setattr("tail", true)?;
         }
 
@@ -1367,12 +1357,66 @@ impl Semantic {
         Ok(result.unbind())
     }
 
-    fn contains_self_call(
-        &self,
-        py: Python<'_>,
-        node: &Bound<'_, PyAny>,
-        func_name: Option<&str>,
-    ) -> PyResult<bool> {
+    /// Visit a CALL Op node with tail-call detection.
+    ///
+    /// Op(CALL, [func_ref, arg1, arg2, ...], kwargs)
+    /// Same as visit_ir_default but marks tail=true when appropriate.
+    fn visit_call_op(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let saved_tail_position = self.state.lock().unwrap().in_tail_position;
+
+        // Visit args with in_tail_position = false (args are never in tail position)
+        self.state.lock().unwrap().in_tail_position = false;
+
+        let ident = node.getattr("ident")?;
+        let args_tuple = node.getattr("args")?.cast::<PyTuple>()?.clone();
+        let visited_args: Result<Vec<_>, _> = args_tuple.iter().map(|arg| self.visit(py, &arg)).collect();
+        let visited_args = visited_args?;
+        let new_args = PyTuple::new(py, &visited_args)?;
+
+        let kwargs_dict = node.getattr("kwargs")?;
+        let new_kwargs = PyDict::new(py);
+        if let Ok(dict) = kwargs_dict.cast::<PyDict>() {
+            for (key, value) in dict.iter() {
+                let visited_value = self.visit(py, &value)?;
+                new_kwargs.set_item(key, visited_value)?;
+            }
+        }
+
+        let op_class = py.import(PY_MOD_NODES)?.getattr("Op")?;
+        let result = op_class.call1((&ident, &new_args, &new_kwargs))?;
+        Self::propagate_position(py, node, &result.clone().unbind());
+
+        // Tail-call detection: mark if in tail position within a named function
+        let current_function = self.state.lock().unwrap().current_function.clone();
+        if saved_tail_position && current_function.is_some() {
+            // Check args[0] is a Ref to current_function (direct self-call)
+            if !visited_args.is_empty() {
+                let func_ref = visited_args[0].bind(py);
+                let is_self_call = func_ref
+                    .getattr("ident")
+                    .and_then(|id| id.extract::<String>())
+                    .map(|name| Some(name) == current_function)
+                    .unwrap_or(false);
+
+                if is_self_call {
+                    // Check no recursive calls hiding in the argument expressions
+                    let call_args = &visited_args[1..];
+                    let args_py = PyTuple::new(py, call_args)?;
+                    let has_self_call_in_args =
+                        self.contains_self_call(py, args_py.as_any(), current_function.as_deref())?;
+
+                    if !has_self_call_in_args {
+                        result.setattr("tail", true)?;
+                    }
+                }
+            }
+        }
+
+        self.state.lock().unwrap().in_tail_position = saved_tail_position;
+        Ok(result.unbind())
+    }
+
+    fn contains_self_call(&self, py: Python<'_>, node: &Bound<'_, PyAny>, func_name: Option<&str>) -> PyResult<bool> {
         if func_name.is_none() {
             return Ok(false);
         }
@@ -1487,133 +1531,77 @@ mod tests {
     fn test_opcode_values_match_python() {
         Python::initialize();
         Python::attach(|py| {
-            let opcode_mod = py.import("catnip.semantic.opcode").unwrap();
+            let opcode_mod = py.import(PY_MOD_SEMANTIC_OPCODE).unwrap();
             let opcode_class = opcode_mod.getattr("OpCode").unwrap();
 
             // Test critical opcodes used in dispatch table
             assert_eq!(
-                opcode_class
-                    .getattr("PRAGMA")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("PRAGMA").unwrap().extract::<i32>().unwrap(),
                 IROpCode::Pragma as i32,
                 "PRAGMA opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("GETATTR")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("GETATTR").unwrap().extract::<i32>().unwrap(),
                 IROpCode::GetAttr as i32,
                 "GETATTR opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("SETATTR")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("SETATTR").unwrap().extract::<i32>().unwrap(),
                 IROpCode::SetAttr as i32,
                 "SETATTR opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("SETITEM")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("SETITEM").unwrap().extract::<i32>().unwrap(),
                 IROpCode::SetItem as i32,
                 "SETITEM opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("SET_LOCALS")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("SET_LOCALS").unwrap().extract::<i32>().unwrap(),
                 IROpCode::SetLocals as i32,
                 "SET_LOCALS opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_IF")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_IF").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpIf as i32,
                 "OP_IF opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_WHILE")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_WHILE").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpWhile as i32,
                 "OP_WHILE opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_FOR")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_FOR").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpFor as i32,
                 "OP_FOR opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_MATCH")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_MATCH").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpMatch as i32,
                 "OP_MATCH opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_LAMBDA")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_LAMBDA").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpLambda as i32,
                 "OP_LAMBDA opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_BLOCK")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_BLOCK").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpBlock as i32,
                 "OP_BLOCK opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("OP_RETURN")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("OP_RETURN").unwrap().extract::<i32>().unwrap(),
                 IROpCode::OpReturn as i32,
                 "OP_RETURN opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("FSTRING")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("FSTRING").unwrap().extract::<i32>().unwrap(),
                 IROpCode::Fstring as i32,
                 "FSTRING opcode mismatch"
             );
             assert_eq!(
-                opcode_class
-                    .getattr("CALL")
-                    .unwrap()
-                    .extract::<i32>()
-                    .unwrap(),
+                opcode_class.getattr("CALL").unwrap().extract::<i32>().unwrap(),
                 IROpCode::Call as i32,
                 "CALL opcode mismatch"
             );

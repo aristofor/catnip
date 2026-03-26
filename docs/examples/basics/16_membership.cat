@@ -1,0 +1,49 @@
+#!/usr/bin/env catnip
+# Membership operators: in / not in
+
+# in
+
+3 in list(1, 2, 3, 4, 5)
+# → True
+
+"cat" in "catnip"
+# → True
+
+"z" in dict(a=1, b=2)
+# → False
+
+# not in
+
+42 not in set(1, 2, 3)
+# → True
+
+# usage in control flow
+
+allowed = list("admin", "editor")
+
+check = (role) => {
+    if role in allowed {
+        "granted"
+    } else {
+        "denied"
+    }
+}
+
+check("admin")   # → "granted"
+check("viewer")  # → "denied"
+
+# custom struct with op in
+
+struct Bag {
+    items
+
+    op in(self, item) => { item in self.items }
+}
+
+b = Bag(list(1, 2, 3))
+
+2 in b
+# → True
+
+5 not in b
+# → True

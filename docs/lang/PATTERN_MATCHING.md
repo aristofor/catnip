@@ -1,13 +1,5 @@
 # Pattern Matching
 
-- [Syntax](SYNTAX.md)
-- [Types](TYPES.md)
-- [Expressions](EXPRESSIONS.md)
-- [Control Flow](CONTROL_FLOW.md)
-- [Functions](FUNCTIONS.md)
-- [Structures](STRUCTURES.md)
-- [Pattern Matching](PATTERN_MATCHING.md)
-
 ## Pattern Matching
 
 Le pattern matching permet de faire correspondre des valeurs à des motifs de manière déclarative et sûre, en regroupant
@@ -111,6 +103,8 @@ match symbole {
 
 Un `match` doit être total. Sans wildcard, une valeur non couverte déclenche une erreur.
 
+<!-- check: no-check -->
+
 ```catnip
 jour = 9
 
@@ -172,7 +166,7 @@ Le pattern matching supporte la destructuration de structures via `NomStruct{cha
 type de l'instance puis lie chaque champ à une variable du même nom :
 
 ```catnip
-struct Point { x, y }
+struct Point { x; y; }
 
 p = Point(3, 4)
 
@@ -188,7 +182,7 @@ le `match` continue vers la branche suivante.
 Combiné avec les guards, on peut filtrer sur les valeurs des champs :
 
 ```catnip
-struct Point { x, y }
+struct Point { x; y; }
 
 classify = (p) => {
     match p {
@@ -208,7 +202,7 @@ Plusieurs types de structures peuvent être testés dans le même match :
 
 ```catnip
 struct Circle { radius }
-struct Rect { width, height }
+struct Rect { width; height; }
 
 area = (shape) => {
     match shape {

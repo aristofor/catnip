@@ -1,5 +1,5 @@
 (* FILE: proof/lang/CatnipPatternProof.v *)
-(* CatnipPatternProof.v — Formal model of Catnip's pattern matching
+(* CatnipPatternProof.v - Formal model of Catnip's pattern matching
  *
  * Source of truth:
  *   catnip_rs/src/core/pattern.rs       (6 pattern types, tag dispatch)

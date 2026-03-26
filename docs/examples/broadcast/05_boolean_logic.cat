@@ -1,4 +1,5 @@
-# Exemple 04 : Logique booléenne
+#!/usr/bin/env catnip
+# Exemple : Logique booléenne
 # Opérations logiques vectorisées
 
 print("⇒ Opérations logiques")
@@ -17,7 +18,8 @@ print("a AND b:", resultat_and)
 resultat_or = a.[or b]
 print("a OR b:", resultat_or)
 
-print("\n⇒ Négation\n")
+print()
+print("⇒ Négation\n")
 
 valeurs = list(True, False, True, True, False)
 print("Valeurs:", valeurs)
@@ -26,7 +28,8 @@ print("Valeurs:", valeurs)
 negation = valeurs.[not]
 print("NOT valeurs:", negation)
 
-print("\n⇒ Combinaison de comparaisons\n")
+print()
+print("⇒ Combinaison de comparaisons\n")
 
 # Vérifier plusieurs conditions
 ages = list(15, 22, 18, 35, 12, 45)
@@ -50,7 +53,8 @@ print("Age < 65:", inf_65)
 actifs = sup_18.[and inf_65]
 print("Adultes actifs (18-64):", actifs)
 
-print("\n⇒ Opérations bitwise\n")
+print()
+print("⇒ Opérations bitwise\n")
 
 # Opérations bit à bit (utiles pour flags)
 flags_a = list(1, 3, 5, 7)
@@ -70,7 +74,8 @@ print("A | B:", bit_or)
 bit_xor = flags_a.[^ flags_b]
 print("A ^ B:", bit_xor)
 
-print("\n⇒ Décalages de bits\n")
+print()
+print("⇒ Décalages de bits\n")
 
 nombres = list(1, 2, 4, 8)
 print("Nombres:", nombres)

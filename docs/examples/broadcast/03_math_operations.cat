@@ -1,4 +1,5 @@
-# Exemple 02 : Opérations mathématiques avancées
+#!/usr/bin/env catnip
+# Exemple : Opérations mathématiques avancées
 # Puissance, modulo, division entière, etc.
 
 print("⇒ Opérations mathématiques")
@@ -20,7 +21,8 @@ print("\nCarrés:", carres)
 racines = carres.[** 0.5]
 print("Racines carrées:", racines)
 
-print("\n⇒ Division entière et modulo\n")
+print()
+print("⇒ Division entière et modulo\n")
 
 # Division entière
 nombres = list(10, 15, 20, 25, 30)
@@ -40,7 +42,8 @@ print("\nNombres:", nombres)
 restes = nombres.[% 2]
 print("Reste par 2 (0=pair, 1=impair):", restes)
 
-print("\n⇒ Combinaisons d'opérations\n")
+print()
+print("⇒ Combinaisons d'opérations\n")
 
 # Calcul de pourcentages
 valeurs = list(100, 200, 300, 400)
@@ -58,7 +61,8 @@ print("Avec TVA (21%):", avec_tva)
 avec_remise = valeurs.[* 0.85].[* 1.21]
 print("Avec remise 15% puis TVA:", avec_remise)
 
-print("\n⇒ Normalisation\n")
+print()
+print("⇒ Normalisation\n")
 
 # Normaliser des valeurs entre 0 et 1
 valeurs = list(10, 50, 30, 70, 20)

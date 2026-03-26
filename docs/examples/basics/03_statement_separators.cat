@@ -1,11 +1,12 @@
+#!/usr/bin/env catnip
 # Exemples : Séparateurs de Statements
 # Démontre l'utilisation des newlines et semicolons
 
 # Newlines comme séparateurs (recommandé)
 x = 1
 y = 2
-z = x + y
-print("Newlines:", z)  # 3
+z = x + y  # → 3
+print("Newlines:", z)
 
 # Semicolons comme séparateurs (inline)
 a = 10; b = 20; c = a + b
@@ -13,46 +14,45 @@ print("Semicolons:", c)  # 30
 
 # Mix newlines et semicolons
 p = 5; q = 3
-r = p * q
-print("Mix:", r)  # 15
+r = p * q  # → 15
+print("Mix:", r)
 
 # Newlines multiples (ignorées)
 first = 100
 
-
 second = 200
-print("Multiple newlines:", first + second)  # 300
+print("Multiple newlines:", first + second)  # → Multiple newlines: 300
 
 # Semicolon suivi de newline
 value = { 42 };
-next = value + 1
-print("Semicolon + newline:", next)  # 43
+next = value + 1  # → 43
+print("Semicolon + newline:", next)
 
 # Newlines dans arguments (ignorées)
 result = max(
     10,
     20,
     30,
-    5
-)
-print("Multiline args:", result)  # 30
+    5,
+)  # → 30
+print("Multiline args:", result)
 
 # Newlines dans listes (ignorées)
 values = list(
     1,
     2,
     3,
-    4
-)
-print("Multiline list:", values)  # [1, 2, 3, 4]
+    4,
+)  # → [1, 2, 3, 4]
+print("Multiline list:", values)
 
 # Newlines dans blocs
 compute = {
     temp = 10 * 2
     final = temp + 5
     final
-}
-print("Block with newlines:", compute)  # 25
+}  # → 25
+print("Block with newlines:", compute)
 
 # if/else multiligne
 check = if True {
@@ -60,25 +60,25 @@ check = if True {
 }
 else {
     0
-}
-print("if/else multiline:", check)  # 100
+}  # → 100
+print("if/else multiline:", check)
 
 # Appels chaînés (newlines entre statements)
 make_adder = (n) => { (m) => { n + m } }
 add5 = make_adder(5)
-result_chained = add5(3)
-print("Chained calls:", result_chained)  # 8
+result_chained = add5(3)  # → 8
+print("Chained calls:", result_chained)
 
 # For-loop avec newlines
 total = 0
 for i in range(1, 6) {
     total = total + i
 }
-print("For loop total:", total)  # 15
+print("For loop total:", total)  # → For loop total: 15
 
 # Statements complexes avec mix
 data = list(1, 2, 3); sum_val = 0
 for val in data {
     sum_val = sum_val + val
 }
-print("Complex mix:", sum_val)  # 6
+print("Complex mix:", sum_val)  # → Complex mix: 6

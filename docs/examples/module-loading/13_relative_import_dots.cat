@@ -1,0 +1,9 @@
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 13_relative_import_dots.cat
+# Import relatif avec dots (style Python)
+
+# Un dot : même répertoire que ce fichier
+host = import('.host_module_example', protocol='py')
+sum = host.add(10, 5)
+
+sum  # → 15

@@ -1,13 +1,40 @@
+#!/usr/bin/env catnip
 # Parsing HTML avec selectolax
-# selectolax utilise le moteur Lexbor (C) -- 10-30x plus rapide que BeautifulSoup
+# selectolax utilise le moteur Lexbor (C) - 10-30x plus rapide que BeautifulSoup
 # Complète httpx : fetch (httpx) → parse (selectolax) → extract (Catnip)
 #
-# Exécuter:
-#   catnip docs/codex/web/selectolax_scraping.cat
+# DEPS: selectolax
 
-selectolax = import("selectolax.parser")
+selectolax = import('selectolax.parser')
 
-# HTML de test -- une page de résultats fictive
+# Structs
+
+struct SearchResult {
+    title; href; score; meta;
+    display(self) => {
+        print(f"  [{self.score}] {self.title} -> {self.href}")
+        print(f"           {self.meta}")
+    }
+}
+
+struct TableRow {
+    key; value;
+    display(self) => { print(f"  {self.key} : {self.value}") }
+}
+
+# Extraction d'un résultat depuis un noeud HTML
+
+extract_result = (node) => {
+    title_node = node.css_first('a.title')
+    SearchResult(
+        title_node.text(),
+        title_node.attributes['href'],
+        node.attributes['data-score'],
+        node.css_first('span.meta').text(),
+    )
+}
+
+# HTML de test - une page de résultats fictive
 
 HTML = '
 <html>
@@ -20,15 +47,15 @@ HTML = '
   <ul id="results">
     <li class="result" data-score="0.98">
       <a href="/doc/intro" class="title">Introduction à Catnip</a>
-      <span class="meta">Guide -- 5 min de lecture</span>
+      <span class="meta">Guide - 5 min de lecture</span>
     </li>
     <li class="result" data-score="0.85">
       <a href="/doc/broadcast" class="title">Broadcasting</a>
-      <span class="meta">Référence -- 12 min de lecture</span>
+      <span class="meta">Référence - 12 min de lecture</span>
     </li>
     <li class="result featured" data-score="0.72">
       <a href="/doc/patterns" class="title">Pattern Matching</a>
-      <span class="meta">Tutoriel -- 8 min de lecture</span>
+      <span class="meta">Tutoriel - 8 min de lecture</span>
     </li>
   </ul>
   <table class="stats">
@@ -46,65 +73,67 @@ tree = selectolax.HTMLParser(HTML)
 # Accès direct aux éléments structurels
 
 print("⇒ Éléments structurels")
-print("  <title>:", tree.css_first("title").text())
-print("  <h1>:", tree.css_first("h1").text())
+print(f"  <title>: {tree.css_first('title').text()}")
+print(f"  <h1>: {tree.css_first('h1').text()}")
 
-# Sélecteurs CSS -- même syntaxe que les navigateurs
+# Sélecteurs CSS - même syntaxe que les navigateurs
 
-print("\n⇒ Sélecteurs CSS")
+print()
+print("⇒ Sélecteurs CSS")
 
 # Par classe
-results = tree.css("li.result")
-print("  li.result:", len(results), "éléments")
+results = tree.css('li.result')
+print(f"  li.result: {len(results)} éléments")
 
 # Par id
-ul = tree.css_first("#results")
-print("  #results tag:", ul.tag)
+ul = tree.css_first('#results')
+print(f"  #results tag: {ul.tag}")
 
 # Combiné
-featured = tree.css_first("li.featured a.title")
-print("  li.featured a.title:", featured.text())
+featured = tree.css_first('li.featured a.title')
+print(f"  li.featured a.title: {featured.text()}")
 
-# Extraction de données structurées
+# Extraction de données structurées via broadcasting
 
-print("\n⇒ Extraction des résultats")
-for node in tree.css("li.result") {
-    title = node.css_first("a.title")
-    meta = node.css_first("span.meta")
-    score = node.attributes["data-score"]
-    href = title.attributes["href"]
-    print("  [" + score + "]", title.text(), "→", href)
-    print("         ", meta.text())
-}
+print()
+print("⇒ Extraction des résultats")
+search_results = tree.css('li.result').[(n) => { extract_result(n) }]
+search_results.[(r) => { r.display() }]
 
 # Attributs et navigation
 
-print("\n⇒ Attributs")
-links = tree.css("nav.breadcrumb a")
+print()
+print("⇒ Attributs")
+links = tree.css('nav.breadcrumb a')
 for a in links {
-    print("  <a href=\"" + a.attributes["href"] + "\">" + a.text() + "</a>")
+    print(f"  <a href=\"{a.attributes['href']}\">{a.text()}</a>")
 }
 
-# Parsing de table HTML
+# Parsing de table HTML via struct TableRow
 
-print("\n⇒ Table de stats")
-rows = tree.css("table.stats tr")
+print()
+print("⇒ Table de stats")
+rows = tree.css('table.stats tr')
+table_rows = list()
 for row in rows {
-    cells = row.css("td")
+    cells = row.css('td')
     if len(cells) == 2 {
-        print("  ", cells[0].text(), ":", cells[1].text())
+        table_rows.append(TableRow(cells[0].text(), cells[1].text()))
     }
 }
+table_rows.[(r) => { r.display() }]
 
 # Texte brut (strip tags)
 
-print("\n⇒ Texte brut du footer")
-footer = tree.css_first("footer")
-print("  ", footer.text(strip=True))
+print()
+print("⇒ Texte brut du footer")
+footer = tree.css_first('footer')
+print(f"  {footer.text(strip=True)}")
 
 # Combinaison avec httpx (pattern complet)
 # fetch = httpx.get("https://example.com")
 # tree = selectolax.HTMLParser(fetch.text)
 # data = tree.css("article h2").[text()]
 
-print("\n⇒ Terminé")
+print()
+print("⇒ Terminé")

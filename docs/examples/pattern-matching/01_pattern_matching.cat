@@ -1,4 +1,5 @@
-# Exemple : Pattern Matching
+#!/usr/bin/env catnip
+# Exemple : pattern matching
 
 print("⇒ Match sur valeurs littérales")
 
@@ -8,10 +9,11 @@ match code {
     200 => { print("OK - Requête réussie") }
     404 => { print("Not Found - Page non trouvée") }
     500 => { print("Internal Server Error") }
-    _ => { print("Code HTTP inconnu:", code) }
+    _   => { print("Code HTTP inconnu:", code) }
 }
 
-print("\n⇒ Capture de variable")
+print()
+print("⇒ Capture de variable")
 
 # Capturer et utiliser la valeur
 nombre = 42
@@ -20,7 +22,8 @@ match nombre {
     n => { print("La valeur est:", n) }
 }
 
-print("\n⇒ Guards (conditions)")
+print()
+print("⇒ Guards (conditions)")
 
 # Classification d'âge
 age = 25
@@ -28,10 +31,11 @@ match age {
     a if a < 13 => { print("Enfant") }
     a if a < 18 => { print("Adolescent") }
     a if a < 65 => { print("Adulte") }
-    a => { print("Senior") }
+    a           => { print("Senior") }
 }
 
-print("\n⇒ Pattern OR (alternatives)")
+print()
+print("⇒ Pattern OR (alternatives)")
 
 # Jours de la semaine
 jour = 6
@@ -42,15 +46,16 @@ match jour {
 }
 
 # Opérateurs mathématiques
-operateur = "+"
+operateur = '+'
 match operateur {
-    "+" | "-" => { print("Opérateur additif") }
-    "*" | "/" | "%" => { print("Opérateur multiplicatif") }
-    "**" => { print("Exponentiation") }
+    '+' | '-' => { print("Opérateur additif") }
+    '*' | '/' | '%' => { print("Opérateur multiplicatif") }
+    '**' => { print("Exponentiation") }
     op => { print("Opérateur inconnu:", op) }
 }
 
-print("\n⇒ Patterns tuple (destructuration)")
+print()
+print("⇒ Patterns tuple (destructuration)")
 
 # Coordonnées
 point = tuple(0, 5)
@@ -74,7 +79,8 @@ match value {
     _ => { print("Autre") }
 }
 
-print("\n⇒ Patterns star (capture du reste)")
+print()
+print("⇒ Patterns star (capture du reste)")
 
 # Tête et reste
 values = list(1, 2, 3, 4, 5)
@@ -92,7 +98,8 @@ match values {
     (a, *middle, z) => { print("Premier:", a, "- Milieu:", len(middle), "- Dernier:", z) }
 }
 
-print("\n⇒ Patterns imbriqués")
+print()
+print("⇒ Patterns imbriqués")
 
 # Tuple dans un tuple
 nested = list(1, tuple(2, 3))
@@ -112,10 +119,11 @@ match pairs {
     ((a, b), (c, d)) => { print("Somme:", a + b + c + d) }
 }
 
-print("\n⇒ Patterns struct")
+print()
+print("⇒ Patterns struct")
 
-struct Point { x, y }
-struct Vec3 { x, y, z }
+struct Point { x; y; }
+struct Vec3 { x; y; z; }
 
 p = Point(10, 20)
 match p {
@@ -123,7 +131,7 @@ match p {
 }
 
 # Dispatch par type
-struct Color { r, g, b }
+struct Color { r; g; b; }
 c = Color(255, 0, 128)
 match c {
     Point{x, y} => { print("C'est un point") }
@@ -141,10 +149,11 @@ match origin {
 # Struct 3D
 v = Vec3(1, 2, 3)
 match v {
-    Vec3{x, y, z} => { print("Vecteur:", x, y, z, "- Norme²:", x**2 + y**2 + z**2) }
+    Vec3{x, y, z} => { print("Vecteur:", x, y, z, "- Norme²:", x ** 2 + y ** 2 + z ** 2) }
 }
 
-print("\n⇒ Tuple + guard combiné")
+print()
+print("⇒ Tuple + guard combiné")
 
 # Diagonale
 coord = tuple(3, 3)
@@ -153,7 +162,8 @@ match coord {
     (x, y) => { print("Hors diagonale:", x, y) }
 }
 
-print("\n⇒ FizzBuzz avec pattern matching")
+print()
+print("⇒ FizzBuzz avec pattern matching")
 
 for i in range(1, 21) {
     match i {

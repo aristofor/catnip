@@ -53,9 +53,9 @@ fn test_double_not_with_expression() {
     });
 }
 
-// Removed: test_multiply_zero_with_expression — proven by sr_mul_zero_r (CatnipOptimProof.v:187)
-// Removed: test_multiple_simplifications — proven by sr_add_zero_r + sr_mul_one_r + sr_sub_zero + compose_preserves_eval
-// Removed: test_nested_simplifications — proven by sr_and_true_l + blunt_double_neg + compose_preserves_eval
+// Removed: test_multiply_zero_with_expression - proven by sr_mul_zero_r (CatnipOptimProof.v:187)
+// Removed: test_multiple_simplifications - proven by sr_add_zero_r + sr_mul_one_r + sr_sub_zero + compose_preserves_eval
+// Removed: test_nested_simplifications - proven by sr_and_true_l + blunt_double_neg + compose_preserves_eval
 
 #[test]
 fn test_empty_expression() {
@@ -71,7 +71,7 @@ fn test_empty_expression() {
     });
 }
 
-// Removed: test_chained_comparisons — proven by cf_lt_fold + blunt_eq_true_r (CatnipOptimProof.v:494)
+// Removed: test_chained_comparisons - proven by cf_lt_fold + blunt_eq_true_r (CatnipOptimProof.v:494)
 
 #[test]
 fn test_variable_operations_not_simplified() {

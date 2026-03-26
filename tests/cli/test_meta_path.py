@@ -9,14 +9,14 @@ from catnip.cli.main import main
 
 
 class TestMetaPath:
-    """Validate META.path is populated for CLI script execution."""
+    """Validate META.file is populated for CLI script execution."""
 
     def test_script_mode_sets_meta_path(self):
         runner = CliRunner()
 
         with runner.isolated_filesystem():
             script_path = Path("meta_path.cat")
-            script_path.write_text('META.path.endswith("meta_path.cat")')
+            script_path.write_text('META.file.endswith("meta_path.cat")')
 
             result = runner.invoke(main, ["--no-cache", str(script_path)])
 

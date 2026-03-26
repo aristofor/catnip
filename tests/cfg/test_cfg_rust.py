@@ -7,14 +7,17 @@ import pytest
 from catnip import Catnip
 
 
-@pytest.fixture
-def catnip():
-    return Catnip()
+def parse_ops(code):
+    """Parse code and return Op nodes for CFG analysis."""
+    c = Catnip()
+    c.parse(code)
+    ops = c._pipeline.prepared_ir_to_op()
+    return ops if isinstance(ops, list) else [ops]
 
 
-def test_cfg_while_loop(catnip):
+def test_cfg_while_loop():
     """Test CFG for while loop."""
-    ir = catnip.parse('while x < 10 { x = x + 1 }')
+    ir = parse_ops('while x < 10 { x = x + 1 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'while')
 
     # entry, exit, while_header, while_body, while_exit
@@ -27,9 +30,9 @@ def test_cfg_while_loop(catnip):
     assert len(cfg.get_reachable_blocks()) == 5
 
 
-def test_cfg_if_else(catnip):
+def test_cfg_if_else():
     """Test CFG for if/else."""
-    ir = catnip.parse('if x > 0 { y = 1 } else { y = 2 }')
+    ir = parse_ops('if x > 0 { y = 1 } else { y = 2 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'if_else')
 
     # entry, exit, if_then, if_else, if_merge
@@ -39,7 +42,7 @@ def test_cfg_if_else(catnip):
     assert cfg.num_edges == 5
 
 
-def test_cfg_nested_break(catnip):
+def test_cfg_nested_break():
     """Test CFG with nested if and break."""
     code = '''
 x = 0
@@ -48,7 +51,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'nested_break')
 
     # entry, exit, while_header, while_body, while_exit, if_then, if_else, if_merge
@@ -56,16 +59,16 @@ while x < 10 {
     assert cfg.num_edges == 9
 
 
-def test_cfg_for_loop(catnip):
+def test_cfg_for_loop():
     """Test CFG for for loop."""
-    ir = catnip.parse('for x in range(10) { y = x }')
+    ir = parse_ops('for x in range(10) { y = x }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'for')
 
     # entry, exit, for_header, for_body, for_exit
     assert cfg.num_blocks == 5
 
 
-def test_cfg_continue(catnip):
+def test_cfg_continue():
     """Test CFG with continue."""
     code = '''
 while x < 10 {
@@ -73,16 +76,16 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'continue')
 
     # Has continue edge to loop header
     assert cfg.num_blocks == 8
 
 
-def test_cfg_dominance_diamond(catnip):
+def test_cfg_dominance_diamond():
     """Test dominance analysis on diamond (if/else) CFG."""
-    ir = catnip.parse('if x > 0 { y = 1 } else { y = 2 }')
+    ir = parse_ops('if x > 0 { y = 1 } else { y = 2 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'if_else')
     cfg.compute_dominators()
 
@@ -96,9 +99,9 @@ def test_cfg_dominance_diamond(catnip):
             assert entry in cfg.get_dominators(block_id)
 
 
-def test_cfg_loop_detection(catnip):
+def test_cfg_loop_detection():
     """Test loop detection."""
-    ir = catnip.parse('while x < 10 { x = x + 1 }')
+    ir = parse_ops('while x < 10 { x = x + 1 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'loop')
     cfg.compute_dominators()
 
@@ -111,7 +114,7 @@ def test_cfg_loop_detection(catnip):
     assert header in loop_blocks
 
 
-def test_cfg_nested_loops(catnip):
+def test_cfg_nested_loops():
     """Test nested loops detection."""
     code = '''
 while x < 10 {
@@ -121,7 +124,7 @@ while x < 10 {
     x = x + 1
 }
 '''
-    ir = catnip.parse(code)
+    ir = parse_ops(code)
     cfg = rs.cfg.build_cfg_from_ir(ir, 'nested')
     cfg.compute_dominators()
 
@@ -130,9 +133,9 @@ while x < 10 {
     assert len(loops) == 2
 
 
-def test_cfg_to_dot(catnip):
+def test_cfg_to_dot():
     """Test DOT generation."""
-    ir = catnip.parse('if x > 0 { y = 1 } else { y = 2 }')
+    ir = parse_ops('if x > 0 { y = 1 } else { y = 2 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'if_else')
 
     dot = cfg.to_dot()
@@ -145,9 +148,9 @@ def test_cfg_to_dot(catnip):
     assert 'conditional_false' in dot
 
 
-def test_cfg_visualize(catnip, tmp_path):
+def test_cfg_visualize(tmp_path):
     """Test visualize method."""
-    ir = catnip.parse('while x < 10 { x = x + 1 }')
+    ir = parse_ops('while x < 10 { x = x + 1 }')
     cfg = rs.cfg.build_cfg_from_ir(ir, 'loop')
 
     dot_file = tmp_path / 'test.dot'

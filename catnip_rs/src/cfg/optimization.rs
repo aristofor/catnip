@@ -54,10 +54,7 @@ pub fn merge_blocks(cfg: &mut ControlFlowGraph) -> usize {
             let edge = &cfg.edges[edge_id];
 
             // Edge must be Fallthrough or Unconditional
-            if !matches!(
-                edge.edge_type,
-                EdgeType::Fallthrough | EdgeType::Unconditional
-            ) {
+            if !matches!(edge.edge_type, EdgeType::Fallthrough | EdgeType::Unconditional) {
                 continue;
             }
 
@@ -97,12 +94,9 @@ pub fn merge_blocks(cfg: &mut ControlFlowGraph) -> usize {
                 // Update successor's predecessor list
                 if let Some(edge) = cfg.edges.get(succ_edge_id) {
                     if let Some(succ_block) = cfg.blocks.get_mut(&edge.target) {
-                        succ_block.predecessors.retain(|&e| {
-                            cfg.edges
-                                .get(e)
-                                .map(|ed| ed.source != block_b_id)
-                                .unwrap_or(true)
-                        });
+                        succ_block
+                            .predecessors
+                            .retain(|&e| cfg.edges.get(e).map(|ed| ed.source != block_b_id).unwrap_or(true));
                         succ_block.predecessors.push(succ_edge_id);
                     }
                 }
@@ -173,10 +167,7 @@ pub fn remove_empty_blocks(cfg: &mut ControlFlowGraph) -> usize {
             let edge = &cfg.edges[edge_id];
 
             // Edge must be Fallthrough or Unconditional
-            if !matches!(
-                edge.edge_type,
-                EdgeType::Fallthrough | EdgeType::Unconditional
-            ) {
+            if !matches!(edge.edge_type, EdgeType::Fallthrough | EdgeType::Unconditional) {
                 continue;
             }
 
@@ -246,16 +237,10 @@ pub fn eliminate_constant_branches(cfg: &mut ControlFlowGraph) -> usize {
         let edge2 = &cfg.edges[edge2_id];
 
         // Both must be conditional
-        if !matches!(
-            edge1.edge_type,
-            EdgeType::ConditionalTrue | EdgeType::ConditionalFalse
-        ) {
+        if !matches!(edge1.edge_type, EdgeType::ConditionalTrue | EdgeType::ConditionalFalse) {
             continue;
         }
-        if !matches!(
-            edge2.edge_type,
-            EdgeType::ConditionalTrue | EdgeType::ConditionalFalse
-        ) {
+        if !matches!(edge2.edge_type, EdgeType::ConditionalTrue | EdgeType::ConditionalFalse) {
             continue;
         }
 
@@ -281,9 +266,7 @@ pub fn eliminate_constant_branches(cfg: &mut ControlFlowGraph) -> usize {
 
             // Update target's predecessors
             if let Some(target_block) = cfg.blocks.get_mut(&target) {
-                target_block
-                    .predecessors
-                    .retain(|&e| e != edge1_id && e != edge2_id);
+                target_block.predecessors.retain(|&e| e != edge1_id && e != edge2_id);
                 target_block.predecessors.push(new_edge_id);
             }
 

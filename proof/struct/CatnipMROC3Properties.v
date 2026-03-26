@@ -216,7 +216,7 @@ Proof.
         apply before_in_head; [exact Hneq|].
         destruct Hiny as [Heq|Hin']; [subst; contradiction|exact Hin'].
       * destruct (String.eqb y head) eqn:Eyh.
-        -- (* y = head: contradiction — y in tail of seq but head is good *)
+        -- (* y = head: contradiction - y in tail of seq but head is good *)
            apply String.eqb_eq in Eyh. subst. exfalso.
            assert (Htail : in_tail head seq = true)
              by (eapply before_in_in_tail; exact Hbefore).

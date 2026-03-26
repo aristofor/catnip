@@ -1,5 +1,5 @@
 (* FILE: proof/analysis/CatnipCFGSSABase.v *)
-(* CatnipCFGSSABase.v — CFG/SSA model + operational lemmas (A)
+(* CatnipCFGSSABase.v - CFG/SSA model + operational lemmas (A)
  *
  * Source of truth:
  *   catnip_rs/src/cfg/ssa.rs             (SSAValue, BlockParam, trivial phi)

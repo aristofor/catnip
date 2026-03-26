@@ -141,6 +141,12 @@ impl RustContext {
     }
 }
 
+impl Default for RustContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Builtin Functions - Phase 2 minimal set
 // ============================================================================
@@ -161,28 +167,19 @@ fn builtin_print(args: &[Value]) -> Result<Value, String> {
 
 fn builtin_len(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
-        return Err(format!(
-            "len() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("len() takes exactly 1 argument ({} given)", args.len()));
     }
 
     match &args[0] {
         Value::List(items) => Ok(Value::Int(items.len() as i64)),
         Value::String(s) => Ok(Value::Int(s.len() as i64)),
-        _ => Err(format!(
-            "object of type '{}' has no len()",
-            args[0].type_name()
-        )),
+        _ => Err(format!("object of type '{}' has no len()", args[0].type_name())),
     }
 }
 
 fn builtin_type(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
-        return Err(format!(
-            "type() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("type() takes exactly 1 argument ({} given)", args.len()));
     }
 
     let type_name = match &args[0] {
@@ -199,10 +196,7 @@ fn builtin_type(args: &[Value]) -> Result<Value, String> {
 
 fn builtin_str(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
-        return Err(format!(
-            "str() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("str() takes exactly 1 argument ({} given)", args.len()));
     }
 
     Ok(Value::String(args[0].to_display_string()))
@@ -210,10 +204,7 @@ fn builtin_str(args: &[Value]) -> Result<Value, String> {
 
 fn builtin_int(args: &[Value]) -> Result<Value, String> {
     if args.is_empty() || args.len() > 1 {
-        return Err(format!(
-            "int() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("int() takes exactly 1 argument ({} given)", args.len()));
     }
 
     match &args[0] {
@@ -224,21 +215,14 @@ fn builtin_int(args: &[Value]) -> Result<Value, String> {
             .map(Value::Int)
             .map_err(|_| format!("invalid literal for int(): '{}'", s)),
         Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-        Value::None => {
-            Err("int() argument must be a string or a number, not 'NoneType'".to_string())
-        }
-        Value::List(_) => {
-            Err("int() argument must be a string or a number, not 'list'".to_string())
-        }
+        Value::None => Err("int() argument must be a string or a number, not 'NoneType'".to_string()),
+        Value::List(_) => Err("int() argument must be a string or a number, not 'list'".to_string()),
     }
 }
 
 fn builtin_float(args: &[Value]) -> Result<Value, String> {
     if args.is_empty() || args.len() > 1 {
-        return Err(format!(
-            "float() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("float() takes exactly 1 argument ({} given)", args.len()));
     }
 
     match &args[0] {
@@ -249,21 +233,14 @@ fn builtin_float(args: &[Value]) -> Result<Value, String> {
             .map(Value::Float)
             .map_err(|_| format!("could not convert string to float: '{}'", s)),
         Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-        Value::None => {
-            Err("float() argument must be a string or a number, not 'NoneType'".to_string())
-        }
-        Value::List(_) => {
-            Err("float() argument must be a string or a number, not 'list'".to_string())
-        }
+        Value::None => Err("float() argument must be a string or a number, not 'NoneType'".to_string()),
+        Value::List(_) => Err("float() argument must be a string or a number, not 'list'".to_string()),
     }
 }
 
 fn builtin_abs(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
-        return Err(format!(
-            "abs() takes exactly 1 argument ({} given)",
-            args.len()
-        ));
+        return Err(format!("abs() takes exactly 1 argument ({} given)", args.len()));
     }
 
     match &args[0] {
@@ -275,10 +252,7 @@ fn builtin_abs(args: &[Value]) -> Result<Value, String> {
 
 fn builtin_range(args: &[Value]) -> Result<Value, String> {
     if args.is_empty() || args.len() > 3 {
-        return Err(format!(
-            "range() takes 1 to 3 arguments ({} given)",
-            args.len()
-        ));
+        return Err(format!("range() takes 1 to 3 arguments ({} given)", args.len()));
     }
 
     let (start, stop, step) = match args.len() {

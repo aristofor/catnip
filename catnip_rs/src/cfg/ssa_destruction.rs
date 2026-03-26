@@ -86,10 +86,10 @@ fn find_insert_position(block: &crate::cfg::basic_block::BasicBlock) -> usize {
 /// This generates `var = var` which is a no-op semantically but ensures
 /// the variable binding exists in the scope after SSA destruction.
 fn create_set_locals_copy(py: Python<'_>, var_name: &str) -> PyResult<Op> {
-    let names = PyTuple::new(py, &[var_name])?;
+    let names = PyTuple::new(py, [var_name])?;
     // Value is just the variable name as a reference (the semantic analyzer resolves it)
-    let values = PyTuple::new(py, &[var_name])?;
-    let args = PyTuple::new(py, &[names.as_any(), values.as_any()])?;
+    let values = PyTuple::new(py, [var_name])?;
+    let args = PyTuple::new(py, [names.as_any(), values.as_any()])?;
     let kwargs = PyDict::new(py);
 
     Ok(Op {

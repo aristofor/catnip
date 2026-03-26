@@ -1,6 +1,6 @@
-# REPL Interactive
+# REPL interactive
 
-La REPL Catnip existe en version **Rust native** integree via PyO3, et en version Python pour l'intégration modules.
+La REPL Catnip existe en version **Rust native** intégrée via PyO3, et en version Python pour l'intégration modules.
 
 > La REPL s'inscrit dans la tradition Lisp (lecture/évaluation/affichage). Dialogue direct avec le runtime: latence
 > humaine, réponse machine.
@@ -16,6 +16,7 @@ TUI ratatui/crossterm dans le crate `catnip_repl` (`_repl.run_repl()`) :
 - **Rapide** : startup instantané, exécution native
 - **Intégrée** : aucun binaire externe nécessaire, livré avec `pip install catnip-lang`
 - **Optimisé** : VM bytecode + JIT intégré
+- **Config-aware** : charge les defaults (`catnip.toml` ou built-in), auto-modules (`io:!`), policies
 - **Source** : `catnip_repl/src/` (boucle TUI), `catnip_repl/src/executor.rs` (pipeline)
 
 Le GIL est libéré (`py.detach()`) pendant la boucle TUI, puis ré-acquis via `Python::attach()` à chaque exécution de
@@ -28,7 +29,7 @@ Utilisé automatiquement pour du Catnip "pur".
 Wrapper léger `MinimalREPL` pour intégrer des modules Python (`-m`/`--module`) :
 
 - **Contexte Python** : accès aux modules chargés (`-m math`, etc.)
-- **Pipeline complet** : parsing → semantic → execution Python
+- **Pipeline complet** : parsing → semantic → exécution Python
 - **Source** : `catnip/repl/minimal.py`
 
 Activé automatiquement si `catnip -m module` ou `catnip repl -m module`.
@@ -59,6 +60,7 @@ Les commandes commencent par `/` :
 | `/clear`         | Effacer la sortie                     |
 | `/history`       | Afficher l'historique                 |
 | `/load <file>`   | Charger et exécuter un fichier `.cat` |
+| `/context [var]` | Inspecter les variables utilisateur   |
 | `/stats`         | Statistiques d'exécution              |
 | `/jit`           | Activer/désactiver le JIT             |
 | `/verbose`       | Activer/désactiver le mode verbeux    |
@@ -67,11 +69,14 @@ Les commandes commencent par `/` :
 | `/config`        | Editeur interactif de configuration   |
 | `/version`       | Afficher la version                   |
 
+**Note** : `exit()` n'est pas un builtin du langage. Pour quitter la REPL, utiliser `/exit`, `/quit` ou Ctrl+D. Pour
+terminer un programme depuis le code, utiliser `sys = import("sys"); sys.exit(code)`.
+
 <!-- doc-snapshot: repl/version -->
 
 ```console
 ▸ /version
-Catnip REPL v0.0.6
+Catnip REPL v0.0.7
 Build: release mode
 Features: JIT (Cranelift), NaN-boxing VM, Rust builtins
 ```
@@ -97,27 +102,53 @@ JIT compiler: enabled
 
 ## Editeur de configuration (`/config`)
 
-`/config` sans arguments ouvre un overlay interactif sous la ligne de prompt. Toutes les clés de `catnip.toml` y sont
-listées avec leur valeur courante et leur source (default, file, env, cli).
+`/config` sans arguments ouvre un overlay interactif sous la ligne de prompt. Les clés sont organisées en 6 groupes :
+
+| Groupe    | Clés                                                     | Persistance   |
+| --------- | -------------------------------------------------------- | ------------- |
+| execution | executor, optimize, tco, jit                             | `catnip.toml` |
+| display   | no_color, theme                                          | `catnip.toml` |
+| cache     | enable_cache, cache_max_size_mb, cache_ttl_seconds       | `catnip.toml` |
+| debug     | log_weird_errors, max_weird_logs, memory_limit           | `catnip.toml` |
+| format    | indent_size, line_length                                 | `catnip.toml` |
+| repl      | show_parse_time, show_exec_time, debug_mode, max_history | session       |
+
+Les clés DSL/CLI (groupes `execution` à `format`) sont sauvegardées dans `catnip.toml` immédiatement. Les clés REPL
+(groupe `repl`) sont modifiées en mémoire pour la session courante.
+
+Chaque clé affiche sa valeur courante et sa source (default, file, env, cli, session). Un `*` marque les valeurs
+modifiées par rapport au défaut.
+
+**Rendu par type** :
+
+- **Bool** : `on` (vert) / `off` (dim), toggle instantané
+- **Choice** : `vm | ast` avec la valeur courante en gras, cycle au suivant
+- **Int** : valeur + range (`0..3`) quand sélectionnée, édition inline
 
 **Navigation** :
 
-| Touche          | Action                                              |
-| --------------- | --------------------------------------------------- |
-| Up / Down / k/j | Naviguer entre les clés                             |
-| Enter / Space   | Toggle (bool), cycle (choice), ou entrer en édition |
-| Esc / q         | Fermer l'éditeur                                    |
+| Touche           | Action                                              |
+| ---------------- | --------------------------------------------------- |
+| Up / Down / k/j  | Naviguer entre les clés                             |
+| Tab              | Sauter au groupe suivant                            |
+| Shift+Tab        | Sauter au groupe précédent                          |
+| Home / g         | Première clé                                        |
+| End / G          | Dernière clé                                        |
+| PageUp/PageDown  | Page haut/bas                                       |
+| Enter / Space    | Toggle (bool), cycle (choice), ou entrer en édition |
+| r                | Reset au défaut                                     |
+| ?                | Afficher/masquer l'aide                             |
+| Esc / q / Ctrl+C | Fermer l'éditeur                                    |
 
 **Mode édition** (valeurs numériques) :
 
-| Touche    | Action                       |
-| --------- | ---------------------------- |
-| 0-9       | Saisir la valeur             |
-| Backspace | Effacer un caractère         |
-| Enter     | Valider (avec borne min/max) |
-| Esc       | Annuler l'édition            |
-
-Les modifications sont sauvegardées dans `catnip.toml` immédiatement.
+| Touche       | Action                       |
+| ------------ | ---------------------------- |
+| 0-9          | Saisir la valeur             |
+| Backspace    | Effacer un caractère         |
+| Left/Right   | Déplacer le curseur          |
+| Enter        | Valider (avec borne min/max) |
+| Esc / Ctrl+C | Annuler l'édition            |
 
 Les sous-commandes textuelles restent disponibles :
 
@@ -130,24 +161,33 @@ Les sous-commandes textuelles restent disponibles :
 
 ### REPL Rust (par défaut)
 
-| Raccourci       | Action                                       |
-| --------------- | -------------------------------------------- |
-| Ctrl+D          | Quitter (ligne vide, sortie normale)         |
-| Ctrl+C          | Annuler la saisie courante, ou abort si vide |
-| Up/Down         | Naviguer dans l'historique                   |
-| Ctrl+A / Home   | Debut de ligne                               |
-| Ctrl+E / End    | Fin de ligne                                 |
-| Ctrl+U          | Effacer la ligne                             |
-| Ctrl+W          | Effacer le mot precedent                     |
-| Ctrl+Left/Right | Deplacer par mot                             |
-| Ctrl+L          | Effacer l'ecran                              |
-| Tab             | Declencher / accepter la completion          |
-| Right           | Accepter le ghost text (hint)                |
-| Escape          | Fermer le popup completion                   |
+| Raccourci       | Action                                                   |
+| --------------- | -------------------------------------------------------- |
+| Ctrl+D          | Quitter (ligne vide, sortie normale)                     |
+| Ctrl+C          | Interrompre l'exécution en cours, ou annuler/abort sinon |
+| Ctrl+R          | Recherche inverse dans l'historique                      |
+| Up/Down         | Naviguer dans l'historique                               |
+| Ctrl+A / Home   | Début de ligne                                           |
+| Ctrl+E / End    | Fin de ligne                                             |
+| Ctrl+U          | Effacer la ligne                                         |
+| Ctrl+W          | Effacer le mot précédent                                 |
+| Ctrl+Left/Right | Déplacer par mot                                         |
+| Ctrl+L          | Effacer l'écran                                          |
+| Tab             | Déclencher / accepter la complétion                      |
+| Right           | Accepter le ghost text (hint)                            |
+| Escape          | Fermer le popup complétion                               |
+
+### Interruption d'exécution (Ctrl+C)
+
+Ctrl+C interrompt les exécutions longues. La VM vérifie un flag d'interruption toutes les ~65k instructions. Pendant
+l'exécution, un `SigintGuard` (RAII) ré-active `ISIG` et installe un handler SIGINT dédié, puis restaure le terminal en
+mode raw à la fin.
+
+En dehors d'une exécution (prompt de saisie), Ctrl+C annule la ligne courante ou quitte la REPL si la ligne est vide.
 
 ### REPL Python (minimal)
 
-La REPL Python minimal offre une interface simplifiée :
+La REPL Python minimale offre une interface simplifiée :
 
 | Raccourci | Action                                       |
 | --------- | -------------------------------------------- |
@@ -160,13 +200,18 @@ Pas d'auto-complétion ni de recherche historique avancée : priorité à la com
 
 Tab ouvre un popup de complétion contextuelle. Chaque suggestion est catégorisée :
 
-| Catégorie  | Contenu                                       |
-| ---------- | --------------------------------------------- |
-| `variable` | Variables définies dans le contexte courant   |
-| `keyword`  | Mots-clés du langage (`if`, `while`, `match`) |
-| `builtin`  | Fonctions builtin (`print`, `len`, `range`)   |
-| `command`  | Commandes REPL (`/help`, `/exit`, `/stats`)   |
-| `method`   | Méthodes après `.` (string, list, dict)       |
+| Catégorie  | Contenu                                          |
+| ---------- | ------------------------------------------------ |
+| `variable` | Variables définies dans le contexte courant      |
+| `keyword`  | Mots-clés du langage (`if`, `while`, `match`)    |
+| `builtin`  | Fonctions builtin (générées depuis `context.py`) |
+| `command`  | Commandes REPL (`/help`, `/exit`, `/stats`)      |
+| `method`   | Méthodes/attributs après `.`                     |
+
+Après un `.`, le compléteur utilise `dir()` sur la variable pour proposer ses attributs réels. Par exemple,
+`io = import("io")` puis `io.` propose les attributs du module `io`. Les instances de struct exposent leurs champs et
+méthodes : `p = Point(1, 2)` puis `p.` propose `x`, `y` et les méthodes définies. Si la variable n'est pas connue,
+fallback sur les méthodes hardcodées de `str`, `list` et `dict`.
 
 **Priorité** : variables > keywords > builtins (évite le shadowing accidentel).
 
@@ -195,6 +240,10 @@ ferme le popup et restaure le ghost text.
 L'historique est persistant dans `$XDG_STATE_HOME/catnip/repl_history` (par défaut
 `~/.local/state/catnip/repl_history`).
 
+**Recherche inverse** (Ctrl+R) : ouvre un prompt de recherche dans l'historique, similaire à fish/bash. Taper du texte
+filtre les entrées correspondantes. Ctrl+R cycle vers le résultat suivant, Enter accepte la sélection, Escape annule et
+revient au prompt normal.
+
 ## Multiline
 
 La REPL détecte automatiquement les expressions multilignes :
@@ -204,17 +253,53 @@ La REPL détecte automatiquement les expressions multilignes :
 - Mots-clés de contrôle (`if`, `while`, `for`, etc.)
 
 La continuation est automatique : Enter ajoute une nouvelle ligne tant que l'expression est incomplète, et soumet quand
-elle est complète.
+elle est complète. Les nouvelles lignes sont **auto-indentées** selon le niveau d'imbrication courant (accolades,
+parenthèses, crochets).
 
 <!-- check: no-check -->
 
 ```catnip
 ▸ f = (x) => {
-▹   x * 2
+▹     x * 2
 ▹ }
 ▸ f(21)
 42
 ```
+
+## Inspection du contexte (`/context`)
+
+`/context` affiche les variables définies par l'utilisateur avec leur type et valeur tronquée. `/context <var>` affiche
+le détail complet d'une variable.
+
+<!-- check: no-check -->
+
+```catnip
+▸ x = 42
+▸ name = "Alice"
+▸ /context
+=== Context ===
+  name             str          'Alice'
+  x                int          42
+▸ /context x
+x: int = 42
+```
+
+Les variables builtins et internes (préfixées `_`) sont exclues de l'affichage.
+
+## Pragmas
+
+Les [directives pragma](../lang/PRAGMAS.md) fonctionnent dans les deux REPL. L'état des pragmas persiste entre les
+évaluations :
+
+<!-- check: no-check -->
+
+```catnip
+▸ pragma("jit", True)
+▸ pragma("tco", False)
+▸ # Les pragmas restent actifs pour les évaluations suivantes
+```
+
+Les pragmas s'appliquent au contexte d'exécution immédiatement. La precedence reste : CLI > REPL > Défaut.
 
 ## Affichage des résultats
 
@@ -227,8 +312,8 @@ Python :
 ▸ 42
 42
 
-▸ "hello"
-hello
+▸ "BORN TO SEGFAULT"
+BORN TO SEGFAULT
 
 ▸ x = 10
 10
@@ -239,7 +324,7 @@ hello
 
 En mode verbose (`-v`), `None` reste visible dans le stage `RESULT` pour le debug.
 
-## Choix de REPL
+## Choix de la REPL
 
 La CLI détecte automatiquement quelle REPL utiliser :
 
@@ -291,7 +376,9 @@ make setup
 
 Les erreurs runtime affichent la position source avec pile d'appels :
 
-```
+<!-- check: expect-error -->
+
+```catnip
 ▸ f = (x) => { x / 0 }
 ▸ f(42)
 File '<repl>', line 2, column 6: division by zero
@@ -306,15 +393,21 @@ CatnipRuntimeError: division by zero
 
 **Continuer après erreur** : La REPL reste ouverte, les variables définies avant l'erreur restent accessibles.
 
-## Messages de sortie
+## Syntax highlighting
 
-La REPL affiche un message aléatoire à la fermeture, adapté au contexte :
+Le highlighter utilise tree-sitter pour coloriser le code en temps réel :
 
-- **Sortie normale** (Ctrl+D, `/exit`) : messages de résolution (`state resolved.`, `fixed point reached.`,
-  `all branches resolved.`, etc.)
-- **Interruption** (Ctrl+C) : messages d'abort (`context destroyed.`, `causality broken.`, `rollback.`, etc.)
-- **Messages rares** (1% de chance) : observations méta (`evaluation evaluated itself.`,
-  `the computation noticed you watching.`, etc.)
+| Element        | Couleur   | Style | Exemples                                |
+| -------------- | --------- | ----- | --------------------------------------- |
+| Keywords       | Cyan      | Bold  | `if`, `while`, `for`, `match`, `return` |
+| Constants      | Purple    | Bold  | `True`, `False`, `None`                 |
+| Built-in types | Blue      | -     | `dict`, `list`, `set`, `tuple`          |
+| Numbers        | Yellow    | -     | `42`, `3.14`, `0xFF`                    |
+| Strings        | Green     | -     | `"hello"`, `f"x={x}"`                   |
+| Comments       | Dark gray | -     | `# comment`                             |
+| Operators      | Red       | -     | `+`, `-`, `==`, `=>`                    |
+| Builtins       | Blue      | -     | `print`, `len`, `type`, `range`         |
+| Punctuation    | White     | -     | `(`, `)`, `[`, `]`, `{`, `}`            |
+| Identifiers    | Default   | -     | Variables et fonctions                  |
 
-> Les messages sont définis dans `catnip_rs/src/constants.rs`. Le ratio exact est 99% normal/abort et 1% weird, ce qui
-> donne à chaque sortie une probabilité non nulle de devenir philosophique.
+Les noeuds `ERROR` (code incomplet) sont aussi traversés pour que le highlighting fonctionne pendant la saisie.

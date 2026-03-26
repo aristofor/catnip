@@ -1,11 +1,12 @@
 // FILE: catnip_rs/src/debug/session.rs
-// RustDebugSession: Rust replacement for catnip/debug/session.py.
+// DebugSession: Rust replacement for catnip/debug/session.py.
 // Owns the mpsc channels and spawns the VM execution thread.
 
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -37,7 +38,7 @@ struct SyncReceiver(mpsc::Receiver<DebugEvent>);
 unsafe impl Sync for SyncReceiver {}
 
 #[pyclass]
-pub struct RustDebugSession {
+pub struct DebugSession {
     command_tx: Option<mpsc::Sender<DebugAction>>,
     event_rx: Option<SyncReceiver>,
     state: u8,
@@ -59,7 +60,7 @@ pub struct RustDebugSession {
 }
 
 #[pymethods]
-impl RustDebugSession {
+impl DebugSession {
     #[new]
     fn new(source_text: String) -> Self {
         let source_bytes = source_text.as_bytes().to_vec();
@@ -127,7 +128,7 @@ impl RustDebugSession {
         let inner_vm = vm_wrapper.getattr("_vm")?;
 
         // Compile to get line_table for breakpoint mapping
-        let compiler_cls = py.import("catnip._rs")?.getattr("Compiler")?;
+        let compiler_cls = py.import(PY_MOD_RS)?.getattr("Compiler")?;
         let compiler = compiler_cls.call0()?;
         let code_attr = catnip.getattr("code")?;
         let code_obj = compiler.call_method1("compile", (&code_attr, "<module>"))?;
@@ -167,7 +168,7 @@ impl RustDebugSession {
         self.vm_ref = Some(inner_vm.unbind());
 
         // Store sourcemap ref as PyObject for dynamic breakpoints
-        let sm_py_cls = py.import("catnip._rs")?.getattr("SourceMap")?;
+        let sm_py_cls = py.import(PY_MOD_RS)?.getattr("SourceMap")?;
         let sm_py = sm_py_cls.call1((self.source_bytes.as_slice(),))?;
         self.sourcemap_ref = Some(sm_py.unbind());
 
@@ -199,11 +200,10 @@ impl RustDebugSession {
 
     /// Send a debug action to the paused VM.
     fn send_command(&self, action: &str) -> PyResult<()> {
-        let act = DebugAction::from_str(action);
+        let act = DebugAction::parse(action);
         if let Some(ref tx) = self.command_tx {
-            tx.send(act).map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("Debug session channel closed")
-            })?;
+            tx.send(act)
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Debug session channel closed"))?;
         }
         Ok(())
     }
@@ -215,11 +215,7 @@ impl RustDebugSession {
     ///   - ("finished", result_repr_str)
     ///   - ("error", error_msg_str)
     #[pyo3(signature = (timeout=None))]
-    fn wait_for_event(
-        &mut self,
-        py: Python<'_>,
-        timeout: Option<f64>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    fn wait_for_event(&mut self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<Py<PyAny>>> {
         let rx = match &self.event_rx {
             Some(rx) => &rx.0,
             None => return Ok(None),
@@ -295,10 +291,7 @@ impl RustDebugSession {
                 self.state = STATE_FINISHED;
                 let result = PyTuple::new(
                     py,
-                    [
-                        "finished".into_pyobject(py)?.into_any().unbind(),
-                        py_result.into_any(),
-                    ],
+                    ["finished".into_pyobject(py)?.into_any().unbind(), py_result.into_any()],
                 )?;
                 Ok(Some(result.unbind().into_any()))
             }
@@ -356,16 +349,12 @@ impl RustDebugSession {
 
     /// Return the Python dict of locals from the last pause.
     fn get_last_pause_locals_py(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.last_pause_locals_py
-            .as_ref()
-            .map(|d| d.clone_ref(py).into_any())
+        self.last_pause_locals_py.as_ref().map(|d| d.clone_ref(py).into_any())
     }
 
     /// Return the sourcemap PyObject for dynamic breakpoints.
     fn get_sourcemap(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.sourcemap_ref
-            .as_ref()
-            .map(|s| s.clone_ref(py).into_any())
+        self.sourcemap_ref.as_ref().map(|s| s.clone_ref(py).into_any())
     }
 
     /// Return the inner VM PyObject for dynamic breakpoints.
@@ -375,21 +364,16 @@ impl RustDebugSession {
 
     /// Return the catnip globals PyObject for eval.
     fn get_catnip_globals(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.catnip_globals
-            .as_ref()
-            .map(|g| g.clone_ref(py).into_any())
+        self.catnip_globals.as_ref().map(|g| g.clone_ref(py).into_any())
     }
 
     /// Add a breakpoint at runtime (while paused).
     fn add_runtime_breakpoint(&self, py: Python<'_>, line: u32) -> PyResult<()> {
         if let (Some(vm), Some(sm)) = (&self.vm_ref, &self.sourcemap_ref) {
             let sm_bound = sm.bind(py);
-            let offset: Option<usize> = sm_bound
-                .call_method1("line_to_offset", (line,))?
-                .extract()?;
+            let offset: Option<usize> = sm_bound.call_method1("line_to_offset", (line,))?.extract()?;
             if let Some(offset) = offset {
-                vm.bind(py)
-                    .call_method1("add_debug_breakpoint", (offset as u32,))?;
+                vm.bind(py).call_method1("add_debug_breakpoint", (offset as u32,))?;
             }
         }
         Ok(())
@@ -399,12 +383,9 @@ impl RustDebugSession {
     fn remove_runtime_breakpoint(&self, py: Python<'_>, line: u32) -> PyResult<()> {
         if let (Some(vm), Some(sm)) = (&self.vm_ref, &self.sourcemap_ref) {
             let sm_bound = sm.bind(py);
-            let offset: Option<usize> = sm_bound
-                .call_method1("line_to_offset", (line,))?
-                .extract()?;
+            let offset: Option<usize> = sm_bound.call_method1("line_to_offset", (line,))?.extract()?;
             if let Some(offset) = offset {
-                vm.bind(py)
-                    .call_method1("remove_debug_breakpoint", (offset as u32,))?;
+                vm.bind(py).call_method1("remove_debug_breakpoint", (offset as u32,))?;
             }
         }
         Ok(())

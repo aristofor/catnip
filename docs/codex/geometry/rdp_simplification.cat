@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # RDP simplification
 #
 # Ramer-Douglas-Peucker : simplification de polyligne en 2D.
@@ -6,7 +7,9 @@
 # Ref : https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm
 
 struct Point {
-    x, y
+    x; y;
+
+    display(self) => { f"({self.x}, {self.y})" }
 
     # Distance carrée à un segment [a, b]
     dist2_to_segment(self, a, b) => {
@@ -84,6 +87,6 @@ polyline = list(
 epsilon = 0.75
 simplified = rdp(polyline, epsilon)
 
-print("Points initiaux :", len(polyline))
-print("Points simplifiés :", len(simplified))
-print("Résultat :", simplified)
+print(f"Points initiaux : {len(polyline)}")
+print(f"Points simplifiés : {len(simplified)}")
+print(f"Résultat : {simplified}")

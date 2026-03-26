@@ -72,12 +72,14 @@ def lint_code(
     check_style: bool = True,
     check_semantic: bool = True,
     check_ir: bool = False,
+    check_names: bool = False,
 ) -> LintResult:
     config = LintConfig(
         check_syntax=check_syntax,
         check_style=check_style,
         check_semantic=check_semantic,
         check_ir=check_ir,
+        check_names=check_names,
     )
     diagnostics = _rs_lint_code(source, config)
     return LintResult(diagnostics=diagnostics, source=source, filename=filename)

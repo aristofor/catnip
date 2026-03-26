@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Broadcasting sur scalaires
 # Le broadcasting fonctionne aussi sur les valeurs simples (scalaires)
 
@@ -15,7 +16,8 @@ print("100 / 4 =", 100.[/ 4])
 # Puissance
 print("2 ** 8 =", 2.[** 8])
 
-print("\n⇒ Chaînage d'opérations\n")
+print()
+print("⇒ Chaînage d'opérations\n")
 
 # Enchaîner plusieurs opérations
 resultat = 10.[- 3].[* 2].[+ 5]
@@ -26,18 +28,21 @@ print("(10 - 3) * 2 + 5 =", resultat)
 # etape2 = 7 * 2   # 14
 # etape3 = 14 + 5  # 19
 
-print("\n⇒ Comparaisons\n")
+print()
+print("⇒ Comparaisons\n")
 
 print("42 > 40 ?", 42.[> 40])
 print("5 < 3 ?", 5.[< 3])
 
-print("\n⇒ Filtrage conditionnel\n")
+print()
+print("⇒ Filtrage conditionnel\n")
 
 # Filtrage sur scalaire retourne une liste
 print("5 if > 3:", 5.[if > 3])  # [5]
 print("2 if > 3:", 2.[if > 3])  # []
 
-print("\n⇒ Fonctions\n")
+print()
+print("⇒ Fonctions\n")
 
 # Fonctions unaires
 print("abs(-42) =", (-42).[abs])
@@ -46,7 +51,8 @@ print("abs(-42) =", (-42).[abs])
 double = (x) => { x * 2 }
 print("double(21) =", 21.[double])
 
-print("\n⇒ Symétrie scalaires/listes\n")
+print()
+print("⇒ Symétrie scalaires/listes\n")
 
 # Le même code fonctionne sur scalaires et listes
 scalaire = 5.[* 2]

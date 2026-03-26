@@ -1,8 +1,8 @@
 // FILE: catnip_tools/src/sourcemap.rs
-/// Source map for lazy position calculation.
-///
-/// Stores source code and converts byte offsets to line/column on demand.
-/// Zero overhead when no error occurs.
+//! Source map for lazy position calculation.
+//!
+//! Stores source code and converts byte offsets to line/column on demand.
+//! Zero overhead when no error occurs.
 
 /// Maps byte offsets to line/column positions.
 ///
@@ -84,12 +84,7 @@ impl SourceMap {
     ///   12 |     return factoral(n - 1, acc)
     ///      |            ^~~~~~~
     /// ```
-    pub fn get_snippet(
-        &mut self,
-        start_byte: usize,
-        end_byte: usize,
-        context_lines: usize,
-    ) -> String {
+    pub fn get_snippet(&mut self, start_byte: usize, end_byte: usize, context_lines: usize) -> String {
         let (line, col) = self.byte_to_line_col(start_byte);
         let (end_line, end_col) = if end_byte > start_byte {
             self.byte_to_line_col(end_byte)
@@ -101,19 +96,10 @@ impl SourceMap {
         let line_num_width = format!("{}", line + context_lines).len();
 
         // Context lines before
-        let ctx_start = if line > context_lines {
-            line - context_lines
-        } else {
-            1
-        };
+        let ctx_start = if line > context_lines { line - context_lines } else { 1 };
         for ctx_line in ctx_start..line {
             let text = self.get_line(ctx_line);
-            lines.push(format!(
-                "  {:>width$} | {}",
-                ctx_line,
-                text,
-                width = line_num_width
-            ));
+            lines.push(format!("  {:>width$} | {}", ctx_line, text, width = line_num_width));
         }
 
         // Error line
@@ -131,11 +117,7 @@ impl SourceMap {
         } else {
             (error_line_text.len() - col + 2).max(1)
         };
-        let pointer = format!(
-            "{}^{}",
-            " ".repeat(col - 1),
-            "~".repeat(span_len.saturating_sub(1))
-        );
+        let pointer = format!("{}^{}", " ".repeat(col - 1), "~".repeat(span_len.saturating_sub(1)));
         lines.push(format!("  {} | {}", " ".repeat(line_num_width), pointer));
 
         // Context lines after
@@ -144,12 +126,7 @@ impl SourceMap {
         let ctx_end = (line + context_lines + 1).min(total_lines + 1);
         for ctx_line in (line + 1)..ctx_end {
             let text = self.get_line(ctx_line);
-            lines.push(format!(
-                "  {:>width$} | {}",
-                ctx_line,
-                text,
-                width = line_num_width
-            ));
+            lines.push(format!("  {:>width$} | {}", ctx_line, text, width = line_num_width));
         }
 
         lines.join("\n")
@@ -221,10 +198,7 @@ mod tests {
 
     #[test]
     fn test_snippet_with_context() {
-        let mut sm = SourceMap::new(
-            b"line1\nline2\nline3\nline4\nline5".to_vec(),
-            "<test>".into(),
-        );
+        let mut sm = SourceMap::new(b"line1\nline2\nline3\nline4\nline5".to_vec(), "<test>".into());
         let snippet = sm.get_snippet(6, 7, 1);
         assert!(snippet.contains("line1")); // context before
         assert!(snippet.contains("line2")); // error line

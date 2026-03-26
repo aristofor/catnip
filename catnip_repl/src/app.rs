@@ -7,31 +7,47 @@
 //! outside the ratatui viewport (which does not support dynamic
 //! resize for Viewport::Inline).
 
+use crate::commands::generate_help_text;
 use crate::completer::{CatnipCompleter, CompletionState};
-use crate::config::{version_info, ReplConfig, HELP_TEXT};
+use crate::config::{ReplConfig, version_info};
 use crate::config_editor::{ConfigAction, ConfigEditorState};
 use crate::executor::{ReplExecutor, ValueKind};
 use crate::highlighter::CatnipHighlighter;
 use crate::hints::HintEngine;
 use crate::history::History;
 use crate::input::InputState;
+use crate::theme::{ANSI_DIM, ANSI_RESET, ANSI_SELECTED_BG, ANSI_STATUS_ERROR, ANSI_STATUS_INFO, ANSI_STATUS_SUCCESS};
 use crate::widgets::completion::MAX_VISIBLE;
 
 use crossterm::cursor;
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Attribute, ResetColor, SetAttribute};
 use crossterm::terminal::{self as ct};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
-use ratatui::Terminal;
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
+use unicode_width::UnicodeWidthStr;
+
+const USAGE_LOAD: &str = "Usage: /load <file.cat>";
+const USAGE_TIME: &str = "Usage: /time <expression>";
+const USAGE_CONFIG_GET: &str = "Usage: /config get KEY";
+const USAGE_CONFIG_SET: &str = "Usage: /config set KEY VALUE";
+const USAGE_CONFIG: &str = "Usage: /config [show|get KEY|set KEY VALUE|path]";
+const EXPRESSION_FAILED: &str = "Expression failed";
+const EXPRESSION_FAILED_WARMUP: &str = "Expression failed during warmup";
+const EXPRESSION_FAILED_BENCHMARK: &str = "Expression failed during benchmark";
+const NO_HISTORY_YET: &str = "No history yet";
+const NO_USER_VARIABLES_DEFINED: &str = "No user variables defined";
+const TYPE_HELP_FOR_COMMANDS: &str = "Type /help for available commands";
+const FILE_LOADED_SUCCESSFULLY: &str = "File loaded successfully";
+const CONFIG_SAVE_SUFFIX: &str = " (saved)";
+const CONFIG_EDITOR_ERROR_PREFIX: &str = "Error: ";
 
 /// REPL exit reason
 pub enum ExitReason {
@@ -50,7 +66,7 @@ impl ExitReason {
             .unwrap_or(0);
         // 1% weird
         let rare = constants::REPL_EXIT_RARE;
-        if nanos % 100 == 0 {
+        if nanos.is_multiple_of(100) {
             return rare[nanos / 100 % rare.len()];
         }
         let msgs = match self {
@@ -58,6 +74,36 @@ impl ExitReason {
             ExitReason::Abort => constants::REPL_EXIT_ABORT,
         };
         msgs[nanos % msgs.len()]
+    }
+}
+
+/// Reverse incremental search state (Ctrl+R)
+struct SearchState {
+    /// Current search query
+    query: String,
+    /// Matching history indices (from `history.search()`)
+    matches: Vec<usize>,
+    /// Current position in the matches list
+    match_index: usize,
+    /// Whether search mode is active
+    active: bool,
+}
+
+impl SearchState {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            matches: Vec::new(),
+            match_index: 0,
+            active: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.query.clear();
+        self.matches.clear();
+        self.match_index = 0;
+        self.active = false;
     }
 }
 
@@ -83,9 +129,47 @@ pub struct App {
     config_editor: ConfigEditorState,
     /// Viewport Y position (line 0) in the terminal
     viewport_y: u16,
+    /// Reverse search state (Ctrl+R)
+    search: SearchState,
 }
 
 impl App {
+    fn format_saved_assignment(key: &str, value: &str) -> String {
+        format!("{key} = {value}{CONFIG_SAVE_SUFFIX}")
+    }
+
+    fn format_unknown_command(command: &str) -> String {
+        format!("Unknown command: /{command}")
+    }
+
+    fn format_variable_not_found(name: &str) -> String {
+        format!("Variable '{name}' not found")
+    }
+
+    fn format_unknown_repl_key(key: &str) -> String {
+        format!("Unknown REPL key: {key}")
+    }
+
+    fn format_config_editor_error(err: &dyn std::fmt::Display) -> String {
+        format!("{CONFIG_EDITOR_ERROR_PREFIX}{err}")
+    }
+
+    fn format_loading_file(filename: &str) -> String {
+        format!("Loading {filename}...")
+    }
+
+    fn format_file_read_error(filename: &str, err: &dyn std::fmt::Display) -> String {
+        format!("Failed to read {filename}: {err}")
+    }
+
+    fn format_file_line_error(line: usize, err: &str) -> String {
+        format!("Line {line}: {err}")
+    }
+
+    fn format_benchmarking(expression: &str) -> String {
+        format!("Benchmarking: {expression}")
+    }
+
     pub fn new(config: ReplConfig) -> Result<Self, String> {
         let executor = ReplExecutor::new()?;
 
@@ -112,13 +196,11 @@ impl App {
             last_config_editor_lines: 0,
             config_editor: ConfigEditorState::new(),
             viewport_y: 0,
+            search: SearchState::new(),
         })
     }
 
-    pub fn run(
-        mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<ExitReason> {
+    pub fn run(mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<ExitReason> {
         // Welcome message
         self.print_dim(terminal, &self.config.welcome_message.clone());
 
@@ -127,17 +209,10 @@ impl App {
 
         loop {
             // Track previous extra lines for cleanup
-            let prev_extra = self.last_continuation_lines
-                + self.last_popup_lines
-                + self.last_config_editor_lines;
+            let prev_extra = self.last_continuation_lines + self.last_popup_lines + self.last_config_editor_lines;
 
             // Hide cursor during render to prevent flicker
-            crossterm::queue!(
-                stdout,
-                cursor::Hide,
-                SetAttribute(Attribute::Reset),
-                ResetColor
-            )?;
+            crossterm::queue!(stdout, cursor::Hide, SetAttribute(Attribute::Reset), ResetColor)?;
 
             // Draw input line 0 via ratatui (viewport = 1 ligne)
             // viewport_y is set inside render_inline from f.area().y
@@ -153,26 +228,21 @@ impl App {
             self.draw_config_editor(&mut stdout)?;
 
             // Clear excess lines from previous frame
-            let curr_extra = self.last_continuation_lines
-                + self.last_popup_lines
-                + self.last_config_editor_lines;
+            let curr_extra = self.last_continuation_lines + self.last_popup_lines + self.last_config_editor_lines;
             for i in curr_extra..prev_extra {
                 let y = self.viewport_y + 1 + i;
-                crossterm::queue!(
-                    stdout,
-                    cursor::MoveTo(0, y),
-                    ct::Clear(ct::ClearType::CurrentLine)
-                )?;
+                crossterm::queue!(stdout, cursor::MoveTo(0, y), ct::Clear(ct::ClearType::CurrentLine))?;
             }
 
             // Position cursor and show
             let (crow, ccol) = self.input.cursor();
             let prompt_len = if crow == 0 {
-                self.config.prompt_main.chars().count()
+                self.config.prompt_main.width()
             } else {
-                self.config.prompt_continuation.chars().count()
+                self.config.prompt_continuation.width()
             };
-            let cursor_x = prompt_len as u16 + ccol as u16;
+            let display_col = self.input.lines()[crow][..ccol].width();
+            let cursor_x = prompt_len as u16 + display_col as u16;
             let cursor_y = self.viewport_y + crow as u16;
             crossterm::queue!(stdout, cursor::MoveTo(cursor_x, cursor_y), cursor::Show)?;
 
@@ -220,6 +290,27 @@ impl App {
         // Seule la ligne 0 est rendue dans le viewport inline (1 ligne)
         // Les lignes de continuation sont rendues via crossterm
         let line_text = &self.input.lines()[0];
+
+        // In search mode, replace the prompt with the search indicator
+        if self.search.active {
+            let search_prompt = format!("(reverse-i-search)`{}': ", self.search.query);
+            let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+            let mut spans = vec![Span::styled(search_prompt.clone(), dim)];
+            if let Some(ref hl) = self.highlighter {
+                spans.extend(hl.highlight_line(line_text));
+            } else {
+                spans.push(Span::raw(line_text.as_str()));
+            }
+            let line_area = Rect::new(area.x, area.y, area.width, 1);
+            Widget::render(Clear, line_area, f.buffer_mut());
+            Widget::render(Line::from(spans), line_area, f.buffer_mut());
+
+            // Cursor at end of search prompt (after the query)
+            let cursor_x = area.x + search_prompt.width() as u16 + line_text.width() as u16;
+            f.set_cursor_position((cursor_x, area.y));
+            return;
+        }
+
         let prompt = &self.config.prompt_main;
         let prompt_style = Style::default().fg(self.config.color_prompt);
 
@@ -246,12 +337,13 @@ impl App {
         // Cursor: toujours sur la ligne 0 pour ratatui
         // draw_continuation_lines repositionne si crow > 0
         let (crow, ccol) = self.input.cursor();
-        let prompt_len = prompt.chars().count();
+        let prompt_w = prompt.width();
         if crow == 0 {
-            let cursor_x = area.x + prompt_len as u16 + ccol as u16;
+            let display_col = self.input.lines()[0][..ccol].width();
+            let cursor_x = area.x + prompt_w as u16 + display_col as u16;
             f.set_cursor_position((cursor_x, area.y));
         } else {
-            let cursor_x = area.x + prompt_len as u16 + line_text.len() as u16;
+            let cursor_x = area.x + prompt_w as u16 + line_text.width() as u16;
             f.set_cursor_position((cursor_x, area.y));
         }
     }
@@ -259,12 +351,9 @@ impl App {
     // -- Scroll + continuation + popup (rendu via crossterm hors viewport) --
 
     /// Scroll the terminal if not enough room for continuation + popup
-    fn ensure_space_below(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<()> {
+    fn ensure_space_below(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
         let line_count = self.input.line_count();
-        let extra_lines = if line_count > 1 { line_count - 1 } else { 0 };
+        let extra_lines = line_count.saturating_sub(1);
 
         let popup_needed = if self.completion.active && !self.completion.suggestions.is_empty() {
             let total = self.completion.suggestions.len();
@@ -288,7 +377,7 @@ impl App {
             let scroll = (total_needed - space_below) as u16;
             let mut stdout = io::stdout();
             for _ in 0..scroll {
-                write!(stdout, "\n")?;
+                writeln!(stdout)?;
             }
             crossterm::execute!(stdout, cursor::MoveUp(scroll))?;
             stdout.flush()?;
@@ -314,11 +403,7 @@ impl App {
 
         for i in 1..line_count {
             let y = self.viewport_y + i as u16;
-            crossterm::queue!(
-                stdout,
-                cursor::MoveTo(0, y),
-                ct::Clear(ct::ClearType::CurrentLine)
-            )?;
+            crossterm::queue!(stdout, cursor::MoveTo(0, y), ct::Clear(ct::ClearType::CurrentLine))?;
 
             // Prompt coloré
             write!(stdout, "{}{}\x1b[0m", prompt_fg, prompt)?;
@@ -375,11 +460,7 @@ impl App {
             }
 
             let y = popup_base_y + i as u16;
-            crossterm::queue!(
-                stdout,
-                cursor::MoveTo(2, y),
-                ct::Clear(ct::ClearType::CurrentLine)
-            )?;
+            crossterm::queue!(stdout, cursor::MoveTo(2, y), ct::Clear(ct::ClearType::CurrentLine))?;
 
             let s = &self.completion.suggestions[idx];
             let cat = s.category;
@@ -394,7 +475,7 @@ impl App {
             if idx == self.completion.selected {
                 write!(
                     stdout,
-                    "\x1b[48;2;60;60;80m\x1b[1m {:<tw$} \x1b[90m{:>cw$} \x1b[0m",
+                    "{ANSI_SELECTED_BG}\x1b[1m {:<tw$} {ANSI_DIM}{:>cw$}{ANSI_RESET}",
                     text_display,
                     cat,
                     tw = text_w,
@@ -403,7 +484,7 @@ impl App {
             } else {
                 write!(
                     stdout,
-                    " {:<tw$} \x1b[90m{:>cw$}\x1b[0m",
+                    " {:<tw$} {ANSI_DIM}{:>cw$}{ANSI_RESET}",
                     text_display,
                     cat,
                     tw = text_w,
@@ -415,14 +496,10 @@ impl App {
         // Indicateur de scroll
         if total > max_visible {
             let y = popup_base_y + max_visible as u16;
-            crossterm::queue!(
-                stdout,
-                cursor::MoveTo(2, y),
-                ct::Clear(ct::ClearType::CurrentLine)
-            )?;
+            crossterm::queue!(stdout, cursor::MoveTo(2, y), ct::Clear(ct::ClearType::CurrentLine))?;
             write!(
                 stdout,
-                "\x1b[90m ({}/{})\x1b[0m",
+                "{ANSI_DIM} ({}/{}){ANSI_RESET}",
                 scroll_offset + max_visible,
                 total
             )?;
@@ -436,17 +513,28 @@ impl App {
 
     // -- Key handling --
 
-    fn handle_key_event(
-        &mut self,
-        key: KeyEvent,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<()> {
+    fn handle_key_event(&mut self, key: KeyEvent, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
         // Config editor intercepts all keys when active
         if self.config_editor.active {
             return self.handle_config_editor_key(key, terminal);
         }
 
+        // Search mode intercepts all keys when active
+        if self.search.active {
+            return self.handle_search_key(key, terminal);
+        }
+
         match (key.modifiers, key.code) {
+            // Ctrl+R : start reverse search
+            (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+                self.search.active = true;
+                self.search.query.clear();
+                self.search.matches.clear();
+                self.search.match_index = 0;
+                self.completion.reset();
+                self.current_hint = None;
+            }
+
             // Ctrl+D : quit
             (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
                 if self.input.is_empty() {
@@ -556,7 +644,8 @@ impl App {
                     self.current_hint = None;
                     let text = self.input.full_text();
                     if should_continue_multiline(&text) {
-                        self.input.new_line();
+                        let indent = catnip_tools::indentation::compute_next_indent(&text, 4);
+                        self.input.new_line_with_indent(indent);
                         self.update_hint();
                     } else {
                         self.submit_input(terminal)?;
@@ -618,10 +707,6 @@ impl App {
         self.completion.reset();
         self.current_hint = None;
 
-        // Normalise universal newlines:
-        // - Windows: \r\n
-        // - old Mac / some terminals: \r
-        // - Unix: \n
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
 
         for ch in normalized.chars() {
@@ -634,10 +719,7 @@ impl App {
         self.update_hint();
     }
 
-    fn clear_screen(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<()> {
+    fn clear_screen(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
         let mut stdout = io::stdout();
         crossterm::execute!(
             stdout,
@@ -738,10 +820,18 @@ impl App {
 
     // -- Submit --
 
-    fn submit_input(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<()> {
+    fn submit_input(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+        // Clear continuation lines before insert_before (they live outside ratatui)
+        if self.last_continuation_lines > 0 {
+            let mut stdout = io::stdout();
+            for i in 0..self.last_continuation_lines {
+                let y = self.viewport_y + 1 + i;
+                crossterm::queue!(stdout, cursor::MoveTo(0, y), ct::Clear(ct::ClearType::CurrentLine))?;
+            }
+            stdout.flush()?;
+            self.last_continuation_lines = 0;
+        }
+
         let text = self.input.full_text();
         let trimmed = text.trim().to_string();
         self.input.clear();
@@ -753,25 +843,27 @@ impl App {
         // Add to history
         self.history.push(&trimmed);
 
-        // Print the input above (echo)
-        let echo = if trimmed.contains('\n') {
-            // Multiline: show with continuation prompts
-            trimmed
-                .lines()
-                .enumerate()
-                .map(|(i, l)| {
-                    if i == 0 {
-                        format!("{}{}", self.config.prompt_main, l)
-                    } else {
-                        format!("{}{}", self.config.prompt_continuation, l)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            format!("{}{}", self.config.prompt_main, trimmed)
-        };
-        self.print_output(terminal, &echo);
+        // Print the input above (echo) with syntax highlighting
+        let prompt_style = Style::default().fg(self.config.color_prompt);
+        let echo_lines: Vec<Line> = trimmed
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                let prompt = if i == 0 {
+                    &self.config.prompt_main
+                } else {
+                    &self.config.prompt_continuation
+                };
+                let mut spans = vec![Span::styled(prompt.as_str(), prompt_style)];
+                if let Some(ref hl) = self.highlighter {
+                    spans.extend(hl.highlight_line(l));
+                } else {
+                    spans.push(Span::raw(l.to_string()));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        self.print_lines(terminal, echo_lines);
 
         // Command handling
         if trimmed.starts_with('/') {
@@ -792,6 +884,8 @@ impl App {
         let vars = self.executor.get_variable_names();
         self.completer.set_variables(vars.clone());
         self.hints.set_variables(vars);
+        let attrs = self.executor.get_variable_attrs();
+        self.completer.set_attrs(attrs);
 
         Ok(())
     }
@@ -809,12 +903,19 @@ impl App {
             return;
         }
 
+        // Enable SIGINT during execution so Ctrl+C can interrupt the VM.
+        let flag = self.executor.interrupt_flag();
+        let _guard = crate::signal::SigintGuard::new(flag);
+
         // Capture stdout during execution so print() output goes through
         // ratatui's insert_before instead of writing directly to the terminal
         // (which would desync the viewport position).
         let captured = capture_stdout(|| self.executor.execute(code));
         let stdout_output = captured.output;
         let result = captured.result;
+
+        // Guard dropped here, SIGINT handler restored
+        drop(_guard);
 
         // Display captured print() output via ratatui
         if !stdout_output.is_empty() {
@@ -836,6 +937,11 @@ impl App {
                 }
             }
             Err(e) => {
+                // exit(N) -> quit REPL
+                if e.starts_with("exit(") {
+                    self.exit_reason = Some(ExitReason::Ok);
+                    return;
+                }
                 self.print_error(terminal, &e);
             }
         }
@@ -843,11 +949,7 @@ impl App {
 
     // -- Commands --
 
-    fn handle_command(
-        &mut self,
-        command: &str,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> io::Result<bool> {
+    fn handle_command(&mut self, command: &str, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<bool> {
         let parts: Vec<&str> = command[1..].split_whitespace().collect();
         if parts.is_empty() {
             return Ok(false);
@@ -855,7 +957,7 @@ impl App {
 
         match parts[0] {
             "help" | "h" => {
-                self.print_dim(terminal, HELP_TEXT);
+                self.print_dim(terminal, &generate_help_text());
             }
             "exit" | "quit" | "q" => {
                 return Ok(true);
@@ -885,11 +987,7 @@ impl App {
                 self.config.enable_jit = !self.config.enable_jit;
                 let msg = format!(
                     "JIT compiler: {}",
-                    if self.config.enable_jit {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                    if self.config.enable_jit { "enabled" } else { "disabled" }
                 );
                 self.print_output(terminal, &msg);
             }
@@ -910,21 +1008,17 @@ impl App {
                 self.config.debug_mode = !self.config.debug_mode;
                 let msg = format!(
                     "Debug mode: {} (shows IR and bytecode)",
-                    if self.config.debug_mode {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                    if self.config.debug_mode { "enabled" } else { "disabled" }
                 );
                 self.print_output(terminal, &msg);
             }
             "history" => {
                 let entries = self.history.entries();
                 if entries.is_empty() {
-                    self.print_output(terminal, "No history yet");
+                    self.print_output(terminal, NO_HISTORY_YET);
                 } else {
                     let total = entries.len();
-                    let start = if total > 20 { total - 20 } else { 0 };
+                    let start = total.saturating_sub(20);
                     let mut output = String::from("=== Command History ===\n");
                     for (i, entry) in entries.iter().enumerate().skip(start) {
                         output.push_str(&format!("  {:3}: {}\n", i + 1, entry));
@@ -935,25 +1029,45 @@ impl App {
             }
             "load" => {
                 if parts.len() < 2 {
-                    self.print_error(terminal, "Usage: /load <file.cat>");
+                    self.print_error(terminal, USAGE_LOAD);
                 } else {
                     self.load_and_execute(parts[1], terminal);
                 }
             }
             "time" => {
                 if parts.len() < 2 {
-                    self.print_error(terminal, "Usage: /time <expression>");
+                    self.print_error(terminal, USAGE_TIME);
                 } else {
                     let expression = command[6..].trim().to_string();
                     self.benchmark_expression(&expression, terminal);
+                }
+            }
+            "context" | "ctx" => {
+                if parts.len() >= 2 {
+                    let detail = self.executor.get_variable_detail(parts[1]);
+                    match detail {
+                        Some(text) => self.print_output(terminal, &text),
+                        None => self.print_error(terminal, &Self::format_variable_not_found(parts[1])),
+                    }
+                } else {
+                    let entries = self.executor.get_context_display();
+                    if entries.is_empty() {
+                        self.print_output(terminal, NO_USER_VARIABLES_DEFINED);
+                    } else {
+                        let mut out = String::from("=== Context ===\n");
+                        for (name, typ, repr) in &entries {
+                            out.push_str(&format!("  {:<16} {:<12} {}\n", name, typ, repr));
+                        }
+                        self.print_output(terminal, out.trim_end());
+                    }
                 }
             }
             "config" => {
                 self.handle_config_command(&parts[1..], terminal);
             }
             _ => {
-                self.print_error(terminal, &format!("Unknown command: /{}", parts[0]));
-                self.print_output(terminal, "Type /help for available commands");
+                self.print_error(terminal, &Self::format_unknown_command(parts[0]));
+                self.print_output(terminal, TYPE_HELP_FOR_COMMANDS);
             }
         }
 
@@ -961,10 +1075,7 @@ impl App {
     }
 
     /// Create a ConfigManager via Python, with file + env loaded.
-    fn make_config_manager<'py>(
-        &self,
-        py: pyo3::Python<'py>,
-    ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+    fn make_config_manager<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
         use pyo3::prelude::*;
         let rs = py.import(pyo3::intern!(py, "catnip._rs"))?;
         let cm = rs.getattr("ConfigManager")?.call0()?;
@@ -991,11 +1102,7 @@ impl App {
         }
     }
 
-    fn handle_config_command(
-        &mut self,
-        args: &[&str],
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    fn handle_config_command(&mut self, args: &[&str], terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         use pyo3::prelude::*;
 
         match args.first().copied() {
@@ -1012,14 +1119,13 @@ impl App {
                             return;
                         }
                     };
-                    let lines: Vec<String> =
-                        match cm.call_method0("debug_report").and_then(|r| r.extract()) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                self.print_error(terminal, &format!("{}", e));
-                                return;
-                            }
-                        };
+                    let lines: Vec<String> = match cm.call_method0("debug_report").and_then(|r| r.extract()) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            self.print_error(terminal, &format!("{}", e));
+                            return;
+                        }
+                    };
 
                     let path = catnip_rs::config::get_config_path();
                     let mut output = format!("# {}\n", path.display());
@@ -1032,7 +1138,7 @@ impl App {
             }
             Some("get") => {
                 if args.len() < 2 {
-                    self.print_error(terminal, "Usage: /config get KEY");
+                    self.print_error(terminal, USAGE_CONFIG_GET);
                     return;
                 }
                 let key = args[1];
@@ -1046,10 +1152,7 @@ impl App {
                     };
                     match cm.call_method1("get", (key,)) {
                         Ok(val) => {
-                            let repr = val
-                                .repr()
-                                .map(|r| r.to_string())
-                                .unwrap_or_else(|_| "?".to_string());
+                            let repr = val.repr().map(|r| r.to_string()).unwrap_or_else(|_| "?".to_string());
                             self.print_output(terminal, &format!("{}: {}", key, repr));
                         }
                         Err(e) => {
@@ -1060,7 +1163,7 @@ impl App {
             }
             Some("set") => {
                 if args.len() < 3 {
-                    self.print_error(terminal, "Usage: /config set KEY VALUE");
+                    self.print_error(terminal, USAGE_CONFIG_SET);
                     return;
                 }
                 let key = args[1];
@@ -1068,15 +1171,12 @@ impl App {
                 Python::attach(|py| {
                     let py_value = self.parse_config_value(py, &raw_value);
                     match py
-                        .import(pyo3::intern!(py, "catnip.config"))
+                        .import(pyo3::intern!(py, "catnip._rs"))
                         .and_then(|m| m.getattr("set_config_value"))
                         .and_then(|f| f.call1((key, py_value)))
                     {
                         Ok(_) => {
-                            self.print_output(
-                                terminal,
-                                &format!("{} = {} (saved)", key, raw_value),
-                            );
+                            self.print_output(terminal, &Self::format_saved_assignment(key, &raw_value));
                         }
                         Err(e) => {
                             self.print_error(terminal, &format!("{}", e));
@@ -1089,7 +1189,7 @@ impl App {
                 self.print_output(terminal, &path.to_string_lossy());
             }
             _ => {
-                self.print_error(terminal, "Usage: /config [show|get KEY|set KEY VALUE|path]");
+                self.print_error(terminal, USAGE_CONFIG);
             }
         }
     }
@@ -1110,9 +1210,7 @@ impl App {
             };
 
             // Extract config entries via debug_report
-            let mut entries = Vec::new();
-            let lines: Vec<String> = match cm.call_method0("debug_report").and_then(|r| r.extract())
-            {
+            let lines: Vec<String> = match cm.call_method0("debug_report").and_then(|r| r.extract()) {
                 Ok(l) => l,
                 Err(e) => {
                     self.print_error(terminal, &format!("{}", e));
@@ -1120,12 +1218,10 @@ impl App {
                 }
             };
 
-            let mut format_entries = Vec::new();
-            let mut in_format = false;
+            let mut entries = Vec::new();
 
             for line in &lines {
-                if line.starts_with("--- format") {
-                    in_format = true;
+                if line.starts_with("---") {
                     continue;
                 }
 
@@ -1135,10 +1231,7 @@ impl App {
                     None => continue,
                 };
 
-                let key = raw_key
-                    .strip_prefix("format.")
-                    .unwrap_or(raw_key)
-                    .to_string();
+                let key = raw_key.strip_prefix("format.").unwrap_or(raw_key).to_string();
 
                 // Split "value_repr  [source...]"
                 let (value, source) = if let Some(bracket_pos) = rest.rfind('[') {
@@ -1154,15 +1247,99 @@ impl App {
                     (rest.to_string(), "default".to_string())
                 };
 
-                if in_format {
-                    format_entries.push((key, value, source));
-                } else {
-                    entries.push((key, value, source));
+                entries.push((key, value, source));
+            }
+
+            // REPL-local settings
+            let repl_entries = vec![
+                ("show_parse_time".to_string(), self.config.show_parse_time.to_string()),
+                ("show_exec_time".to_string(), self.config.show_exec_time.to_string()),
+                ("debug_mode".to_string(), self.config.debug_mode.to_string()),
+                ("max_history".to_string(), self.config.max_history.to_string()),
+            ];
+
+            self.config_editor.load(entries, repl_entries);
+
+            // Set title with config file path
+            let path: String = py
+                .import(pyo3::intern!(py, "catnip.config"))
+                .and_then(|m| m.getattr("get_config_path"))
+                .and_then(|f| f.call0())
+                .and_then(|p| p.str()?.extract())
+                .unwrap_or_else(|_| "catnip.toml".to_string());
+            self.config_editor.title = path;
+        });
+    }
+
+    // -- Reverse search (Ctrl+R) --
+
+    fn handle_search_key(
+        &mut self,
+        key: KeyEvent,
+        _terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> io::Result<()> {
+        match (key.modifiers, key.code) {
+            // Ctrl+R again: cycle to next match
+            (KeyModifiers::CONTROL, KeyCode::Char('r')) => {
+                if !self.search.matches.is_empty() {
+                    self.search.match_index = (self.search.match_index + 1) % self.search.matches.len();
+                    self.apply_search_match();
                 }
             }
 
-            self.config_editor.load(entries, format_entries);
-        });
+            // Ctrl+C / Escape: cancel search, restore empty input
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+                self.search.reset();
+                self.input.clear();
+            }
+
+            // Enter: accept current match, exit search
+            (_, KeyCode::Enter) => {
+                self.search.reset();
+                // Input already contains the matched entry
+            }
+
+            // Backspace: remove last char from query
+            (_, KeyCode::Backspace) => {
+                self.search.query.pop();
+                self.update_search();
+            }
+
+            // Regular char: append to query
+            (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(ch)) => {
+                self.search.query.push(ch);
+                self.update_search();
+            }
+
+            // Any other key: accept match and replay the key as normal input
+            _ => {
+                self.search.reset();
+                // Don't clear input -- keep the matched text
+            }
+        }
+        Ok(())
+    }
+
+    fn update_search(&mut self) {
+        self.search.matches = self.history.search(&self.search.query);
+        self.search.match_index = 0;
+        self.apply_search_match();
+    }
+
+    fn apply_search_match(&mut self) {
+        if let Some(&hist_idx) = self.search.matches.get(self.search.match_index) {
+            if let Some(entry) = self.history.get(hist_idx) {
+                let lines: Vec<String> = entry.split('\n').map(|s| s.to_string()).collect();
+                let last_row = lines.len() - 1;
+                let last_col = lines[last_row].len();
+                *self.input.lines_mut() = lines;
+                self.input.set_cursor_col(last_col);
+                // Set cursor row to last line
+                self.input.set_cursor_row(last_row);
+            }
+        } else {
+            self.input.clear();
+        }
     }
 
     /// Handle key events while the config editor is active.
@@ -1174,7 +1351,7 @@ impl App {
         // Edit mode: intercept typing keys
         if self.config_editor.edit.is_some() {
             match (key.modifiers, key.code) {
-                (_, KeyCode::Esc) => {
+                (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                     self.config_editor.cancel_edit();
                 }
                 (_, KeyCode::Enter) => {
@@ -1201,7 +1378,7 @@ impl App {
 
         // Navigation mode
         match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
+            (_, KeyCode::Esc) | (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 self.config_editor.reset();
             }
             (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
@@ -1215,26 +1392,45 @@ impl App {
                     self.apply_config_action(action, terminal);
                 }
             }
+            (_, KeyCode::Tab) => {
+                self.config_editor.jump_next_group();
+            }
+            (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                self.config_editor.jump_prev_group();
+            }
+            (_, KeyCode::Home) | (_, KeyCode::Char('g')) => {
+                self.config_editor.select_first();
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('G')) | (_, KeyCode::End) => {
+                self.config_editor.select_last();
+            }
+            (_, KeyCode::PageDown) => {
+                self.config_editor.page_down(5);
+            }
+            (_, KeyCode::PageUp) => {
+                self.config_editor.page_up(5);
+            }
+            (_, KeyCode::Char('r')) => {
+                if let Some(action) = self.config_editor.reset_selected() {
+                    self.apply_config_action(action, terminal);
+                }
+            }
+            (_, KeyCode::Char('?')) => {
+                self.config_editor.show_help = !self.config_editor.show_help;
+            }
             _ => {}
         }
 
         Ok(())
     }
 
-    /// Apply a config change via Python's set_config_value.
-    fn apply_config_action(
-        &mut self,
-        action: ConfigAction,
-        _terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    /// Apply a config change via Python's set_config_value or REPL-local mutation.
+    fn apply_config_action(&mut self, action: ConfigAction, _terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+        use crate::config_editor::StatusKind;
         use pyo3::prelude::*;
 
         match action {
-            ConfigAction::SetValue {
-                key,
-                value,
-                is_format,
-            } => {
+            ConfigAction::SetValue { key, value, is_format } => {
                 Python::attach(|py| {
                     let py_value = self.parse_config_value(py, &value);
                     let target_key = if is_format {
@@ -1243,160 +1439,258 @@ impl App {
                         key.clone()
                     };
                     match py
-                        .import(pyo3::intern!(py, "catnip.config"))
+                        .import(pyo3::intern!(py, "catnip._rs"))
                         .and_then(|m| m.getattr("set_config_value"))
                         .and_then(|f| f.call1((&target_key, py_value)))
                     {
                         Ok(_) => {
                             self.config_editor.status_message =
-                                Some(format!("{} = {} (saved)", key, value));
+                                Some((Self::format_saved_assignment(&key, &value), StatusKind::Success));
                         }
                         Err(e) => {
-                            self.config_editor.status_message = Some(format!("Error: {}", e));
+                            self.config_editor.status_message =
+                                Some((Self::format_config_editor_error(&e), StatusKind::Error));
                         }
                     }
                 });
+            }
+            ConfigAction::SetRepl { key, value } => {
+                let ok = match key.as_str() {
+                    "show_parse_time" => {
+                        self.config.show_parse_time = value == "true";
+                        true
+                    }
+                    "show_exec_time" => {
+                        self.config.show_exec_time = value == "true";
+                        true
+                    }
+                    "debug_mode" => {
+                        self.config.debug_mode = value == "true";
+                        true
+                    }
+                    "max_history" => {
+                        if let Ok(n) = value.parse::<usize>() {
+                            self.config.max_history = n;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if ok {
+                    self.config_editor.status_message = Some((format!("{} = {}", key, value), StatusKind::Success));
+                } else {
+                    self.config_editor.status_message = Some((Self::format_unknown_repl_key(&key), StatusKind::Error));
+                }
             }
         }
     }
 
     /// Render the config editor overlay below input lines (queued, caller flushes).
     fn draw_config_editor(&mut self, stdout: &mut Stdout) -> io::Result<()> {
+        use crate::config_editor::{ConfigType, Row, StatusKind};
+
         if !self.config_editor.active || self.config_editor.total_items() == 0 {
             self.last_config_editor_lines = 0;
             return Ok(());
         }
 
         let base_y = self.viewport_y + self.input.line_count() as u16 + self.last_popup_lines;
+        let (_, term_h) = ct::size()?;
 
-        let (term_w, _) = ct::size()?;
-        let w = (term_w as usize).min(60);
+        let rows = self.config_editor.rows();
+
+        // Viewport: reserve 2 lines (status + help)
+        let avail_h = term_h.saturating_sub(base_y).saturating_sub(2) as usize;
+        let max_rows = avail_h.max(3).min(rows.len());
+        self.config_editor.ensure_visible(max_rows + 2);
+
+        let visible_start = self.config_editor.scroll_offset;
+        let visible_end = (visible_start + max_rows).min(rows.len());
+        let has_scroll_up = visible_start > 0;
+        let has_scroll_down = visible_end < rows.len();
 
         let mut line_idx: u16 = 0;
 
-        // Header
-        let header = format!("  {:<24} {:<14} {}", "key", "value", "source");
-        crossterm::queue!(
-            stdout,
-            cursor::MoveTo(0, base_y + line_idx),
-            ct::Clear(ct::ClearType::CurrentLine)
-        )?;
-        write!(stdout, "\x1b[1m{}\x1b[0m", &header[..header.len().min(w)])?;
-        line_idx += 1;
-
-        // Separator
-        let sep: String = "\u{2500}".repeat(w.min(50));
-        crossterm::queue!(
-            stdout,
-            cursor::MoveTo(0, base_y + line_idx),
-            ct::Clear(ct::ClearType::CurrentLine)
-        )?;
-        write!(stdout, "  \x1b[90m{}\x1b[0m", sep)?;
-        line_idx += 1;
-
-        // Main items
-        let main_count = self.config_editor.items.len();
-        for i in 0..main_count {
-            let item = &self.config_editor.items[i];
-            let is_selected = i == self.config_editor.selected;
-            self.draw_config_item(stdout, base_y + line_idx, item, is_selected, i, w)?;
+        // Title with config file path
+        if !self.config_editor.title.is_empty() {
+            crossterm::queue!(
+                stdout,
+                cursor::MoveTo(0, base_y + line_idx),
+                ct::Clear(ct::ClearType::CurrentLine)
+            )?;
+            write!(stdout, "  \x1b[90m{}\x1b[0m", self.config_editor.title)?;
             line_idx += 1;
         }
 
-        // Format separator
-        crossterm::queue!(
-            stdout,
-            cursor::MoveTo(0, base_y + line_idx),
-            ct::Clear(ct::ClearType::CurrentLine)
-        )?;
-        write!(stdout, "  \x1b[90m--- format ---\x1b[0m")?;
-        line_idx += 1;
+        // Visible rows
+        for (ri, row) in rows.iter().enumerate().take(visible_end).skip(visible_start) {
+            crossterm::queue!(
+                stdout,
+                cursor::MoveTo(0, base_y + line_idx),
+                ct::Clear(ct::ClearType::CurrentLine)
+            )?;
 
-        // Format items
-        for i in 0..self.config_editor.format_items.len() {
-            let item = &self.config_editor.format_items[i];
-            let global_idx = main_count + i;
-            let is_selected = global_idx == self.config_editor.selected;
-            self.draw_config_item(stdout, base_y + line_idx, item, is_selected, global_idx, w)?;
+            match row {
+                Row::GroupHeader(gi) => {
+                    let label = crate::config_editor::GROUPS[*gi].group.label();
+                    // Scroll indicators on first/last header
+                    let indicator = if ri == visible_start && has_scroll_up {
+                        " \x1b[90m\u{25b2}\x1b[0m"
+                    } else if ri == visible_end - 1 && has_scroll_down {
+                        " \x1b[90m\u{25bc}\x1b[0m"
+                    } else {
+                        ""
+                    };
+                    write!(stdout, "  \x1b[1m{}\x1b[0m{}", label, indicator)?;
+                }
+                Row::Item(idx) => {
+                    let item = &self.config_editor.items[*idx];
+                    let is_selected = *idx == self.config_editor.selected;
+
+                    let modified = if item.is_modified() { "*" } else { " " };
+                    let marker = if is_selected { ">" } else { " " };
+
+                    // Value display (type-aware)
+                    let value_display = if is_selected {
+                        if let Some(ref edit) = self.config_editor.edit {
+                            format!("\x1b[1m{}\x1b[0m\x1b[90m\u{2502}\x1b[0m", edit.buffer)
+                        } else {
+                            self.format_config_value(item)
+                        }
+                    } else {
+                        self.format_config_value(item)
+                    };
+
+                    // Source color
+                    let source_str = self.format_config_source(&item.source);
+
+                    // Range hint for selected int
+                    let range_hint = if is_selected {
+                        if let ConfigType::Int { min, max } = &item.config_type {
+                            format!("  \x1b[90m{}..{}\x1b[0m", min, max)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    if is_selected {
+                        write!(
+                            stdout,
+                            "{ANSI_SELECTED_BG}{}{} {:<18} {}{}  {}{ANSI_RESET}",
+                            modified, marker, item.key, value_display, range_hint, source_str,
+                        )?;
+                    } else {
+                        write!(
+                            stdout,
+                            "{}  {:<18} {}  {}",
+                            modified, item.key, value_display, source_str,
+                        )?;
+                    }
+                }
+            }
             line_idx += 1;
         }
 
-        // Status/help line
+        // Status / help line
         crossterm::queue!(
             stdout,
             cursor::MoveTo(0, base_y + line_idx),
             ct::Clear(ct::ClearType::CurrentLine)
         )?;
-        if let Some(ref msg) = self.config_editor.status_message {
-            write!(stdout, "  \x1b[33m{}\x1b[0m", msg)?;
+        if let Some((ref msg, ref kind)) = self.config_editor.status_message {
+            let color = match kind {
+                StatusKind::Success => ANSI_STATUS_SUCCESS,
+                StatusKind::Error => ANSI_STATUS_ERROR,
+                StatusKind::Info => ANSI_STATUS_INFO,
+            };
+            write!(stdout, "  \x1b[{color}m{msg}{ANSI_RESET}")?;
         } else if self.config_editor.edit.is_some() {
-            write!(stdout, "  \x1b[90m[Enter] save  [Esc] cancel\x1b[0m")?;
+            write!(stdout, "  {ANSI_DIM}Enter save  Esc cancel{ANSI_RESET}")?;
         } else {
             write!(
                 stdout,
-                "  \x1b[90m[Enter] edit  [\u{2191}\u{2193}] navigate  [Esc] close\x1b[0m"
+                "  {ANSI_DIM}Enter toggle  \u{2191}\u{2193} nav  Tab group  r reset  ? help  Esc close{ANSI_RESET}"
             )?;
         }
         line_idx += 1;
+
+        // Help overlay
+        if self.config_editor.show_help {
+            let help_lines = [
+                "\u{2191}\u{2193}/jk  navigate       Enter/Space  toggle/edit",
+                "Tab   next group     Shift+Tab    prev group",
+                "g     first          G            last",
+                "r     reset default  ?            toggle help",
+                "Esc/q close",
+            ];
+            for hl in &help_lines {
+                crossterm::queue!(
+                    stdout,
+                    cursor::MoveTo(0, base_y + line_idx),
+                    ct::Clear(ct::ClearType::CurrentLine)
+                )?;
+                write!(stdout, "  \x1b[90m{}\x1b[0m", hl)?;
+                line_idx += 1;
+            }
+        }
 
         self.last_config_editor_lines = line_idx;
         Ok(())
     }
 
-    /// Draw a single config item line.
-    fn draw_config_item(
-        &self,
-        stdout: &mut Stdout,
-        y: u16,
-        item: &crate::config_editor::ConfigItem,
-        selected: bool,
-        _global_idx: usize,
-        _max_width: usize,
-    ) -> io::Result<()> {
-        crossterm::queue!(
-            stdout,
-            cursor::MoveTo(0, y),
-            ct::Clear(ct::ClearType::CurrentLine)
-        )?;
+    /// Format a config value with type-aware ANSI styling.
+    fn format_config_value(&self, item: &crate::config_editor::ConfigItem) -> String {
+        use crate::config_editor::ConfigType;
 
-        let marker = if selected { ">" } else { " " };
-
-        // Show edit buffer if this item is selected and in edit mode
-        let value_display = if selected {
-            if let Some(ref edit) = self.config_editor.edit {
-                format!("{}\u{2502}", edit.buffer) // cursor indicator
-            } else {
-                item.value.clone()
+        match &item.config_type {
+            ConfigType::Bool => {
+                let is_true = item.value == "True" || item.value == "true";
+                if is_true {
+                    "\x1b[32mon\x1b[0m".to_string()
+                } else {
+                    "\x1b[90moff\x1b[0m".to_string()
+                }
             }
-        } else {
-            item.value.clone()
-        };
-
-        if selected {
-            write!(
-                stdout,
-                "\x1b[48;2;60;60;80m\x1b[1m{} {:<24} {:<14} \x1b[90m{:<10}\x1b[0m",
-                marker, item.key, value_display, item.source
-            )?;
-        } else {
-            write!(
-                stdout,
-                "{} {:<24} {:<14} \x1b[90m{:<10}\x1b[0m",
-                marker, item.key, value_display, item.source
-            )?;
+            ConfigType::Choice(choices) => {
+                let current = item.value.trim_matches('\'');
+                let parts: Vec<String> = choices
+                    .iter()
+                    .map(|c| {
+                        if *c == current {
+                            format!("\x1b[1m{}\x1b[0m", c)
+                        } else {
+                            format!("\x1b[90m{}\x1b[0m", c)
+                        }
+                    })
+                    .collect();
+                parts.join("\x1b[90m | \x1b[0m")
+            }
+            ConfigType::Int { .. } => {
+                format!("\x1b[1m{}\x1b[0m", item.value)
+            }
         }
-
-        Ok(())
     }
 
-    fn load_and_execute(
-        &mut self,
-        filename: &str,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    /// Format source tag with color coding.
+    fn format_config_source(&self, source: &str) -> String {
+        match source {
+            "default" => "\x1b[90mdefault\x1b[0m".to_string(),
+            "file" => format!("\x1b[0m{}\x1b[0m", source),
+            "env" => format!("\x1b[36m{}\x1b[0m", source),
+            "cli" => format!("\x1b[96;1m{}\x1b[0m", source),
+            "session" => format!("\x1b[35m{}\x1b[0m", source),
+            _ => format!("\x1b[90m{}\x1b[0m", source),
+        }
+    }
+
+    fn load_and_execute(&mut self, filename: &str, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         match std::fs::read_to_string(filename) {
             Ok(code) => {
-                self.print_output(terminal, &format!("Loading {}...", filename));
+                self.print_output(terminal, &Self::format_loading_file(filename));
                 for (i, line) in code.lines().enumerate() {
                     let trimmed = line.trim();
                     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -1408,30 +1702,26 @@ impl App {
                     match res {
                         Ok((text, kind)) => self.print_result(terminal, &text, kind),
                         Err(e) => {
-                            self.print_error(terminal, &format!("Line {}: {}", i + 1, e));
+                            self.print_error(terminal, &Self::format_file_line_error(i + 1, &e));
                             return;
                         }
                     }
                 }
-                self.print_output(terminal, "File loaded successfully");
+                self.print_output(terminal, FILE_LOADED_SUCCESSFULLY);
             }
             Err(e) => {
-                self.print_error(terminal, &format!("Failed to read {}: {}", filename, e));
+                self.print_error(terminal, &Self::format_file_read_error(filename, &e));
             }
         }
     }
 
-    fn benchmark_expression(
-        &mut self,
-        expression: &str,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
-        self.print_output(terminal, &format!("Benchmarking: {}", expression));
+    fn benchmark_expression(&mut self, expression: &str, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+        self.print_output(terminal, &Self::format_benchmarking(expression));
 
         // Warmup
         for _ in 0..10 {
             if self.executor.execute(expression).is_err() {
-                self.print_error(terminal, "Expression failed during warmup");
+                self.print_error(terminal, EXPRESSION_FAILED_WARMUP);
                 return;
             }
         }
@@ -1439,7 +1729,7 @@ impl App {
         // Determine iterations
         let single_run = Instant::now();
         if self.executor.execute(expression).is_err() {
-            self.print_error(terminal, "Expression failed");
+            self.print_error(terminal, EXPRESSION_FAILED);
             return;
         }
         let single_time = single_run.elapsed();
@@ -1457,7 +1747,7 @@ impl App {
         let start = Instant::now();
         for _ in 0..iterations {
             if self.executor.execute(expression).is_err() {
-                self.print_error(terminal, "Expression failed during benchmark");
+                self.print_error(terminal, EXPRESSION_FAILED_BENCHMARK);
                 return;
             }
         }
@@ -1478,11 +1768,7 @@ impl App {
             iterations,
             total_time,
             avg_time,
-            if ops_per_sec.is_finite() {
-                ops_per_sec
-            } else {
-                0.0
-            }
+            if ops_per_sec.is_finite() { ops_per_sec } else { 0.0 }
         );
         self.print_output(terminal, &result);
     }
@@ -1490,10 +1776,11 @@ impl App {
     // -- Output helpers --
 
     fn print_output(&self, terminal: &mut Terminal<CrosstermBackend<Stdout>>, text: &str) {
-        let lines: Vec<Line> = text
-            .lines()
-            .map(|l| Line::from(Span::raw(l.to_string())))
-            .collect();
+        let lines: Vec<Line> = text.lines().map(|l| Line::from(Span::raw(l.to_string()))).collect();
+        self.print_lines(terminal, lines);
+    }
+
+    fn print_lines(&self, terminal: &mut Terminal<CrosstermBackend<Stdout>>, lines: Vec<Line<'_>>) {
         let count = lines.len() as u16;
         if count > 0 {
             let _ = terminal.insert_before(count, |buf| {
@@ -1520,12 +1807,7 @@ impl App {
         }
     }
 
-    fn print_result(
-        &self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-        text: &str,
-        kind: ValueKind,
-    ) {
+    fn print_result(&self, terminal: &mut Terminal<CrosstermBackend<Stdout>>, text: &str, kind: ValueKind) {
         let style = self.result_style(kind);
         let lines: Vec<Line> = text
             .lines()
@@ -1619,89 +1901,8 @@ fn get_history_path(config: &ReplConfig) -> PathBuf {
     dir.join(&config.history_file)
 }
 
-// -- Multiline helpers (inline, avoids cross-crate dep for internal use) --
-
-/// Continuation operators
-const CONTINUATION_OPS: &[&str] = &[
-    "**", "//", "+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^", "==", "!=", "<=", ">=", "<",
-    ">", ",", "=",
-];
-
-/// Continuation keywords
-const CONTINUATION_KEYWORDS: &[&str] = &["if", "elif", "else", "while", "for", "match"];
-
-fn should_continue_multiline(text: &str) -> bool {
-    let stripped = text.trim_end();
-
-    let brace_count = text.matches('{').count() as i32 - text.matches('}').count() as i32;
-    let paren_count = text.matches('(').count() as i32 - text.matches(')').count() as i32;
-    let bracket_count = text.matches('[').count() as i32 - text.matches(']').count() as i32;
-
-    if brace_count > 0 || paren_count > 0 || bracket_count > 0 {
-        return true;
-    }
-
-    for op in CONTINUATION_OPS {
-        if stripped.ends_with(op) {
-            return true;
-        }
-    }
-
-    if let Some(last_word) = stripped.split_whitespace().last() {
-        if CONTINUATION_KEYWORDS.contains(&last_word) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn has_continuation_op(line: &str) -> bool {
-    let stripped = line.trim_end();
-    CONTINUATION_OPS.iter().any(|op| stripped.ends_with(op))
-}
-
-fn preprocess_multiline(code: &str) -> String {
-    let lines: Vec<&str> = code.split('\n').collect();
-    let n_lines = lines.len();
-
-    if n_lines == 1 {
-        return code.to_string();
-    }
-
-    let mut processed = Vec::new();
-    let mut i = 0;
-
-    while i < n_lines {
-        let line = lines[i];
-        let stripped = line.trim_end();
-
-        if has_continuation_op(stripped) {
-            let mut accumulated = vec![stripped.to_string()];
-            let mut j = i + 1;
-
-            while j < n_lines {
-                let next_line = lines[j].trim_start();
-                accumulated.push(next_line.to_string());
-
-                if has_continuation_op(next_line) {
-                    j += 1;
-                } else {
-                    j += 1;
-                    break;
-                }
-            }
-
-            processed.push(accumulated.join(" "));
-            i = j;
-        } else {
-            processed.push(line.to_string());
-            i += 1;
-        }
-    }
-
-    processed.join("\n")
-}
+// Multiline helpers: shared with debug console via catnip_tools
+use catnip_tools::multiline::{preprocess_multiline, should_continue_multiline};
 
 // -- Stdout capture --
 
@@ -1727,7 +1928,7 @@ fn capture_stdout<T, F: FnOnce() -> T>(f: F) -> CapturedExec<T> {
         }
 
         // Create pipe
-        let mut pipe_fds: [RawFd; 2] = [0; 0 + 2];
+        let mut pipe_fds: [RawFd; 2] = [0; 2];
         if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
             libc::close(saved_fd);
             let result = f();
@@ -1747,11 +1948,7 @@ fn capture_stdout<T, F: FnOnce() -> T>(f: F) -> CapturedExec<T> {
         // Flush Python's stdout buffer into the pipe
         // (Python buffers writes to fd 1)
         pyo3::Python::attach(|py| {
-            let _ = py.run(
-                pyo3::ffi::c_str!("import sys; sys.stdout.flush()"),
-                None,
-                None,
-            );
+            let _ = py.run(pyo3::ffi::c_str!("import sys; sys.stdout.flush()"), None, None);
         });
 
         // Restore original stdout

@@ -1,0 +1,36 @@
+#!/usr/bin/env catnip
+# Nombres complexes (suffix j/J)
+# Backend Python complex, arithmetique complete
+
+# Litteraux imaginaires purs
+z1 = 2j
+z2 = 1.5J
+print(z1)
+print(z2)
+
+# Construction par addition
+z = 1 + 2j
+print(z)
+
+# Arithmetique
+print((1 + 2j) + (3 + 4j))  # → (4+6j)
+print((1 + 2j) * (3 + 4j))  # → (-5+10j)
+print((2 + 0j) ** 2)        # → (4+0j)
+
+# Attributs
+print((1 + 2j).real)         # → 1.0
+print((1 + 2j).imag)         # → 2.0
+print((1 + 2j).conjugate())  # → (1-2j)
+print(abs(3 + 4j))           # → 5.0
+
+# Melange int/float/complex
+print(1 + 2j)      # → (1+2j)
+print(1.5 + 0.5j)  # → (1.5+0.5j)
+print(2j * 3)      # → 6j
+
+# Egalite
+print((1 + 0j) == 1)  # → True
+print(0j == 0)        # → True
+
+# Builtin complex()
+print(complex(1, 2))  # → (1+2j)

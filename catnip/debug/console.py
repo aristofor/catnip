@@ -1,5 +1,5 @@
 # FILE: catnip/debug/console.py
-"""Interactive console debugger for Catnip — delegates to Rust."""
+"""Interactive console debugger for Catnip - delegates to Rust."""
 
 from .._rs import run_debugger
 from .session import DebugSession
@@ -24,14 +24,17 @@ class ConsoleDebugger:
         h, help       - Show help
     """
 
-    def __init__(self, session: DebugSession, no_color: bool = False):
+    def __init__(self, session: DebugSession, no_color: bool = False, filename: str = None):
         self.session = session
         self.no_color = no_color
+        self.filename = filename
 
     def run(self):
-        """Main debugger loop — delegated to Rust."""
-        run_debugger(
+        """Main debugger loop - delegated to Rust. Returns exit code."""
+        return run_debugger(
             self.session.source_text,
             list(self.session._breakpoints),
             no_color=self.no_color,
+            catnip_instance=self.session.catnip,
+            filename=self.filename,
         )

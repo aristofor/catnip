@@ -196,6 +196,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -316,6 +320,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -466,6 +474,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -1274,6 +1286,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -1401,6 +1417,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -1520,6 +1540,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -1636,6 +1660,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -1779,6 +1807,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -2090,6 +2122,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -2221,6 +2257,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -2504,6 +2544,10 @@
             "named": true
           },
           {
+            "type": "null_coalesce",
+            "named": true
+          },
+          {
             "type": "set_literal",
             "named": true
           },
@@ -2639,6 +2683,10 @@
             "named": true
           },
           {
+            "type": "null_coalesce",
+            "named": true
+          },
+          {
             "type": "set_literal",
             "named": true
           },
@@ -2750,6 +2798,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -2873,6 +2925,10 @@
             "named": true
           },
           {
+            "type": "null_coalesce",
+            "named": true
+          },
+          {
             "type": "set_literal",
             "named": true
           },
@@ -2990,6 +3046,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -3218,6 +3278,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -3412,6 +3476,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -3528,6 +3596,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -3675,6 +3747,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -3810,6 +3886,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -3936,6 +4016,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -4090,6 +4174,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -4319,6 +4407,10 @@
             "named": true
           },
           {
+            "type": "null_coalesce",
+            "named": true
+          },
+          {
             "type": "set_literal",
             "named": true
           },
@@ -4450,6 +4542,10 @@
           },
           {
             "type": "nd_recursion",
+            "named": true
+          },
+          {
+            "type": "null_coalesce",
             "named": true
           },
           {
@@ -4665,6 +4761,129 @@
     }
   },
   {
+    "type": "null_coalesce",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "additive",
+          "named": true
+        },
+        {
+          "type": "bit_and",
+          "named": true
+        },
+        {
+          "type": "bit_or",
+          "named": true
+        },
+        {
+          "type": "bit_xor",
+          "named": true
+        },
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "bool_and",
+          "named": true
+        },
+        {
+          "type": "bool_not",
+          "named": true
+        },
+        {
+          "type": "bool_or",
+          "named": true
+        },
+        {
+          "type": "call",
+          "named": true
+        },
+        {
+          "type": "chained",
+          "named": true
+        },
+        {
+          "type": "comparison",
+          "named": true
+        },
+        {
+          "type": "dict_literal",
+          "named": true
+        },
+        {
+          "type": "exponent",
+          "named": true
+        },
+        {
+          "type": "group",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expr",
+          "named": true
+        },
+        {
+          "type": "lambda_expr",
+          "named": true
+        },
+        {
+          "type": "list_literal",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "match_expr",
+          "named": true
+        },
+        {
+          "type": "multiplicative",
+          "named": true
+        },
+        {
+          "type": "nd_map",
+          "named": true
+        },
+        {
+          "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
+          "type": "set_literal",
+          "named": true
+        },
+        {
+          "type": "shift",
+          "named": true
+        },
+        {
+          "type": "tuple_literal",
+          "named": true
+        },
+        {
+          "type": "unary",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "number",
     "named": true,
     "fields": {},
@@ -4872,6 +5091,14 @@
           "named": true
         },
         {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "pragma_qualified",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -4880,6 +5107,32 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "pragma_qualified",
+    "named": true,
+    "fields": {
+      "attr": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "namespace": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -4995,6 +5248,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -5287,6 +5544,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -5435,6 +5696,10 @@
         },
         {
           "type": "nd_recursion",
+          "named": true
+        },
+        {
+          "type": "null_coalesce",
           "named": true
         },
         {
@@ -5597,6 +5862,10 @@
             "named": true
           },
           {
+            "type": "null_coalesce",
+            "named": true
+          },
+          {
             "type": "set_literal",
             "named": true
           },
@@ -5624,21 +5893,6 @@
           }
         ]
       }
-    }
-  },
-  {
-    "type": "struct_fields",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "struct_field",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -5724,7 +5978,7 @@
           "named": true
         },
         {
-          "type": "struct_fields",
+          "type": "struct_field",
           "named": true
         },
         {
@@ -5773,7 +6027,7 @@
       "required": false,
       "types": [
         {
-          "type": "struct_fields",
+          "type": "struct_field",
           "named": true
         },
         {
@@ -5824,6 +6078,10 @@
         },
         {
           "type": "dict_literal",
+          "named": true
+        },
+        {
+          "type": "exponent",
           "named": true
         },
         {
@@ -6087,6 +6345,10 @@
           "named": true
         },
         {
+          "type": "null_coalesce",
+          "named": true
+        },
+        {
           "type": "set_literal",
           "named": true
         },
@@ -6226,6 +6488,10 @@
     "named": false
   },
   {
+    "type": "??",
+    "named": false
+  },
+  {
     "type": "@",
     "named": false
   },
@@ -6345,6 +6611,10 @@
   {
     "type": "integer",
     "named": true
+  },
+  {
+    "type": "is",
+    "named": false
   },
   {
     "type": "list",

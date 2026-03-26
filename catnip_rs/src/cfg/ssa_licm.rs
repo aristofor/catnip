@@ -94,9 +94,7 @@ pub fn licm(cfg: &mut ControlFlowGraph, ssa: &SSAContext) -> LICMResult {
         }
     }
 
-    LICMResult {
-        hoisted: total_hoisted,
-    }
+    LICMResult { hoisted: total_hoisted }
 }
 
 /// Find or create a preheader for a loop.
@@ -169,12 +167,7 @@ fn collect_loop_defs(ssa: &SSAContext, loop_blocks: &HashSet<usize>) -> HashSet<
 ///
 /// An instruction is loop-invariant if none of its operands (from instruction_uses)
 /// are defined inside the loop.
-fn is_loop_invariant(
-    ssa: &SSAContext,
-    block_id: usize,
-    instr_idx: usize,
-    loop_defs: &HashSet<SSAValue>,
-) -> bool {
+fn is_loop_invariant(ssa: &SSAContext, block_id: usize, instr_idx: usize, loop_defs: &HashSet<SSAValue>) -> bool {
     let uses = ssa.get_uses(block_id, instr_idx);
     if uses.is_empty() {
         return false; // No tracked uses → conservative: don't hoist

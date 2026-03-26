@@ -17,12 +17,12 @@ pub extern "C" fn catnip_tools_version() -> *const c_char {
 
 /// Format source code. Returns JSON `{"ok":"..."}` or `{"err":"..."}`.
 /// Caller must free the result with `catnip_tools_free`.
+///
+/// # Safety
+///
+/// `source` must be a valid, non-null pointer to a NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn catnip_tools_format(
-    source: *const c_char,
-    indent_size: u32,
-    line_length: u32,
-) -> *mut c_char {
+pub unsafe extern "C" fn catnip_tools_format(source: *const c_char, indent_size: u32, line_length: u32) -> *mut c_char {
     let result = panic::catch_unwind(|| {
         let source = unsafe { CStr::from_ptr(source) }
             .to_str()
@@ -31,6 +31,7 @@ pub extern "C" fn catnip_tools_format(
         let config = FormatConfig {
             indent_size: indent_size as usize,
             line_length: line_length as usize,
+            align: false,
         };
 
         formatter::format_code(source, &config)
@@ -45,12 +46,17 @@ pub extern "C" fn catnip_tools_format(
 
 /// Lint source code. Returns JSON `{"ok":[...]}` or `{"err":"..."}`.
 /// Caller must free the result with `catnip_tools_free`.
+///
+/// # Safety
+///
+/// `source` must be a valid, non-null pointer to a NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn catnip_tools_lint(
+pub unsafe extern "C" fn catnip_tools_lint(
     source: *const c_char,
     check_syntax: bool,
     check_style: bool,
     check_semantic: bool,
+    check_names: bool,
 ) -> *mut c_char {
     let result = panic::catch_unwind(|| {
         let source = unsafe { CStr::from_ptr(source) }
@@ -62,6 +68,7 @@ pub extern "C" fn catnip_tools_lint(
             check_style,
             check_semantic,
             check_ir: false,
+            check_names,
         };
 
         linter::lint_code(source, &config)
@@ -78,12 +85,15 @@ pub extern "C" fn catnip_tools_lint(
 }
 
 /// Free a string returned by format/lint functions.
+///
+/// # Safety
+///
+/// `ptr` must be a pointer previously returned by this library via
+/// `CString::into_raw`, and it must not be freed more than once.
 #[unsafe(no_mangle)]
-pub extern "C" fn catnip_tools_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn catnip_tools_free(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe {
-            drop(CString::from_raw(ptr));
-        }
+        unsafe { drop(CString::from_raw(ptr)) };
     }
 }
 

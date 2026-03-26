@@ -116,10 +116,7 @@ pub fn inter_block_cse(cfg: &ControlFlowGraph, ssa: &SSAContext) -> CSEResult {
 
             let key = SSAExprKey {
                 opcode: rhs_opcode,
-                operands: uses
-                    .iter()
-                    .map(|v| super::ssa::ExprOperand::Var(*v))
-                    .collect(),
+                operands: uses.iter().map(|v| super::ssa::ExprOperand::Var(*v)).collect(),
             };
 
             if !key.is_resolved() {
@@ -154,11 +151,7 @@ pub fn inter_block_cse(cfg: &ControlFlowGraph, ssa: &SSAContext) -> CSEResult {
 /// Find the SSA value defined by an instruction (if any).
 fn find_def_value(ssa: &SSAContext, block_id: usize, instr_idx: usize) -> Option<SSAValue> {
     for (value, def) in &ssa.value_defs {
-        if let super::ssa::ValueDef::Instruction {
-            block,
-            instr_idx: idx,
-        } = def
-        {
+        if let super::ssa::ValueDef::Instruction { block, instr_idx: idx } = def {
             if *block == block_id && *idx == instr_idx {
                 return Some(*value);
             }

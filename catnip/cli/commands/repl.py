@@ -6,7 +6,7 @@ import sys
 import click
 
 
-@click.command("repl")
+@click.command('repl')
 @click.pass_context
 def cmd_repl(ctx):
     """Start the interactive REPL (default mode)."""
@@ -24,6 +24,7 @@ def cmd_repl(ctx):
             no_color=opts.get('no_color', False),
             optimizations=opts.get('optimizations', ()),
             modules=modules,
+            mode='repl',
         )
         repl = MinimalREPL(catnip, parsing=opts.get('parsing', 3), verbose=opts.get('verbose', False))
         repl.run()

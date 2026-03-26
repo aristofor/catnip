@@ -1,0 +1,85 @@
+#!/usr/bin/env catnip
+# Filtrage et transformation de données
+
+struct User { id; name; age; active; score;
+
+    is_active(self) => { self.active }
+    has_min_score(self, min_score) => { self.score >= min_score }
+    is_younger_than(self, max_age) => { self.age < max_age }
+
+    with_status(self, excellent_threshold) => {
+        status = if self.score >= excellent_threshold { 'excellent' } else { 'good' }
+        UserWithStatus(
+            id=self.id,
+            name=self.name,
+            age=self.age,
+            active=self.active,
+            score=self.score,
+            status=status,
+        )
+    }
+}
+
+struct UserWithStatus extends(User) { status }
+
+# Données utilisateur
+users = list(
+    User(id=1, name='Alice', age=28, active=True, score=85),
+    User(id=2, name='Bob', age=35, active=True, score=92),
+    User(id=3, name='Charlie', age=22, active=False, score=78),
+    User(id=4, name='Diana', age=29, active=True, score=88),
+    User(id=5, name='Eve', age=31, active=False, score=95),
+)
+
+# Fonction de filtrage générique
+filter_users = (lst, predicate) => {
+    fold(lst, list(), (acc, user) => { if predicate(user) { acc + list(user) } else { acc } })
+}
+
+# Fonction de mapping générique
+map_users = (lst, transform) => {
+    fold(lst, list(), (acc, user) => { acc + list(transform(user)) })
+}
+
+is_active = (u) => { u.is_active() }
+is_high_score = (u) => { u.has_min_score(85) }
+is_young = (u) => { u.is_younger_than(30) }
+add_status = (u) => { u.with_status(90) }
+
+# Appliquer filtres
+print("Filtrage de données")
+print()
+
+print(f"Tous les utilisateurs : {len(users)}")
+
+active_users = filter_users(users, is_active)
+print(f"Utilisateurs actifs : {len(active_users)}")
+
+high_scorers = filter_users(users, is_high_score)
+print(f"Scores >= 85 : {len(high_scorers)}")
+
+young_users = filter_users(users, is_young)
+print(f"Âge < 30 : {len(young_users)}")
+
+print()
+print("Utilisateurs actifs avec high score :")
+
+# Composition de filtres
+active_and_high = filter_users(active_users, is_high_score)
+
+for u in active_and_high {
+    print(f"  - {u.name}  (score: {u.score})")
+}
+
+print()
+print("Transformation avec status :")
+
+# Mapper avec ajout de status
+with_status = map_users(high_scorers, add_status)
+
+for u in with_status {
+    print(f"  - {u.name} : {u.status}")
+}
+
+# Retourner nombre de résultats finaux
+len(active_and_high)  # → 3

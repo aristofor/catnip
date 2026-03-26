@@ -6,6 +6,7 @@ import pytest
 from catnip import Catnip, Context, pass_context
 
 
+@pytest.mark.no_standalone
 class TestPassContext:
     """Test that @pass_context injects the execution context."""
 
@@ -81,23 +82,8 @@ class TestPassContext:
 
         assert result == 15
 
-    def test_regular_function_no_context(self, cat):
-        """Function without @pass_context does NOT receive context."""
-        received = []
 
-        def regular_func(*args):
-            received.extend(args)
-            return sum(args)
-
-        cat.context.globals['regular'] = regular_func
-        cat.parse('regular(1, 2, 3)')
-        result = cat.execute()
-
-        assert result == 6
-        assert received == [1, 2, 3]
-        assert not any(isinstance(a, Context) for a in received)
-
-
+@pytest.mark.no_standalone
 class TestPassContextModes:
     """Test @pass_context works in both VM and AST modes."""
 
@@ -145,8 +131,66 @@ f()''')
         assert result == 'Context'
 
 
+@pytest.mark.no_standalone
+class TestPassContextCallbackFromPython:
+    """Test @pass_context works when a Catnip function is called back from Python."""
+
+    def test_vmfunction_calls_pass_context(self):
+        """VMFunction called from Python can call @pass_context functions."""
+
+        @pass_context
+        def get_ctx_type(ctx):
+            return type(ctx).__name__
+
+        cat = Catnip(vm_mode='on')
+        cat.context.globals['ctx_type'] = get_ctx_type
+        cat.parse('f = () => { ctx_type() }')
+        cat.execute()
+
+        # Resolve the Catnip function and call it from Python
+        f = cat.registry.resolve_ident('f')
+        result = f()
+        assert result == 'Context'
+
+    def test_vmfunction_pass_context_with_args(self):
+        """VMFunction callback with @pass_context function that takes args."""
+
+        @pass_context
+        def add_from_ctx(ctx, a, b):
+            return a + b
+
+        cat = Catnip(vm_mode='on')
+        cat.context.globals['add_ctx'] = add_from_ctx
+        cat.parse('compute = (x, y) => { add_ctx(x, y) }')
+        cat.execute()
+
+        compute = cat.registry.resolve_ident('compute')
+        result = compute(10, 20)
+        assert result == 30
+
+
 class TestPassContextErrorHandling:
     """Test error handling for @pass_context edge cases."""
+
+    @pytest.fixture
+    def cat(self):
+        return Catnip()
+
+    def test_regular_function_no_context(self, cat):
+        """Function without @pass_context does NOT receive context."""
+        received = []
+
+        def regular_func(*args):
+            received.extend(args)
+            return sum(args)
+
+        cat.context.globals['regular'] = regular_func
+        cat.parse('regular(1, 2, 3)')
+        result = cat.execute()
+
+        assert result == 6
+        assert received == [1, 2, 3]
+        assert not any(isinstance(a, Context) for a in received)
 
     def test_decorator_sets_attribute(self):
         """@pass_context sets the pass_context attribute to True."""

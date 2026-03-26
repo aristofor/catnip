@@ -1,0 +1,56 @@
+#!/usr/bin/env catnip
+# Exemple : fold et reduce
+
+print("⇒ fold : agregation avec valeur initiale")
+
+# Somme
+total = fold(list(1, 2, 3, 4, 5), 0, (acc, x) => { acc + x })
+print("Somme 1..5:", total)
+
+# Produit
+produit = fold(list(1, 2, 3, 4), 1, (acc, x) => { acc * x })
+print("Produit 1..4:", produit)
+
+# Concatenation
+mot = fold(list("c", "a", "t"), "", (acc, x) => { acc + x })
+print("Concat:", mot)
+
+print()
+print("⇒ fold sur collection vide")
+
+# fold est total : sur une liste vide, retourne init
+vide = fold(list(), 0, (acc, x) => { acc + x })
+print("fold(list(), 0, +):", vide)
+
+print()
+print("⇒ fold un seul niveau")
+
+# fold n'effectue pas de descente récursive
+taille_totale = fold(list(list(1, 2), list(3, 4)), 0, (acc, row) => {
+        acc + len(row)
+    })
+print("Éléments dans sous-listes:", taille_totale)
+
+print()
+print("⇒ reduce : sans valeur initiale")
+
+# Le premier élément sert d'accumulateur
+somme = reduce(list(10, 20, 30), (acc, x) => { acc + x })
+print("reduce sum:", somme)
+
+# Maximum artisanal
+maximum = reduce(list(3, 1, 4, 1, 5, 9, 2, 6), (acc, x) => {
+        if x > acc { x } else { acc }
+    })
+print("Maximum:", maximum)
+
+print()
+print("⇒ Composition broadcast + fold")
+
+# broadcast transforme, fold agregre
+resultat = fold(list(1, 2, 3).[* 10], 0, (acc, x) => { acc + x })
+print("list(1,2,3).[*10] puis fold +:", resultat)
+
+# Pipeline complet : transformer puis agreger
+cubes = fold(list(1, 2, 3, 4).[** 3], 0, (acc, x) => { acc + x })
+print("Somme des cubes 1..4:", cubes)

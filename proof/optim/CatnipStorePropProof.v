@@ -1,5 +1,5 @@
 (* FILE: proof/optim/CatnipStorePropProof.v *)
-(* CatnipStorePropProof.v — Store model + constant/copy propagation proofs
+(* CatnipStorePropProof.v - Store model + constant/copy propagation proofs
  *
  * Source of truth:
  *   catnip_rs/src/semantic/constant_propagation.rs

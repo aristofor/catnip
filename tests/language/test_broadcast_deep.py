@@ -67,10 +67,29 @@ class TestBroadcastDeepMap:
         result = exec_catnip("list(list(1, 2)).[.[* 2]]")
         assert result == [[2, 4]]
 
+    def test_nested_add_vector(self):
+        """Matrix + vector broadcasts into each row."""
+        result = exec_catnip("""
+            list(list(1, 2, 3), list(4, 5, 6)).[+ list(10, 20, 30)]
+        """)
+        assert result == [[11, 22, 33], [14, 25, 36]]
+
+    def test_nested_multiply_vector(self):
+        """Matrix * vector broadcasts into each row."""
+        result = exec_catnip("""
+            list(list(1, 2), list(3, 4)).[* list(10, 20)]
+        """)
+        assert result == [[10, 40], [30, 80]]
+
+    def test_flat_zip_unchanged(self):
+        """Flat list + list still does element-wise zip."""
+        result = exec_catnip("list(1, 2, 3).[+ list(10, 20, 30)]")
+        assert result == [11, 22, 33]
+
     def test_struct_as_leaf(self):
         """Les structs sont traités comme des feuilles"""
         code = """
-        struct Point { x, y }
+        struct Point { x; y; }
         p = Point(1, 2)
         list(list(p)).[(p) => { p.x }]
         """

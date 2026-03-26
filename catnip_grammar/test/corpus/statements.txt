@@ -9,8 +9,12 @@ x = 42
 (source_file
   (statement
     (assignment
-      (lvalue (unpack_target (identifier)))
-      (integer))))
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (literal
+        (number
+          (integer))))))
 
 ================================================================================
 Chained assignment
@@ -23,10 +27,18 @@ a = b = c = 1
 (source_file
   (statement
     (assignment
-      (lvalue (unpack_target (identifier)))
-      (lvalue (unpack_target (identifier)))
-      (lvalue (unpack_target (identifier)))
-      (integer))))
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (literal
+        (number
+          (integer))))))
 
 ================================================================================
 Tuple unpacking assignment
@@ -39,7 +51,11 @@ a, b = pair
 (source_file
   (statement
     (assignment
-      (lvalue (unpack_target (unpack_sequence (identifier) (identifier))))
+      (lvalue
+        (unpack_target
+          (unpack_sequence
+            (identifier)
+            (identifier))))
       (identifier))))
 
 ================================================================================
@@ -52,8 +68,13 @@ return
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (return_stmt (integer)))
-  (statement (return_stmt)))
+  (statement
+    (return_stmt
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (return_stmt)))
 
 ================================================================================
 Break and continue
@@ -65,8 +86,10 @@ continue
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (break_stmt))
-  (statement (continue_stmt)))
+  (statement
+    (break_stmt))
+  (statement
+    (continue_stmt)))
 
 ================================================================================
 Pragma statement
@@ -79,14 +102,16 @@ pragma("tco", True)
 (source_file
   (statement
     (pragma_stmt
-      (pragma_arg (string))
-      (pragma_arg (true)))))
+      (pragma_arg
+        (string))
+      (pragma_arg
+        (true)))))
 
 ================================================================================
 Struct with default field values
 ================================================================================
 
-struct Point { x, y = 0 }
+struct Point { x; y = 0; }
 
 --------------------------------------------------------------------------------
 
@@ -94,20 +119,19 @@ struct Point { x, y = 0 }
   (statement
     (struct_stmt
       name: (identifier)
-      (struct_fields
-        (struct_field
-          name: (identifier))
-        (struct_field
-          name: (identifier)
-          default: (literal
-            (number
-              (integer))))))))
+      (struct_field
+        name: (identifier))
+      (struct_field
+        name: (identifier)
+        default: (literal
+          (number
+            (integer)))))))
 
 ================================================================================
 Struct extends
 ================================================================================
 
-struct Point3 extends(Point) { z }
+struct Point3 extends(Point) { z; }
 
 --------------------------------------------------------------------------------
 
@@ -116,7 +140,6 @@ struct Point3 extends(Point) { z }
     (struct_stmt
       name: (identifier)
       (struct_extends
-        base: (identifier))
-      (struct_fields
-        (struct_field
-          name: (identifier))))))
+        (identifier))
+      (struct_field
+        name: (identifier)))))

@@ -1,90 +1,175 @@
+#!/usr/bin/env catnip
 # SQLAlchemy + DuckDB Engine - ORM complet sur base analytique
 # Combine la puissance de DuckDB avec l'écosystème SQLAlchemy
 #
-# Requires: pip install sqlalchemy duckdb-engine
-# Exécuter: catnip -m sqlalchemy -m duckdb sqlalchemy_duckdb.cat
+# DEPS: duckdb-engine sqlalchemy
 
-# Création du moteur DuckDB in-memory via SQLAlchemy
-engine = sqlalchemy.create_engine("duckdb:///:memory:")
-metadata = sqlalchemy.MetaData()
+sa = import('sqlalchemy')
 
-# Tables
-Int = sqlalchemy.Integer
-Str = sqlalchemy.String
-Num = sqlalchemy.Numeric
-Col = sqlalchemy.Column
+# Structs métier
+struct Customer {
+    id; name; country
 
-customers = sqlalchemy.Table("customers", metadata, Col("id", Int(), primary_key=True, autoincrement=False), Col("name", Str()), Col("country", Str()))
+    display(self) => { f"  {self.name} ({self.country})" }
+    to_params(self) => { dict(id=self.id, name=self.name, country=self.country) }
+}
 
-orders = sqlalchemy.Table("orders", metadata, Col("id", Int(), primary_key=True, autoincrement=False), Col("customer_id", Int()), Col("product", Str()), Col("qty", Int()), Col("price", Num(10, 2)))
+struct Order {
+    id; customer_id; product; qty; price
+
+    total(self) => { self.qty * self.price }
+    to_params(self) => { dict(id=self.id, cid=self.customer_id, product=self.product, qty=self.qty, price=self.price) }
+}
+
+struct Report {
+    label; sql
+
+    run(self, conn) => {
+        rows = conn.execute(sa.text(self.sql)).fetchall()
+        results = list()
+        for row in rows {
+            results.append(f"  {row[0]} : {row[1]}")
+        }
+        results
+    }
+}
+
+# Setup
+engine = sa.create_engine("duckdb:///:memory:")
+metadata = sa.MetaData()
+
+Int = sa.Integer
+Str = sa.String
+Num = sa.Numeric
+Col = sa.Column
+
+customers_table = sa.Table("customers", metadata,
+    Col("id", Int(), primary_key=True, autoincrement=False),
+    Col("name", Str()),
+    Col("country", Str()),
+)
+
+orders_table = sa.Table("orders", metadata,
+    Col("id", Int(), primary_key=True, autoincrement=False),
+    Col("customer_id", Int()),
+    Col("product", Str()),
+    Col("qty", Int()),
+    Col("price", Num(10, 2)),
+)
 
 metadata.create_all(engine)
-print("⇒ Schéma créé")
-
 conn = engine.connect()
 
-# Insérer via SQL brut (plus simple en Catnip)
-conn.execute(sqlalchemy.text("INSERT INTO customers VALUES (1, 'Alice', 'France'), (2, 'Bob', 'USA'), (3, 'Charlie', 'China')"))
+# Données via structs
+customers = list(
+    Customer(1, "Alice", "France"),
+    Customer(2, "Bob", "USA"),
+    Customer(3, "Charlie", "China"),
+)
 
-conn.execute(sqlalchemy.text("INSERT INTO orders VALUES (1, 1, 'Laptop', 1, 1299.99), (2, 1, 'Mouse', 2, 29.99), (3, 2, 'Keyboard', 1, 89.99), (4, 3, 'Monitor', 2, 399.99), (5, 2, 'Laptop', 1, 1299.99)"))
+orders = list(
+    Order(1, 1, "Laptop", 1, 1299.99),
+    Order(2, 1, "Mouse", 2, 29.99),
+    Order(3, 2, "Keyboard", 1, 89.99),
+    Order(4, 3, "Monitor", 2, 399.99),
+    Order(5, 2, "Laptop", 1, 1299.99),
+)
+
+# Insertion via to_params()
+for c in customers {
+    conn.execute(sa.text("INSERT INTO customers VALUES (:id, :name, :country)"), c.to_params())
+}
+for o in orders {
+    conn.execute(sa.text("INSERT INTO orders VALUES (:id, :cid, :product, :qty, :price)"), o.to_params())
+}
 conn.commit()
-print("⇒ Données insérées (3 clients, 5 commandes)")
+print(f"⇒ Données insérées ({len(customers)} clients, {len(orders)} commandes)")
 
-# SELECT avec l'API SQLAlchemy
-print("\n⇒ Clients (SQLAlchemy select)")
-stmt = sqlalchemy.select(customers.c.name, customers.c.country).order_by(customers.c.name)
+# SELECT via SQLAlchemy
+print()
+print("⇒ Clients (SQLAlchemy select)")
+stmt = sa.select(customers_table.c.name, customers_table.c.country).order_by(customers_table.c.name)
 for row in conn.execute(stmt) {
-    print("  ", row[0], "(", row[1], ")")
+    print(f"  {row[0]} ({row[1]})")
 }
 
 # JOIN
-print("\n⇒ Commandes avec JOIN")
-total_col = (orders.c.qty * orders.c.price).label("total")
-stmt = sqlalchemy.select(customers.c.name, orders.c.product, total_col).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).order_by(sqlalchemy.desc("total")).limit(5)
+print()
+print("⇒ Commandes avec JOIN")
+total_col = (orders_table.c.qty * orders_table.c.price).label("total")
+stmt = sa.select(customers_table.c.name, orders_table.c.product, total_col).select_from(
+    customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))
+).order_by(sa.desc("total")).limit(5)
 
 for row in conn.execute(stmt) {
-    print("  ", row[0], "-", row[1], ":", round(row[2], 2), "€")
+    print(f"  {row[0]} - {row[1]} : {round(row[2], 2)} €")
 }
 
-# GROUP BY avec fonctions d'agrégation
-print("\n⇒ CA par client (GROUP BY)")
-stmt = sqlalchemy.select(customers.c.name, sqlalchemy.func.count(orders.c.id).label("n"), sqlalchemy.func.sum(orders.c.qty * orders.c.price).label("ca")).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).group_by(customers.c.id, customers.c.name).order_by(sqlalchemy.desc("ca"))
+# GROUP BY
+print()
+print("⇒ CA par client (GROUP BY)")
+stmt = sa.select(
+    customers_table.c.name,
+    sa.func.count(orders_table.c.id).label("n"),
+    sa.func.sum(orders_table.c.qty * orders_table.c.price).label("ca"),
+).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))
+).group_by(customers_table.c.id, customers_table.c.name).order_by(sa.desc("ca"))
 
 for row in conn.execute(stmt) {
-    print("  ", row[0], ":", row[1], "commandes,", round(row[2], 2), "€")
+    print(f"  {row[0]} : {row[1]} commandes, {round(row[2], 2)} €")
 }
 
 # Sous-requête
-print("\n⇒ Commandes > moyenne (sous-requête)")
-avg_sq = sqlalchemy.select(sqlalchemy.func.avg(orders.c.qty * orders.c.price)).scalar_subquery()
-stmt = sqlalchemy.select(customers.c.name, orders.c.product, (orders.c.qty * orders.c.price).label("t")).select_from(customers.join(orders, customers.c.id.__eq__(orders.c.customer_id))).where((orders.c.qty * orders.c.price).__gt__(avg_sq)).order_by(sqlalchemy.desc("t"))
+print()
+print("⇒ Commandes > moyenne (sous-requête)")
+avg_sq = sa.select(sa.func.avg(orders_table.c.qty * orders_table.c.price)).scalar_subquery()
+stmt = sa.select(
+    customers_table.c.name, orders_table.c.product,
+    (orders_table.c.qty * orders_table.c.price).label("t"),
+).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))).where(
+    (orders_table.c.qty * orders_table.c.price).__gt__(avg_sq)).order_by(sa.desc("t"))
 
 for row in conn.execute(stmt) {
-    print("  ", row[0], "-", row[1], ":", round(row[2], 2), "€")
+    print(f"  {row[0]} - {row[1]} : {round(row[2], 2)} €")
 }
 
 # HAVING
-print("\n⇒ Produits vendus > 1 fois (HAVING)")
-stmt = sqlalchemy.select(orders.c.product, sqlalchemy.func.sum(orders.c.qty).label("q")).group_by(orders.c.product).having(sqlalchemy.func.count(orders.c.id).__gt__(1))
+print()
+print("⇒ Produits vendus > 1 fois (HAVING)")
+stmt = sa.select(
+    orders_table.c.product,
+    sa.func.sum(orders_table.c.qty).label("q"),
+).group_by(orders_table.c.product).having(sa.func.count(orders_table.c.id).__gt__(1))
 
 for row in conn.execute(stmt) {
-    print("  ", row[0], ":", row[1], "unités")
+    print(f"  {row[0]} : {row[1]} unités")
 }
 
-# SQL brut DuckDB avec window function QUALIFY
-print("\n⇒ Window function QUALIFY (SQL brut DuckDB)")
-sql = sqlalchemy.text("SELECT c.name, o.product, o.qty * o.price as amount FROM customers c JOIN orders o ON c.id = o.customer_id QUALIFY RANK() OVER (PARTITION BY c.id ORDER BY o.qty * o.price DESC) = 1 ORDER BY amount DESC")
+# Window function QUALIFY (SQL brut DuckDB)
+print()
+print("⇒ Window function QUALIFY (SQL brut DuckDB)")
+sql = sa.text("SELECT c.name, o.product, o.qty * o.price as amount " +
+    "FROM customers c JOIN orders o ON c.id = o.customer_id " +
+    "QUALIFY RANK() OVER (PARTITION BY c.id ORDER BY o.qty * o.price DESC) = 1 " +
+    "ORDER BY amount DESC")
 for row in conn.execute(sql) {
-    print("  ", row[0], "- top:", row[1], "(", round(row[2], 2), "€)")
+    print(f"  {row[0]} - top: {row[1]} ({round(row[2], 2)} €)")
 }
 
-# Stats globales
-print("\n⇒ Stats globales")
-sql = sqlalchemy.text("SELECT COUNT(DISTINCT c.id), COUNT(o.id), ROUND(SUM(o.qty * o.price), 2), ROUND(AVG(o.qty * o.price), 2) FROM customers c JOIN orders o ON c.id = o.customer_id")
-s = conn.execute(sql).fetchone()
-print("  ", s[0], "clients,", s[1], "commandes")
-print("  CA:", s[2], "€, panier moyen:", s[3], "€")
+# Stats via Report struct + broadcasting
+reports = list(
+    Report("Clients", "SELECT 'total', COUNT(DISTINCT c.id) FROM customers c JOIN orders o ON c.id = o.customer_id"),
+    Report("Commandes", "SELECT 'total', COUNT(o.id) FROM orders o"),
+    Report("CA total", "SELECT 'montant', ROUND(SUM(o.qty * o.price), 2) FROM orders o"),
+    Report("Panier moyen", "SELECT 'montant', ROUND(AVG(o.qty * o.price), 2) FROM orders o"),
+)
+
+print()
+print("⇒ Stats globales")
+reports.[(r) => {
+        lines=r.run(conn)
+        for line in lines { print(line) }
+    }]
 
 conn.close()
 engine.dispose()
-print("\n⇒ Done")

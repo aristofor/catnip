@@ -5,6 +5,7 @@
 
 use crate::theme::hex;
 use catnip_rs::constants::{highlighting as hl, highlighting_light as hl_light};
+use catnip_tools::symbols;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::cell::RefCell;
@@ -133,16 +134,6 @@ impl CatnipHighlighter {
         let c = &self.colors;
 
         match kind {
-            // Keywords
-            "if" | "elif" | "else" | "while" | "for" | "in" | "match" | "case" | "return"
-            | "break" | "continue" | "and" | "or" | "not" | "pragma" => {
-                let mut style = Style::default().fg(c.keyword);
-                if c.keyword_bold {
-                    style = style.add_modifier(Modifier::BOLD);
-                }
-                style
-            }
-
             // Constants
             "True" | "False" | "None" => {
                 let mut style = Style::default().fg(c.constant);
@@ -156,21 +147,19 @@ impl CatnipHighlighter {
             "dict" | "list" | "set" | "tuple" => Style::default().fg(c.type_color),
 
             // Numbers
-            "integer" | "float" | "binary_integer" | "octal_integer" | "hexadecimal_integer" => {
-                Style::default().fg(c.number)
-            }
+            "integer"
+            | "float"
+            | "decimal"
+            | "imaginary"
+            | "binary_integer"
+            | "octal_integer"
+            | "hexadecimal_integer" => Style::default().fg(c.number),
 
             // Strings
             "string" | "f_string" => Style::default().fg(c.string),
 
             // Comments
             "comment" => Style::default().fg(c.comment),
-
-            // Operators
-            "=>" | "+" | "-" | "*" | "/" | "%" | "**" | "//" | "==" | "!=" | "<" | ">" | "<="
-            | ">=" | "&" | "|" | "^" | "~" | "<<" | ">>" | "@" | "~~" | "~>" | "~[]" => {
-                Style::default().fg(c.operator)
-            }
 
             // Assignment operator
             "=" => Style::default().fg(c.operator),
@@ -186,9 +175,17 @@ impl CatnipHighlighter {
             }
 
             // Punctuation
-            "(" | ")" | "[" | "]" | "{" | "}" | "," | ";" | ":" | "." => {
-                Style::default().fg(c.punctuation)
+            "(" | ")" | "[" | "]" | "{" | "}" | "," | ";" | ":" | "." => Style::default().fg(c.punctuation),
+
+            // Keywords and operators from grammar (catch-all)
+            other if symbols::is_keyword(other) => {
+                let mut style = Style::default().fg(c.keyword);
+                if c.keyword_bold {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                style
             }
+            other if symbols::is_operator(other) => Style::default().fg(c.operator),
 
             _ => Style::default(),
         }

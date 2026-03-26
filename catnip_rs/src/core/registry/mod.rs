@@ -12,7 +12,6 @@ mod access;
 mod args;
 mod arithmetic;
 mod bitwise;
-mod broadcast;
 mod control_flow;
 mod execution;
 mod functions;
@@ -22,6 +21,7 @@ mod nd;
 mod patterns;
 mod stack;
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::cell::RefCell;
@@ -108,12 +108,28 @@ pub(crate) struct OpCodeCache {
 
     // Trait
     pub trait_def: i32,
+
+    // Nil-coalescing
+    pub null_coalesce: i32,
+
+    // Membership
+    pub in_: i32,
+    pub not_in: i32,
+
+    // Identity
+    pub is_: i32,
+    pub is_not: i32,
+
+    // Intrinsics
+    pub type_of: i32,
+    pub globals: i32,
+    pub locals: i32,
 }
 
 impl OpCodeCache {
     /// Initialize OpCode cache from Python OpCode enum
     fn new(py: Python<'_>) -> PyResult<Self> {
-        let opcode_module = py.import("catnip.semantic.opcode")?;
+        let opcode_module = py.import(PY_MOD_SEMANTIC_OPCODE)?;
         let opcode_class = opcode_module.getattr("OpCode")?;
 
         let get = |name: &str| -> PyResult<i32> { opcode_class.getattr(name)?.extract() };
@@ -182,6 +198,18 @@ impl OpCodeCache {
             op_struct: get("OP_STRUCT")?,
 
             trait_def: get("TRAIT_DEF")?,
+
+            null_coalesce: get("NULL_COALESCE")?,
+
+            in_: get("IN")?,
+            not_in: get("NOT_IN")?,
+
+            is_: get("IS")?,
+            is_not: get("IS_NOT")?,
+
+            type_of: get("TYPE_OF")?,
+            globals: get("GLOBALS")?,
+            locals: get("LOCALS")?,
         })
     }
 }
@@ -296,7 +324,7 @@ impl Registry {
     #[new]
     fn new(py: Python<'_>, context: Py<PyAny>) -> PyResult<Self> {
         // Initialize control flow ops from Python BEFORE creating the registry
-        let opcode_module = py.import("catnip.semantic.opcode")?;
+        let opcode_module = py.import(PY_MOD_SEMANTIC_OPCODE)?;
         let control_flow_ops_py = opcode_module.getattr("CONTROL_FLOW_OPS")?;
         let mut control_flow_ops = HashSet::new();
         for op in control_flow_ops_py.try_iter()? {
@@ -358,12 +386,7 @@ impl Registry {
     /// Returns:
     ///     The resolved value or None
     #[pyo3(signature = (ident, check=true))]
-    fn resolve_ident(
-        &self,
-        py: Python<'_>,
-        ident: &str,
-        check: bool,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    fn resolve_ident(&self, py: Python<'_>, ident: &str, check: bool) -> PyResult<Option<Py<PyAny>>> {
         self.resolve_ident_impl(py, ident, check)
     }
 
@@ -464,6 +487,12 @@ impl Registry {
         self.op_bool_and(py, items)
     }
 
+    /// Nil-coalescing: a ?? b
+    #[pyo3(signature = (*items))]
+    fn _null_coalesce(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        self.op_null_coalesce(py, items)
+    }
+
     /// Less than: a < b < c < ...
     #[pyo3(signature = (*items))]
     fn _lt(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
@@ -498,6 +527,30 @@ impl Registry {
     #[pyo3(signature = (*items))]
     fn _ne(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.op_ne(py, items)
+    }
+
+    /// Membership test: item in container
+    #[pyo3(signature = (*items))]
+    fn _in(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        self.op_in(py, items)
+    }
+
+    /// Negated membership test: item not in container
+    #[pyo3(signature = (*items))]
+    fn _not_in(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        self.op_not_in(py, items)
+    }
+
+    /// Identity test: a is b
+    #[pyo3(signature = (*items))]
+    fn _is(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        self.op_is(py, items)
+    }
+
+    /// Negated identity test: a is not b
+    #[pyo3(signature = (*items))]
+    fn _is_not(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        self.op_is_not(py, items)
     }
 
     // ========================================
@@ -734,13 +787,8 @@ impl Registry {
     /// Helper method to call broadcast_map from Python
     ///
     /// This is used as a callback in apply_broadcast to map functions over collections.
-    fn _broadcast_map_helper(
-        &self,
-        py: Python<'_>,
-        target: Py<PyAny>,
-        func: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
-        use crate::core::registry::broadcast;
+    fn _broadcast_map_helper(&self, py: Python<'_>, target: Py<PyAny>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        use crate::core::broadcast;
         let target = target.bind(py);
         let func = func.bind(py);
         broadcast::broadcast_map(py, target, func)
@@ -767,9 +815,7 @@ impl Registry {
     ) -> PyResult<Py<PyAny>> {
         let target_obj = target.clone().unbind();
         let operator_obj = operator.clone().unbind();
-        let operand_obj = operand
-            .map(|o| o.clone().unbind())
-            .unwrap_or_else(|| py.None());
+        let operand_obj = operand.map(|o| o.clone().unbind()).unwrap_or_else(|| py.None());
 
         self.apply_broadcast(py, target_obj, operator_obj, operand_obj, is_filter)
     }
@@ -789,12 +835,7 @@ impl Registry {
     }
 
     /// Execute ND-map on data (Python-exposed wrapper)
-    pub fn execute_nd_map_py(
-        &self,
-        py: Python<'_>,
-        data: Py<PyAny>,
-        func: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    pub fn execute_nd_map_py(&self, py: Python<'_>, data: Py<PyAny>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
         self.execute_nd_map(py, &data, &func)
     }
 }
@@ -818,11 +859,7 @@ impl Registry {
         let args = self.unwrap_and_eval_args(py, items)?;
         if args.is_empty() {
             return default_value.map_or_else(
-                || {
-                    Err(pyo3::exceptions::PyTypeError::new_err(
-                        "requires at least one argument",
-                    ))
-                },
+                || Err(pyo3::exceptions::PyTypeError::new_err("requires at least one argument")),
                 Ok,
             );
         }
@@ -866,7 +903,7 @@ impl Registry {
     /// Register all operations in the internals dict
     fn register_operations(&self, py: Python<'_>) -> PyResult<()> {
         // Import OpCode enum
-        let opcode_module = py.import("catnip.semantic.opcode")?;
+        let opcode_module = py.import(PY_MOD_SEMANTIC_OPCODE)?;
         let opcode_class = opcode_module.getattr("OpCode")?;
 
         // Helper to get OpCode value
@@ -905,6 +942,7 @@ impl Registry {
         self.register_op(py, "bool_not", get_opcode("NOT")?)?;
         self.register_op(py, "bool_or", get_opcode("OR")?)?;
         self.register_op(py, "bool_and", get_opcode("AND")?)?;
+        self.register_op(py, "null_coalesce", get_opcode("NULL_COALESCE")?)?;
         self.register_op(py, "lt", get_opcode("LT")?)?;
         self.register_op(py, "le", get_opcode("LE")?)?;
         self.register_op(py, "gt", get_opcode("GT")?)?;
@@ -962,6 +1000,17 @@ impl Registry {
         // Trait
         self.register_op(py, "trait_def", get_opcode("TRAIT_DEF")?)?;
 
+        // Membership
+        self.register_op(py, "in", get_opcode("IN")?)?;
+        self.register_op(py, "not_in", get_opcode("NOT_IN")?)?;
+        self.register_op(py, "is", get_opcode("IS")?)?;
+        self.register_op(py, "is_not", get_opcode("IS_NOT")?)?;
+
+        // Intrinsics
+        self.register_op(py, "typeof", get_opcode("TYPE_OF")?)?;
+        self.register_op(py, "globals", get_opcode("GLOBALS")?)?;
+        self.register_op(py, "locals", get_opcode("LOCALS")?)?;
+
         // Broadcasting (NOT implemented, use Cython fallback)
         // NOT registering: broadcast, nd_recursion, nd_map, nd_empty_topos
 
@@ -985,9 +1034,37 @@ impl Registry {
         let globals = ctx.getattr("globals")?;
         let globals_dict = globals.cast::<PyDict>()?;
 
-        // Add globals() and locals() utility functions (stubs for now)
-        let globals_fn = py.eval(c"lambda: {}", None, None)?;
-        let locals_fn = py.eval(c"lambda: {}", None, None)?;
+        // globals()/locals() fallbacks for indirect calls (f = globals; f())
+        // Direct calls are intercepted by the semantic analyzer as intrinsic opcodes.
+        let ctx_ref = self.ctx.clone_ref(py);
+        let globals_fn = pyo3::types::PyCFunction::new_closure(
+            py,
+            Some(c"globals"),
+            None,
+            move |_args: &Bound<'_, pyo3::types::PyTuple>,
+                  _kwargs: Option<&Bound<'_, PyDict>>|
+                  -> PyResult<Py<PyAny>> {
+                let py = _args.py();
+                let ctx = ctx_ref.bind(py);
+                let g = ctx.getattr("globals")?;
+                let dict = g.cast::<PyDict>()?;
+                Ok(dict.copy()?.into_any().unbind())
+            },
+        )?;
+        let ctx_ref2 = self.ctx.clone_ref(py);
+        let locals_fn = pyo3::types::PyCFunction::new_closure(
+            py,
+            Some(c"locals"),
+            None,
+            move |_args: &Bound<'_, pyo3::types::PyTuple>,
+                  _kwargs: Option<&Bound<'_, PyDict>>|
+                  -> PyResult<Py<PyAny>> {
+                let py = _args.py();
+                let ctx = ctx_ref2.bind(py);
+                let locals_scope = ctx.getattr("locals")?;
+                locals_scope.call_method0("items").map(|v| v.unbind())
+            },
+        )?;
 
         globals_dict.set_item("globals", globals_fn)?;
         globals_dict.set_item("locals", locals_fn)?;

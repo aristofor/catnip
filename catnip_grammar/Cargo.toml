@@ -9,6 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 tree-sitter = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 cc = "1.2"

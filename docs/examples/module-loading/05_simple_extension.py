@@ -5,13 +5,13 @@ Exemple simple et fonctionnel d'extension de Catnip.
 
 from catnip import Catnip, Context, pass_context
 
-
-# Exemple 1 : Fonctions simples
+# Exemple : Fonctions simples
 
 
 def example_simple_functions():
     """Ajouter des fonctions simples au context."""
-    print("\n⇒ Exemple 1 : Fonctions simples\n")
+    print()
+    print("⇒ Exemple 1 : Fonctions simples\n")
 
     def greet(name):
         return f"Hello, {name}!"
@@ -48,7 +48,8 @@ def example_simple_functions():
 
 def example_object_methods():
     """Exposer un objet avec des méthodes."""
-    print("\n⇒ Exemple 2 : Objet avec méthodes\n")
+    print()
+    print("⇒ Exemple 2 : Objet avec méthodes\n")
 
     class Calculator:
         def __init__(self):
@@ -93,7 +94,8 @@ def example_object_methods():
 
 def example_context_access():
     """Fonction qui accède au context avec @pass_context."""
-    print("\n⇒ Exemple 3 : Fonction avec accès au context\n")
+    print()
+    print("⇒ Exemple 3 : Fonction avec accès au context\n")
 
     @pass_context
     def store(ctx, key, value):
@@ -128,7 +130,8 @@ def example_context_access():
 
 def example_python_module():
     """Exposer un module Python complet."""
-    print("\n⇒ Exemple 4 : Module Python\n")
+    print()
+    print("⇒ Exemple 4 : Module Python\n")
 
     import math
 
@@ -150,12 +153,13 @@ def example_python_module():
         print(f'{test:20} = {result}')
 
 
-# Exemple 5 : État partagé
+# Exemple : État partagé
 
 
 def example_shared_state():
     """État partagé entre plusieurs exécutions."""
-    print("\n⇒ Exemple 5 : État partagé\n")
+    print()
+    print("⇒ Exemple 5 : État partagé\n")
 
     class DataStore:
         def __init__(self):
@@ -192,12 +196,13 @@ def example_shared_state():
         print(f'{"":30} → {result}')
 
 
-# Exemple 6 : Variables et calculs
+# Exemple : Variables et calculs
 
 
 def example_variables():
     """Utilisation de variables dans Catnip."""
-    print("\n⇒ Exemple 6 : Variables et calculs\n")
+    print()
+    print("⇒ Exemple 6 : Variables et calculs\n")
 
     ctx = Context()
     catnip = Catnip(context=ctx)
@@ -218,12 +223,13 @@ def example_variables():
     print(f'\nRésultat: {result}')
 
 
-# Exemple 7 : API personnalisée
+# Exemple : API personnalisée
 
 
 def example_custom_api():
     """Créer une API personnalisée pour votre application."""
-    print("\n⇒ Exemple 7 : API personnalisée\n")
+    print()
+    print("⇒ Exemple 7 : API personnalisée\n")
 
     class UserAPI:
         def __init__(self):

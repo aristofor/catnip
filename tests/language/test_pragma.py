@@ -43,12 +43,12 @@ class TestPragma:
         """Create a simple pragma."""
         p = Pragma(
             type=PragmaType.OPTIMIZE,
-            directive="optimize",
+            directive='optimize',
             value=3,
             options={},
         )
         assert p.type == PragmaType.OPTIMIZE
-        assert p.directive == "optimize"
+        assert p.directive == 'optimize'
         assert p.value == 3
         assert p.options == {}
         assert p.line is None
@@ -57,24 +57,24 @@ class TestPragma:
         """Pragma with options dict."""
         p = Pragma(
             type=PragmaType.WARNING,
-            directive="warning",
-            value="off",
-            options={"name": "unused"},
+            directive='warning',
+            value='off',
+            options={'name': 'unused'},
             line=42,
         )
-        assert p.options["name"] == "unused"
+        assert p.options['name'] == 'unused'
         assert p.line == 42
 
     def test_pragma_repr(self):
         """Pragma has readable repr."""
         p = Pragma(
             type=PragmaType.TCO,
-            directive="tco",
-            value="on",
+            directive='tco',
+            value='on',
             options={},
         )
-        assert "tco" in repr(p)
-        assert "on" in repr(p)
+        assert 'tco' in repr(p)
+        assert 'on' in repr(p)
 
 
 class TestPragmaContext:
@@ -98,7 +98,7 @@ class TestPragmaContext:
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.OPTIMIZE,
-            directive="optimize",
+            directive='optimize',
             value=1,
             options={},
         )
@@ -116,184 +116,143 @@ class TestOptimizePragma:
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.OPTIMIZE,
-            directive="optimize",
+            directive='optimize',
             value=level,
             options={},
         )
         ctx.add(p)
         assert ctx.optimize_level == level
 
-    @pytest.mark.parametrize(
-        "name,expected",
-        [
-            ("none", 0),
-            ("off", 0),
-            ("basic", 1),
-            ("low", 1),
-            ("medium", 2),
-            ("default", 2),
-            ("high", 3),
-            ("full", 3),
-            ("aggressive", 3),
-        ],
-    )
-    def test_string_levels(self, name, expected):
-        """Set optimization via string name."""
-        ctx = PragmaContext()
-        p = Pragma(
-            type=PragmaType.OPTIMIZE,
-            directive="optimize",
-            value=name,
-            options={},
-        )
-        ctx.add(p)
-        assert ctx.optimize_level == expected
-
-    def test_case_insensitive(self):
-        """String levels are case-insensitive."""
-        ctx = PragmaContext()
-        for variant in ["FULL", "Full", "fUlL"]:
-            p = Pragma(
-                type=PragmaType.OPTIMIZE,
-                directive="optimize",
-                value=variant,
-                options={},
-            )
-            ctx.add(p)
-            assert ctx.optimize_level == 3
-
     def test_invalid_numeric_level(self):
         """Reject optimization level outside 0-3."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.OPTIMIZE,
-            directive="optimize",
+            directive='optimize',
             value=5,
             options={},
         )
         with pytest.raises(CatnipPragmaError, match="must be 0-3"):
             ctx.add(p)
 
-    def test_invalid_string_level(self):
-        """Reject unknown optimization level name."""
+    def test_string_rejected(self):
+        """Reject string values (strict typing)."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.OPTIMIZE,
-            directive="optimize",
-            value="turbo",
+            directive='optimize',
+            value='high',
             options={},
         )
-        with pytest.raises(CatnipPragmaError, match="Unknown optimization level"):
+        with pytest.raises(CatnipPragmaError, match="integer"):
             ctx.add(p)
 
 
 class TestWarningPragma:
     """Test warning control pragmas."""
 
-    @pytest.mark.parametrize("action", ["on", "yes"])
-    def test_enable_warning(self, action):
+    def test_enable_warning(self):
         """Enable a warning."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.WARNING,
-            directive="warning",
-            value=action,
-            options={"name": "unused"},
+            directive='warning',
+            value=True,
+            options={'name': 'unused'},
         )
         ctx.add(p)
-        assert ctx.warnings["unused"] is True
+        assert ctx.warnings['unused'] is True
 
-    @pytest.mark.parametrize("action", ["off", "no"])
-    def test_disable_warning(self, action):
+    def test_disable_warning(self):
         """Disable a warning."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.WARNING,
-            directive="warning",
-            value=action,
-            options={"name": "deprecated"},
+            directive='warning',
+            value=False,
+            options={'name': 'deprecated'},
         )
         ctx.add(p)
-        assert ctx.warnings["deprecated"] is False
+        assert ctx.warnings['deprecated'] is False
 
     def test_warning_default_name(self):
         """Without name option, uses 'all'."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.WARNING,
-            directive="warning",
-            value="off",
+            directive='warning',
+            value=False,
             options={},
         )
         ctx.add(p)
-        assert ctx.warnings["all"] is False
+        assert ctx.warnings['all'] is False
 
-    def test_invalid_warning_action(self):
-        """Reject unknown warning action."""
+    def test_string_warning_rejected(self):
+        """Reject string values (strict typing)."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.WARNING,
-            directive="warning",
-            value="maybe",
+            directive='warning',
+            value='on',
             options={},
         )
-        with pytest.raises(CatnipPragmaError, match="Unknown warning action"):
+        with pytest.raises(CatnipPragmaError, match="True or False"):
             ctx.add(p)
 
     def test_is_warning_enabled_default(self):
         """is_warning_enabled returns True by default."""
         ctx = PragmaContext()
-        assert ctx.is_warning_enabled("anything") is True
+        assert ctx.is_warning_enabled('anything') is True
 
     def test_is_warning_enabled_specific(self):
         """is_warning_enabled respects specific warning setting."""
         ctx = PragmaContext()
-        ctx.warnings["unused"] = False
-        assert ctx.is_warning_enabled("unused") is False
-        assert ctx.is_warning_enabled("other") is True
+        ctx.warnings['unused'] = False
+        assert ctx.is_warning_enabled('unused') is False
+        assert ctx.is_warning_enabled('other') is True
 
     def test_is_warning_enabled_all_fallback(self):
         """is_warning_enabled uses 'all' as fallback."""
         ctx = PragmaContext()
-        ctx.warnings["all"] = False
-        assert ctx.is_warning_enabled("anything") is False
+        ctx.warnings['all'] = False
+        assert ctx.is_warning_enabled('anything') is False
 
 
 class TestInlinePragma:
     """Test inline hint pragmas."""
 
-    @pytest.mark.parametrize("hint", ["always", "never", "auto"])
+    @pytest.mark.parametrize('hint', ['always', 'never', 'auto'])
     def test_valid_hints(self, hint):
         """Accept valid inline hints."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.INLINE,
-            directive="inline",
+            directive='inline',
             value=hint,
-            options={"function": "my_func"},
+            options={'function': 'my_func'},
         )
         ctx.add(p)
-        assert ctx.inline_hints["my_func"] == hint
+        assert ctx.inline_hints['my_func'] == hint
 
     def test_default_function_name(self):
         """Without function option, uses __next__."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.INLINE,
-            directive="inline",
-            value="always",
+            directive='inline',
+            value='always',
             options={},
         )
         ctx.add(p)
-        assert ctx.inline_hints["__next__"] == "always"
+        assert ctx.inline_hints['__next__'] == 'always'
 
     def test_invalid_hint(self):
         """Reject unknown inline hint."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.INLINE,
-            directive="inline",
-            value="sometimes",
+            directive='inline',
+            value='sometimes',
             options={},
         )
         with pytest.raises(CatnipPragmaError, match="Unknown inline hint"):
@@ -302,13 +261,13 @@ class TestInlinePragma:
     def test_should_inline_default(self):
         """should_inline returns 'auto' by default."""
         ctx = PragmaContext()
-        assert ctx.should_inline("unknown_func") == "auto"
+        assert ctx.should_inline('unknown_func') == 'auto'
 
     def test_should_inline_specific(self):
         """should_inline returns specific hint."""
         ctx = PragmaContext()
-        ctx.inline_hints["my_func"] = "always"
-        assert ctx.should_inline("my_func") == "always"
+        ctx.inline_hints['my_func'] = "always"
+        assert ctx.should_inline('my_func') == 'always'
 
 
 class TestPurePragma:
@@ -319,8 +278,8 @@ class TestPurePragma:
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.PURE,
-            directive="pure",
-            value="my_func",
+            directive='pure',
+            value='my_func',
             options={},
         )
         ctx.add(p)
@@ -334,8 +293,8 @@ class TestPurePragma:
 
         p = Pragma(
             type=PragmaType.PURE,
-            directive="pure",
-            value="my_func",
+            directive='pure',
+            value='my_func',
             options={"enable": False},
         )
         ctx.add(p)
@@ -345,28 +304,26 @@ class TestPurePragma:
 class TestCachePragma:
     """Test cache control pragmas."""
 
-    @pytest.mark.parametrize("value", [True, "on", "yes", "true"])
-    def test_enable_cache(self, value):
-        """Enable cache via various formats."""
+    def test_enable_cache(self):
+        """Enable cache."""
         ctx = PragmaContext()
         ctx.cache_enabled = False  # Start disabled
         p = Pragma(
             type=PragmaType.CACHE,
-            directive="cache",
-            value=value,
+            directive='cache',
+            value=True,
             options={},
         )
         ctx.add(p)
         assert ctx.cache_enabled is True
 
-    @pytest.mark.parametrize("value", [False, "off", "no", "false"])
-    def test_disable_cache(self, value):
-        """Disable cache via various formats."""
+    def test_disable_cache(self):
+        """Disable cache."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.CACHE,
-            directive="cache",
-            value=value,
+            directive='cache',
+            value=False,
             options={},
         )
         ctx.add(p)
@@ -376,28 +333,26 @@ class TestCachePragma:
 class TestDebugPragma:
     """Test debug mode pragmas."""
 
-    @pytest.mark.parametrize("value", [True, "on", "yes", "true"])
-    def test_enable_debug(self, value):
+    def test_enable_debug(self):
         """Enable debug mode."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.DEBUG,
-            directive="debug",
-            value=value,
+            directive='debug',
+            value=True,
             options={},
         )
         ctx.add(p)
         assert ctx.debug_mode is True
 
-    @pytest.mark.parametrize("value", [False, "off", "no", "false"])
-    def test_disable_debug(self, value):
+    def test_disable_debug(self):
         """Disable debug mode."""
         ctx = PragmaContext()
         ctx.debug_mode = True  # Start enabled
         p = Pragma(
             type=PragmaType.DEBUG,
-            directive="debug",
-            value=value,
+            directive='debug',
+            value=False,
             options={},
         )
         ctx.add(p)
@@ -407,28 +362,26 @@ class TestDebugPragma:
 class TestTCOPragma:
     """Test tail-call optimization pragmas."""
 
-    @pytest.mark.parametrize("value", [True, "on", "yes", "true"])
-    def test_enable_tco(self, value):
+    def test_enable_tco(self):
         """Enable TCO."""
         ctx = PragmaContext()
         ctx.tco_enabled = False  # Start disabled
         p = Pragma(
             type=PragmaType.TCO,
-            directive="tco",
-            value=value,
+            directive='tco',
+            value=True,
             options={},
         )
         ctx.add(p)
         assert ctx.tco_enabled is True
 
-    @pytest.mark.parametrize("value", [False, "off", "no", "false"])
-    def test_disable_tco(self, value):
+    def test_disable_tco(self):
         """Disable TCO."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.TCO,
-            directive="tco",
-            value=value,
+            directive='tco',
+            value=False,
             options={},
         )
         ctx.add(p)
@@ -438,32 +391,43 @@ class TestTCOPragma:
 class TestJITPragma:
     """Test JIT compilation pragmas."""
 
-    @pytest.mark.parametrize("value", [True, "on", "yes", "true"])
-    def test_enable_jit(self, value):
+    def test_enable_jit(self):
         """Enable JIT."""
         ctx = PragmaContext()
         ctx.jit_enabled = False  # Start disabled
         p = Pragma(
             type=PragmaType.JIT,
-            directive="jit",
-            value=value,
+            directive='jit',
+            value=True,
             options={},
         )
         ctx.add(p)
         assert ctx.jit_enabled is True
 
-    @pytest.mark.parametrize("value", [False, "off", "no", "false"])
-    def test_disable_jit(self, value):
+    def test_disable_jit(self):
         """Disable JIT."""
         ctx = PragmaContext()
         p = Pragma(
             type=PragmaType.JIT,
-            directive="jit",
-            value=value,
+            directive='jit',
+            value=False,
             options={},
         )
         ctx.add(p)
         assert ctx.jit_enabled is False
+
+    def test_jit_all(self):
+        """JIT 'all' mode."""
+        ctx = PragmaContext()
+        p = Pragma(
+            type=PragmaType.JIT,
+            directive='jit',
+            value='all',
+            options={},
+        )
+        ctx.add(p)
+        assert ctx.jit_enabled is True
+        assert ctx.jit_all is True
 
 
 class TestPragmaContextStateStack:
@@ -564,7 +528,7 @@ class TestPragmaIntegration:
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.parse('pragma("tco", "off")')
+        catnip.parse('pragma("tco", False)')
         catnip.execute()
         assert catnip.pragma_context.tco_enabled is False
 
@@ -573,7 +537,7 @@ class TestPragmaIntegration:
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.parse('pragma("debug", "on")')
+        catnip.parse('pragma("debug", True)')
         catnip.execute()
         assert catnip.pragma_context.debug_mode is True
 
@@ -582,7 +546,7 @@ class TestPragmaIntegration:
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.parse('pragma("cache", "off")')
+        catnip.parse('pragma("cache", False)')
         catnip.execute()
         assert catnip.pragma_context.cache_enabled is False
 
@@ -592,9 +556,9 @@ class TestPragmaIntegration:
 
         catnip = Catnip()
         catnip.parse("""
-            pragma("tco", "off")
-            pragma("debug", "on")
-            pragma("cache", "off")
+            pragma("tco", False)
+            pragma("debug", True)
+            pragma("cache", False)
         """)
         catnip.execute()
         assert catnip.pragma_context.tco_enabled is False
@@ -605,46 +569,43 @@ class TestPragmaIntegration:
 class TestOptimizationLevel:
     """Test optimization level settings."""
 
-    def test_optimize_level_0_disables_constant_folding(self):
-        """Level 0 disables all optimizations including constant folding."""
+    def test_optimize_level_0_no_folding(self):
+        """Level 0 (no semantic) keeps operations unfolded."""
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.pragma_context.optimize_level = 0
-        catnip.parse("2 + 3")
-        # With opt level 0, should NOT fold to 5
-        assert len(catnip.code) == 1
-        # Should be an Op ADD, not a literal 5
-        from catnip._rs import Op
-
-        assert isinstance(catnip.code[0], Op)
+        ir = catnip._pipeline.parse_to_ir("2 + 3", False)
+        # Without semantic, should NOT fold to 5
+        assert len(ir) == 1
+        assert ir[0].kind == 'Op'
 
     def test_optimize_level_3_enables_constant_folding(self):
-        """Level 3 enables all optimizations including constant folding."""
+        """Semantic analysis folds constant expressions."""
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.pragma_context.optimize_level = 3
-        catnip.parse("2 + 3")
-        # With opt level 3, should fold to 5
-        assert catnip.code == [5]
+        ir = catnip._pipeline.parse_to_ir("2 + 3", True)
+        assert len(ir) == 1
+        # Constant folding: 2 + 3 → 5
+        assert ir[0].kind == 'Int'
+        assert ir[0].value == 5
 
-    def test_pragma_optimize_none(self):
-        """pragma('optimize', 'none') sets level to 0."""
+    def test_pragma_optimize_0(self):
+        """pragma('optimize', 0) sets level to 0."""
         from catnip import Catnip
 
         catnip = Catnip()
-        catnip.parse('pragma("optimize", "none")')
+        catnip.parse('pragma("optimize", 0)')
         catnip.execute()
         assert catnip.pragma_context.optimize_level == 0
 
-    def test_pragma_optimize_full(self):
-        """pragma('optimize', 'full') sets level to 3."""
+    def test_pragma_optimize_3(self):
+        """pragma('optimize', 3) sets level to 3."""
         from catnip import Catnip
 
         catnip = Catnip()
         catnip.pragma_context.optimize_level = 0  # Start at 0
-        catnip.parse('pragma("optimize", "full")')
+        catnip.parse('pragma("optimize", 3)')
         catnip.execute()
         assert catnip.pragma_context.optimize_level == 3
 
@@ -666,5 +627,5 @@ class TestOptimizationLevel:
         assert result0 == result3 == 5
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     pytest.main([__file__, "-v"])

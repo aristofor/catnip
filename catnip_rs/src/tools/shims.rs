@@ -4,6 +4,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
+use crate::constants::{FORMAT_ALIGN_DEFAULT, FORMAT_INDENT_SIZE_DEFAULT, FORMAT_LINE_LENGTH_DEFAULT};
+
 // --- FormatConfig ---
 
 #[pyclass(name = "FormatConfig", from_py_object)]
@@ -13,16 +15,19 @@ pub struct FormatConfig {
     pub indent_size: usize,
     #[pyo3(get, set)]
     pub line_length: usize,
+    #[pyo3(get, set)]
+    pub align: bool,
 }
 
 #[pymethods]
 impl FormatConfig {
     #[new]
-    #[pyo3(signature = (indent_size=4, line_length=120))]
-    pub fn new(indent_size: usize, line_length: usize) -> Self {
+    #[pyo3(signature = (indent_size=FORMAT_INDENT_SIZE_DEFAULT, line_length=FORMAT_LINE_LENGTH_DEFAULT, align=FORMAT_ALIGN_DEFAULT))]
+    pub fn new(indent_size: usize, line_length: usize, align: bool) -> Self {
         Self {
             indent_size,
             line_length,
+            align,
         }
     }
 
@@ -56,19 +61,24 @@ impl FormatConfig {
                     match key {
                         "indent_size" => {
                             config.indent_size = value.parse().map_err(|_| {
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Invalid indent_size value: {}",
-                                    value
-                                ))
+                                pyo3::exceptions::PyValueError::new_err(format!("Invalid indent_size value: {}", value))
                             })?;
                         }
                         "line_length" => {
                             config.line_length = value.parse().map_err(|_| {
-                                pyo3::exceptions::PyValueError::new_err(format!(
-                                    "Invalid line_length value: {}",
-                                    value
-                                ))
+                                pyo3::exceptions::PyValueError::new_err(format!("Invalid line_length value: {}", value))
                             })?;
+                        }
+                        "align" => {
+                            config.align = match value {
+                                "true" => true,
+                                "false" => false,
+                                _ => {
+                                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                        "Invalid align value: {value}. Expected 'true' or 'false'"
+                                    )));
+                                }
+                            };
                         }
                         _ => {}
                     }
@@ -81,8 +91,10 @@ impl FormatConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "FormatConfig(indent_size={}, line_length={})",
-            self.indent_size, self.line_length
+            "FormatConfig(indent_size={}, line_length={}, align={})",
+            self.indent_size,
+            self.line_length,
+            if self.align { "True" } else { "False" },
         )
     }
 }
@@ -90,8 +102,9 @@ impl FormatConfig {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
-            indent_size: 4,
-            line_length: 120,
+            indent_size: FORMAT_INDENT_SIZE_DEFAULT,
+            line_length: FORMAT_LINE_LENGTH_DEFAULT,
+            align: FORMAT_ALIGN_DEFAULT,
         }
     }
 }
@@ -101,6 +114,7 @@ impl FormatConfig {
         catnip_tools::config::FormatConfig {
             indent_size: self.indent_size,
             line_length: self.line_length,
+            align: self.align,
         }
     }
 }
@@ -124,7 +138,7 @@ impl Formatter {
 
     pub fn format(&self, _py: Python, source: &str) -> PyResult<String> {
         catnip_tools::formatter::format_code(source, &self.config.to_tools())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 }
 
@@ -134,8 +148,7 @@ impl Formatter {
 #[pyo3(signature = (source, config=None))]
 pub fn format_code(_py: Python, source: &str, config: Option<FormatConfig>) -> PyResult<String> {
     let cfg = config.unwrap_or_default();
-    catnip_tools::formatter::format_code(source, &cfg.to_tools())
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    catnip_tools::formatter::format_code(source, &cfg.to_tools()).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 // --- Severity ---
@@ -179,30 +192,28 @@ pub struct LintConfig {
     pub check_semantic: bool,
     #[pyo3(get, set)]
     pub check_ir: bool,
+    #[pyo3(get, set)]
+    pub check_names: bool,
 }
 
 #[pymethods]
 impl LintConfig {
     #[new]
-    #[pyo3(signature = (check_syntax=true, check_style=true, check_semantic=true, check_ir=false))]
-    pub fn new(
-        check_syntax: bool,
-        check_style: bool,
-        check_semantic: bool,
-        check_ir: bool,
-    ) -> Self {
+    #[pyo3(signature = (check_syntax=true, check_style=true, check_semantic=true, check_ir=false, check_names=false))]
+    pub fn new(check_syntax: bool, check_style: bool, check_semantic: bool, check_ir: bool, check_names: bool) -> Self {
         Self {
             check_syntax,
             check_style,
             check_semantic,
             check_ir,
+            check_names,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "LintConfig(syntax={}, style={}, semantic={}, ir={})",
-            self.check_syntax, self.check_style, self.check_semantic, self.check_ir
+            "LintConfig(syntax={}, style={}, semantic={}, ir={}, names={})",
+            self.check_syntax, self.check_style, self.check_semantic, self.check_ir, self.check_names
         )
     }
 }
@@ -214,6 +225,7 @@ impl Default for LintConfig {
             check_style: true,
             check_semantic: true,
             check_ir: false,
+            check_names: false,
         }
     }
 }
@@ -294,10 +306,11 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
         check_style: cfg.check_style,
         check_semantic: cfg.check_semantic,
         check_ir: cfg.check_ir,
+        check_names: cfg.check_names,
     };
 
-    let diagnostics = catnip_tools::linter::lint_code(source, &tools_cfg)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let diagnostics =
+        catnip_tools::linter::lint_code(source, &tools_cfg).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     let list = PyList::empty(py);
     for d in diagnostics {

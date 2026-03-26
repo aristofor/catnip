@@ -11,8 +11,10 @@
 //! 2. Then reassigned before any intervening use
 //! 3. The first assignment's value is never read
 
+use super::extract_var_name;
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -34,6 +36,12 @@ impl DeadStoreEliminationPass {
             last_store: RwLock::new(HashMap::new()),
             read_indices: RwLock::new(HashSet::new()),
         }
+    }
+}
+
+impl Default for DeadStoreEliminationPass {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -68,7 +76,7 @@ impl OptimizationPass for DeadStoreEliminationPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -89,9 +97,7 @@ impl OptimizationPass for DeadStoreEliminationPass {
                             if let Ok(args_inner) = arg.getattr("args") {
                                 if let Ok(args_inner_tuple) = args_inner.cast::<PyTuple>() {
                                     if args_inner_tuple.len() >= 1 {
-                                        if let Ok(dest_name) =
-                                            args_inner_tuple.get_item(0)?.extract::<String>()
-                                        {
+                                        if let Some(dest_name) = extract_var_name(&args_inner_tuple.get_item(0)?) {
                                             // Mark this as a store for the variable
                                             self.last_store.write().unwrap().insert(dest_name, idx);
                                         }
@@ -126,7 +132,7 @@ impl OptimizationPass for DeadStoreEliminationPass {
         let new_args_tuple = PyTuple::new(py, &new_args)?;
 
         // Create new IR with filtered args
-        let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+        let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
         let ident = visited_bound.getattr("ident")?;
         let kwargs = visited_bound.getattr("kwargs")?;
 
@@ -154,7 +160,7 @@ impl OptimizationPass for DeadStoreEliminationPass {
 
 impl DeadStoreEliminationPass {
     /// Record all Ref nodes in an operation (reads of variables)
-    fn record_reads(&self, py: Python<'_>, op: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn record_reads(&self, _py: Python<'_>, op: &Bound<'_, PyAny>) -> PyResult<()> {
         let type_name_obj = op.get_type().name()?;
         let type_name = type_name_obj.to_str()?;
 
@@ -173,7 +179,7 @@ impl DeadStoreEliminationPass {
             if let Ok(args) = op.getattr("args") {
                 for arg in args.try_iter()? {
                     let arg = arg?;
-                    self.record_reads(py, &arg)?;
+                    self.record_reads(_py, &arg)?;
                 }
             }
             if let Ok(kwargs) = op.getattr("kwargs") {
@@ -182,7 +188,7 @@ impl DeadStoreEliminationPass {
                         let item = item?;
                         let item_tuple = item.cast::<PyTuple>()?;
                         let value = item_tuple.get_item(1)?;
-                        self.record_reads(py, &value)?;
+                        self.record_reads(_py, &value)?;
                     }
                 }
             }
@@ -192,11 +198,7 @@ impl DeadStoreEliminationPass {
     }
 
     /// Identify stores that are dead (overwritten before being read)
-    fn identify_dead_stores(
-        &self,
-        _py: Python<'_>,
-        args_tuple: &Bound<'_, PyTuple>,
-    ) -> PyResult<HashSet<usize>> {
+    fn identify_dead_stores(&self, _py: Python<'_>, args_tuple: &Bound<'_, PyTuple>) -> PyResult<HashSet<usize>> {
         let mut dead_stores = HashSet::new();
         let read_indices = self.read_indices.read().unwrap();
 
@@ -214,9 +216,7 @@ impl DeadStoreEliminationPass {
                             if let Ok(args_inner) = arg.getattr("args") {
                                 if let Ok(args_inner_tuple) = args_inner.cast::<PyTuple>() {
                                     if args_inner_tuple.len() >= 1 {
-                                        if let Ok(var_name) =
-                                            args_inner_tuple.get_item(0)?.extract::<String>()
-                                        {
+                                        if let Some(var_name) = extract_var_name(&args_inner_tuple.get_item(0)?) {
                                             var_stores.entry(var_name).or_default().push(idx);
                                         }
                                     }
@@ -239,8 +239,7 @@ impl DeadStoreEliminationPass {
                     // A store is dead if:
                     // 1. It's not the last store for this variable
                     // 2. The variable is not read between the two stores
-                    let is_read_between =
-                        (first_store_idx + 1..second_store_idx).any(|i| read_indices.contains(&i));
+                    let is_read_between = (first_store_idx + 1..second_store_idx).any(|i| read_indices.contains(&i));
 
                     if !is_read_between {
                         dead_stores.insert(first_store_idx);

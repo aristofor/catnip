@@ -37,8 +37,9 @@ catnip format --diff script.cat
 ### Options
 
 ```bash
-catnip format -l 80 script.cat        # Line length (défaut: 120)
-catnip format --indent-size 2 src/     # Taille d'indentation (défaut: 4)
+catnip format -l 80 script.cat            # Line length (défaut: 120)
+catnip format --indent-size 2 src/        # Taille d'indentation (défaut: 4)
+catnip format --align src/               # Forcer --align (activé par défaut)
 ```
 
 ### Formater depuis stdin
@@ -80,7 +81,7 @@ z = +x
 w = ~a
 ```
 
-**`not` keyword** : espace avant (sauf debut de ligne) et espace apres
+**`not` keyword** : espace avant (sauf début de ligne) et espace après
 
 ```python
 # Avant
@@ -139,7 +140,14 @@ list(1, 2, 3)
 func(a, b, c)
 ```
 
-**Point-virgules** : espace apres, pas avant
+**Keywords en position valeur** : pas d'espace avant `,` ou `;`
+
+```python
+# (op, a, b) → préservé tel quel (pas "op , a, b")
+# struct S { op; x; } → pas "op ; x ;"
+```
+
+**Point-virgules** : espace après, pas avant
 
 ```python
 # Avant
@@ -189,6 +197,19 @@ if x {
 }
 ```
 
+**Instanciation de structs** : pas d'espace avant `{`
+
+```python
+# Les blocs de contrôle gardent l'espace
+if x { ... }
+while y { ... }
+struct Point { x; y; }
+
+# Les instanciations de structs n'ont pas d'espace
+Point{1, 2}
+f(Point{x, y}, other)
+```
+
 **Structures imbriquées**
 
 ```python
@@ -211,14 +232,16 @@ match x {
 
 ### Commentaires
 
-**Commentaires inline** : minimum 2 espaces avant
+**Commentaires inline** : exactement 2 espaces avant `#`
 
 ```python
 # Avant
 x = 42# important
+y = 1,# trailing
 
 # Après
 x = 42  # important
+y = 1,  # trailing
 ```
 
 **Commentaires standalone** : indentation normale
@@ -243,7 +266,7 @@ Les f-strings et b-strings sont preservees intactes (pas de reformatage du conte
 
 ```python
 x = f"hello {name}"       # préservé
-y = b'raw bytes'           # préservé
+y = b'raw bytes'          # préservé
 ```
 
 ### Newlines
@@ -252,9 +275,27 @@ y = b'raw bytes'           # préservé
 
 **Maximum 2 newlines consecutives** : les sequences de 3+ newlines sont reduites a 2.
 
-**Pas de newlines en debut de fichier** : les lignes vides initiales sont supprimees.
+**Pas de newlines en début de fichier** : les lignes vides initiales sont supprimées.
 
 **Une seule newline en fin de fichier.**
+
+**Décorateurs isolés sur leur propre ligne** : chaque `@decorator` est placé seul sur sa ligne, comme en Python.
+
+```
+# Avant
+@jit f = (n) => { n * 2 }
+@jit @pure g = (x) => { x + 1 }
+
+# Après
+@jit
+f = (n) => { n * 2 }
+@jit
+@pure
+g = (x) => { x + 1 }
+```
+
+Cette règle s'applique aux décorateurs d'assignments (`@jit`, `@pure`, `@cached`) et aux décorateurs de méthodes dans
+les structs/traits (`@abstract`, `@static`).
 
 ### Jointure de lignes
 
@@ -273,7 +314,7 @@ f(aaaa, bbbb, cccc)
 La jointure détecte les continuations par :
 
 - Fin de ligne : `,`, `(`, `[`, `+`, `-`, `*`, `/`, `and`, `or`, `=>`
-- Début de ligne suivante : `+`, `-`, `)`, `]`, `and`, `or`
+- Début de ligne suivante : `.`, `+`, `-`, `)`, `]`, `and`, `or`
 
 Les lignes vides (séparateurs de sections) ne sont jamais jointes.
 
@@ -289,12 +330,36 @@ data = dict(
     b=2,
 )
 
+# Fonctionne aussi avec des commentaires trailing
+points = list(
+    Point(0, 0),
+    Point(1, 1),
+    Point(2, 2),  # doublon
+)
+
 # Pas de virgule terminale -> jointure en inline
 data = dict(a=1, b=2)
 ```
 
 Ce comportement s'inspire de Black (Python) et Prettier (JS) : la virgule terminale est un signal explicite du
 développeur pour conserver la disposition verticale.
+
+#### Concaténation de strings multilignes
+
+Les concaténations de strings explicitement réparties sur plusieurs lignes sont préservées. Quand les deux opérandes du
+`+` sont des littéraux string, le formatteur considère que la coupure est intentionnelle (lisibilité, SQL, HTML...) :
+
+```python
+# Préservé tel quel
+query = "SELECT * FROM users " +
+    "WHERE active = 1 " +
+    "ORDER BY name"
+
+# Les concaténations non-string sont toujours jointes si elles tiennent
+x = a +
+    b
+# → x = a + b
+```
 
 #### Fermetures empilées
 
@@ -395,6 +460,65 @@ doubled = numbers.[* 2]
 filtered = numbers.[if > 3]
 ```
 
+## Alignement en colonne
+
+Le formatteur **préserve** l'alignement existant des symboles `=`, `=>` et `#` sur les groupes de lignes consécutives.
+Activé par défaut, il ne force jamais l'alignement sur du code qui ne l'est pas.
+
+Le principe : si le développeur a pris le temps d'aligner ses `=`, le formatteur respecte cette intention et maintient
+l'alignement. Si le code n'est pas aligné, il n'est pas touché.
+
+### Détection de l'intention
+
+Le formatteur détecte l'alignement dans le source original : dans un groupe de lignes, si au moins 2 partagent la même
+colonne pour le symbole et qu'au moins une a du padding explicite, le groupe est considéré comme intentionnellement
+aligné.
+
+```python
+# Pas d'intention → pas touché
+x = 1
+longer_name = 2
+
+# Intention détectée (x a du padding) → alignement préservé
+x           = 1
+longer_name = 2
+
+# Alignement cassé par une nouvelle ligne → réparé
+x           = 1           x              = 1
+longer_name = 2     →     longer_name    = 2
+very_long_name = 3        very_long_name = 3
+```
+
+### Symboles alignés
+
+**Assignations (`=`)** — uniquement les `=` hors parenthèses (pas les kwargs, `==`, `+=`, etc.)
+
+**Match arms (`=>`)** — alignement des flèches dans les bras de match
+
+**Commentaires trailing (`#`)** — alignement des `#` inline (les commentaires standalone sont ignorés)
+
+### Groupement
+
+Un **groupe** est une suite de lignes consécutives non-vides, au même niveau d'indentation, contenant toutes le symbole
+cible. Une ligne vide, un changement d'indentation, ou une ligne à l'intérieur d'un string literal multilignes casse le
+groupe. Minimum 2 lignes pour déclencher l'alignement.
+
+### Configuration
+
+Activé par défaut. Désactivable via TOML :
+
+```toml
+[format]
+align = false
+```
+
+Ou via l'API programmatique :
+
+```python
+config = FormatConfig(align=False)
+formatted = format_code(source, config)
+```
+
 ## Architecture interne
 
 Le formatteur utilise une approche **token-based** en 5 phases, toutes en Rust :
@@ -415,9 +539,10 @@ lignes différentes, en respectant le nombre de lignes vides de la source (un ga
 Le formatteur parcourt les tokens et applique les règles localement :
 
 - `needs_space_before()` : opérateurs binaires, keywords, détection du contexte unaire
-- `needs_space_after()` : virgules, point-virgules, `=>`, keywords
-- Gestion de l'indentation via `LBRACE`/`RBRACE`
-- Préservation des commentaires avec espacement minimal
+- `needs_space_after()` : virgules, point-virgules, `=>`, keywords (sauf avant `,`/`;`)
+- Gestion de l'indentation via `LBRACE`/`RBRACE` avec distinction bloc/struct init (`BraceKind`)
+- Préservation des commentaires avec exactement 2 espaces avant `#` inline
+- Tracking `after_block_keyword` pour distinguer `if x { }` (bloc) de `Point{x, y}` (struct init)
 
 La détection unaire utilise le dernier token significatif (non-newline) pour distinguer `-x` (unaire) de `a - x`
 (binaire), même à travers des sauts de ligne.
@@ -426,10 +551,17 @@ La détection unaire utilise le dernier token significatif (non-newline) pour di
 
 Deux passes sur le texte formaté :
 
-- **Jointure** (`join_short_lines`) : fusionne les lignes de continuation qui tiennent dans `line_length`
+- **Jointure** (`join_short_lines`) : fusionne les lignes de continuation qui tiennent dans `line_length`. Ne remonte
+  pas le contenu après `{` (un bloc ouvre un nouveau scope, pas une continuation)
 - **Coupure** (`wrap_long_lines`) : découpe les lignes qui dépassent `line_length` aux meilleurs points de coupure
 
-### 5. Normalisation finale
+### 5. Alignement en colonne (préservation)
+
+Post-processing qui compare le texte formaté au source original. Pour chaque groupe de lignes consécutives au même
+indent, vérifie si l'alignement est intentionnel dans le source (via `has_alignment_intent` : au moins 2 lignes au même
+colonne + padding explicite). Si oui, aligne le groupe dans la sortie. Sinon, ne touche pas.
+
+### 6. Normalisation finale
 
 - Suppression des espaces en fin de ligne (trailing whitespace)
 - Suppression des newlines en début de fichier
@@ -470,6 +602,10 @@ print(formatted)
 
 ```python
 config = FormatConfig(indent_size=2, line_length=80)
+formatted = format_code(source, config)
+
+# Avec alignement en colonne
+config = FormatConfig(align=True)
 formatted = format_code(source, config)
 ```
 
@@ -512,8 +648,7 @@ done
 
 ## Limitations connues
 
-1. **Broadcasting edge cases** : `.[` peut avoir un espace superflu dans certains cas complexes
-1. **Blocs single-line** : pas d'optimisation pour `{ return 1 }` vs `{\n    return 1\n}`
+1. **Broadcasting edge cases** : `.[` peut avoir une espace superflue dans certains cas complexes
 1. **Jointure non-idempotente** : formatter deux fois un code avec des lignes jointes puis recoupees peut donner un
    resultat different (les coupures de ligne ne reproduisent pas forcement l'indentation originale)
 

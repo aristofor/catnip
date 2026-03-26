@@ -6,8 +6,25 @@
 //! - Compiler warnings
 //! - Runtime behavior
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
+
+/// Raise a CatnipPragmaError.
+fn pragma_error(py: Python, message: &str) -> PyResult<PyErr> {
+    let exc_module = py.import(PY_MOD_EXC)?;
+    let pragma_error_cls = exc_module.getattr("CatnipPragmaError")?;
+    Ok(PyErr::from_value(pragma_error_cls.call1((message,))?))
+}
+
+/// Extract a boolean value from a pragma, raising CatnipPragmaError on invalid input.
+fn extract_bool_pragma(py: Python, pragma: &Pragma, name: &str) -> PyResult<bool> {
+    pragma
+        .value
+        .bind(py)
+        .extract::<bool>()
+        .map_err(|_| pragma_error(py, &format!("Pragma '{}' requires True or False", name)).unwrap())
+}
 
 /// Types of pragmas supported.
 #[pyclass(eq, eq_int, module = "catnip._rs", from_py_object)]
@@ -140,6 +157,37 @@ impl PragmaType {
     }
 }
 
+impl PragmaType {
+    /// Resolve a directive string to a PragmaType. Single canonical form per directive.
+    pub fn from_directive(s: &str) -> Option<Self> {
+        match s {
+            "optimize" => Some(Self::Optimize),
+            "warning" => Some(Self::Warning),
+            "inline" => Some(Self::Inline),
+            "pure" => Some(Self::Pure),
+            "cache" => Some(Self::Cache),
+            "debug" => Some(Self::Debug),
+            "tco" => Some(Self::Tco),
+            "jit" => Some(Self::Jit),
+            "nd_mode" => Some(Self::NdMode),
+            "nd_workers" => Some(Self::NdWorkers),
+            "nd_memoize" => Some(Self::NdMemoize),
+            "nd_batch_size" => Some(Self::NdBatchSize),
+            _ => None,
+        }
+    }
+
+    /// All known directive names (delegates to catnip_core constants).
+    pub fn all_directives() -> &'static [&'static str] {
+        catnip_core::constants::PRAGMA_DIRECTIVES
+    }
+
+    /// Valid ND mode values (delegates to catnip_core constants).
+    pub fn nd_mode_values() -> &'static [&'static str] {
+        catnip_core::constants::ND_MODE_VALUES
+    }
+}
+
 /// Represents a pragma directive.
 #[pyclass(module = "catnip._rs")]
 #[derive(Debug)]
@@ -164,13 +212,7 @@ pub struct Pragma {
 impl Pragma {
     #[new]
     #[pyo3(signature = (r#type, directive, value, options, line=None))]
-    fn new(
-        r#type: PragmaType,
-        directive: String,
-        value: Py<PyAny>,
-        options: Py<PyAny>,
-        line: Option<i32>,
-    ) -> Self {
+    pub fn new(r#type: PragmaType, directive: String, value: Py<PyAny>, options: Py<PyAny>, line: Option<i32>) -> Self {
         Self {
             pragma_type: r#type,
             directive,
@@ -192,7 +234,7 @@ pub struct PragmaContext {
     pragmas: Vec<Py<Pragma>>,
 
     #[pyo3(get, set)]
-    optimize_level: i32,
+    pub optimize_level: i32,
 
     #[pyo3(get)]
     warnings: Py<pyo3::types::PyDict>,
@@ -204,31 +246,31 @@ pub struct PragmaContext {
     pure_functions: Py<pyo3::types::PySet>,
 
     #[pyo3(get, set)]
-    cache_enabled: bool,
+    pub cache_enabled: bool,
 
     #[pyo3(get, set)]
-    debug_mode: bool,
+    pub debug_mode: bool,
 
     #[pyo3(get, set)]
-    tco_enabled: bool,
+    pub tco_enabled: bool,
 
     #[pyo3(get, set)]
-    jit_enabled: bool,
+    pub jit_enabled: bool,
 
     #[pyo3(get, set)]
-    jit_all: bool,
+    pub jit_all: bool,
 
     #[pyo3(get, set)]
-    nd_mode: String,
+    pub nd_mode: String,
 
     #[pyo3(get, set)]
-    nd_workers: i32,
+    pub nd_workers: i32,
 
     #[pyo3(get, set)]
-    nd_memoize: bool,
+    pub nd_memoize: bool,
 
     #[pyo3(get, set)]
-    nd_batch_size: i32,
+    pub nd_batch_size: i32,
 
     state_stack: Vec<PragmaState>,
 }
@@ -240,6 +282,9 @@ struct PragmaState {
     pure_functions: Py<pyo3::types::PySet>,
     cache_enabled: bool,
     debug_mode: bool,
+    tco_enabled: bool,
+    jit_enabled: bool,
+    jit_all: bool,
     nd_mode: String,
     nd_workers: i32,
     nd_memoize: bool,
@@ -249,7 +294,7 @@ struct PragmaState {
 #[pymethods]
 impl PragmaContext {
     #[new]
-    fn new(py: Python) -> Self {
+    pub fn new(py: Python) -> Self {
         Self {
             pragmas: Vec::new(),
             optimize_level: 0,
@@ -270,7 +315,7 @@ impl PragmaContext {
     }
 
     /// Add a pragma and apply its effects.
-    fn add(&mut self, py: Python, pragma: Py<Pragma>) -> PyResult<()> {
+    pub fn add(&mut self, py: Python, pragma: Py<Pragma>) -> PyResult<()> {
         self.apply_pragma(py, pragma.clone_ref(py))?;
         self.pragmas.push(pragma);
         Ok(())
@@ -285,6 +330,9 @@ impl PragmaContext {
             pure_functions: self.pure_functions.clone_ref(py),
             cache_enabled: self.cache_enabled,
             debug_mode: self.debug_mode,
+            tco_enabled: self.tco_enabled,
+            jit_enabled: self.jit_enabled,
+            jit_all: self.jit_all,
             nd_mode: self.nd_mode.clone(),
             nd_workers: self.nd_workers,
             nd_memoize: self.nd_memoize,
@@ -296,7 +344,7 @@ impl PragmaContext {
     /// Restore state from stack.
     fn pop_state(&mut self, py: Python<'_>) -> PyResult<()> {
         let state = self.state_stack.pop().ok_or_else(|| {
-            let exc_module = py.import("catnip.exc").unwrap();
+            let exc_module = py.import(PY_MOD_EXC).unwrap();
             let internal_error = exc_module.getattr("CatnipWeirdError").unwrap();
             PyErr::from_value(internal_error.call1(("No state to pop",)).unwrap())
         })?;
@@ -307,6 +355,9 @@ impl PragmaContext {
         self.pure_functions = state.pure_functions;
         self.cache_enabled = state.cache_enabled;
         self.debug_mode = state.debug_mode;
+        self.tco_enabled = state.tco_enabled;
+        self.jit_enabled = state.jit_enabled;
+        self.jit_all = state.jit_all;
         self.nd_mode = state.nd_mode;
         self.nd_workers = state.nd_workers;
         self.nd_memoize = state.nd_memoize;
@@ -440,55 +491,25 @@ impl PragmaContext {
 
     /// Apply optimization level pragma.
     fn apply_optimize(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        // Try to parse as int
-        if let Ok(level) = value.extract::<i32>() {
-            if (0..=3).contains(&level) {
-                self.optimize_level = level;
-                return Ok(());
-            } else {
-                let exc_module = py.import("catnip.exc")?;
-                let pragma_error = exc_module.getattr("CatnipPragmaError")?;
-                return Err(PyErr::from_value(pragma_error.call1((format!(
-                    "Optimization level must be 0-3, got {}",
-                    level
-                ),))?));
-            }
-        }
-
-        // Try to parse as string
-        if let Ok(level_str) = value.extract::<String>() {
-            let level_str_lower = level_str.to_lowercase();
-            let level = match level_str_lower.as_str() {
-                "none" | "off" => 0,
-                "basic" | "low" => 1,
-                "medium" | "default" => 2,
-                "high" | "full" | "aggressive" => 3,
-                _ => {
-                    let exc_module = py.import("catnip.exc")?;
-                    let pragma_error = exc_module.getattr("CatnipPragmaError")?;
-                    return Err(PyErr::from_value(
-                        pragma_error
-                            .call1((format!("Unknown optimization level: {}", level_str),))?,
-                    ));
-                }
-            };
+        let level = pragma
+            .value
+            .bind(py)
+            .extract::<i32>()
+            .map_err(|_| pragma_error(py, "Pragma 'optimize' requires an integer 0-3").unwrap())?;
+        if (0..=3).contains(&level) {
             self.optimize_level = level;
-            return Ok(());
+            Ok(())
+        } else {
+            Err(pragma_error(
+                py,
+                &format!("Optimization level must be 0-3, got {}", level),
+            )?)
         }
-
-        let exc_module = py.import("catnip.exc")?;
-        let pragma_error = exc_module.getattr("CatnipPragmaError")?;
-        Err(PyErr::from_value(
-            pragma_error.call1(("Optimization level must be int or str",))?,
-        ))
     }
 
     /// Apply warning control pragma.
     fn apply_warning(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-        let action = value.extract::<String>()?.to_lowercase();
+        let enabled = extract_bool_pragma(py, pragma, "warning")?;
 
         let options = pragma.options.bind(py).cast::<PyDict>()?;
         let warning_name = options
@@ -496,19 +517,7 @@ impl PragmaContext {
             .and_then(|v| v.extract::<String>().ok())
             .unwrap_or_else(|| "all".to_string());
 
-        let warnings_dict = self.warnings.bind(py);
-        match action.as_str() {
-            "on" | "yes" => warnings_dict.set_item(warning_name, true)?,
-            "off" | "no" => warnings_dict.set_item(warning_name, false)?,
-            _ => {
-                let exc_module = py.import("catnip.exc")?;
-                let pragma_error = exc_module.getattr("CatnipPragmaError")?;
-                return Err(PyErr::from_value(
-                    pragma_error.call1((format!("Unknown warning action: {}", action),))?,
-                ));
-            }
-        };
-
+        self.warnings.bind(py).set_item(warning_name, enabled)?;
         Ok(())
     }
 
@@ -530,7 +539,7 @@ impl PragmaContext {
                 Ok(())
             }
             _ => {
-                let exc_module = py.import("catnip.exc")?;
+                let exc_module = py.import(PY_MOD_EXC)?;
                 let pragma_error = exc_module.getattr("CatnipPragmaError")?;
                 Err(PyErr::from_value(
                     pragma_error.call1((format!("Unknown inline hint: {}", hint),))?,
@@ -562,64 +571,19 @@ impl PragmaContext {
 
     /// Control caching.
     fn apply_cache(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        if let Ok(bool_val) = value.extract::<bool>() {
-            self.cache_enabled = bool_val;
-            return Ok(());
-        }
-
-        if let Ok(action) = value.extract::<String>() {
-            let action_lower = action.to_lowercase();
-            match action_lower.as_str() {
-                "on" | "yes" | "true" => self.cache_enabled = true,
-                "off" | "no" | "false" => self.cache_enabled = false,
-                _ => {}
-            }
-        }
-
+        self.cache_enabled = extract_bool_pragma(py, pragma, "cache")?;
         Ok(())
     }
 
     /// Control debug mode.
     fn apply_debug(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        if let Ok(bool_val) = value.extract::<bool>() {
-            self.debug_mode = bool_val;
-            return Ok(());
-        }
-
-        if let Ok(action) = value.extract::<String>() {
-            let action_lower = action.to_lowercase();
-            match action_lower.as_str() {
-                "on" | "yes" | "true" => self.debug_mode = true,
-                "off" | "no" | "false" => self.debug_mode = false,
-                _ => {}
-            }
-        }
-
+        self.debug_mode = extract_bool_pragma(py, pragma, "debug")?;
         Ok(())
     }
 
     /// Control tail-call optimization.
     fn apply_tco(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        if let Ok(bool_val) = value.extract::<bool>() {
-            self.tco_enabled = bool_val;
-            return Ok(());
-        }
-
-        if let Ok(action) = value.extract::<String>() {
-            let action_lower = action.to_lowercase();
-            match action_lower.as_str() {
-                "on" | "yes" | "true" => self.tco_enabled = true,
-                "off" | "no" | "false" => self.tco_enabled = false,
-                _ => {}
-            }
-        }
-
+        self.tco_enabled = extract_bool_pragma(py, pragma, "tco")?;
         Ok(())
     }
 
@@ -633,26 +597,15 @@ impl PragmaContext {
             return Ok(());
         }
 
-        if let Ok(action) = value.extract::<String>() {
-            let action_lower = action.to_lowercase();
-            match action_lower.as_str() {
-                "all" => {
-                    self.jit_enabled = true;
-                    self.jit_all = true;
-                }
-                "on" | "yes" | "true" => {
-                    self.jit_enabled = true;
-                    self.jit_all = false;
-                }
-                "off" | "no" | "false" => {
-                    self.jit_enabled = false;
-                    self.jit_all = false;
-                }
-                _ => {}
+        if let Ok(s) = value.extract::<String>() {
+            if s == "all" {
+                self.jit_enabled = true;
+                self.jit_all = true;
+                return Ok(());
             }
         }
 
-        Ok(())
+        Err(pragma_error(py, "Pragma 'jit' requires True, False, or \"all\"")?)
     }
 
     /// Control ND-recursion execution mode.
@@ -668,7 +621,7 @@ impl PragmaContext {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown ND mode: {}. Use 'sequential', 'thread', or 'process'",
                     mode
-                )))
+                )));
             }
         }
 
@@ -677,90 +630,40 @@ impl PragmaContext {
 
     /// Control ND-recursion worker count.
     fn apply_nd_workers(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        // Try int extraction first, then fallback to string parsing
-        let workers = if let Ok(i) = value.extract::<i32>() {
-            i
-        } else if let Ok(s) = value.extract::<String>() {
-            // Parse string to int
-            s.trim().parse::<i32>().map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "nd_workers must be integer or parseable string, got '{}': {}",
-                    s, e
-                ))
-            })?
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "nd_workers must be int or string",
-            ));
-        };
-
+        let workers = pragma
+            .value
+            .bind(py)
+            .extract::<i32>()
+            .map_err(|_| pragma_error(py, "Pragma 'nd_workers' requires an integer").unwrap())?;
         if workers < 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "ND workers must be non-negative, got {}",
-                workers
-            )));
+            return Err(pragma_error(
+                py,
+                &format!("ND workers must be non-negative, got {}", workers),
+            )?);
         }
-
         self.nd_workers = workers;
         Ok(())
     }
 
     /// Control ND-recursion memoization.
     fn apply_nd_memoize(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        if let Ok(bool_val) = value.extract::<bool>() {
-            self.nd_memoize = bool_val;
-            return Ok(());
-        }
-
-        if let Ok(action) = value.extract::<String>() {
-            let action_lower = action.to_lowercase();
-            match action_lower.as_str() {
-                "on" | "yes" | "true" => self.nd_memoize = true,
-                "off" | "no" | "false" => self.nd_memoize = false,
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "ND memoize must be on/off, got {}",
-                        action
-                    )))
-                }
-            }
-        }
-
+        self.nd_memoize = extract_bool_pragma(py, pragma, "nd_memoize")?;
         Ok(())
     }
 
     /// Control ND-recursion batch size for parallel execution.
     fn apply_nd_batch_size(&mut self, py: Python, pragma: &Pragma) -> PyResult<()> {
-        let value = pragma.value.bind(py);
-
-        // Try int extraction first, then fallback to string parsing
-        let batch_size = if let Ok(i) = value.extract::<i32>() {
-            i
-        } else if let Ok(s) = value.extract::<String>() {
-            // Parse string to int
-            s.trim().parse::<i32>().map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "nd_batch_size must be integer or parseable string, got '{}': {}",
-                    s, e
-                ))
-            })?
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "nd_batch_size must be int or string",
-            ));
-        };
-
+        let batch_size = pragma
+            .value
+            .bind(py)
+            .extract::<i32>()
+            .map_err(|_| pragma_error(py, "Pragma 'nd_batch_size' requires an integer").unwrap())?;
         if batch_size < 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "ND batch size must be non-negative, got {}",
-                batch_size
-            )));
+            return Err(pragma_error(
+                py,
+                &format!("ND batch size must be non-negative, got {}", batch_size),
+            )?);
         }
-
         self.nd_batch_size = batch_size;
         Ok(())
     }

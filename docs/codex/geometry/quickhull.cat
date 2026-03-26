@@ -1,3 +1,4 @@
+#!/usr/bin/env catnip
 # Quickhull 2D
 #
 # Entrée : liste de Point{x, y}
@@ -10,12 +11,9 @@
 #
 # Ref : https://en.wikipedia.org/wiki/Quickhull
 # Voir aussi : convex_hull.cat (scan de Graham, O(n log n) garanti)
-#
-# Run:
-#   catnip docs/codex/geometry/quickhull.cat
 
 struct Point {
-    x, y
+    x; y;
 
     # Comparaison lexicographique (x puis y)
     op <(self, rhs) => { self.x < rhs.x or (self.x == rhs.x and self.y < rhs.y) }
@@ -30,30 +28,13 @@ struct Point {
 
 # Filtre les points strictement à gauche de la droite a→b
 left_of = (points, a, b) => {
-    result = list()
-    for p in points {
-        if a.cross(b, p) > 0 {
-            result = result + list(p)
-        }
-    }
-    result
+    fold(points, list(), (acc, p) => { if a.cross(b, p) > 0 { acc + list(p) } else { acc } })
 }
 
 # Point le plus éloigné de la droite a→b
 # (le cross product est proportionnel à la distance signée)
 farthest = (points, a, b) => {
-    best = points[0]
-    best_d = a.cross(b, points[0])
-    i = 1
-    while i < len(points) {
-        d = a.cross(b, points[i])
-        if d > best_d {
-            best_d = d
-            best = points[i]
-        }
-        i = i + 1
-    }
-    best
+    reduce(points, (best, p) => { if a.cross(b, p) > a.cross(b, best) { p } else { best } })
 }
 
 # Récursion : hull des points à gauche de a→b
@@ -74,21 +55,13 @@ quickhull = (points) => {
     if len(points) <= 1 {
         points
     } else {
-        # Extrêmes : x min et x max (y pour départager)
-        min_p = points[0]
-        max_p = points[0]
-        i = 1
-        while i < len(points) {
-            p = points[i]
-            if p < min_p { min_p = p }
-            if p > max_p { max_p = p }
-            i = i + 1
-        }
-
-        # Partition : points au-dessus et en-dessous de la droite min→max
+        # Extrêmes gauche/droite en un seul pass
+        (min_p, max_p) = fold(points, tuple(points[0], points[0]), (acc, p) => {
+            (lo, hi) = acc
+            tuple(if p < lo { p } else { lo }, if p > hi { p } else { hi })
+        })
         upper = left_of(points, min_p, max_p)
         lower = left_of(points, max_p, min_p)
-
         # Assemblage CCW : min → upper hull → max → lower hull
         list(min_p) + hull_rec(upper, min_p, max_p) + list(max_p) + hull_rec(lower, max_p, min_p)
     }

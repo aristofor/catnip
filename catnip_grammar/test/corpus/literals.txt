@@ -10,27 +10,51 @@ Integer literals
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (integer))
-  (statement (integer))
-  (statement (integer))
-  (statement (integer)))
+  (statement
+    (literal
+      (number
+        (integer))))
+  (statement
+    (literal
+      (number
+        (integer))))
+  (statement
+    (literal
+      (number
+        (integer))))
+  (statement
+    (literal
+      (number
+        (integer)))))
 
 ================================================================================
 Float literals
 ================================================================================
 
 3.14
-.5
+0.5
 1e10
 2.5e-3
 
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (float))
-  (statement (float))
-  (statement (float))
-  (statement (float)))
+  (statement
+    (literal
+      (number
+        (float))))
+  (statement
+    (literal
+      (number
+        (float))))
+  (statement
+    (literal
+      (number
+        (float))))
+  (statement
+    (literal
+      (number
+        (float)))))
 
 ================================================================================
 Boolean literals
@@ -42,8 +66,12 @@ False
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (true))
-  (statement (false)))
+  (statement
+    (literal
+      (true)))
+  (statement
+    (literal
+      (false))))
 
 ================================================================================
 None literal
@@ -54,7 +82,9 @@ None
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (none)))
+  (statement
+    (literal
+      (none))))
 
 ================================================================================
 String literals
@@ -67,9 +97,15 @@ String literals
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (string))
-  (statement (string))
-  (statement (string (escape_sequence))))
+  (statement
+    (literal
+      (string)))
+  (statement
+    (literal
+      (string)))
+  (statement
+    (literal
+      (string))))
 
 ================================================================================
 F-string
@@ -80,4 +116,9 @@ f"hello {name}"
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (fstring (interpolation (identifier)))))
+  (statement
+    (literal
+      (fstring
+        (fstring_text_double)
+        (interpolation
+          (identifier))))))

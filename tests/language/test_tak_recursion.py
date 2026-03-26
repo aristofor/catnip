@@ -17,7 +17,7 @@ class TestTAKRecursion(unittest.TestCase):
     def test_tak_simple(self):
         """Test simple TAK case."""
         code = """
-        pragma("tco", "off")
+        pragma("tco", False)
 
         tak = (x, y, z) => {
             if y >= x { z }
@@ -36,7 +36,7 @@ class TestTAKRecursion(unittest.TestCase):
     def test_tak_complex(self):
         """Test complex TAK case with deep recursion."""
         code = """
-        pragma("tco", "off")
+        pragma("tco", False)
 
         tak = (x, y, z) => {
             if y >= x { z }
@@ -55,7 +55,7 @@ class TestTAKRecursion(unittest.TestCase):
     def test_nested_recursive_calls(self):
         """Test nested recursive calls in else branch."""
         code = """
-        pragma("tco", "off")
+        pragma("tco", False)
 
         test = (x, y) => {
             if x <= 0 { y }

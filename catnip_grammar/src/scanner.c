@@ -56,6 +56,12 @@ bool tree_sitter_catnip_external_scanner_scan(void *payload, TSLexer *lexer,
             space_count++;
         }
 
+        // Check for continuation tokens: line starting with '.' chains
+        // the previous expression (method call, broadcast, attribute access)
+        if (lexer->lookahead == '.') {
+            return false;
+        }
+
         // Check if followed by 'else' or 'elif' (lightweight lookahead)
         // We check first 3-4 chars to distinguish from regular identifiers starting with 'e'
         if (lexer->lookahead == 'e') {

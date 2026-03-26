@@ -46,20 +46,13 @@ impl SeqIter {
         // Direct FFI access: skip PyO3 cast + bounds check per iteration
         let item_ptr = unsafe {
             match self.kind {
-                SeqKind::List => pyo3::ffi::PyList_GetItem(
-                    self.seq.as_ptr(),
-                    self.index as pyo3::ffi::Py_ssize_t,
-                ),
-                SeqKind::Tuple => pyo3::ffi::PyTuple_GetItem(
-                    self.seq.as_ptr(),
-                    self.index as pyo3::ffi::Py_ssize_t,
-                ),
+                SeqKind::List => pyo3::ffi::PyList_GetItem(self.seq.as_ptr(), self.index as pyo3::ffi::Py_ssize_t),
+                SeqKind::Tuple => pyo3::ffi::PyTuple_GetItem(self.seq.as_ptr(), self.index as pyo3::ffi::Py_ssize_t),
             }
         };
         if item_ptr.is_null() {
-            return Err(PyErr::take(py).unwrap_or_else(|| {
-                pyo3::exceptions::PyIndexError::new_err("sequence index out of range")
-            }));
+            return Err(PyErr::take(py)
+                .unwrap_or_else(|| pyo3::exceptions::PyIndexError::new_err("sequence index out of range")));
         }
         self.index += 1;
         let item = unsafe { pyo3::Bound::from_borrowed_ptr(py, item_ptr) };

@@ -1,7 +1,7 @@
 # BROADCAST_GUIDE
 
-Voir aussi : [BROADCAST_SPEC.md](./BROADCAST_SPEC.md) pour la référence normative et
-[BROADCAST_RUNTIME.md](./BROADCAST_RUNTIME.md) pour les détails d'implémentation.
+Voir aussi : [BROADCAST_SPEC](BROADCAST_SPEC.md) pour la référence normative et
+[BROADCAST_RUNTIME](BROADCAST_RUNTIME.md) pour les détails d'implémentation.
 
 ## Cas d'Usage
 
@@ -11,7 +11,7 @@ Voir aussi : [BROADCAST_SPEC.md](./BROADCAST_SPEC.md) pour la référence normat
 
 ```catnip
 # Charger module pandas
-# import("./pandas_helper.py") as pd
+# pd = import("pandas_helper", protocol="py")
 
 # Obtenir des données (peut être scalaire, Series, ou DataFrame)
 data = pd.query(df, "age > 30")["salary"]
@@ -65,6 +65,8 @@ positive = data.[(x) => {
 ```
 
 ### 4. Agrégations avec Broadcasting
+
+Voir aussi [FOLD_GUIDE](FOLD_GUIDE.md) pour la composition complète broadcast + fold.
 
 <!-- check: no-check -->
 
@@ -176,7 +178,7 @@ print(clamped)  # [1, 2, 3, 3, 3]
 # Chaîner map et filter
 data = list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 result = data.[if > 3].[* 2].[if < 15].[+ 1]
-print(result)  # [9, 11, 13, 15]
+print(result)  # → [9, 11, 13, 15]
 # > 3: [4,5,6,7,8,9,10]
 # * 2: [8,10,12,14,16,18,20]
 # < 15: [8,10,12,14]
@@ -191,10 +193,10 @@ a = list(1, 2, 3)
 b = list(10, 20, 30)
 
 sum_lists = a.[+ b]
-print(sum_lists)  # [11, 22, 33]
+print(sum_lists)  # → [11, 22, 33]
 
 prod_lists = a.[* b]
-print(prod_lists)  # [10, 40, 90]
+print(prod_lists)  # → [10, 40, 90]
 ```
 
 ### Avec Pandas

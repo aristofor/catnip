@@ -59,7 +59,7 @@ Variable phi_lookup : nat -> nat -> option Phi.
 Hypothesis phi_lookup_spec : forall b p,
   phi_at b p -> phi_lookup b (sv_var (phi_val p)) = Some p.
 
-(* H-B3: structural — every use requires a definition on every path *)
+(* H-B3: structural - every use requires a definition on every path *)
 Hypothesis use_on_path : forall v u,
   uses_at u v ->
   forall p, path g.(edge) g.(entry) u p ->
@@ -226,7 +226,7 @@ Qed.
 (* records available expressions, replaces redundant computations.   *)
 (* ================================================================ *)
 
-(* H-D1: external — environment consistent with pure computations *)
+(* H-D1: external - environment consistent with pure computations *)
 Hypothesis env_consistent : forall v e,
   computes v e -> pure_op (ek_op e) ->
   rho v = eval_expr ev rho e.
@@ -317,11 +317,11 @@ Definition VN := nat.
 Variable vn_map : SSAVal -> VN.
 Variable canonical : VN -> SSAVal.
 
-(* H-E1: external — VN-equivalent values have the same value *)
+(* H-E1: external - VN-equivalent values have the same value *)
 Hypothesis vn_sound : forall v1 v2,
   vn_map v1 = vn_map v2 -> rho v1 = rho v2.
 
-(* H-E2: external — canonical representative has the correct VN *)
+(* H-E2: external - canonical representative has the correct VN *)
 Hypothesis canonical_has_vn : forall vn,
   vn_map (canonical vn) = vn.
 
@@ -411,11 +411,11 @@ Variable preheader : nat.
 
 Definition in_loop (b : nat) : Prop := In b loop_body.
 
-(* H-F1: structural — header dominates all loop body blocks *)
+(* H-F1: structural - header dominates all loop body blocks *)
 Hypothesis header_dom_body : forall b,
   in_loop b -> dominates g loop_header b.
 
-(* H-F2: structural — any path entering the loop passes through preheader *)
+(* H-F2: structural - any path entering the loop passes through preheader *)
 Hypothesis loop_entry_via_preheader : forall b p,
   in_loop b ->
   path g.(edge) g.(entry) b p ->

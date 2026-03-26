@@ -139,13 +139,6 @@ def generate_theme_py(data: dict) -> str:
     lines.append(f"PROMPT_CONTINUATION = {data['prompts']['continuation']!r}")
     lines.append('')
 
-    # Box drawing
-    lines.append('# Box drawing')
-    box = data['box']
-    for key in ('corner_tl', 'corner_tr', 'corner_bl', 'corner_br', 'vertical', 'horizontal'):
-        lines.append(f"BOX_{key.upper()} = {box[key]!r}")
-    lines.append('')
-
     # UI colors
     lines.append('# UI colors (true color ANSI)')
     for name, entry in data['ui'].items():
@@ -281,6 +274,7 @@ def generate_pygments_css(data: dict) -> str:
         fg = css_color(base['foreground'])
         bg = css_color(base['background'])
         comment_c = css_color(base['comment'])
+        operator_c = css_color(base['operator'])
         punctuation_c = css_color(base['punctuation'])
         keyword_c = css_color(accent['keyword'])
         constant_c = css_color(accent['constant'])
@@ -288,6 +282,7 @@ def generate_pygments_css(data: dict) -> str:
         number_c = css_color(accent['number'])
         string_c = css_color(accent['string'])
         builtin_c = css_color(accent['builtin'])
+        prompt_c = css_color(ui['prompt'])
 
         # comment style flags
         comment_extra = ''
@@ -352,7 +347,11 @@ def generate_pygments_css(data: dict) -> str:
 {indent}    color: {keyword_c};
 {indent}}}
 
-{indent}& .o,   /* Operator */
+{indent}& .o {{
+{indent}    /* Operator */
+{indent}    color: {operator_c};
+{indent}}}
+
 {indent}& .cpf {{
 {indent}    /* Comment.PreprocFile */
 {indent}    color: {punctuation_c};
@@ -393,7 +392,7 @@ def generate_pygments_css(data: dict) -> str:
 {indent}}} /* Generic.Output */
 
 {indent}& .gp {{
-{indent}    color: {builtin_c};
+{indent}    color: {prompt_c};
 {indent}    font-weight: bold;
 {indent}}} /* Generic.Prompt */
 
@@ -527,6 +526,33 @@ def generate_pygments_css(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Update logo SVG
+# ---------------------------------------------------------------------------
+
+# All non-white fills in the master SVG that should track ui.prompt
+_LOGO_FILL_RE = re.compile(r'fill="#(?!fff\b)([0-9a-fA-F]{3,6})"')
+
+
+def update_logo_color(data: dict, project_root: Path) -> None:
+    """Replace the primary color in catnip-logo.svg with ui.prompt hex."""
+    logo_path = project_root / 'docs' / 'assets' / 'catnip-logo.svg'
+    if not logo_path.exists():
+        return
+
+    entry = color_entry(data['ui']['prompt'])
+    hex_color = f"#{entry['r']:02x}{entry['g']:02x}{entry['b']:02x}"
+
+    svg = logo_path.read_text()
+    updated = _LOGO_FILL_RE.sub(f'fill="{hex_color}"', svg)
+
+    if updated != svg:
+        logo_path.write_text(updated)
+        print(f"  Updated {logo_path} -> {hex_color}")
+    else:
+        print(f"  Logo already up to date ({hex_color})")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -549,7 +575,10 @@ def main():
     css_output.write_text(css)
     print(f"  Generated {css_output}")
 
-    print("\nDone! Flow: visual.toml -> _theme.py + highlight.css")
+    # Patch logo SVG: propagate ui.prompt color as primary fill
+    update_logo_color(data, base.parent)
+
+    print("\nDone! Flow: visual.toml -> _theme.py + highlight.css + logo")
 
 
 if __name__ == '__main__':

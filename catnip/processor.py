@@ -14,7 +14,7 @@ from .colors import Theme, colorize, format_value, print_stage
 from .exc import CatnipWeirdError
 
 
-def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_format="text"):
+def process_input(catnip, text, parsing, verbose=False, vm_mode='off', output_format='text', quiet=False):
     """
     Process the text (command or script) based on the chosen parsing level.
 
@@ -35,7 +35,7 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
         # Levels 0-2: Use Rust pipeline (fast orchestration)
         if parsing < 3:
             if verbose:
-                print_stage("INPUT", text, Theme.STAGE_PARSE)
+                print_stage('INPUT', text, Theme.STAGE_PARSE)
 
             res = rust_process_input(catnip, text, parsing)
 
@@ -43,10 +43,10 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
                 # Parse tree: always use .pretty()
                 content = res.pretty()
                 if verbose:
-                    print_stage("PARSE TREE", content, Theme.STAGE_PARSE)
+                    print_stage('PARSE TREE', content, Theme.STAGE_PARSE)
                 else:
                     print(content)
-            elif output_format == "json":
+            elif output_format == 'json':
                 # Serde JSON verbeux (backwards compat)
                 import json as json_module
 
@@ -55,16 +55,16 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
                 if isinstance(res, list):
                     json_items = []
                     for item in res:
-                        item_json = ir_to_json_pretty(item)
+                        item_json = _ir_item_to_json(item, ir_to_json_pretty)
                         json_items.append(json_module.loads(item_json))
                     print(json_module.dumps(json_items, indent=2))
                 else:
-                    print(ir_to_json_pretty(res))
-            elif output_format == "repr":
+                    print(_ir_item_to_json(res, ir_to_json_pretty))
+            elif output_format == 'repr':
                 # Ancien pformat
                 content = pformat(res)
                 if verbose:
-                    stage_names = {1: "IR (Transformer)", 2: "EXECUTABLE IR (Semantic)"}
+                    stage_names = {1: 'IR (Transformer)', 2: 'EXECUTABLE IR (Semantic)'}
                     print_stage(stage_names[parsing], content, Theme.STAGE_SEMANTIC)
                 else:
                     print(content)
@@ -77,14 +77,14 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
 
                     compact_items = []
                     for item in res:
-                        item_json = ir_to_json_compact_pretty(item)
+                        item_json = _ir_item_to_json(item, ir_to_json_compact_pretty)
                         compact_items.append(json_module.loads(item_json))
                     content = json_module.dumps(compact_items, indent=2)
                 else:
-                    content = ir_to_json_compact_pretty(res)
+                    content = _ir_item_to_json(res, ir_to_json_compact_pretty)
 
                 if verbose:
-                    stage_names = {1: "IR (Transformer)", 2: "EXECUTABLE IR (Semantic)"}
+                    stage_names = {1: 'IR (Transformer)', 2: 'EXECUTABLE IR (Semantic)'}
                     print_stage(stage_names[parsing], content, Theme.STAGE_SEMANTIC)
                 else:
                     print(content)
@@ -92,17 +92,17 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
         elif parsing == 3:
             # Level 3: Execute and show result
             if verbose:
-                print_stage("INPUT", text, Theme.STAGE_PARSE)
+                print_stage('INPUT', text, Theme.STAGE_PARSE)
 
                 # Show IR
                 ir = catnip.parse(text, semantic=False)
-                print_stage("IR (Transformer)", _format_ir_compact(ir), Theme.STAGE_SEMANTIC)
+                print_stage('IR (Transformer)', _format_ir_compact(ir), Theme.STAGE_SEMANTIC)
 
                 # Show executable IR
                 catnip.parse(text, semantic=True)
-                executable = catnip.code
+                executable = catnip._pipeline.parse_to_ir(text, True)
                 print_stage(
-                    "EXECUTABLE IR (Semantic)",
+                    'EXECUTABLE IR (Semantic)',
                     _format_ir_compact(executable),
                     Theme.STAGE_SEMANTIC,
                 )
@@ -111,32 +111,25 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
                 catnip.parse(text)
 
             if verbose:
-                env_executor = os.environ.get("CATNIP_EXECUTOR")
+                env_executor = os.environ.get('CATNIP_EXECUTOR')
                 if env_executor:
-                    # Map executor to vm_mode for display: vm→on, ast→off
-                    expected_vm_mode = (
-                        "on" if env_executor == "vm" else "off" if env_executor == "ast" else env_executor
-                    )
-                    suffix = "" if expected_vm_mode == vm_mode else " (overridden)"
+                    from .config import executor_to_vm_mode
+
+                    expected_vm_mode = executor_to_vm_mode(env_executor)
+                    suffix = '' if expected_vm_mode == vm_mode else " (overridden)"
                     vm_info = f"{vm_mode} (CATNIP_EXECUTOR={env_executor}{suffix})"
                 else:
                     vm_info = f"{vm_mode}"
-                print_stage("EXECUTOR", vm_info, Theme.STAGE_EXECUTE)
+                print_stage('EXECUTOR', vm_info, Theme.STAGE_EXECUTE)
 
-            # Execute (using VM if requested)
+            # Execute (delegates to Pipeline in VM mode)
             catnip.vm_mode = vm_mode
-            if vm_mode == "off":
-                res = catnip.execute()
-            else:
-                from .vm.executor import VMExecutor
+            res = catnip.execute(trace=verbose)
 
-                executor = VMExecutor(catnip.registry, catnip.context)
-                res = executor.execute(catnip.code, trace=verbose)
-
-            # Show result (suppress None like Python REPL)
+            # Show result (suppress None like Python REPL, or --quiet)
             if verbose:
-                print_stage("RESULT", format_value(res), Theme.STAGE_RESULT)
-            elif res is not None:
+                print_stage('RESULT', format_value(res), Theme.STAGE_RESULT)
+            elif not quiet and res is not None:
                 print(format_value(res))
 
         else:
@@ -152,21 +145,30 @@ def process_input(catnip, text, parsing, verbose=False, vm_mode="off", output_fo
         raise
 
 
+def _ir_item_to_json(item, fallback_fn):
+    """Serialize an IR item to JSON. Uses native to_json() for IRNode, falls back for Op."""
+    if hasattr(item, 'to_json'):
+        return item.to_json()
+    return fallback_fn(item)
+
+
 def _format_ir_compact(ir):
     """Format IR in a more compact, readable way."""
     if isinstance(ir, list):
         if len(ir) == 1:
             return _format_node(ir[0])
-        return "\n".join(f"{i+1}. {_format_node(node)}" for i, node in enumerate(ir))
+        return '\n'.join(f"{i+1}. {_format_node(node)}" for i, node in enumerate(ir))
     return _format_node(ir)
 
 
 def _format_node(node):
     """Format a single IR node with colors."""
     from .nodes import Op, Ref
-    from .transformer import IR
 
-    if isinstance(node, (Op, IR)):
+    if hasattr(node, 'to_json'):
+        return node.to_json()
+
+    if isinstance(node, Op):
         # Format operation
         ident = colorize(node.ident, Theme.KEYWORD)
         args_str = _format_args(node.args)
@@ -188,12 +190,12 @@ def _format_node(node):
         return colorize(str(node), Theme.TYPE_BOOL)
 
     elif node is None:
-        return colorize("None", Theme.TYPE_NONE)
+        return colorize('None', Theme.TYPE_NONE)
 
     elif isinstance(node, (list, tuple)):
         items = ", ".join(_format_node(item) for item in node)
-        bracket = "[" if isinstance(node, list) else "("
-        close_bracket = "]" if isinstance(node, list) else ")"
+        bracket = '[' if isinstance(node, list) else '('
+        close_bracket = ']' if isinstance(node, list) else ')'
         return f"{bracket}{items}{close_bracket}"
 
     else:
@@ -203,7 +205,7 @@ def _format_node(node):
 def _format_args(args):
     """Format argument list."""
     if not args:
-        return ""
+        return ''
     if len(args) == 1:
         return _format_node(args[0])
     return ", ".join(_format_node(arg) for arg in args)

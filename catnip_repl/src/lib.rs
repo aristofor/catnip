@@ -6,17 +6,25 @@
 extern crate _rs as catnip_rs;
 
 pub mod app;
+pub mod commands;
 pub mod completer;
 pub mod config;
 pub mod config_editor;
+pub mod config_tui;
 pub mod context;
 pub mod executor;
 pub mod highlighter;
 pub mod hints;
 pub mod history;
 pub mod input;
+pub mod signal;
 pub mod theme;
 pub mod widgets;
+
+#[cfg(test)]
+mod completion_workflow_tests;
+#[cfg(test)]
+mod integration_tests;
 
 use pyo3::prelude::*;
 
@@ -29,6 +37,14 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use app::{App, ExitReason};
 use config::ReplConfig;
+
+/// Launch the standalone config editor TUI.
+#[pyfunction]
+#[pyo3(signature = (config_path=None))]
+pub fn run_config_editor(py: Python, config_path: Option<String>) -> PyResult<()> {
+    py.detach(|| -> Result<(), String> { config_tui::run(config_path.as_deref()) })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
 
 /// Launch the ratatui REPL from Python via PyO3.
 ///
@@ -62,9 +78,7 @@ pub fn run_repl(py: Python, verbose: bool) -> PyResult<i32> {
             default_hook(info);
         }));
 
-        let reason = app
-            .run(&mut terminal)
-            .map_err(|e| format!("REPL error: {e}"))?;
+        let reason = app.run(&mut terminal).map_err(|e| format!("REPL error: {e}"))?;
 
         disable_raw_mode().map_err(|e| format!("Failed to disable raw mode: {e}"))?;
         println!();
@@ -74,11 +88,12 @@ pub fn run_repl(py: Python, verbose: bool) -> PyResult<i32> {
             ExitReason::Abort => 130,
         })
     })
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 #[pymodule]
 fn _repl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_repl, m)?)?;
+    m.add_function(wrap_pyfunction!(run_config_editor, m)?)?;
     Ok(())
 }

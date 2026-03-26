@@ -1,0 +1,22 @@
+#!/usr/bin/env catnip
+# ⇒ Module IO builtin
+# Le module io fournit print/write/input avec signatures Python complètes.
+
+io = import('io')
+
+# print avec séparateur et fin de ligne
+io.print("BORN TO SEGFAULT", "World", sep=", ", end="!\n")
+
+# write = pas de séparateur, pas de newline, flush par défaut
+io.write("a")
+io.write("b")
+io.write("c\n")
+
+# writeln = write + newline
+io.writeln("done")
+
+# eprint = print sur stderr
+io.eprint("warning: something happened")
+
+# Vérifier le backend
+io.print("protocol:", io.PROTOCOL)

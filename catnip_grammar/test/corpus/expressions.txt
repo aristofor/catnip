@@ -13,13 +13,68 @@ Arithmetic expressions
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (additive (integer) (add_sub_op) (integer)))
-  (statement (additive (integer) (add_sub_op) (integer)))
-  (statement (multiplicative (integer) (mul_div_op) (integer)))
-  (statement (multiplicative (integer) (mul_div_op) (integer)))
-  (statement (multiplicative (integer) (mul_div_op) (integer)))
-  (statement (multiplicative (integer) (mul_div_op) (integer)))
-  (statement (exponent (integer) (integer))))
+  (statement
+    (additive
+      (literal
+        (number
+          (integer)))
+      (add_sub_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (additive
+      (literal
+        (number
+          (integer)))
+      (add_sub_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (multiplicative
+      (literal
+        (number
+          (integer)))
+      (mul_div_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (multiplicative
+      (literal
+        (number
+          (integer)))
+      (mul_div_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (multiplicative
+      (literal
+        (number
+          (integer)))
+      (mul_div_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (multiplicative
+      (literal
+        (number
+          (integer)))
+      (mul_div_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (exponent
+      (literal
+        (number
+          (integer)))
+      (literal
+        (number
+          (integer))))))
 
 ================================================================================
 Comparison expressions
@@ -35,12 +90,36 @@ a != b
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (comparison (identifier) (comp_op) (identifier)))
-  (statement (comparison (identifier) (comp_op) (identifier)))
-  (statement (comparison (identifier) (comp_op) (identifier)))
-  (statement (comparison (identifier) (comp_op) (identifier)))
-  (statement (comparison (identifier) (comp_op) (identifier)))
-  (statement (comparison (identifier) (comp_op) (identifier))))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier)))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier)))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier)))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier)))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier)))
+  (statement
+    (comparison
+      (identifier)
+      (comp_op)
+      (identifier))))
 
 ================================================================================
 Boolean expressions
@@ -53,9 +132,17 @@ not a
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (bool_and (identifier) (identifier)))
-  (statement (bool_or (identifier) (identifier)))
-  (statement (bool_not (identifier))))
+  (statement
+    (bool_and
+      (identifier)
+      (identifier)))
+  (statement
+    (bool_or
+      (identifier)
+      (identifier)))
+  (statement
+    (bool_not
+      (identifier))))
 
 ================================================================================
 Bitwise expressions
@@ -70,11 +157,32 @@ a >> 2
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (bit_and (identifier) (identifier)))
-  (statement (bit_or (identifier) (identifier)))
-  (statement (bit_xor (identifier) (identifier)))
-  (statement (shift (identifier) (shift_op) (integer)))
-  (statement (shift (identifier) (shift_op) (integer))))
+  (statement
+    (bit_and
+      (identifier)
+      (identifier)))
+  (statement
+    (bit_or
+      (identifier)
+      (identifier)))
+  (statement
+    (bit_xor
+      (identifier)
+      (identifier)))
+  (statement
+    (shift
+      (identifier)
+      (shift_op)
+      (literal
+        (number
+          (integer)))))
+  (statement
+    (shift
+      (identifier)
+      (shift_op)
+      (literal
+        (number
+          (integer))))))
 
 ================================================================================
 Unary expressions
@@ -87,9 +195,18 @@ Unary expressions
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (unary (unary_op) (identifier)))
-  (statement (unary (unary_op) (identifier)))
-  (statement (unary (unary_op) (identifier))))
+  (statement
+    (unary
+      (unary_op)
+      (identifier)))
+  (statement
+    (unary
+      (unary_op)
+      (identifier)))
+  (statement
+    (unary
+      (unary_op)
+      (identifier))))
 
 ================================================================================
 Grouping
@@ -100,4 +217,18 @@ Grouping
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (multiplicative (group (additive (integer) (add_sub_op) (integer))) (mul_div_op) (integer))))
+  (statement
+    (multiplicative
+      (group
+        (additive
+          (literal
+            (number
+              (integer)))
+          (add_sub_op)
+          (literal
+            (number
+              (integer)))))
+      (mul_div_op)
+      (literal
+        (number
+          (integer))))))

@@ -9,7 +9,11 @@ Simple lambda
 (source_file
   (statement
     (lambda_expr
-      (block (statement (integer))))))
+      (block
+        (statement
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Lambda with parameter
@@ -22,8 +26,17 @@ Lambda with parameter
 (source_file
   (statement
     (lambda_expr
-      (lambda_params (lambda_param name: (identifier)))
-      (block (statement (additive (identifier) (add_sub_op) (integer)))))))
+      (lambda_params
+        (lambda_param
+          name: (identifier)))
+      (block
+        (statement
+          (additive
+            (identifier)
+            (add_sub_op)
+            (literal
+              (number
+                (integer)))))))))
 
 ================================================================================
 Lambda with default parameter
@@ -37,9 +50,19 @@ Lambda with default parameter
   (statement
     (lambda_expr
       (lambda_params
-        (lambda_param name: (identifier))
-        (lambda_param name: (identifier) default: (integer)))
-      (block (statement (additive (identifier) (add_sub_op) (identifier)))))))
+        (lambda_param
+          name: (identifier))
+        (lambda_param
+          name: (identifier)
+          default: (literal
+            (number
+              (integer)))))
+      (block
+        (statement
+          (additive
+            (identifier)
+            (add_sub_op)
+            (identifier)))))))
 
 ================================================================================
 Lambda with variadic parameter
@@ -53,9 +76,13 @@ Lambda with variadic parameter
   (statement
     (lambda_expr
       (lambda_params
-        (lambda_param name: (identifier))
-        (variadic_param name: (identifier)))
-      (block (statement (identifier))))))
+        (lambda_param
+          name: (identifier))
+        (variadic_param
+          name: (identifier)))
+      (block
+        (statement
+          (identifier))))))
 
 ================================================================================
 Named function
@@ -68,10 +95,21 @@ f = (x) => { x * 2 }
 (source_file
   (statement
     (assignment
-      (lvalue (unpack_target (identifier)))
+      (lvalue
+        (unpack_target
+          (identifier)))
       (lambda_expr
-        (lambda_params (lambda_param name: (identifier)))
-        (block (statement (multiplicative (identifier) (mul_div_op) (integer))))))))
+        (lambda_params
+          (lambda_param
+            name: (identifier)))
+        (block
+          (statement
+            (multiplicative
+              (identifier)
+              (mul_div_op)
+              (literal
+                (number
+                  (integer))))))))))
 
 ================================================================================
 Function call
@@ -85,7 +123,17 @@ f(1, 2, 3)
   (statement
     (call
       (identifier)
-      (arguments (args (integer) (integer) (integer))))))
+      (arguments
+        (args
+          (literal
+            (number
+              (integer)))
+          (literal
+            (number
+              (integer)))
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Function call with kwargs
@@ -99,6 +147,15 @@ f(a=1, b=2)
   (statement
     (call
       (identifier)
-      (arguments (kwargs
-        (kwarg key: (identifier) value: (integer))
-        (kwarg key: (identifier) value: (integer)))))))
+      (arguments
+        (kwargs
+          (kwarg
+            key: (identifier)
+            value: (literal
+              (number
+                (integer))))
+          (kwarg
+            key: (identifier)
+            value: (literal
+              (number
+                (integer)))))))))

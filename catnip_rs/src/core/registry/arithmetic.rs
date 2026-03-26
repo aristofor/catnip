@@ -55,20 +55,12 @@ impl Registry {
     }
 
     /// True division: fold left with operator.truediv
-    pub(crate) fn op_truediv(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_truediv(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.fold_left_operator(py, items, self.operator_cache.truediv.bind(py), None)
     }
 
     /// Floor division: fold left with operator.floordiv
-    pub(crate) fn op_floordiv(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_floordiv(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.fold_left_operator(py, items, self.operator_cache.floordiv.bind(py), None)
     }
 

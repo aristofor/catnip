@@ -25,7 +25,7 @@ impl Params {
             if bound.is_instance_of::<PyTuple>() {
                 a
             } else {
-                PyTuple::new(py, &[bound.clone()])?.unbind().into()
+                PyTuple::new(py, std::slice::from_ref(bound))?.unbind().into()
             }
         } else {
             PyTuple::empty(py).unbind().into()
@@ -219,10 +219,7 @@ impl CallMember {
         let ident_repr = parent.ident.bind(py).repr()?.to_string();
         let args_repr = params_ref.args.bind(py).repr()?.to_string();
         let kwargs_repr = params_ref.kwargs.bind(py).repr()?.to_string();
-        Ok(format!(
-            "<CallMember {} {} {}>",
-            ident_repr, args_repr, kwargs_repr
-        ))
+        Ok(format!("<CallMember {} {} {}>", ident_repr, args_repr, kwargs_repr))
     }
 
     // Pickle support
@@ -256,18 +253,13 @@ pub struct Call {
 impl Call {
     #[new]
     #[pyo3(signature = (func, args=None, kwargs=None))]
-    fn new(
-        py: Python,
-        func: Py<PyAny>,
-        args: Option<Py<PyAny>>,
-        kwargs: Option<Py<PyAny>>,
-    ) -> PyResult<Self> {
+    fn new(py: Python, func: Py<PyAny>, args: Option<Py<PyAny>>, kwargs: Option<Py<PyAny>>) -> PyResult<Self> {
         let args_tuple = if let Some(a) = args {
             let bound = a.bind(py);
             if bound.is_instance_of::<PyTuple>() {
                 a
             } else {
-                PyTuple::new(py, &[bound.clone()])?.unbind().into()
+                PyTuple::new(py, std::slice::from_ref(bound))?.unbind().into()
             }
         } else {
             PyTuple::empty(py).unbind().into()
@@ -293,10 +285,7 @@ impl Call {
         let func_repr = self.func.bind(py).repr()?.to_string();
         let args_repr = self.args.bind(py).repr()?.to_string();
         let kwargs_repr = self.kwargs.bind(py).repr()?.to_string();
-        Ok(format!(
-            "<Call {} {} {}>",
-            func_repr, args_repr, kwargs_repr
-        ))
+        Ok(format!("<Call {} {} {}>", func_repr, args_repr, kwargs_repr))
     }
 
     // Pickle support

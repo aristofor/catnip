@@ -2,9 +2,9 @@
 
 ## Introduction
 
-Catnip est volontairement **minimal côté I/O** : pas d'accès réseau/fichiers ni d'API haut niveau par défaut. `print` et
-`write` servent juste la REPL ou l'exécution en console. L'hôte expose ensuite ce dont l'application a besoin, au bon
-niveau de contrôle.
+Catnip est volontairement **sans I/O** : pas d'accès réseau, fichiers, ni même `print` par défaut. Les fonctions I/O
+(`print`, `write`, `input`) viennent du module `io`, auto-importé en CLI et REPL mais absent en mode embarqué. L'hôte
+expose ensuite ce dont l'application a besoin, au bon niveau de contrôle.
 
 > Kernighan, Ritchie et Thompson auraient probablement approuvé un coeur sans I/O.
 
@@ -15,8 +15,9 @@ transporte :
 - **`locals`** : scope local (géré automatiquement par Catnip)
 - **`result`** : dernier résultat (accessible via `ctx.result` côté hôte)
 
-Par défaut, le context expose quelques primitives (ex: `print`, `write`, `len`) et un logger minimal, mais aucun accès
-réseau ou fichier.
+Par défaut, le context expose des primitives de calcul (`len`, `range`, `sorted`...) et un logger minimal, mais aucune
+fonction I/O. `print`, `write` et `input` sont fournis par le module `io` (auto-importé en CLI/REPL, configurable via
+`catnip.toml`).
 
 ## Méthode 1 : Ajouter des fonctions simples
 

@@ -11,10 +11,7 @@ enum HintContext<'a> {
     /// Typing an identifier prefix: `pri|` -> suggest `print(values...)`
     IdentifierPrefix { prefix: &'a str },
     /// Inside a function call: `map(fn, |` -> suggest remaining params
-    FunctionCall {
-        func_name: &'a str,
-        arg_index: usize,
-    },
+    FunctionCall { func_name: &'a str, arg_index: usize },
     /// Typing a keyword prefix: `whi|` -> suggest `le condition { body }`
     KeywordPrefix { prefix: &'a str },
 }
@@ -36,11 +33,7 @@ const BUILTIN_SIGNATURES: &[(&str, &str, &[&str])] = &[
     ("zip", "iter1, iter2, ...", &["iter1", "iter2", "..."]),
     ("map", "fn, iterable", &["fn", "iterable"]),
     ("filter", "fn, iterable", &["fn", "iterable"]),
-    (
-        "sorted",
-        "iterable, key, reverse",
-        &["iterable", "key", "reverse"],
-    ),
+    ("sorted", "iterable, key, reverse", &["iterable", "key", "reverse"]),
     ("reversed", "iterable", &["iterable"]),
     ("len", "obj", &["obj"]),
     ("sum", "iterable, start", &["iterable", "start"]),
@@ -76,9 +69,7 @@ pub struct HintEngine {
 
 impl HintEngine {
     pub fn new() -> Self {
-        Self {
-            variables: Vec::new(),
-        }
+        Self { variables: Vec::new() }
     }
 
     pub fn set_variables(&mut self, vars: Vec<String>) {
@@ -118,7 +109,7 @@ impl HintEngine {
 
     /// Detect if cursor is inside a function call: `func(arg1, |`
     fn detect_function_call<'a>(&self, line: &'a str, pos: usize) -> Option<HintContext<'a>> {
-        let bytes = line[..pos].as_bytes();
+        let bytes = &line.as_bytes()[..pos];
         let mut depth = 0i32;
 
         // Scan backwards to find unmatched '('
@@ -167,10 +158,7 @@ impl HintEngine {
         // (start of line or after whitespace only)
         let before = line[..start].trim_end();
         // Allow keyword hints at line start, after '=', or after '{' / ';'
-        let ok_position = before.is_empty()
-            || before.ends_with('=')
-            || before.ends_with('{')
-            || before.ends_with(';');
+        let ok_position = before.is_empty() || before.ends_with('=') || before.ends_with('{') || before.ends_with(';');
 
         if !ok_position {
             return None;
@@ -212,14 +200,9 @@ impl HintEngine {
     /// Generate ghost text for a given context
     fn hint_for_context(&self, ctx: &HintContext) -> Option<String> {
         match ctx {
-            HintContext::FunctionCall {
-                func_name,
-                arg_index,
-            } => {
+            HintContext::FunctionCall { func_name, arg_index } => {
                 // Find signature
-                let sig = BUILTIN_SIGNATURES
-                    .iter()
-                    .find(|(name, _, _)| *name == *func_name)?;
+                let sig = BUILTIN_SIGNATURES.iter().find(|(name, _, _)| *name == *func_name)?;
                 let params = sig.2;
                 if *arg_index >= params.len() {
                     return Some(")".to_string());
@@ -230,9 +213,7 @@ impl HintEngine {
             }
             HintContext::KeywordPrefix { prefix } => {
                 // Find best matching keyword template
-                let (kw, template) = KEYWORD_TEMPLATES
-                    .iter()
-                    .find(|(kw, _)| kw.starts_with(*prefix))?;
+                let (kw, template) = KEYWORD_TEMPLATES.iter().find(|(kw, _)| kw.starts_with(*prefix))?;
                 // Ghost = rest of keyword + template
                 let rest = &kw[prefix.len()..];
                 Some(format!("{}{}", rest, template))
@@ -258,6 +239,12 @@ impl HintEngine {
                 None
             }
         }
+    }
+}
+
+impl Default for HintEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -296,10 +283,7 @@ mod tests {
         let e = engine();
         // "ma" at statement start -> keyword "match" takes priority
         let hint = e.get_hint("ma", 2);
-        assert_eq!(
-            hint,
-            Some("tch value { case pattern => result }".to_string())
-        );
+        assert_eq!(hint, Some("tch value { case pattern => result }".to_string()));
         // "ma" in non-keyword position -> identifier "map" via fallthrough
         let hint = e.get_hint("foo(ma", 6);
         assert_eq!(hint, Some("p(fn, iterable)".to_string()));
@@ -393,5 +377,49 @@ mod tests {
         // map(filter(...), |  -> should suggest second arg of map
         let hint = e.get_hint("map(filter(x), ", 15);
         assert_eq!(hint, Some("iterable)".to_string()));
+    }
+
+    #[test]
+    fn test_hint_unknown_function() {
+        let e = engine();
+        // Unknown function call -> no param hint
+        let hint = e.get_hint("my_func(", 8);
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn test_keyword_after_assignment() {
+        let e = engine();
+        // "if" after "= " is at statement-start position for hint detection
+        let hint = e.get_hint("x = if", 6);
+        // Depending on implementation: either keyword hint or None
+        // "if" at position 4 is after "= ", detect_keyword_prefix checks statement start
+        // The word "if" is a full keyword, so no suffix to suggest
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn test_keyword_not_mid_identifier() {
+        let e = engine();
+        // "while_loop" should not trigger "while" keyword hint
+        let hint = e.get_hint("while_loop", 10);
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn test_variable_hint_suffix() {
+        let mut e = engine();
+        e.set_variables(vec!["fibonacci".to_string()]);
+        let hint = e.get_hint("fib", 3);
+        assert_eq!(hint, Some("onacci".to_string()));
+    }
+
+    #[test]
+    fn test_builtin_priority_over_variable() {
+        let mut e = engine();
+        e.set_variables(vec!["printer".to_string()]);
+        // "pri" should hint "print" (builtin) not "printer" (variable)
+        let hint = e.get_hint("pri", 3);
+        assert_eq!(hint, Some("nt(values...)".to_string()));
     }
 }

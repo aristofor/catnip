@@ -1,0 +1,42 @@
+# FILE: catnip/_error_strings.py
+"""Shared error message fragments used across Python wrappers."""
+
+COMPILE_SYNTAX_PREFIX = 'Compilation error: SyntaxError:'
+
+SYNTAX_ERROR_PREFIX = 'Syntax error'
+EXPECTED_PREFIX = 'Expected '
+UNEXPECTED_TOKEN_PREFIX = 'Unexpected token'
+SYNTAX_PREFIXES = (
+    SYNTAX_ERROR_PREFIX,
+    EXPECTED_PREFIX,
+    UNEXPECTED_TOKEN_PREFIX,
+)
+
+TYPE_ERROR_PREFIX = 'type error:'
+RUNTIME_ERROR_PREFIX = 'runtime error: '
+
+PY_TYPE_ERROR_PREFIX = 'TypeError: '
+CATNIP_TYPE_ERROR_PREFIX = 'CatnipTypeError: '
+VALUE_ERROR_PREFIX = 'ValueError: '
+INDEX_ERROR_PREFIX = 'IndexError: '
+KEY_ERROR_PREFIX = 'KeyError: '
+ATTRIBUTE_ERROR_PREFIX = 'AttributeError: '
+ZERO_DIVISION_ERROR_PREFIX = 'ZeroDivisionError: '
+RUNTIME_EXCEPTION_PREFIX = 'RuntimeError: '
+WEIRD_ERROR_PREFIX = 'WeirdError: '
+
+RUNTIME_WRAPPED_PREFIXES = (
+    RUNTIME_EXCEPTION_PREFIX,
+    VALUE_ERROR_PREFIX,
+    INDEX_ERROR_PREFIX,
+    ATTRIBUTE_ERROR_PREFIX,
+    ZERO_DIVISION_ERROR_PREFIX,
+    CATNIP_TYPE_ERROR_PREFIX,
+    PY_TYPE_ERROR_PREFIX,
+    KEY_ERROR_PREFIX,
+)
+
+TYPE_PREFIXES = (
+    CATNIP_TYPE_ERROR_PREFIX,
+    PY_TYPE_ERROR_PREFIX,
+)

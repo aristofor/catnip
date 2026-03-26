@@ -1,14 +1,32 @@
+#!/usr/bin/env catnip
 # Parsing XML avec xml.etree.ElementTree
-# Module stdlib pour lire et manipuler des fichiers XML
-#
-# Exécuter: catnip -m xml.etree.ElementTree -m tempfile -m pathlib -m shutil xml_parsing.cat
+# Module stdlib pour lire et naviguer dans des documents XML
 
-ET = import("xml.etree.ElementTree")
-tempfile = import("tempfile")
-pathlib = import("pathlib")
-shutil = import("shutil")
+ET = import('xml.etree.ElementTree')
 
-# Parsing d'une chaîne XML
+# Modélisation des données
+
+struct Book {
+    id; title; author; year; category;
+
+    display(self) => {
+        f"Book#{self.id} '{self.title}' ({self.author}, {self.year}) [{self.category}]"
+    }
+}
+
+# Extraction d'un Book depuis un élément XML
+
+book_from_xml = (node) => {
+    Book(
+        node.get('id'),
+        node.find('title').text,
+        node.find('author').text,
+        node.find('year').text,
+        node.get('category'),
+    )
+}
+
+# Données XML
 
 xml_string = '<?xml version="1.0"?>
 <catalog>
@@ -30,79 +48,76 @@ xml_string = '<?xml version="1.0"?>
 </catalog>
 '
 
+# Parsing
+
 print("⇒ Parsing XML")
 root = ET.fromstring(xml_string)
-print("  Tag racine:", root.tag)
-print("  Nombre d'enfants:", len(root))
+print(f"  Tag racine: {root.tag}")
+print(f"  Nombre d'enfants: {len(root)}")
 
-# Navigation dans l'arbre
+# Conversion en structs
 
-print("\n⇒ Navigation dans l'arbre")
-for book in root {
-    print("  Book id:", book.get("id"))
-    print("    Titre:", book.find("title").text)
-    print("    Auteur:", book.find("author").text)
+print()
+print("⇒ Conversion en structs Book")
+books = list()
+for node in root {
+    books = books + list(book_from_xml(node))
+}
+for book in books {
+    print(f"  {book}")
+}
+
+# Filtrage par catégorie avec match
+
+print()
+print("⇒ Filtrage par catégorie (match)")
+for book in books {
+    label = match book.category {
+        'fiction' => { "Roman" }
+        'science' => { "Science" }
+        _         => { "Autre" }
+    }
+    print(f"  [{label}] {book.title}")
 }
 
 # Recherche avec findall
 
-print("\n⇒ Recherche avec findall")
-titles = root.findall(".//title")
+print()
+print("⇒ Recherche avec findall")
+titles = root.findall('.//title')
 print("  Tous les titres:")
 for t in titles {
-    print("    -", t.text)
+    print(f"    - {t.text}")
 }
 
-# Accès aux attributs
+# Attributs
 
-print("\n⇒ Attributs")
-for book in root {
-    attrs = book.attrib
-    print("  Book:", attrs)
+print()
+print("⇒ Attributs")
+for node in root {
+    attrs = node.attrib
+    print(f"  Book: {attrs}")
 }
 
-# Création d'éléments
+# Navigation dans l'arbre
 
-print("\n⇒ Création d'un nouveau document")
-config = ET.Element("config")
-config.set("version", "1.0")
+print()
+print("⇒ Navigation dans l'arbre")
+for node in root {
+    book = book_from_xml(node)
+    print(f"  Book id:{book.id}")
+    print(f"    Titre: {book.title}")
+    print(f"    Auteur: {book.author}")
+}
 
-# SubElement avec attributs
-server = ET.SubElement(config, "server")
-server.set("host", "localhost")
-server.set("port", "8080")
+# Livres par décennie via broadcasting
 
-# Affectation du contenu texte (obj.attr = value)
-server.text = "Server configuration"
-
-# Ajouter un sous-élément avec texte
-database = ET.SubElement(config, "database")
-database.text = "PostgreSQL"
-database.tail = "\n"
-
-print("  Document créé:")
-print("  ", ET.tostring(config, encoding="unicode"))
-
-# Écriture dans un fichier
-
-temp_dir = pathlib.Path(tempfile.mkdtemp())
-xml_file = temp_dir / "catalog.xml"
-
-tree = ET.ElementTree(root)
-tree.write(str(xml_file), encoding="unicode", xml_declaration=True)
-
-print("\n⇒ Fichier XML créé")
-print("  Chemin:", xml_file)
-print("  Taille:", xml_file.stat().st_size, "bytes")
-
-# Relecture
-
-print("\n⇒ Relecture du fichier")
-tree2 = ET.parse(str(xml_file))
-root2 = tree2.getroot()
-print("  Livres dans le fichier:", len(root2))
-
-# Nettoyage
-
-shutil.rmtree(str(temp_dir))
-print("\n⇒ Nettoyage effectué")
+print()
+print("⇒ Livres par décennie")
+decades = books.[(b) => {
+        decade=int(b.year) - int(b.year) % 10
+        f"  {b.title} → {decade}s"
+    }]
+for d in decades {
+    print(d)
+}

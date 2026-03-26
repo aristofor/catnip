@@ -18,11 +18,19 @@ class TestFormatCode:
         assert result == 'f = (x, y) => { x + y }\n'
 
     def test_block_indentation(self):
+        # Single-stmt block stays multi-line with proper indentation
         code = '{\nx=1\n}'
         result = format_code(code)
         assert result == '{\n    x = 1\n}\n'
 
+    def test_block_indentation_multi_stmt(self):
+        # Multi-stmt blocks stay expanded with proper indentation
+        code = '{\nx=1\ny=2\n}'
+        result = format_code(code)
+        assert result == '{\n    x = 1\n    y = 2\n}\n'
+
     def test_nested_blocks(self):
+        # Inner single-stmt block stays expanded with proper indentation
         code = '{\n{\nx=1\n}\n}'
         result = format_code(code)
         assert result == '{\n    {\n        x = 1\n    }\n}\n'
@@ -230,8 +238,26 @@ class TestLineWrapping:
 class TestDecorators:
     """Test decorator formatting."""
 
-    def test_decorator(self):
+    def test_decorator_preserved(self):
         assert format_code('@pure\nf = (x) => { x }').startswith('@pure\n')
+
+    def test_decorator_isolated_on_own_line(self):
+        """Inline decorator gets split to its own line."""
+        result = format_code('@jit f = (n) => { n * 2 }')
+        assert result.startswith('@jit\nf = (n) => { n * 2 }')
+
+    def test_multiple_decorators_each_on_own_line(self):
+        result = format_code('@jit @pure f = (x) => { x }')
+        lines = result.strip().split('\n')
+        assert lines[0] == '@jit'
+        assert lines[1] == '@pure'
+        assert lines[2].startswith('f = ')
+
+    def test_decorator_in_struct(self):
+        code = 'struct S {\n  @abstract area(self)\n}'
+        result = format_code(code)
+        assert '@abstract' in result
+        assert '@abstract area' not in result  # not on same line
 
 
 class TestRealWorldExamples:
@@ -263,3 +289,117 @@ n*factorial(n-1)
         code = 'result=(a+b)*(c-d)/2'
         result = format_code(code)
         assert 'result = (a + b) * (c - d) / 2' in result
+
+
+class TestColumnAlignment:
+    """Test column alignment for assignments, comments, and arrows."""
+
+    def test_align_assignments_not_triggered(self):
+        """Unaligned assignments stay unaligned (first 2 lines differ)."""
+        config = FormatConfig(align=True)
+        code = "x = 1\nlonger_name = 2\ny = 3\n"
+        result = format_code(code, config)
+        assert result == "x = 1\nlonger_name = 2\ny = 3\n"
+
+    def test_align_assignments_triggered(self):
+        """First 2 lines aligned triggers alignment for the group."""
+        config = FormatConfig(align=True)
+        code = "x           = 1\nlonger_name = 2\ny           = 3\n"
+        result = format_code(code, config)
+        lines = result.strip().split('\n')
+        eq_cols = [line.index('=') for line in lines]
+        assert len(set(eq_cols)) == 1
+
+    def test_align_comments_not_triggered(self):
+        """Unaligned comments stay unaligned (first 2 lines differ)."""
+        config = FormatConfig(align=True)
+        code = "code # short\nmore_code # longer comment\n"
+        result = format_code(code, config)
+        lines = result.strip().split('\n')
+        hash_cols = [line.index('#') for line in lines]
+        assert len(set(hash_cols)) > 1
+
+    def test_align_comments_triggered(self):
+        """First 2 lines aligned triggers alignment for the group."""
+        config = FormatConfig(align=True)
+        code = "code       # short\nmore_code  # longer comment\n"
+        result = format_code(code, config)
+        lines = result.strip().split('\n')
+        hash_cols = [line.index('#') for line in lines]
+        assert len(set(hash_cols)) == 1
+
+    def test_align_arrows_not_triggered(self):
+        """Unaligned arrows stay unaligned (first 2 lines differ)."""
+        config = FormatConfig(align=True)
+        code = "match x {\n    1 => { \"one\" }\n    100 => { \"hundred\" }\n    _ => { \"other\" }\n}\n"
+        result = format_code(code, config)
+        lines = [l for l in result.strip().split('\n') if '=>' in l]
+        arrow_cols = [line.index('=>') for line in lines]
+        assert len(set(arrow_cols)) > 1
+
+    def test_align_arrows_triggered(self):
+        """First 2 lines aligned triggers alignment for the group."""
+        config = FormatConfig(align=True)
+        code = "match x {\n    1   => { \"one\" }\n    100 => { \"hundred\" }\n    _   => { \"other\" }\n}\n"
+        result = format_code(code, config)
+        lines = [l for l in result.strip().split('\n') if '=>' in l]
+        arrow_cols = [line.index('=>') for line in lines]
+        assert len(set(arrow_cols)) == 1
+
+    def test_align_enabled_by_default(self):
+        """align=True by default, but first 2 lines must trigger."""
+        code = "x = 1\nlonger_name = 2\n"
+        result = format_code(code)
+        assert result == "x = 1\nlonger_name = 2\n"
+
+    def test_align_idempotent(self):
+        config = FormatConfig(align=True)
+        code = "x = 1\nlonger_name = 2\ny = 3\n"
+        first = format_code(code, config)
+        second = format_code(first, config)
+        assert first == second
+
+    def test_align_arrows_idempotent(self):
+        config = FormatConfig(align=True)
+        code = "match x {\n    1   => { \"a\" }\n    200 => { \"b\" }\n}\n"
+        first = format_code(code, config)
+        second = format_code(first, config)
+        assert first == second
+
+    def test_align_blank_line_breaks_group(self):
+        """Aligned groups separated by blank line."""
+        config = FormatConfig(align=True)
+        code = "x  = 1\nyy = 2\n\na  = 10\nbb = 20\n"
+        result = format_code(code, config)
+        lines = result.strip().split('\n')
+        # Each group is already aligned → preserved
+        assert lines[0].index('=') == lines[1].index('=')
+        assert lines[3].index('=') == lines[4].index('=')
+
+    def test_align_config_from_toml(self):
+        toml_text = """
+[format]
+align = true
+"""
+        config = FormatConfig.from_toml_section(toml_text)
+        assert config.align is True
+
+    def test_align_config_defaults(self):
+        config = FormatConfig()
+        assert config.align is True
+
+    def test_align_survives_line_joining(self):
+        """Alignment uses line map to find originals after join_short_lines reduces line count."""
+        config = FormatConfig(align=True)
+        code = "f(\n    a, b\n)\nx           = 1\nlonger_name = 2\n"
+        result = format_code(code, config)
+        lines = [l for l in result.strip().split('\n') if '=' in l and '=>' not in l]
+        eq_cols = [line.index('=') for line in lines]
+        assert len(set(eq_cols)) == 1
+
+    def test_multiline_single_stmt_block_preserved(self):
+        """A block written on multiple lines stays multi-line after formatting."""
+        code = "if cond {\n    result\n}"
+        result = format_code(code)
+        assert '{\n' in result
+        assert '    result\n' in result

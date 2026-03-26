@@ -9,10 +9,10 @@ import pytest
 def test_diamond_fields(cat):
     """Diamond inheritance merges fields via MRO (first-seen wins)."""
     code = """
-struct A { x }
-struct B extends(A) { y }
-struct C extends(A) { z }
-struct D extends(B, C) { w }
+struct A { x; }
+struct B extends(A) { y; }
+struct C extends(A) { z; }
+struct D extends(B, C) { w; }
 
 d = D(1, 2, 3, 4)
 list(d.x, d.y, d.z, d.w)
@@ -25,10 +25,10 @@ list(d.x, d.y, d.z, d.w)
 def test_diamond_no_duplicate_fields(cat):
     """Shared ancestor field 'x' appears only once in diamond."""
     code = """
-struct A { x }
-struct B extends(A) { y }
-struct C extends(A) { z }
-struct D extends(B, C) { w }
+struct A { x; }
+struct B extends(A) { y; }
+struct C extends(A) { z; }
+struct D extends(B, C) { w; }
 
 d = D(10, 20, 30, 40)
 d.x
@@ -67,7 +67,7 @@ def test_method_inherited_from_ancestor(cat):
     """Method from shared ancestor is accessible."""
     code = """
 struct A {
-    x
+    x;
     greet(self) => { "hello from A" }
 }
 struct B extends(A) {}
@@ -115,7 +115,7 @@ def test_super_init_chaining(cat):
     """init methods chain via super following MRO."""
     code = """
 struct A {
-    trace = ""
+    trace = "";
     init(self) => { self.trace = self.trace + "A" }
 }
 struct B extends(A) {
@@ -177,13 +177,13 @@ trait Greetable {
 }
 
 struct A {
-    x
+    x;
 }
 struct B extends(A) {
-    y
+    y;
 }
 struct C implements(Greetable) extends(B) {
-    z
+    z;
 }
 
 c = C(1, 2, 3)
@@ -201,11 +201,11 @@ def test_single_inheritance_still_works(cat):
     """Single extends(Base) continues to work as before."""
     code = """
 struct Base {
-    x
+    x;
     value(self) => { self.x * 2 }
 }
 struct Child extends(Base) {
-    y
+    y;
     both(self) => { self.x + self.y }
 }
 
@@ -221,7 +221,7 @@ def test_single_inheritance_super(cat):
     """Single inheritance super still works correctly."""
     code = """
 struct Base {
-    x
+    x;
     value(self) => { self.x }
 }
 struct Child extends(Base) {
@@ -242,8 +242,8 @@ c.value()
 def test_redefine_inherited_field_error(cat):
     """Redefining a parent field must be an error."""
     code = """
-struct A { x }
-struct B extends(A) { x }
+struct A { x; }
+struct B extends(A) { x; }
 """
     cat.parse(code)
     with pytest.raises(Exception) as exc_info:
@@ -257,9 +257,9 @@ struct B extends(A) { x }
 def test_multiple_parents_with_defaults(cat):
     """Default values from parents are preserved."""
     code = """
-struct A { x = 10 }
-struct B { y = 20 }
-struct C extends(A, B) { z = 30 }
+struct A { x = 10; }
+struct B { y = 20; }
+struct C extends(A, B) { z = 30; }
 
 c = C()
 list(c.x, c.y, c.z)
@@ -276,12 +276,12 @@ def test_static_method_inherited(cat):
     """Static methods are inherited through MRO."""
     code = """
 struct A {
-    x
+    x;
     @static
     create() => { A(42) }
 }
 struct B extends(A) {
-    y
+    y;
 }
 
 b = B(1, 2)

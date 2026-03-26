@@ -14,7 +14,8 @@
 //! - match x { _ => body } (single catchall) → body
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -48,7 +49,7 @@ impl OptimizationPass for DeadCodeEliminationPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -159,8 +160,7 @@ impl DeadCodeEliminationPass {
                     // Guard constant True: simplify to no guard
                     let effective_no_guard;
                     if !guard.is_none() && self.is_python_true(&guard)? {
-                        let simplified =
-                            PyTuple::new(py, &[pattern.unbind(), py.None(), body.unbind()])?;
+                        let simplified = PyTuple::new(py, &[pattern.unbind(), py.None(), body.unbind()])?;
                         live_cases.push(simplified.into_any());
                         effective_no_guard = true;
                     } else {
@@ -190,10 +190,9 @@ impl DeadCodeEliminationPass {
                     if live_cases.is_empty() {
                         return Ok(py.None());
                     }
-                    let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+                    let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
                     let new_cases = PyTuple::new(py, &live_cases)?;
-                    let new_args =
-                        PyTuple::new(py, &[value_expr.unbind(), new_cases.into_any().unbind()])?;
+                    let new_args = PyTuple::new(py, &[value_expr.unbind(), new_cases.into_any().unbind()])?;
                     let kwargs = node.getattr("kwargs")?;
                     return ir_class
                         .call1((node.getattr("ident")?, new_args, kwargs))

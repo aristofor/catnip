@@ -14,11 +14,27 @@ match x {
     (match_expr
       value: (identifier)
       (match_case
-        (pattern (pattern_or (pattern_literal (integer))))
-        (block (statement (string))))
+        (pattern
+          (pattern_or
+            (pattern_literal
+              (literal
+                (number
+                  (integer))))))
+        (block
+          (statement
+            (literal
+              (string)))))
       (match_case
-        (pattern (pattern_or (pattern_literal (integer))))
-        (block (statement (string)))))))
+        (pattern
+          (pattern_or
+            (pattern_literal
+              (literal
+                (number
+                  (integer))))))
+        (block
+          (statement
+            (literal
+              (string))))))))
 
 ================================================================================
 Match with variable pattern
@@ -35,8 +51,18 @@ match x {
     (match_expr
       value: (identifier)
       (match_case
-        (pattern (pattern_or (pattern_var (identifier))))
-        (block (statement (additive (identifier) (add_sub_op) (integer))))))))
+        (pattern
+          (pattern_or
+            (pattern_var
+              (identifier))))
+        (block
+          (statement
+            (additive
+              (identifier)
+              (add_sub_op)
+              (literal
+                (number
+                  (integer))))))))))
 
 ================================================================================
 Match with wildcard pattern
@@ -53,8 +79,13 @@ match x {
     (match_expr
       value: (identifier)
       (match_case
-        (pattern (pattern_or (pattern_wildcard)))
-        (block (statement (string)))))))
+        (pattern
+          (pattern_or
+            (pattern_wildcard)))
+        (block
+          (statement
+            (literal
+              (string))))))))
 
 ================================================================================
 Match with OR pattern
@@ -73,10 +104,22 @@ match x {
       (match_case
         (pattern
           (pattern_or
-            (pattern_literal (integer))
-            (pattern_literal (integer))
-            (pattern_literal (integer))))
-        (block (statement (string)))))))
+            (pattern_literal
+              (literal
+                (number
+                  (integer))))
+            (pattern_literal
+              (literal
+                (number
+                  (integer))))
+            (pattern_literal
+              (literal
+                (number
+                  (integer))))))
+        (block
+          (statement
+            (literal
+              (string))))))))
 
 ================================================================================
 Match with guard
@@ -93,9 +136,20 @@ match x {
     (match_expr
       value: (identifier)
       (match_case
-        (pattern (pattern_or (pattern_var (identifier))))
-        guard: (comparison (identifier) (comp_op) (integer))
-        (block (statement (string)))))))
+        (pattern
+          (pattern_or
+            (pattern_var
+              (identifier))))
+        guard: (comparison
+          (identifier)
+          (comp_op)
+          (literal
+            (number
+              (integer))))
+        (block
+          (statement
+            (literal
+              (string))))))))
 
 ================================================================================
 Match with tuple pattern
@@ -117,14 +171,30 @@ match point {
           (pattern_or
             (pattern_tuple
               (pattern_items
-                (pattern_literal (integer))
-                (pattern_literal (integer))))))
-        (block (statement (string))))
+                (pattern_literal
+                  (literal
+                    (number
+                      (integer))))
+                (pattern_literal
+                  (literal
+                    (number
+                      (integer))))))))
+        (block
+          (statement
+            (literal
+              (string)))))
       (match_case
         (pattern
           (pattern_or
             (pattern_tuple
               (pattern_items
-                (pattern_var (identifier))
-                (pattern_var (identifier))))))
-        (block (statement (additive (identifier) (add_sub_op) (identifier))))))))
+                (pattern_var
+                  (identifier))
+                (pattern_var
+                  (identifier))))))
+        (block
+          (statement
+            (additive
+              (identifier)
+              (add_sub_op)
+              (identifier))))))))

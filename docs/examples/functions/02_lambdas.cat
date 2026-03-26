@@ -1,4 +1,5 @@
-# Exemple 4 : Lambdas et blocs anonymes
+#!/usr/bin/env catnip
+# Exemple : Lambdas et blocs anonymes
 
 print("⇒ Lambdas simples")
 
@@ -19,7 +20,8 @@ print("doubler(21) =", doubler(21))
 multiplier = (a, b) => { a * b }
 print("multiplier(6, 7) =", multiplier(6, 7))
 
-print("\n⇒ Lambdas avec logique")
+print()
+print("⇒ Lambdas avec logique")
 
 # Lambda avec calcul intermédiaire
 calculer_moyenne = (a, b, c) => {
@@ -41,7 +43,8 @@ valeur_absolue = (x) => {
 print("abs(-42) =", valeur_absolue(-42))
 print("abs(42) =", valeur_absolue(42))
 
-print("\n⇒ Utilisation avec itérations")
+print()
+print("⇒ Utilisation avec itérations")
 
 # Appliquer une lambda à une séquence
 tripler = (x) => { x * 3 }

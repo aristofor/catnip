@@ -57,5 +57,5 @@ def test_constant_folding_preserves_call_in_comparison(executor):
     assert cat.execute() == 1
 
 
-# Removed: test_strength_reduction_and_folding_compose — sr_pow_one, const_fold_add (CatnipOptimProof.v, CatnipConstFoldProof.v)
+# Removed: test_strength_reduction_and_folding_compose - sr_pow_one, const_fold_add (CatnipOptimProof.v, CatnipConstFoldProof.v)
 # Doublon exact de test_optimization_iterations dans test_optimizer.py; passes prouvees individuellement

@@ -109,7 +109,7 @@ Le JIT applique automatiquement :
 **Élimination d'overhead** : pas de boxing/unboxing, dispatch direct
 
 **Builtins natifs** : `abs`, `bool`, `int`, `max`, `min`, `round` compilés en instructions machine
-(icmp/select/identity), `float` via callback extern C -- pas d'appel Python
+(icmp/select/identity), `float` via callback extern C - pas d'appel Python
 
 **Inline de fonctions pures** : petites fonctions pures (\<20 opcodes) inlinées automatiquement
 
@@ -145,28 +145,30 @@ Les traces compilées sont persistées sur disque pour éliminer le warm-up au p
 
 ```mermaid
 flowchart TD
-    A["Loop/fonction atteint le seuil hot"] --> B{"Entrée cache trace présente ?"}
-    B -->|Oui| C["Charger Trace sérialisée"]
-    C --> D["Recompiler rapidement via Cranelift"]
+    A["Première itération de boucle"] --> W{"Cache trace présent ?"}
+    W -->|Oui| C["Charger Trace sérialisée"]
+    C --> D["Recompiler via Cranelift"]
     D --> E["Exécuter en natif"]
-    B -->|Non| F["Profiler + enregistrer nouvelle trace"]
+    W -->|Non| H2["Compter les itérations"]
+    H2 --> A2{"Seuil atteint (100) ?"}
+    A2 -->|Oui| B{"Cache trace ?"}
+    B -->|Oui| C
+    B -->|Non| F["Enregistrer nouvelle trace"]
     F --> G["Compiler trace"]
     G --> H["Persister (write temp + rename atomique)"]
     H --> E
-    E --> I{"Version/format valide ?"}
-    I -->|Non| J["Invalidation automatique"]
 ```
 
-1. **Hash du bytecode** : chaque programme reçoit un hash FNV-1a calculé sur les instructions (opcode + arg) ET le
-   constant pool (valeurs NaN-boxed). Deux programmes avec les mêmes instructions mais des constantes différentes
-   produisent des hash différents.
+1. **Hash du bytecode** : chaque CodeObject reçoit un hash FNV-1a calculé sur les instructions (opcode + arg) ET le
+   constant pool (valeurs NaN-boxed), cachée dans un `OnceLock<u64>` pour éviter le recalcul. Le hash est mis à jour
+   dans le JIT executor à chaque Call (nouveau frame) et restauré sur Return.
 
 1. **Stockage** : les traces sont sérialisées en bincode dans `~/.cache/catnip/` (fichiers plats). Clé :
    `jit_v{VERSION}_{HASH:016x}_{OFFSET:06x}`.
 
-1. **Chargement** : au moment où la VM détecte un loop chaud (seuil 100), elle vérifie d'abord le cache disque. Si une
-   trace existe et que la version correspond, elle est rechargée et recompilée via Cranelift sans repasser par
-   l'enregistrement.
+1. **Warm-start** : au premier passage d'une boucle, la VM vérifie le cache disque *avant* de compter les itérations. Si
+   une trace compilée existe, elle est chargée et le code natif est utilisé dès la première itération (zéro warm-up). Si
+   pas de cache, le flow classique s'applique (100 itérations → hot → trace → compile → cache).
 
 1. **Invalidation** : par version Catnip + version format cache. Un changement de version invalide automatiquement les
    entrées.
@@ -185,10 +187,12 @@ Le cache est safe pour l'exécution concurrente ND (mode `spawn`) :
 
 **Non cachée** : le `CompiledFn` (pointeur vers code machine) - runtime-specific, non sérialisable
 
-Les stencils Cranelift (code machine non relocaté + table de relocations) sont cachés séparément (`jit_native_{SHA256}`)
-via le trait `CacheKvStore` de Cranelift. Au rechargement, le stencil est désérialisé et les relocations appliquées par
-`define_function_bytes` + `finalize_definitions` -- sans repasser par la compilation Cranelift. La clé SHA-256 inclut le
-triple ISA + les flags CPU, ce qui invalide le cache en cas de changement d'architecture.
+Les stencils Cranelift (code machine non relocaté + table de relocations) sont cachés séparément
+(`jit_nv{CACHE_VERSION}_{SHA256}`) via le trait `CacheKvStore` de Cranelift. Le préfixe `nv` (native versioned) inclut
+`CACHE_VERSION = VMOpCode::MAX + COMPILER_SALT`, ce qui invalide automatiquement le cache quand les opcodes ou la
+sémantique de compilation changent. Au démarrage, les fichiers d'anciennes versions (y compris le legacy `jit_native_*`)
+sont nettoyés. Au rechargement, le stencil est désérialisé et les relocations appliquées par `define_function_bytes` +
+`finalize_definitions` -- sans repasser par la compilation Cranelift.
 
 > Le cache garde la trace (le plan), pas le binaire final. Chaque process forge son code machine localement.
 
@@ -265,3 +269,32 @@ ordre.
 **Référence SSA** : Cytron et al. (1991), "Efficiently Computing Static Single Assignment Form and the Control
 Dependence Graph" (IEEE TOPLAS). Construction SSA du pipeline CFG/SSA de Catnip : Braun et al. (2013), "Simple and
 Efficient Construction of Static Single Assignment Form".
+
+## Préservation des locals non-JIT
+
+Le JIT opère sur un tableau `Vec<i64>` contenant les bits NaN-boxed bruts des `Value` du frame (`v.bits() as i64`). Le
+codegen Cranelift unboxe les valeurs dans l'entry block (extraction du payload pour les ints, bitcast pour les floats)
+et re-boxe dans les exit/guard_fail blocks avant de les écrire en mémoire.
+
+Après exécution JIT, seuls les slots dont la valeur NaN-boxed a changé sont restaurés dans le frame via
+`Value::from_raw()`. Les slots inchangés conservent leur `Value` originale.
+
+## Overflow Guards (BigInt)
+
+Les opérations arithmétiques compilées (+, -, \*) incluent des guards de dépassement SmallInt. Après chaque `iadd`,
+`isub`, `imul` Cranelift, le codegen vérifie que le résultat reste dans la plage 47-bit signée :
+
+```rust
+let too_big = builder.ins().icmp(SignedGreaterThan, result, max_val);
+let too_small = builder.ins().icmp(SignedLessThan, result, min_val);
+let overflow = builder.ins().bor(too_big, too_small);
+builder.ins().brif(overflow, guard_fail_block, &fail_args, cont, &cont_args);
+```
+
+Si le résultat dépasse la plage SmallInt, le code natif effectue une **deoptimization** : retour à l'interpréteur VM qui
+gère la promotion BigInt correctement. Ce mécanisme garantit que les boucles JIT-compilées produisant des entiers larges
+(ex: fibonacci au-delà de 2^46) fonctionnent sans corruption.
+
+**Restauration post-JIT** : quand le JIT rend la main (exit normal ou guard failure), les locals sont restaurés depuis
+le `Vec<i64>` via `Value::from_raw()` -- les valeurs sont déjà NaN-boxed par le codegen. L'ancienne valeur du slot est
+`decref`-ée avant écrasement pour maintenir l'intégrité du refcount des valeurs heap-allocated.

@@ -6,33 +6,22 @@ from __future__ import annotations
 import click
 
 from ..plugins import discover_plugins
-
-
-def _format_table(rows, headers):
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-
-    header_line = "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers)))
-    sep_line = "  ".join("-" * widths[i] for i in range(len(headers)))
-    body_lines = ["  ".join(row[i].ljust(widths[i]) for i in range(len(headers))) for row in rows]
-    return "\n".join([header_line, sep_line, *body_lines])
+from ..utils import BUILTIN_COMMANDS_PREFIX, format_table
 
 
 def _command_source(entry_point):
     if entry_point is None:
         return 'builtin'
-    if entry_point.value.startswith('catnip.cli.commands.'):
+    if entry_point.value.startswith(BUILTIN_COMMANDS_PREFIX):
         return 'builtin'
     if entry_point.dist:
-        return f"plugin:{entry_point.dist.name}"
+        return f'plugin:{entry_point.dist.name}'
     return 'plugin'
 
 
-@click.command("commands")
+@click.command('commands')
 @click.option(
-    "--resolve/--no-resolve",
+    '--resolve/--no-resolve',
     default=True,
     help="Load commands to show short help strings",
 )
@@ -44,7 +33,7 @@ def cmd_commands(ctx, resolve):
         click.echo("Error: No CLI group context available", err=True)
         ctx.exit(1)
 
-    plugins = getattr(group, "plugins", None)
+    plugins = getattr(group, 'plugins', None)
     if plugins is None:
         plugins = discover_plugins()
 
@@ -67,5 +56,5 @@ def cmd_commands(ctx, resolve):
         click.echo("No commands found.")
         return
 
-    table = _format_table(rows, headers=['command', 'source', 'status', 'help'])
+    table = format_table(rows, headers=['command', 'source', 'status', 'help'])
     click.echo(table)

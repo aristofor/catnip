@@ -10,7 +10,8 @@
 //! Works at block level only (not inter-blocks).
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::collections::{HashMap, HashSet};
@@ -20,10 +21,23 @@ pub struct CommonSubexpressionEliminationPass {
     pure_ops: HashSet<i32>,
 }
 
+impl CommonSubexpressionEliminationPass {
+    /// Create a new pass (Rust API)
+    pub fn new() -> Self {
+        Self::py_new()
+    }
+}
+
+impl Default for CommonSubexpressionEliminationPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
 impl CommonSubexpressionEliminationPass {
     #[new]
-    fn new() -> Self {
+    fn py_new() -> Self {
         let mut pure_ops = HashSet::new();
 
         // Arithmetic
@@ -85,7 +99,7 @@ impl OptimizationPass for CommonSubexpressionEliminationPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -162,22 +176,18 @@ impl CommonSubexpressionEliminationPass {
                     let (_var_name, expr_node) = &expr_to_var[expr_hash];
 
                     // Create assignment: SET_LOCALS((var_name,), expr_node)
-                    let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
-                    let set_locals_ident =
-                        (OpCode::SET_LOCALS as i32).into_pyobject(py)?.into_any();
+                    let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
+                    let set_locals_ident = (OpCode::SET_LOCALS as i32).into_pyobject(py)?.into_any();
 
                     // First arg: tuple of variable names
-                    let var_names_tuple = PyTuple::new(py, &[var_name.clone()])?;
+                    let var_names_tuple = PyTuple::new(py, std::slice::from_ref(var_name))?;
 
                     // Second arg: expression node
-                    let assignment_args = PyTuple::new(
-                        py,
-                        &[var_names_tuple.into_any().unbind(), expr_node.clone_ref(py)],
-                    )?;
+                    let assignment_args =
+                        PyTuple::new(py, &[var_names_tuple.into_any().unbind(), expr_node.clone_ref(py)])?;
 
                     let empty_dict = PyDict::new(py);
-                    let assignment =
-                        ir_class.call1((set_locals_ident, assignment_args, empty_dict))?;
+                    let assignment = ir_class.call1((set_locals_ident, assignment_args, empty_dict))?;
 
                     new_statements.push(assignment.unbind());
                     cse_injected.insert(var_name.clone());
@@ -190,7 +200,7 @@ impl CommonSubexpressionEliminationPass {
         }
 
         // Create new block with injected CSE assignments
-        let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+        let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
         let block_ident = block.getattr("ident")?;
         let new_args = PyTuple::new(py, &new_statements)?;
         let kwargs = block.getattr("kwargs")?;
@@ -226,8 +236,8 @@ impl CommonSubexpressionEliminationPass {
             }
         }
 
-        // Only IR nodes can be CSE
-        if type_name != "IR" {
+        // Only IR/Op nodes can be CSE
+        if type_name != "IR" && type_name != "Op" {
             return Ok(found);
         }
 
@@ -290,11 +300,7 @@ impl CommonSubexpressionEliminationPass {
                     let replaced = self.replace_subexpressions(py, &item, expr_to_var)?;
                     result.push(replaced);
                 }
-                return Ok(py
-                    .import("builtins")?
-                    .getattr("list")?
-                    .call1((result,))?
-                    .unbind());
+                return Ok(py.import("builtins")?.getattr("list")?.call1((result,))?.unbind());
             }
         }
 
@@ -310,8 +316,8 @@ impl CommonSubexpressionEliminationPass {
             }
         }
 
-        // Only IR nodes can be replaced
-        if type_name != "IR" {
+        // Only IR/Op nodes can be replaced
+        if type_name != "IR" && type_name != "Op" {
             return Ok(node.clone().unbind());
         }
 
@@ -322,7 +328,7 @@ impl CommonSubexpressionEliminationPass {
                 let node_hash = self.hash_pyobject(py, &hashable_repr)?;
                 if let Some((var_name, _)) = expr_to_var.get(&node_hash) {
                     // Replace with Ref
-                    let ref_class = py.import("catnip.nodes")?.getattr("Ref")?;
+                    let ref_class = py.import(PY_MOD_NODES)?.getattr("Ref")?;
                     return ref_class.call1((var_name,)).map(|r| r.unbind());
                 }
             }
@@ -365,7 +371,7 @@ impl CommonSubexpressionEliminationPass {
         }
 
         // Return new IR with replaced args
-        let ir_class = py.import("catnip.transformer")?.getattr("IR")?;
+        let ir_class = py.import(PY_MOD_TRANSFORMER)?.getattr("IR")?;
         let new_node = ir_class.call1((ident, new_args_tuple, replaced_kwargs))?;
         Ok(new_node.unbind())
     }
@@ -397,15 +403,15 @@ impl CommonSubexpressionEliminationPass {
             }
         }
 
-        // For non-IR nodes, nothing to do
-        if type_name != "IR" {
-            // eprintln!("CSE: Non-IR node, skipping");
+        // For non-IR/Op nodes, nothing to do
+        if type_name != "IR" && type_name != "Op" {
+            // eprintln!("CSE: Non-IR/Op node, skipping");
             return Ok(());
         }
 
         // Don't descend into control flow operations
         let ident = node.getattr("ident")?;
-        // eprintln!("CSE: IR node, checking control flow");
+        // eprintln!("CSE: IR/Op node, checking control flow");
         if self.is_control_flow(&ident)? {
             // eprintln!("CSE: Control flow node, skipping");
             return Ok(());
@@ -505,7 +511,7 @@ impl CommonSubexpressionEliminationPass {
                     }
                 }
             }
-            "IR" => {
+            "IR" | "Op" => {
                 // Hash based on ident and hashable args ONLY
                 // DO NOT include kwargs - they contain metadata like start_byte/end_byte
                 // which differ between identical expressions at different positions
@@ -534,8 +540,7 @@ impl CommonSubexpressionEliminationPass {
             }
             "Ref" => {
                 let ident = obj.getattr("ident")?;
-                let result_list =
-                    vec!["Ref".into_pyobject(py)?.into_any().unbind(), ident.unbind()];
+                let result_list = vec!["Ref".into_pyobject(py)?.into_any().unbind(), ident.unbind()];
                 return Ok(PyTuple::new(py, &result_list)?.into_any().unbind());
             }
             _ => {}
@@ -587,7 +592,7 @@ impl CommonSubexpressionEliminationPass {
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
 
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(false);
         }
 
@@ -628,7 +633,7 @@ impl CommonSubexpressionEliminationPass {
             let arg_type_name = arg_type_name_obj.to_str()?;
 
             match arg_type_name {
-                "IR" => complexity += 2,         // Sub-operation = complex
+                "IR" | "Op" => complexity += 2,  // Sub-operation = complex
                 "Identifier" => complexity += 1, // Identifier = somewhat complex
                 "Ref" => complexity += 1,        // Ref = somewhat complex
                 _ => {}                          // Constants don't count

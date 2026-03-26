@@ -1,40 +1,38 @@
+#!/usr/bin/env catnip
 # Distance géodésique : formule de Haversine
 # Distance orthodromique entre deux points GPS (latitude, longitude)
 # sur la sphère terrestre moyenne (R = 6371 km)
 #
 # Ref: https://en.wikipedia.org/wiki/Haversine_formula
-#
-# Exécuter:
-#   catnip docs/codex/geospatial/haversine_distance.cat
-#
 
-math = import("math")
+math = import('math')
 
 # Rayon moyen de la Terre (km)
 R = 6371.0
 
 struct Location {
-    lat, lon
+    lat; lon;
 
     # Distance géodésique vers un autre point (km)
     distance_to(self, other) => {
         dlat = math.radians(other.lat - self.lat)
         dlon = math.radians(other.lon - self.lon)
-        a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(self.lat)) * math.cos(math.radians(other.lat)) * math.sin(dlon / 2) ** 2
+        a    = math.sin(dlat / 2) ** 2 + math.cos(math.radians(self.lat)) * math.cos(math.radians(other.lat)) *
+            math.sin(dlon / 2) ** 2
         2 * R * math.asin(math.sqrt(a))
     }
 }
 
 # Coordonnées de villes
 
-paris     = Location(48.8566,    2.3522)
-london    = Location(51.5074,   -0.1278)
-new_york  = Location(40.7128,  -74.0060)
-tokyo     = Location(35.6762,  139.6503)
+paris     = Location(48.8566, 2.3522)
+london    = Location(51.5074, -0.1278)
+new_york  = Location(40.7128, -74.0060)
+tokyo     = Location(35.6762, 139.6503)
 sydney    = Location(-33.8688, 151.2093)
-cape_town = Location(-33.9249,  18.4241)
+cape_town = Location(-33.9249, 18.4241)
 rio       = Location(-22.9068, -43.1729)
-moscow    = Location(55.7558,   37.6173)
+moscow    = Location(55.7558, 37.6173)
 
 # Distance directe entre paires
 
@@ -51,7 +49,8 @@ names  = list("Londres", "New York", "Tokyo", "Sydney", "Le Cap", "Rio", "Moscou
 
 distances = cities.[(city) => { round(paris.distance_to(city), 1) }]
 
-print("\n⇒ Broadcasting : distances depuis Paris")
+print()
+print("⇒ Broadcasting : distances depuis Paris")
 for i in range(len(names)) {
     print("  ", names[i], ":", distances[i], "km")
 }
@@ -61,7 +60,8 @@ for i in range(len(names)) {
 closest  = min(distances)
 farthest = max(distances)
 
-print("\n⇒ Extrêmes")
+print()
+print("⇒ Extrêmes")
 print("  Plus proche :", names[distances.index(closest)], "(", closest, "km )")
 print("  Plus loin   :", names[distances.index(farthest)], "(", farthest, "km )")
 
@@ -71,7 +71,8 @@ dist_from = (ref) => {
     (point) => { round(ref.distance_to(point), 1) }
 }
 
-print("\n⇒ Variante curried : distances depuis Tokyo")
+print()
+print("⇒ Variante curried : distances depuis Tokyo")
 from_tokyo = dist_from(tokyo)
 tokyo_distances = cities.[(city) => { from_tokyo(city) }]
 
@@ -81,7 +82,8 @@ for i in range(len(names)) {
 
 # Matrice de distances
 
-print("\n⇒ Matrice de distances (km)")
+print()
+print("⇒ Matrice de distances (km)")
 
 sample       = list(paris, london, new_york, tokyo, sydney)
 sample_names = list("Paris", "Londres", "New York", "Tokyo", "Sydney")
@@ -98,7 +100,8 @@ for i in range(len(sample_names)) {
 
 # Rayon de recherche : villes à moins de 5000 km de Paris
 
-print("\n⇒ Villes à moins de 5000 km de Paris")
+print()
+print("⇒ Villes à moins de 5000 km de Paris")
 for i in range(len(names)) {
     if distances[i] < 5000 {
         print("  ", names[i], ":", distances[i], "km")
@@ -107,14 +110,16 @@ for i in range(len(names)) {
 
 # Périmètre d'un trajet
 
-print("\n⇒ Périmètre Paris → Londres → New York → Rio → Le Cap → Tokyo → Paris")
+print()
+print("⇒ Périmètre Paris → Londres → New York → Rio → Le Cap → Tokyo → Paris")
 trajet = list(paris, london, new_york, rio, cape_town, tokyo, paris)
 etapes = list("Paris→Londres", "Londres→NY", "NY→Rio", "Rio→Le Cap", "Le Cap→Tokyo", "Tokyo→Paris")
 
-total = 0
+distances_etapes = range(len(etapes)).[(i) => { round(trajet[i].distance_to(trajet[i + 1]), 1) }]
+
 for i in range(len(etapes)) {
-    d = round(trajet[i].distance_to(trajet[i + 1]), 1)
-    print("  ", etapes[i], ":", d, "km")
-    total = total + d
+    print("  ", etapes[i], ":", distances_etapes[i], "km")
 }
+
+total = fold(distances_etapes, 0, (acc, d) => { acc + d })
 print("  Total :", round(total, 1), "km")

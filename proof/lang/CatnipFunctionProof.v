@@ -1,5 +1,5 @@
 (* FILE: proof/lang/CatnipFunctionProof.v *)
-(* CatnipFunctionProof.v — Formal model of Catnip's function/lambda and TCO trampoline
+(* CatnipFunctionProof.v - Formal model of Catnip's function/lambda and TCO trampoline
  *
  * Source of truth:
  *   catnip_rs/src/core/nodes.rs:66-81         (TailCall struct)

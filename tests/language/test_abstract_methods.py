@@ -14,7 +14,7 @@ trait Printable {
     to_string(self)
 }
 struct Point implements(Printable) {
-    x, y
+    x; y;
     to_string(self) => { "Point" }
 }
 Point(1, 2).to_string()
@@ -30,7 +30,7 @@ trait Printable {
     @abstract
     to_string(self)
 }
-struct Point implements(Printable) { x, y }
+struct Point implements(Printable) { x; y; }
 """
     cat.parse(code)
     with pytest.raises(Exception, match=r"abstract method"):
@@ -44,7 +44,7 @@ trait Showable {
     @abstract
     show(self)
 }
-struct Point implements(Showable) { x, y }
+struct Point implements(Showable) { x; y; }
 """
     cat.parse(code)
     with pytest.raises(Exception, match=r"abstract"):
@@ -58,7 +58,7 @@ def test_struct_abstract_method_inherited(cat):
     """Abstract method in base struct, implemented in child."""
     code = """
 struct Animal {
-    name
+    name;
     @abstract
     speak(self)
 }
@@ -75,7 +75,7 @@ def test_struct_abstract_cannot_instantiate(cat):
     """Direct instantiation of struct with abstract method fails."""
     code = """
 struct Animal {
-    name
+    name;
     @abstract
     speak(self)
 }
@@ -90,7 +90,7 @@ def test_struct_abstract_child_missing_impl(cat):
     """Child struct that doesn't implement parent abstract method fails."""
     code = """
 struct Animal {
-    name
+    name;
     @abstract
     speak(self)
 }
@@ -114,7 +114,7 @@ trait Serializable {
     type_name(self) => { "object" }
 }
 struct Config implements(Serializable) {
-    key
+    key;
     serialize(self) => { self.key }
 }
 c = Config("debug")
@@ -138,7 +138,7 @@ trait Styled extends(Base) {
     style(self) => { "default" }
 }
 struct Widget implements(Styled) {
-    name
+    name;
     render(self) => { self.name }
 }
 w = Widget("btn")
@@ -158,7 +158,7 @@ trait Base {
 trait Styled extends(Base) {
     style(self) => { "default" }
 }
-struct Widget implements(Styled) { name }
+struct Widget implements(Styled) { name; }
 """
     cat.parse(code)
     with pytest.raises(Exception, match=r"abstract"):
@@ -175,7 +175,7 @@ trait Base {
 trait Concrete extends(Base) {
     render(self) => { "concrete" }
 }
-struct Widget implements(Concrete) { name }
+struct Widget implements(Concrete) { name; }
 Widget("x").render()
 """
     cat.parse(code)
@@ -189,7 +189,7 @@ def test_abstract_init_forbidden(cat):
     """@abstract on init method should be rejected at parse time."""
     code = """
 struct Foo {
-    x
+    x;
     @abstract
     init(self)
 }
@@ -211,7 +211,7 @@ trait Codec {
     decode(self)
 }
 struct Json implements(Codec) {
-    data
+    data;
     encode(self) => { "encoded" }
     decode(self) => { "decoded" }
 }
@@ -232,7 +232,7 @@ trait Codec {
     decode(self)
 }
 struct Json implements(Codec) {
-    data
+    data;
     encode(self) => { "encoded" }
 }
 """

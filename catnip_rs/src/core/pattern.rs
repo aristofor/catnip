@@ -307,8 +307,7 @@ impl PatternStruct {
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
         if let Ok(other_pattern) = other.extract::<PyRef<PatternStruct>>() {
             Python::attach(|py| {
-                Ok(self.name == other_pattern.name
-                    && self.fields.bind(py).eq(other_pattern.fields.bind(py))?)
+                Ok(self.name == other_pattern.name && self.fields.bind(py).eq(other_pattern.fields.bind(py))?)
             })
         } else {
             Ok(false)

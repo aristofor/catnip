@@ -7,11 +7,7 @@ use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 
 impl Registry {
     /// Create a list literal from items, evaluating each item.
-    pub(crate) fn op_list_literal(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_list_literal(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         for i in 0..items.len() {
             let item = items.get_item(i)?.unbind();
@@ -22,11 +18,7 @@ impl Registry {
     }
 
     /// Create a tuple literal from items, evaluating each item.
-    pub(crate) fn op_tuple_literal(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_tuple_literal(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let mut temp = Vec::new();
         for i in 0..items.len() {
             let item = items.get_item(i)?.unbind();
@@ -37,11 +29,7 @@ impl Registry {
     }
 
     /// Create a set literal from items, evaluating each item.
-    pub(crate) fn op_set_literal(
-        &self,
-        py: Python<'_>,
-        items: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_set_literal(&self, py: Python<'_>, items: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let set = PySet::empty(py)?;
         for i in 0..items.len() {
             let item = items.get_item(i)?.unbind();
@@ -52,11 +40,7 @@ impl Registry {
     }
 
     /// Create a dict literal from key-value pairs, evaluating keys and values
-    pub(crate) fn op_dict_literal(
-        &self,
-        py: Python<'_>,
-        pairs: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    pub(crate) fn op_dict_literal(&self, py: Python<'_>, pairs: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
 
         for i in 0..pairs.len() {
@@ -81,36 +65,44 @@ impl Registry {
 
     /// Evaluate an f-string template with interpolated expressions
     ///
-    /// Parts are tuples: ('text', str) or ('expr', expr_node)
-    pub(crate) fn op_fstring(
-        &self,
-        py: Python<'_>,
-        parts: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    /// Parts: String (text) or Tuple(expr, Int(conv), spec)
+    /// conv: 0=none, 1=str, 2=repr, 3=ascii
+    pub(crate) fn op_fstring(&self, py: Python<'_>, parts: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let builtins = py.import("builtins")?;
+        let format_fn = builtins.getattr("format")?;
         let mut result = String::new();
 
         for i in 0..parts.len() {
             let part = parts.get_item(i)?;
 
-            // Each part should be a tuple (type, value)
-            if let Ok(part_tuple) = part.cast::<PyTuple>() {
-                if part_tuple.len() == 2 {
-                    let part_type: String = part_tuple.get_item(0)?.extract()?;
-                    let part_value = part_tuple.get_item(1)?;
+            if let Ok(text) = part.extract::<String>() {
+                // Text part
+                result.push_str(&text);
+            } else if let Ok(tuple) = part.cast::<PyTuple>() {
+                // Interpolation: (expr, conv, spec)
+                let expr = tuple.get_item(0)?;
+                let conv: i64 = tuple.get_item(1)?.extract()?;
+                let spec_node = tuple.get_item(2)?;
 
-                    if part_type == "text" {
-                        // Direct text, just extract as string
-                        let text: String = part_value.extract()?;
-                        result.push_str(&text);
-                    } else if part_type == "expr" {
-                        // Expression node, evaluate it
-                        let expr_result = self.exec_stmt_impl(py, part_value.unbind())?;
-                        // Convert to string using Python str()
-                        let str_value = expr_result.bind(py).str()?;
-                        let text: String = str_value.extract()?;
-                        result.push_str(&text);
-                    }
-                }
+                let value = self.exec_stmt_impl(py, expr.unbind())?;
+
+                // Apply conversion
+                let converted = match conv {
+                    1 => builtins.getattr("str")?.call1((value.bind(py),))?.unbind(),
+                    2 => builtins.getattr("repr")?.call1((value.bind(py),))?.unbind(),
+                    3 => builtins.getattr("ascii")?.call1((value.bind(py),))?.unbind(),
+                    _ => value,
+                };
+
+                // Apply format spec
+                let spec: String = if spec_node.is_none() {
+                    String::new()
+                } else {
+                    spec_node.extract()?
+                };
+
+                let formatted = format_fn.call1((converted.bind(py), spec))?.extract::<String>()?;
+                result.push_str(&formatted);
             }
         }
 

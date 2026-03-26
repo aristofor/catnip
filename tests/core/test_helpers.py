@@ -24,8 +24,8 @@ def exec_catnip(code, vm_mode=None):
             assert result == 3
     """
     if vm_mode is None:
-        executor = os.environ.get("CATNIP_EXECUTOR", "ast")
-        vm_mode = "on" if executor == "vm" else "off" if executor == "ast" else executor
+        executor = os.environ.get('CATNIP_EXECUTOR', 'ast')
+        vm_mode = 'on' if executor == 'vm' else 'off' if executor == 'ast' else executor
     c = Catnip(vm_mode=vm_mode)
     c.parse(code)
     return c.execute()
@@ -43,7 +43,7 @@ def parse_ir(code, vm_mode=None):
             assert ir[0].ident == OpCode.ADD
     """
     if vm_mode is None:
-        executor = os.environ.get("CATNIP_EXECUTOR", "ast")
-        vm_mode = "on" if executor == "vm" else "off" if executor == "ast" else executor
+        executor = os.environ.get('CATNIP_EXECUTOR', 'ast')
+        vm_mode = 'on' if executor == 'vm' else 'off' if executor == 'ast' else executor
     c = Catnip(vm_mode=vm_mode)
-    return c.parse(code, 1)
+    return c.parse(code, semantic=False)

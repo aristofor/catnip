@@ -11,6 +11,16 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+from .._error_strings import (
+    ATTRIBUTE_ERROR_PREFIX,
+    INDEX_ERROR_PREFIX,
+    KEY_ERROR_PREFIX,
+    RUNTIME_ERROR_PREFIX,
+    TYPE_PREFIXES,
+    VALUE_ERROR_PREFIX,
+    WEIRD_ERROR_PREFIX,
+)
+from .._rs import VM as _VM
 from .._rs import SourceMap
 from ..exc import CatnipNameError, CatnipRuntimeError, CatnipTypeError, CatnipWeirdError
 from ..suggest import suggest_name
@@ -20,17 +30,6 @@ if TYPE_CHECKING:
     from catnip._rs import CodeObject
 
     from ..context import Context
-
-# Try to import the Rust VM module
-_catnip_rs_available = False
-_VM = None
-
-try:
-    from catnip._rs import VM as _VM
-
-    _catnip_rs_available = True
-except ImportError:
-    pass
 
 
 def _convert_rust_exception(exc: Exception) -> Exception:
@@ -46,26 +45,26 @@ def _convert_rust_exception(exc: Exception) -> Exception:
         return exc  # Pass through as-is
 
     # Strip "runtime error: " prefix if present
-    if msg.startswith("runtime error: "):
-        msg = msg[len("runtime error: ") :]
+    if msg.startswith(RUNTIME_ERROR_PREFIX):
+        msg = msg[len(RUNTIME_ERROR_PREFIX) :]
 
     # Check for wrapped Python exceptions in message
-    if msg.startswith("IndexError: "):
-        return IndexError(msg[len("IndexError: ") :])
-    if msg.startswith("KeyError: "):
-        key = msg[len("KeyError: ") :]
+    if msg.startswith(INDEX_ERROR_PREFIX):
+        return IndexError(msg[len(INDEX_ERROR_PREFIX) :])
+    if msg.startswith(KEY_ERROR_PREFIX):
+        key = msg[len(KEY_ERROR_PREFIX) :]
         return KeyError(key.strip("'\""))
-    if msg.startswith("AttributeError: "):
-        return AttributeError(msg[len("AttributeError: ") :])
+    if msg.startswith(ATTRIBUTE_ERROR_PREFIX):
+        return AttributeError(msg[len(ATTRIBUTE_ERROR_PREFIX) :])
 
     # ValueError - return Python ValueError
-    if msg.startswith("ValueError: "):
-        return ValueError(msg[len("ValueError: ") :])
+    if msg.startswith(VALUE_ERROR_PREFIX):
+        return ValueError(msg[len(VALUE_ERROR_PREFIX) :])
 
     # TypeError / CatnipTypeError - return CatnipTypeError for enrichment with source location
-    if isinstance(exc, TypeError) or msg.startswith(("TypeError: ", "CatnipTypeError: ")):
+    if isinstance(exc, TypeError) or msg.startswith(TYPE_PREFIXES):
         type_msg = msg
-        for prefix in ("CatnipTypeError: ", "TypeError: "):
+        for prefix in TYPE_PREFIXES:
             if msg.startswith(prefix):
                 type_msg = msg[len(prefix) :]
                 break
@@ -77,25 +76,16 @@ def _convert_rust_exception(exc: Exception) -> Exception:
         return CatnipTypeError(type_msg)
 
     # Type errors without prefix
-    if "unsupported operand" in msg:
+    if 'unsupported operand' in msg:
         return CatnipTypeError(msg)
-    if "not iterable" in msg:
+    if 'not iterable' in msg:
         return CatnipTypeError(msg)
 
     # Internal VM errors (stack underflow, frame overflow)
-    if msg.startswith("WeirdError: "):
-        return CatnipWeirdError(msg[len("WeirdError: ") :], cause="vm")
+    if msg.startswith(WEIRD_ERROR_PREFIX):
+        return CatnipWeirdError(msg[len(WEIRD_ERROR_PREFIX) :], cause='vm')
 
     return CatnipRuntimeError(msg)
-
-
-def is_rust_vm_available() -> bool:
-    """Check if the Rust VM is available."""
-    return _catnip_rs_available
-
-
-# Alias
-is_catnip_rs_available = is_rust_vm_available
 
 
 class VMExecutor:
@@ -104,9 +94,6 @@ class VMExecutor:
     """
 
     def __init__(self, registry, context: Context) -> None:
-        if not _catnip_rs_available:
-            raise RuntimeError("Rust VM not available. Build it with: cd catnip_rs && maturin develop --release")
-
         self.registry = registry
         self.context = context
         # Store registry and executor in context for VMFunction direct calls
@@ -203,6 +190,21 @@ class VMExecutor:
             # Re-format the message with location info
             Exception.__init__(base_exc, base_exc._format_message())
             return base_exc
+
+        # Standard Python exceptions: inject location into the message
+        if line is not None:
+            loc = f"line {line}"
+            if col is not None:
+                loc += f", column {col}"
+            if filename and filename != '<input>':
+                loc = f"File {filename!r}, {loc}"
+            # Rebuild exception with location prefix
+            orig_args = base_exc.args
+            if orig_args:
+                enriched_msg = f"{loc}: {orig_args[0]}"
+                base_exc.args = (enriched_msg, *orig_args[1:])
+            else:
+                base_exc.args = (loc,)
 
         return base_exc
 

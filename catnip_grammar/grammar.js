@@ -4,6 +4,7 @@
  */
 
 const PREC = {
+  NULLCOAL: 0,
   OR: 1,
   AND: 2,
   NOT: 3,
@@ -86,7 +87,8 @@ module.exports = grammar({
       ')',
     ),
 
-    pragma_arg: $ => choice($.string, $.true, $.false),
+    pragma_arg: $ => choice($.string, $.true, $.false, $.integer, $.pragma_qualified),
+    pragma_qualified: $ => seq(field('namespace', $.identifier), '.', field('attr', $.identifier)),
 
     struct_stmt: $ => seq(
       'struct',
@@ -96,7 +98,7 @@ module.exports = grammar({
         seq($.struct_extends, optional($.struct_implements)),
       )),
       '{',
-      optional($.struct_fields),
+      repeat($.struct_field),
       repeat($.struct_method),
       '}',
     ),
@@ -116,22 +118,17 @@ module.exports = grammar({
       ')',
     ),
 
-    struct_fields: $ => prec.right(seq(
-      $.struct_field,
-      repeat(seq(',', $.struct_field)),
-      optional(choice(',', ';')),
-    )),
-
     struct_field: $ => seq(
       field('name', $.identifier),
       optional(seq('=', field('default', $._expression))),
+      optional(';'),
     ),
 
     operator_symbol: $ => choice(
       '+', '-', '*', '/', '//', '%', '**',
       '==', token('!='), '<', '<=', '>', '>=',
       '&', '|', '^', '<<', '>>',
-      '~',
+      '~', 'in', seq('not', 'in'),
     ),
 
     struct_method: $ => seq(
@@ -154,7 +151,7 @@ module.exports = grammar({
       field('name', $.identifier),
       optional($.trait_extends),
       '{',
-      optional($.struct_fields),
+      repeat($.struct_field),
       repeat($.struct_method),
       '}',
     ),
@@ -272,7 +269,10 @@ module.exports = grammar({
     ),
 
     // Expressions
-    _expression: $ => $._bool_or,
+    _expression: $ => $._null_coal,
+
+    _null_coal: $ => choice($.null_coalesce, $._bool_or),
+    null_coalesce: $ => prec.left(PREC.NULLCOAL, seq($._null_coal, '??', $._bool_or)),
 
     _bool_or: $ => choice($.bool_or, $._bool_and),
     bool_or: $ => prec.left(PREC.OR, seq($._bool_or, 'or', $._bool_and)),
@@ -287,7 +287,7 @@ module.exports = grammar({
     comparison: $ => prec.left(PREC.COMPARE,
       seq($._bit_or, repeat1(seq($.comp_op, $._bit_or)))
     ),
-    comp_op: $ => choice('<=', '<', '>=', '>', token('!='), '=='),
+    comp_op: $ => choice('<=', '<', '>=', '>', token('!='), '==', 'in', seq('not', 'in'), 'is', seq('is', 'not')),
 
     _bit_or: $ => choice($.bit_or, $._bit_xor),
     bit_or: $ => prec.left(PREC.BIT_OR, seq($._bit_or, '|', $._bit_xor)),
@@ -306,16 +306,16 @@ module.exports = grammar({
     additive: $ => prec.left(PREC.ADD, seq($._additive, $.add_sub_op, $._multiplicative)),
     add_sub_op: $ => choice('+', '-'),
 
-    _multiplicative: $ => choice($.multiplicative, $._exponent),
-    multiplicative: $ => prec.left(PREC.MUL, seq($._multiplicative, $.mul_div_op, $._exponent)),
+    _multiplicative: $ => choice($.multiplicative, $._unary),
+    multiplicative: $ => prec.left(PREC.MUL, seq($._multiplicative, $.mul_div_op, $._unary)),
     mul_div_op: $ => choice('*', '/', '//', '%'),
 
-    _exponent: $ => choice($.exponent, $._unary),
-    exponent: $ => prec.right(PREC.EXP, seq($._unary, '**', $._exponent)),
-
-    _unary: $ => choice($.unary, $.literal, $._primary),
+    _unary: $ => choice($.unary, $._exponent),
     unary: $ => prec(PREC.UNARY, seq($.unary_op, $._unary)),
     unary_op: $ => choice('-', '+', '~'),
+
+    _exponent: $ => choice($.exponent, $.literal, $._primary),
+    exponent: $ => prec.right(PREC.EXP, seq($._exponent, '**', $._unary)),
 
     _primary: $ => choice(
       $.lambda_expr,
@@ -490,7 +490,7 @@ module.exports = grammar({
     unpack_tuple: $ => seq('(', $.unpack_items, ')'),
 
     unpack_sequence: $ => seq(
-      $.identifier,
+      $._unpack_item,
       ',',
       $._unpack_item,
       repeat(seq(',', $._unpack_item)),

@@ -7,8 +7,10 @@
 //! - process: ProcessPoolExecutor, true parallelism, separate memory spaces
 
 use super::recur::NDRecur;
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// Scheduler for ND recursion.
@@ -33,6 +35,8 @@ pub struct NDScheduler {
     pub memoize_enabled: bool,
     /// Processes available flag
     processes_available: bool,
+    /// Recursion depth counter (prevents stack overflow)
+    recursion_depth: Cell<usize>,
 }
 
 #[pymethods]
@@ -45,9 +49,7 @@ impl NDScheduler {
         } else {
             // Get CPU count
             let os = py.import("os")?;
-            os.call_method0("cpu_count")?
-                .extract::<Option<usize>>()?
-                .unwrap_or(4)
+            os.call_method0("cpu_count")?.extract::<Option<usize>>()?.unwrap_or(4)
         };
 
         Ok(Self {
@@ -58,16 +60,13 @@ impl NDScheduler {
             memoize_cache: HashMap::new(),
             memoize_enabled,
             processes_available: true,
+            recursion_depth: Cell::new(0),
         })
     }
 
     /// Synchronous (sequential) execution.
     #[pyo3(signature = (seed, nd_lambda))]
-    fn execute_sync(
-        self_: Bound<'_, Self>,
-        seed: Py<PyAny>,
-        nd_lambda: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn execute_sync(self_: Bound<'_, Self>, seed: Py<PyAny>, nd_lambda: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let py = self_.py();
 
         // Check memoization cache
@@ -96,9 +95,7 @@ impl NDScheduler {
             let mut self_ref = self_.borrow_mut();
             if self_ref.memoize_enabled {
                 let cache_key = self_ref.make_cache_key(py, &seed)?;
-                self_ref
-                    .memoize_cache
-                    .insert(cache_key, result.clone().unbind());
+                self_ref.memoize_cache.insert(cache_key, result.clone().unbind());
             }
         }
 
@@ -107,11 +104,7 @@ impl NDScheduler {
 
     /// Thread-based execution (with ThreadPoolExecutor).
     #[pyo3(signature = (seed, nd_lambda))]
-    fn execute_thread(
-        self_: Bound<'_, Self>,
-        seed: Py<PyAny>,
-        nd_lambda: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn execute_thread(self_: Bound<'_, Self>, seed: Py<PyAny>, nd_lambda: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let py = self_.py();
 
         // Check memoization cache
@@ -130,19 +123,14 @@ impl NDScheduler {
             let mut self_ref = self_.borrow_mut();
             if self_ref.thread_executor.is_none() {
                 let cf = py.import("concurrent.futures")?;
-                let executor = cf
-                    .getattr("ThreadPoolExecutor")?
-                    .call1((self_ref.n_workers,))?;
+                let executor = cf.getattr("ThreadPoolExecutor")?.call1((self_ref.n_workers,))?;
                 self_ref.thread_executor = Some(executor.unbind());
             }
         }
 
         // Create recur handle
         let self_obj: Py<PyAny> = self_.clone().into_any().unbind();
-        let recur = Py::new(
-            py,
-            NDRecur::create(self_obj, nd_lambda.clone_ref(py), None, "thread"),
-        )?;
+        let recur = Py::new(py, NDRecur::create(self_obj, nd_lambda.clone_ref(py), None, "thread"))?;
 
         // Call the lambda with seed and recur
         let result = nd_lambda.bind(py).call1((seed.bind(py), recur))?;
@@ -152,9 +140,7 @@ impl NDScheduler {
             let mut self_ref = self_.borrow_mut();
             if self_ref.memoize_enabled {
                 let cache_key = self_ref.make_cache_key(py, &seed)?;
-                self_ref
-                    .memoize_cache
-                    .insert(cache_key, result.clone().unbind());
+                self_ref.memoize_cache.insert(cache_key, result.clone().unbind());
             }
         }
 
@@ -163,11 +149,7 @@ impl NDScheduler {
 
     /// Process-based execution (with ProcessPoolExecutor).
     #[pyo3(signature = (seed, nd_lambda))]
-    fn execute_process(
-        self_: Bound<'_, Self>,
-        seed: Py<PyAny>,
-        nd_lambda: Py<PyAny>,
-    ) -> PyResult<Py<PyAny>> {
+    fn execute_process(self_: Bound<'_, Self>, seed: Py<PyAny>, nd_lambda: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let py = self_.py();
 
         // Check if processes are available
@@ -194,7 +176,7 @@ impl NDScheduler {
         }
 
         // Get the worker function from the nd module
-        let nd_module = py.import("catnip.nd.scheduler")?;
+        let nd_module = py.import(PY_MOD_ND)?;
         let worker_fn = nd_module.getattr("_worker_execute_simple")?;
 
         // Submit to executor
@@ -207,10 +189,7 @@ impl NDScheduler {
         };
 
         // Wait for result
-        py_future
-            .call_method0("result")?
-            .extract()
-            .map_err(Into::into)
+        py_future.call_method0("result")?.extract().map_err(Into::into)
     }
 
     /// Submit a recursive call.
@@ -221,19 +200,36 @@ impl NDScheduler {
         nd_lambda: Py<PyAny>,
         _parent_future: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let mode = self_.borrow().mode.clone();
-        match mode.as_str() {
-            "thread" => Self::execute_thread(self_, value, nd_lambda),
-            "process" => Self::execute_sync(self_, value, nd_lambda), // Recursive calls run inline
-            _ => Self::execute_sync(self_, value, nd_lambda),
+        // Depth guard: prevent stack overflow from infinite ND recursion
+        let depth = self_.borrow().recursion_depth.get();
+        if depth >= ND_MAX_RECURSION_DEPTH {
+            return Err(pyo3::exceptions::PyRecursionError::new_err(
+                "maximum ND recursion depth exceeded",
+            ));
         }
+        self_.borrow().recursion_depth.set(depth + 1);
+
+        let mode = self_.borrow().mode.clone();
+        let result = match mode.as_str() {
+            "thread" => Self::execute_thread(self_.clone(), value, nd_lambda),
+            "process" => Self::execute_sync(self_.clone(), value, nd_lambda), // Recursive calls run inline
+            _ => Self::execute_sync(self_.clone(), value, nd_lambda),
+        };
+
+        // Always decrement, even on error
+        self_
+            .borrow()
+            .recursion_depth
+            .set(self_.borrow().recursion_depth.get() - 1);
+
+        result
     }
 
     /// Change the execution mode.
     fn set_mode(&mut self, py: Python<'_>, mode: &str) -> PyResult<()> {
         if !["sequential", "thread", "process"].contains(&mode) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid mode: {}. Use 'sequential', 'threads', or 'processes'",
+                "Invalid mode: {}. Use 'sequential', 'thread', or 'process'",
                 mode
             )));
         }
@@ -269,10 +265,7 @@ impl NDScheduler {
                 self.memoize_cache.len()
             )
         } else {
-            format!(
-                "NDScheduler(workers={}, mode='{}')",
-                self.n_workers, self.mode
-            )
+            format!("NDScheduler(workers={}, mode='{}')", self.n_workers, self.mode)
         }
     }
 }
@@ -303,7 +296,7 @@ fn create_process_executor(py: Python<'_>, n_workers: usize) -> PyResult<Py<PyAn
     let cf = py.import("concurrent.futures")?;
 
     // Get worker init function
-    let nd_module = py.import("catnip.nd.scheduler")?;
+    let nd_module = py.import(PY_MOD_ND)?;
     let worker_init = nd_module.getattr("_worker_init")?;
 
     // Create kwargs dict

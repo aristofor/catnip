@@ -1,0 +1,44 @@
+[module]
+name = "sys"
+version = "0.1.0"
+description = "Runtime introspection: argv, environ, version, platform, exit"
+
+[exports]
+symbols = ["PROTOCOL", "argv", "environ", "executable", "version", "platform", "cpu_count", "exit"]
+
+[exports.argv]
+signature = "list[str]"
+description = "Command-line arguments passed to the script"
+
+[exports.environ]
+signature = "dict[str, str]"
+description = "Snapshot of process environment variables"
+
+[exports.executable]
+signature = "str"
+description = "Absolute path of the current interpreter executable"
+
+[exports.version]
+signature = "str"
+description = "Catnip version string"
+
+[exports.platform]
+signature = "str"
+description = "OS platform identifier (linux, macos, windows)"
+
+[exports.cpu_count]
+signature = "int"
+description = "Number of available CPUs (respects cgroups and CPU affinity)"
+
+[exports.exit]
+signature = "(code: int = 0) -> never"
+description = "Exit the process with the given status code"
+
+[backends]
+rust = "rust/"
+
+[errors]
+# exit raises SystemExit
+
+[compat]
+notes = "Pure Rust -- no Python sys/os imports. All data comes from std::env."

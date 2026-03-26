@@ -9,7 +9,7 @@
 //! - not True → False
 
 use super::opcode::OpCode;
-use super::optimizer::{default_visit_ir, OptimizationPass};
+use super::optimizer::{OptimizationPass, default_visit_ir};
 use crate::types::catnip;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -57,7 +57,7 @@ impl OptimizationPass for ConstantFoldingPass {
         let node_type = visited_bound.get_type();
         let type_name_obj = node_type.name()?;
         let type_name = type_name_obj.to_str()?;
-        if type_name != "IR" {
+        if type_name != "IR" && type_name != "Op" {
             return Ok(visited);
         }
 
@@ -97,7 +97,7 @@ impl ConstantFoldingPass {
     }
 
     /// Check if a value is a constant (not Ref, IR, Op, Identifier)
-    fn is_constant(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn is_constant(&self, _py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
         let obj_type = obj.get_type();
         let type_name_obj = obj_type.name()?;
         let type_name = type_name_obj.to_str()?;
@@ -117,7 +117,7 @@ impl ConstantFoldingPass {
         if obj.is_instance_of::<pyo3::types::PyList>() || obj.is_instance_of::<PyTuple>() {
             for item in obj.try_iter()? {
                 let item = item?;
-                if !self.is_constant(py, &item)? {
+                if !self.is_constant(_py, &item)? {
                     return Ok(false);
                 }
             }
@@ -144,12 +144,7 @@ impl ConstantFoldingPass {
     }
 
     /// Fold based on opcode
-    fn fold_by_opcode(
-        &self,
-        py: Python<'_>,
-        opcode: OpCode,
-        args: &Bound<'_, PyTuple>,
-    ) -> PyResult<Py<PyAny>> {
+    fn fold_by_opcode(&self, py: Python<'_>, opcode: OpCode, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         match opcode {
             // Arithmetic operations
             OpCode::ADD => self.fold_add(py, args),
@@ -211,13 +206,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -238,13 +229,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -265,13 +252,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -292,13 +275,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -319,13 +298,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -346,13 +321,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -374,13 +345,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -389,9 +356,7 @@ impl ConstantFoldingPass {
             let arg = args.get_item(0)?;
             arg.neg().map(|r| r.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -400,9 +365,7 @@ impl ConstantFoldingPass {
             let arg = args.get_item(0)?;
             arg.pos().map(|r| r.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -421,9 +384,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -441,9 +402,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -461,9 +420,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -481,9 +438,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -501,9 +456,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -521,9 +474,7 @@ impl ConstantFoldingPass {
             let py_true = py.import("builtins")?.getattr("bool")?.call1((true,))?;
             Ok(py_true.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -551,13 +502,9 @@ impl ConstantFoldingPass {
                 let py_bool = py.import("builtins")?.getattr("bool")?.call1((result,))?;
                 return Ok(py_bool.unbind());
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -584,13 +531,9 @@ impl ConstantFoldingPass {
                 let py_bool = py.import("builtins")?.getattr("bool")?.call1((result,))?;
                 return Ok(py_bool.unbind());
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -602,9 +545,7 @@ impl ConstantFoldingPass {
             let py_bool = py.import("builtins")?.getattr("bool")?.call1((result,))?;
             Ok(py_bool.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -626,13 +567,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -653,13 +590,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -680,13 +613,9 @@ impl ConstantFoldingPass {
                     return Ok(result.unbind());
                 }
             }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -695,9 +624,7 @@ impl ConstantFoldingPass {
             let arg = args.get_item(0)?;
             arg.call_method0("__invert__").map(|r| r.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -707,9 +634,7 @@ impl ConstantFoldingPass {
             let right = args.get_item(1)?;
             left.lshift(&right).map(|r| r.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -719,9 +644,7 @@ impl ConstantFoldingPass {
             let right = args.get_item(1)?;
             left.rshift(&right).map(|r| r.unbind())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid args",
-            ))
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid args"))
         }
     }
 
@@ -746,8 +669,6 @@ mod tests {
     fn test_pass_creation() {
         // Test que la passe peut être créée
         let _pass = ConstantFoldingPass::new();
-        // Si on arrive ici, c'est bon
-        assert!(true);
     }
 
     // Tests unitaires Rust: voir semantic/tests/test_constant_folding.rs (37 tests)

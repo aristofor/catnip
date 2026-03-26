@@ -9,7 +9,7 @@ from catnip import Catnip
 def test_static_method_basic(cat):
     """@static method with no self, called on the type."""
     code = """struct Counter {
-    value
+    value;
 
     @static
     zero() => {
@@ -25,7 +25,7 @@ c.value"""
 def test_static_method_on_instance(cat):
     """@static method callable on an instance too."""
     code = """struct Counter {
-    value
+    value;
 
     @static
     zero() => {
@@ -42,7 +42,7 @@ c2.value"""
 def test_static_with_params(cat):
     """@static method with parameters (no self)."""
     code = """struct Point {
-    x, y
+    x; y;
 
     @static
     origin() => {
@@ -63,7 +63,7 @@ list(p.x, p.y)"""
 def test_static_and_instance_mixed(cat):
     """Mix of @static and instance methods in one struct."""
     code = """struct Vec2 {
-    x, y
+    x; y;
 
     length_sq(self) => {
         self.x * self.x + self.y * self.y
@@ -83,7 +83,7 @@ v.length_sq()"""
 def test_static_self_param_error(cat):
     """@static method with self as first param is a parse error."""
     code = """struct Bad {
-    x
+    x;
 
     @static
     broken(self) => {
@@ -102,7 +102,7 @@ def test_static_in_trait(cat):
         42
     }
 }
-struct Widget implements(Factory) { v }
+struct Widget implements(Factory) { v; }
 Widget.create()"""
     cat.parse(code)
     assert cat.execute() == 42
@@ -116,7 +116,7 @@ def test_abstract_static_in_trait(cat):
     build()
 }
 struct Thing implements(Buildable) {
-    x
+    x;
 
     @static
     build() => {
@@ -136,7 +136,7 @@ def test_abstract_static_not_implemented(cat):
     @static
     build()
 }
-struct Broken implements(Buildable) { x }"""
+struct Broken implements(Buildable) { x; }"""
     with pytest.raises(Exception, match="abstract|implement"):
         cat.parse(code)
         cat.execute()
@@ -145,14 +145,14 @@ struct Broken implements(Buildable) { x }"""
 def test_static_with_extends(cat):
     """@static methods inherited through extends."""
     code = """struct Base {
-    x
+    x;
 
     @static
     default_val() => {
         10
     }
 }
-struct Child extends(Base) { y }
+struct Child extends(Base) { y; }
 Child.default_val()"""
     cat.parse(code)
     assert cat.execute() == 10
@@ -161,7 +161,7 @@ Child.default_val()"""
 def test_static_override_in_child(cat):
     """Child struct can override parent's @static method."""
     code = """struct Base {
-    x
+    x;
 
     @static
     make() => {
@@ -169,7 +169,7 @@ def test_static_override_in_child(cat):
     }
 }
 struct Child extends(Base) {
-    y
+    y;
 
     @static
     make() => {
@@ -185,14 +185,14 @@ c.y"""
 def test_static_on_instance_from_extends(cat):
     """Inherited @static callable on instance."""
     code = """struct Base {
-    x
+    x;
 
     @static
     label() => {
         "base"
     }
 }
-struct Child extends(Base) { y }
+struct Child extends(Base) { y; }
 c = Child(1, 2)
 c.label()"""
     cat.parse(code)
@@ -209,7 +209,7 @@ trait B {
     @static
     foo() => { 2 }
 }
-struct S implements(A, B) { x }"""
+struct S implements(A, B) { x; }"""
     with pytest.raises(Exception, match="conflict"):
         cat.parse(code)
         cat.execute()

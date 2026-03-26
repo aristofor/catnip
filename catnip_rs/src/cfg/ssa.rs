@@ -58,6 +58,12 @@ impl BlockSSAInfo {
     }
 }
 
+impl Default for BlockSSAInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Variable name interning table.
 #[derive(Debug, Clone)]
 pub struct VarTable {
@@ -96,6 +102,12 @@ impl VarTable {
     }
 }
 
+impl Default for VarTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Where an SSA value was defined.
 #[derive(Debug, Clone)]
 pub enum ValueDef {
@@ -128,9 +140,7 @@ pub struct SSAExprKey {
 
 impl SSAExprKey {
     pub fn is_resolved(&self) -> bool {
-        self.operands
-            .iter()
-            .all(|op| !matches!(op, ExprOperand::Opaque))
+        self.operands.iter().all(|op| !matches!(op, ExprOperand::Opaque))
     }
 }
 
@@ -175,9 +185,7 @@ impl SSAContext {
 
     /// Ensure a block has SSA info initialized.
     pub fn ensure_block(&mut self, block_id: usize) {
-        self.blocks
-            .entry(block_id)
-            .or_insert_with(BlockSSAInfo::new);
+        self.blocks.entry(block_id).or_default();
     }
 
     /// Allocate a fresh SSA version for a variable.
@@ -197,11 +205,7 @@ impl SSAContext {
         let value = SSAValue::new(var_id, version);
 
         self.ensure_block(block);
-        self.blocks
-            .get_mut(&block)
-            .unwrap()
-            .current_defs
-            .insert(var_id, value);
+        self.blocks.get_mut(&block).unwrap().current_defs.insert(var_id, value);
 
         self.value_defs
             .insert(value, ValueDef::Instruction { block, instr_idx });
@@ -230,12 +234,7 @@ impl SSAContext {
     }
 
     /// Braun: readVariableRecursive.
-    fn use_var_recursive(
-        &mut self,
-        cfg: &ControlFlowGraph,
-        block: usize,
-        var_id: usize,
-    ) -> SSAValue {
+    fn use_var_recursive(&mut self, cfg: &ControlFlowGraph, block: usize, var_id: usize) -> SSAValue {
         let sealed = self.blocks.get(&block).map(|b| b.sealed).unwrap_or(false);
 
         let value = if !sealed {
@@ -268,11 +267,7 @@ impl SSAContext {
         };
 
         // Record current def for this block
-        self.blocks
-            .get_mut(&block)
-            .unwrap()
-            .current_defs
-            .insert(var_id, value);
+        self.blocks.get_mut(&block).unwrap().current_defs.insert(var_id, value);
         value
     }
 
@@ -289,19 +284,12 @@ impl SSAContext {
         };
         self.blocks.get_mut(&block).unwrap().params.push(param);
 
-        self.value_defs
-            .insert(value, ValueDef::BlockParam { block, param_idx });
+        self.value_defs.insert(value, ValueDef::BlockParam { block, param_idx });
         value
     }
 
     /// Fill phi operands from predecessor blocks.
-    fn fill_phi_operands(
-        &mut self,
-        cfg: &ControlFlowGraph,
-        block: usize,
-        var_id: usize,
-        _phi_value: SSAValue,
-    ) {
+    fn fill_phi_operands(&mut self, cfg: &ControlFlowGraph, block: usize, var_id: usize, _phi_value: SSAValue) {
         let preds = Self::get_predecessor_blocks(cfg, block);
         let param_idx = self.blocks[&block].params.len() - 1;
 
@@ -315,17 +303,9 @@ impl SSAContext {
     ///
     /// A phi is trivial if all operands are the same value (or the phi itself).
     /// Returns the value that replaces the phi.
-    pub fn try_remove_trivial_phi(
-        &mut self,
-        cfg: &ControlFlowGraph,
-        block: usize,
-        phi_value: SSAValue,
-    ) -> SSAValue {
+    pub fn try_remove_trivial_phi(&mut self, _cfg: &ControlFlowGraph, block: usize, phi_value: SSAValue) -> SSAValue {
         // Find the param for this phi
-        let param_idx = self.blocks[&block]
-            .params
-            .iter()
-            .position(|p| p.value == phi_value);
+        let param_idx = self.blocks[&block].params.iter().position(|p| p.value == phi_value);
 
         let param_idx = match param_idx {
             Some(idx) => idx,
@@ -334,8 +314,7 @@ impl SSAContext {
 
         // Collect unique non-self operands
         let mut same: Option<SSAValue> = None;
-        let incoming: Vec<Option<SSAValue>> =
-            self.blocks[&block].params[param_idx].incoming.clone();
+        let incoming: Vec<Option<SSAValue>> = self.blocks[&block].params[param_idx].incoming.clone();
 
         for op in &incoming {
             let Some(op_val) = op else { continue };
@@ -378,14 +357,13 @@ impl SSAContext {
                 let incoming_len = self.blocks[&other_block].params[pi].incoming.len();
                 for ii in 0..incoming_len {
                     if self.blocks[&other_block].params[pi].incoming[ii] == Some(phi_value) {
-                        self.blocks.get_mut(&other_block).unwrap().params[pi].incoming[ii] =
-                            Some(replacement);
+                        self.blocks.get_mut(&other_block).unwrap().params[pi].incoming[ii] = Some(replacement);
                         replaced = true;
                     }
                 }
                 if replaced && param_value != phi_value && param_value != replacement {
                     // Recursively try to simplify
-                    self.try_remove_trivial_phi(cfg, other_block, param_value);
+                    self.try_remove_trivial_phi(_cfg, other_block, param_value);
                 }
             }
         }
@@ -412,10 +390,7 @@ impl SSAContext {
             let param_idx_actual = self.blocks[&block]
                 .params
                 .iter()
-                .position(|p| {
-                    p.value.var == *var_id
-                        && self.blocks[&block].incomplete_phis.get(var_id).is_some()
-                })
+                .position(|p| p.value.var == *var_id && self.blocks[&block].incomplete_phis.contains_key(var_id))
                 .unwrap_or(0);
 
             for (i, &pred) in preds.iter().enumerate() {
@@ -423,8 +398,7 @@ impl SSAContext {
                 if param_idx_actual < self.blocks[&block].params.len()
                     && i < self.blocks[&block].params[param_idx_actual].incoming.len()
                 {
-                    self.blocks.get_mut(&block).unwrap().params[param_idx_actual].incoming[i] =
-                        Some(incoming);
+                    self.blocks.get_mut(&block).unwrap().params[param_idx_actual].incoming[i] = Some(incoming);
                 }
             }
         }
@@ -464,11 +438,7 @@ impl SSAContext {
             .filter(|p| {
                 // A param is live if its value matches itself (not replaced by trivial removal)
                 p.value.var < self.vars.id_to_name.len()
-                    && self
-                        .blocks
-                        .get(&block)
-                        .and_then(|b| b.current_defs.get(&p.value.var))
-                        == Some(&p.value)
+                    && self.blocks.get(&block).and_then(|b| b.current_defs.get(&p.value.var)) == Some(&p.value)
             })
             .collect()
     }
@@ -484,6 +454,12 @@ impl SSAContext {
                     .count()
             })
             .sum()
+    }
+}
+
+impl Default for SSAContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

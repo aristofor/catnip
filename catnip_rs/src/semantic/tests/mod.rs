@@ -15,6 +15,9 @@ mod test_blunt_code;
 mod test_constant_folding;
 
 #[cfg(test)]
+mod test_constant_propagation;
+
+#[cfg(test)]
 mod test_cse;
 
 #[cfg(test)]

@@ -1,19 +1,20 @@
-# Demo script using loaded host module with NAMESPACE
-# Run with: catnip docs/examples/module-loading/01_demo.cat
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 01_demo.cat
+# Script de démonstration avec module hôte chargé dans un namespace
 
-# Load the host module
-host = import("03_host_module_example.py")
+# Charger le module hôte
+host = import('host_module_example', protocol='py')
 
-# Use host module functions via namespace (host.function())
+# Utiliser les fonctions du module hôte via le namespace (host.function())
 x = host.add(10, 5)
 y = host.multiply(x, 2)
 z = host.power(2, 8)
 
-# Call greet function
+# Appeler la fonction greet
 message = host.greet("Catnip")
 
-# Use Counter class
+# Utiliser la classe Counter
 counter = host.Counter(100)
 
-# Final result
-z
+# Résultat final
+z  # → 256

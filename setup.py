@@ -12,28 +12,25 @@ from setuptools.command.build_py import build_py as _build_py
 from setuptools_rust import Binding, RustExtension
 
 
-class BuildPyWithBinaries(_build_py):
-    """Custom build_py qui inclut les binaires Rust précompilés."""
+class BuildPyCustom(_build_py):
+    """Custom build_py: copies optional Rust binaries."""
 
     def run(self):
-        # Build standard Python package
         super().run()
+        self._copy_binaries()
 
-        # Copy pre-built binaries if they exist
-        # Note: Binaries must be compiled separately with:
-        #   cargo build --release --bin catnip-standalone --no-default-features --features embedded
-        #   cargo build --release --bin catnip-repl --no-default-features --features repl-standalone
+    def _copy_binaries(self):
+        """Copy pre-built Rust binaries if available."""
         bin_dir = Path(self.build_lib) / 'catnip' / 'bin'
         bin_dir.mkdir(parents=True, exist_ok=True)
 
-        for binary in ['catnip-standalone', 'catnip-repl']:
-            src = Path('target/release') / binary
+        for binary in ['catnip', 'catnip-repl']:
+            src = Path('target/bins/release') / binary
             dst = bin_dir / binary
 
             if src.exists():
                 self.announce(f'Including Rust binary: {binary}', level=3)
                 shutil.copy2(src, dst)
-                # Rendre exécutable
                 os.chmod(dst, 0o755)
             else:
                 self.announce(f'Skipping {binary} (not found, run make build-bins first)', level=2)
@@ -59,11 +56,25 @@ rust_extensions = [
         debug=False,
         args=_profile_args,
     ),
+    RustExtension(
+        "catnip.catnip_io",
+        path="catnip_libs/io/rust/Cargo.toml",
+        binding=Binding.PyO3,
+        debug=False,
+        args=_profile_args,
+    ),
+    RustExtension(
+        "catnip.catnip_sys",
+        path="catnip_libs/sys/rust/Cargo.toml",
+        binding=Binding.PyO3,
+        debug=False,
+        args=_profile_args,
+    ),
 ]
 
 setup(
     rust_extensions=rust_extensions,
     cmdclass={
-        'build_py': BuildPyWithBinaries,
+        'build_py': BuildPyCustom,
     },
 )

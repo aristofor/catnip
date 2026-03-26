@@ -71,16 +71,16 @@ class TestCatnipNameError:
 
     def test_message_format(self):
         """Le message contient le nom de la variable."""
-        err = CatnipNameError("undefined_var")
-        assert "undefined_var" in str(err)
+        err = CatnipNameError('undefined_var')
+        assert 'undefined_var' in str(err)
         assert "not defined" in str(err)
-        assert err.name == "undefined_var"
+        assert err.name == 'undefined_var'
 
     def test_with_location(self):
         """Localisation incluse dans le message."""
-        err = CatnipNameError("x", line=10, column=5)
+        err = CatnipNameError('x', line=10, column=5)
         msg = str(err)
-        assert "x" in msg
+        assert 'x' in msg
         assert "line 10" in msg
 
 
@@ -89,20 +89,20 @@ class TestCatnipArityError:
 
     def test_fixed_arity(self):
         """Fixed arity (exact argument count)."""
-        err = CatnipArityError("setattr", expected=3, got=2)
+        err = CatnipArityError('setattr', expected=3, got=2)
         msg = str(err)
-        assert "setattr" in msg
-        assert "3" in msg
-        assert "2" in msg
-        assert err.operation == "setattr"
+        assert 'setattr' in msg
+        assert '3' in msg
+        assert '2' in msg
+        assert err.operation == 'setattr'
         assert err.expected == 3
         assert err.got == 2
 
     def test_range_arity(self):
         """Variable arity (min-max)."""
-        err = CatnipArityError("if", expected=(1, 2), got=0)
+        err = CatnipArityError('if', expected=(1, 2), got=0)
         msg = str(err)
-        assert "if" in msg
+        assert 'if' in msg
         assert "1-2" in msg
         assert "0" in msg
 
@@ -110,8 +110,8 @@ class TestCatnipArityError:
         """CatnipArityError raised by the semantic analyzer."""
         # Arity is checked during semantic analysis
         # This test validates the exception structure
-        err = CatnipArityError("test_op", expected=3, got=1, line=10)
-        assert err.operation == "test_op"
+        err = CatnipArityError('test_op', expected=3, got=1, line=10)
+        assert err.operation == 'test_op'
         assert err.expected == 3
         assert err.got == 1
         assert "line 10" in str(err)
@@ -129,8 +129,8 @@ class TestCatnipPatternError:
 
     def test_complex_value(self):
         """Valeur complexe dans le message."""
-        err = CatnipPatternError({"key": "value"})
-        assert "key" in str(err)
+        err = CatnipPatternError({'key': 'value'})
+        assert 'key' in str(err)
 
 
 class TestCatnipPragmaError:
@@ -138,12 +138,12 @@ class TestCatnipPragmaError:
 
     def test_invalid_optimization_level(self):
         """Niveau d'optimisation invalide via pragma."""
-        # pragma("optimize", "invalid") raises CatnipPragmaError at runtime
+        # pragma("optimize", "invalid") raises CatnipPragmaError (string, not int)
         catnip = Catnip()
         with pytest.raises(CatnipPragmaError) as exc_info:
             catnip.parse('pragma("optimize", "invalid_level")')
             catnip.execute()
-        assert "level" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
+        assert "optimize" in str(exc_info.value).lower() or "integer" in str(exc_info.value).lower()
 
     def test_unknown_pragma(self):
         """Unknown pragma directive raises CatnipSemanticError."""
@@ -160,7 +160,7 @@ class TestCatnipPragmaError:
         with pytest.raises(CatnipPragmaError) as exc_info:
             catnip.parse('pragma("warning", "invalid_action")')
             catnip.execute()
-        assert "warning" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
+        assert "warning" in str(exc_info.value).lower() or "true" in str(exc_info.value).lower()
 
 
 class TestCatnipRuntimeError:
@@ -173,7 +173,7 @@ class TestCatnipRuntimeError:
             catnip.parse("a, b = 42")
             catnip.execute()
         assert "unpack" in str(exc_info.value).lower()
-        assert "int" in str(exc_info.value)
+        assert 'int' in str(exc_info.value)
 
     def test_unpacking_wrong_count(self):
         """Unpacking avec mauvais nombre de valeurs."""

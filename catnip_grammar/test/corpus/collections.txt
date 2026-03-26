@@ -9,7 +9,19 @@ list(1, 2, 3)
 (source_file
   (statement
     (list_literal
-      (collection_items (integer) (integer) (integer)))))
+      (collection_items
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Tuple literal
@@ -22,7 +34,19 @@ tuple(1, 2, 3)
 (source_file
   (statement
     (tuple_literal
-      (collection_items (integer) (integer) (integer)))))
+      (collection_items
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Set literal
@@ -35,7 +59,19 @@ set(1, 2, 3)
 (source_file
   (statement
     (set_literal
-      (collection_items (integer) (integer) (integer)))))
+      (collection_items
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))
+        (collection_item
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Dict literal
@@ -49,8 +85,18 @@ dict(("a", 1), ("b", 2))
   (statement
     (dict_literal
       (dict_items
-        (dict_pair key: (string) value: (integer))
-        (dict_pair key: (string) value: (integer))))))
+        (dict_pair
+          key: (literal
+            (string))
+          value: (literal
+            (number
+              (integer))))
+        (dict_pair
+          key: (literal
+            (string))
+          value: (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Dict kwargs
@@ -106,7 +152,8 @@ list()
 --------------------------------------------------------------------------------
 
 (source_file
-  (statement (list_literal)))
+  (statement
+    (list_literal)))
 
 ================================================================================
 Index access
@@ -120,7 +167,10 @@ xs[0]
   (statement
     (chained
       (identifier)
-      (index (integer)))))
+      (index
+        (literal
+          (number
+            (integer)))))))
 
 ================================================================================
 Slice access
@@ -134,7 +184,14 @@ xs[1:5]
   (statement
     (chained
       (identifier)
-      (index (slice_range (integer) (integer))))))
+      (index
+        (slice_range
+          (literal
+            (number
+              (integer)))
+          (literal
+            (number
+              (integer))))))))
 
 ================================================================================
 Attribute access
@@ -148,7 +205,8 @@ obj.attr
   (statement
     (chained
       (identifier)
-      (getattr attribute: (identifier)))))
+      (getattr
+        attribute: (identifier)))))
 
 ================================================================================
 Method call
@@ -164,4 +222,11 @@ obj.method(1, 2)
       (identifier)
       (callattr
         method: (identifier)
-        (arguments (args (integer) (integer)))))))
+        (arguments
+          (args
+            (literal
+              (number
+                (integer)))
+            (literal
+              (number
+                (integer)))))))))

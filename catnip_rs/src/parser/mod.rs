@@ -1,11 +1,12 @@
 // FILE: catnip_rs/src/parser/mod.rs
 pub mod core;
-pub mod pure_transforms;
 pub mod transforms;
 pub mod tree_node;
-pub mod utils;
+
+// Re-exported from catnip_core (pure Rust, no PyO3)
+pub use catnip_core::parser::transform_pure;
+pub use catnip_core::parser::{pure_transforms, utils};
 
 // Re-exports
 pub use core::TreeSitterParser;
-pub use pure_transforms::transform as transform_pure;
 pub use tree_node::TreeNode;

@@ -14,7 +14,7 @@ pub enum DebugAction {
 }
 
 impl DebugAction {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "continue" | "c" => Self::Continue,
             "step_into" | "step" | "s" => Self::StepInto,

@@ -19,10 +19,9 @@ pub fn transform(py: Python, node: Node, source: &str, _level: i32) -> PyResult<
     }
 
     // Delegate to pure_transforms
-    let ir_pure = pure_transforms::transform(node, source)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+    let ir_pure = pure_transforms::transform(node, source).map_err(pyo3::exceptions::PyValueError::new_err)?;
 
-    // Convert IRPure → Python object
+    // Convert IR → Python object
     ir_pure_to_python(py, ir_pure)
 }
 
@@ -38,8 +37,7 @@ fn transform_source_file(py: Python, node: Node, source: &str) -> PyResult<Py<Py
         }
 
         // Transform child using pure_transforms
-        let ir_pure = pure_transforms::transform(child, source)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let ir_pure = pure_transforms::transform(child, source).map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         // Convert to Python
         let py_result = ir_pure_to_python(py, ir_pure)?;
@@ -68,8 +66,8 @@ fn contains_none_literal(node: &Node) -> bool {
     false
 }
 
-// Re-export utils helpers for backward compatibility
-pub use super::utils::{get_child_by_field, node_text};
+// Re-export utils helpers
+pub use super::utils::node_text;
 
 #[cfg(test)]
 mod tests {
@@ -78,10 +76,6 @@ mod tests {
     #[test]
     fn test_transform_simple() {
         Python::initialize();
-        Python::attach(|_py| {
-            // Test basic transformation - verify transform doesn't crash
-            // Full integration tests are in Python test suite
-            assert!(true);
-        });
+        Python::attach(|_py| ());
     }
 }

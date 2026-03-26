@@ -112,13 +112,7 @@ impl CatnipCache {
 
         let key = Py::new(
             py,
-            CacheKey::new(
-                source,
-                CacheType::Bytecode,
-                optimize,
-                tco_enabled,
-                String::new(),
-            ),
+            CacheKey::new(source, CacheType::Bytecode, optimize, tco_enabled, String::new()),
         )?;
         let backend = self.backend.bind(py);
         let result: Option<Py<CacheEntry>> = backend.call_method1("get", (key,))?.extract()?;
@@ -146,13 +140,7 @@ impl CatnipCache {
 
         let key = Py::new(
             py,
-            CacheKey::new(
-                source,
-                CacheType::Bytecode,
-                optimize,
-                tco_enabled,
-                String::new(),
-            ),
+            CacheKey::new(source, CacheType::Bytecode, optimize, tco_enabled, String::new()),
         )?;
         let backend = self.backend.bind(py);
         backend.call_method1("set", (key, bytecode, metadata))?;
@@ -173,13 +161,7 @@ impl CatnipCache {
                 for tco_enabled in [true, false] {
                     let key = Py::new(
                         py,
-                        CacheKey::new(
-                            source.clone(),
-                            cache_type,
-                            optimize,
-                            tco_enabled,
-                            String::new(),
-                        ),
+                        CacheKey::new(source.clone(), cache_type, optimize, tco_enabled, String::new()),
                     )?;
                     let backend = self.backend.bind(py);
                     backend.call_method1("delete", (key,))?;

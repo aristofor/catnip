@@ -1,5 +1,5 @@
 (* FILE: proof/vm/CatnipNanBoxProof.v *)
-(* CatnipNanBoxProof.v — NaN-boxing value representation correctness
+(* CatnipNanBoxProof.v - NaN-boxing value representation correctness
  *
  * Source of truth:
  *   catnip_rs/src/vm/value.rs
@@ -7,16 +7,16 @@
  * Proves tag discrimination, encoding injectivity, and round-trip
  * correctness for the VM's NaN-boxed value representation:
  *
- *   [Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:3][Payload:48]
- *     63        62-52              51     50-48    47-0
+ *   [Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:4][Payload:47]
+ *     63        62-52              51     50-47    46-0
  *
- * 7 tags: SmallInt(0), Bool(1), Nil(2), Symbol(3),
- *         PyObj(4), Struct(5), BigInt(6).
+ * 8 tags: SmallInt(0), Bool(1), Nil(2), Symbol(3),
+ *         PyObj(4), Struct(5), BigInt(6), VMFunc(7).
  *
- * Complete proofs for all 7 tags (0-6), including BigInt
+ * Complete proofs for all 8 tags (0-7), including BigInt
  * promotion/demotion invariants (SmallInt <-> BigInt).
  *
- * Models bitwise encoding as arithmetic (tag * 2^48 + payload)
+ * Models bitwise encoding as arithmetic (tag * 2^47 + payload)
  * since Z arithmetic is cleaner for Coq proofs than Z.land/Z.lor
  * on 64-bit constants.
  *
@@ -30,14 +30,14 @@ Open Scope Z_scope.
 (* ================================================================ *)
 (* A. Constants                                                      *)
 (*                                                                    *)
-(* QNAN_BASE = 0x7FF8 * 2^48 (bits 63-52 + quiet NaN bit).         *)
-(* Tag occupies bits 50-48 = multiplier of 2^48.                     *)
-(* Payload occupies bits 47-0.                                       *)
+(* QNAN_BASE = 0x7FF8 * 2^47 (bits 63-52 + quiet NaN bit).         *)
+(* Tag occupies bits 50-47 = multiplier of 2^47.                     *)
+(* Payload occupies bits 46-0.                                       *)
 (* ================================================================ *)
 
-Definition W := 2 ^ 48.     (* payload width *)
-Definition QNAN := 32760.   (* 0x7FF8: quiet NaN prefix *)
-Definition NTAGS := 7.
+Definition W := 2 ^ 47.     (* payload width *)
+Definition QNAN := 65520.   (* 0x7FF8 * 2: shifted for 4-bit tags *)
+Definition NTAGS := 8.
 
 Definition tag_id_SmallInt := 0.
 Definition tag_id_Bool     := 1.
@@ -46,6 +46,7 @@ Definition tag_id_Symbol   := 3.
 Definition tag_id_PyObj    := 4.
 Definition tag_id_Struct   := 5.
 Definition tag_id_BigInt   := 6.
+Definition tag_id_VMFunc   := 7.
 
 
 (* ================================================================ *)
@@ -163,7 +164,7 @@ Qed.
 (* ================================================================ *)
 (* G. SmallInt Round-Trip (non-negative)                             *)
 (*                                                                    *)
-(* Non-negative integers in [0, 2^47) round-trip directly.           *)
+(* Non-negative integers in [0, 2^46) round-trip directly.           *)
 (* Negative integers require sign extension (modeled separately).     *)
 (* ================================================================ *)
 
@@ -184,8 +185,8 @@ Proof.
     + apply Z.mod_pos_bound. pose proof W_pos. lia.
 Qed.
 
-(* SmallInt range: -2^47 to 2^47-1 *)
-Definition HALF_W := 2 ^ 47.
+(* SmallInt range: -2^46 to 2^46-1 *)
+Definition HALF_W := 2 ^ 46.
 
 Definition sign_extend (p : Z) : Z :=
   if p <? HALF_W then p else p - W.
@@ -201,24 +202,24 @@ Proof.
   2: { unfold valid_payload. split;
        apply Z.mod_pos_bound; pose proof W_pos; lia. }
   unfold sign_extend, HALF_W, W in *.
-  destruct (Z.ltb_spec (i mod 2^48) (2^47)).
+  destruct (Z.ltb_spec (i mod 2^47) (2^46)).
   - (* i >= 0: mod is identity *)
     assert (Hi0 : 0 <= i).
     { destruct (Z.lt_ge_cases i 0) as [Hn|]; [|lia].
       exfalso.
-      assert (Hdiv : i / 2^48 = -1)
-        by (symmetry; apply (Z.div_unique i (2^48) (-1) (i + 2^48)); lia).
-      pose proof (Z.div_mod i (2^48) ltac:(lia)) as Heq.
+      assert (Hdiv : i / 2^47 = -1)
+        by (symmetry; apply (Z.div_unique i (2^47) (-1) (i + 2^47)); lia).
+      pose proof (Z.div_mod i (2^47) ltac:(lia)) as Heq.
       rewrite Hdiv in Heq. lia. }
     rewrite Z.mod_small by lia. lia.
-  - (* i < 0: mod = i + 2^48 *)
+  - (* i < 0: mod = i + 2^47 *)
     assert (Hi_neg : i < 0).
     { destruct (Z.lt_ge_cases i 0); [lia|].
-      assert (i mod 2^48 = i) by (apply Z.mod_small; lia).
+      assert (i mod 2^47 = i) by (apply Z.mod_small; lia).
       lia. }
-    assert (Hdiv : i / 2^48 = -1)
-      by (symmetry; apply (Z.div_unique i (2^48) (-1) (i + 2^48)); lia).
-    pose proof (Z.div_mod i (2^48) ltac:(lia)) as Hmod.
+    assert (Hdiv : i / 2^47 = -1)
+      by (symmetry; apply (Z.div_unique i (2^47) (-1) (i + 2^47)); lia).
+    pose proof (Z.div_mod i (2^47) ltac:(lia)) as Hmod.
     rewrite Hdiv in Hmod. lia.
 Qed.
 
@@ -309,7 +310,7 @@ Qed.
 (* ================================================================ *)
 (* I'. BigInt Pointer Round-Trip                                     *)
 (*                                                                    *)
-(* BigInt uses tag 6 with a 48-bit Arc<BigInt> pointer payload.     *)
+(* BigInt uses tag 6 with a 47-bit Arc<BigInt> pointer payload.     *)
 (* Same encoding scheme as PyObj (tag 4) and Struct (tag 5).         *)
 (* Source: Value::from_bigint, as_bigint_ref (value.rs)              *)
 (* ================================================================ *)
@@ -334,7 +335,7 @@ Qed.
 (* Source: Value::from_bigint_or_demote (value.rs:173-182)           *)
 (*         bigint_binop, binary_add (core.rs)                        *)
 (*                                                                    *)
-(* SmallInt range: [-2^47, 2^47).                                    *)
+(* SmallInt range: [-2^46, 2^46).                                    *)
 (* from_bigint_or_demote(n):                                         *)
 (*   if n fits SmallInt -> encode as SmallInt (demotion)             *)
 (*   otherwise          -> keep as BigInt (no demotion)              *)
@@ -487,7 +488,7 @@ Qed.
 (* ================================================================ *)
 (* K. Tag Classification                                             *)
 (*                                                                    *)
-(* Every encoded value has exactly one of the 7 tags.               *)
+(* Every encoded value has exactly one of the 8 tags.               *)
 (* ================================================================ *)
 
 Theorem tag_exhaustive : forall v,
@@ -495,13 +496,13 @@ Theorem tag_exhaustive : forall v,
   let t := extract_tag v in
   t = tag_id_SmallInt \/ t = tag_id_Bool \/ t = tag_id_Nil \/
   t = tag_id_Symbol \/ t = tag_id_PyObj \/ t = tag_id_Struct \/
-  t = tag_id_BigInt.
+  t = tag_id_BigInt \/ t = tag_id_VMFunc.
 Proof.
   intros v Hv.
   destruct (decode_tag_valid v Hv) as [Hlo Hhi].
   unfold tag_id_SmallInt, tag_id_Bool, tag_id_Nil,
          tag_id_Symbol, tag_id_PyObj, tag_id_Struct,
-         tag_id_BigInt, NTAGS in *.
+         tag_id_BigInt, tag_id_VMFunc, NTAGS in *.
   lia.
 Qed.
 
@@ -559,7 +560,7 @@ Example ex_int_signed_neg :
 Proof. reflexivity. Qed.
 
 Example ex_int_signed_min :
-  sign_extend (extract_payload (encode_int (-140737488355328))) = -140737488355328.
+  sign_extend (extract_payload (encode_int (-70368744177664))) = -70368744177664.
 Proof. reflexivity. Qed.
 
 Example ex_nil_tag :

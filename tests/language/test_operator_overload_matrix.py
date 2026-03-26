@@ -7,7 +7,7 @@ from catnip import Catnip
 from catnip.exc import CatnipTypeError
 
 # ---------------------------------------------------------------------------
-# 1. Ambiguity — dispatch left-operand-wins, cross-type, missing operators
+# 1. Ambiguity - dispatch left-operand-wins, cross-type, missing operators
 # ---------------------------------------------------------------------------
 
 
@@ -15,11 +15,11 @@ class TestAmbiguity:
     def test_left_operand_dispatches(self, cat):
         code = """\
 struct A {
-    val
+    val;
     op +(self, rhs) => { A(self.val + rhs.val + 100) }
 }
 struct B {
-    val
+    val;
     op +(self, rhs) => { B(self.val + rhs.val + 200) }
 }
 r = A(1) + B(2)
@@ -30,11 +30,11 @@ r.val"""
     def test_swap_operands_swaps_dispatch(self, cat):
         code = """\
 struct A {
-    val
+    val;
     op +(self, rhs) => { A(self.val + rhs.val + 100) }
 }
 struct B {
-    val
+    val;
     op +(self, rhs) => { B(self.val + rhs.val + 200) }
 }
 r = B(2) + A(1)
@@ -45,7 +45,7 @@ r.val"""
     def test_scalar_plus_struct_reverse(self, cat):
         code = """\
 struct S {
-    val
+    val;
     op +(self, rhs) => { S(self.val + rhs) }
 }
 r = 5 + S(10)
@@ -56,10 +56,10 @@ r.val"""
     def test_only_left_has_op_succeeds(self, cat):
         code = """\
 struct A {
-    val
+    val;
     op +(self, rhs) => { A(self.val + rhs.val) }
 }
-struct B { val }
+struct B { val; }
 r = A(1) + B(2)
 r.val"""
         cat.parse(code)
@@ -67,9 +67,9 @@ r.val"""
 
     def test_only_right_has_op_reverse(self, cat):
         code = """\
-struct A { val }
+struct A { val; }
 struct B {
-    val
+    val;
     op +(self, rhs) => { B(self.val + rhs.val) }
 }
 r = A(1) + B(2)
@@ -80,10 +80,10 @@ r.val"""
     def test_chaining_mixed_types(self, cat):
         code = """\
 struct A {
-    val
+    val;
     op +(self, rhs) => { A(self.val + rhs.val) }
 }
-struct B { val }
+struct B { val; }
 r = A(1) + B(2) + A(3)
 r.val"""
         cat.parse(code)
@@ -92,7 +92,7 @@ r.val"""
 
 
 # ---------------------------------------------------------------------------
-# 2. Broadcast shape — broadcast with overloaded operators, various shapes
+# 2. Broadcast shape - broadcast with overloaded operators, various shapes
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ class TestBroadcastShape:
     def test_broadcast_struct_op_flat(self, cat):
         code = """\
 struct Num {
-    val
+    val;
     op *(self, rhs) => { Num(self.val * rhs) }
 }
 result = list(Num(1), Num(2), Num(3)).[* 10]
@@ -111,7 +111,7 @@ list(result[0].val, result[1].val, result[2].val)"""
     def test_broadcast_struct_op_nested(self, cat):
         code = """\
 struct Num {
-    val
+    val;
     op *(self, rhs) => { Num(self.val * rhs) }
 }
 result = list(list(Num(1)), list(Num(2), Num(3))).[* 5]
@@ -122,10 +122,10 @@ list(result[0][0].val, result[1][0].val, result[1][1].val)"""
     def test_broadcast_missing_op_error(self, cat):
         code = """\
 struct HasOp {
-    val
+    val;
     op *(self, rhs) => { HasOp(self.val * rhs) }
 }
-struct NoOp { val }
+struct NoOp { val; }
 list(HasOp(1), NoOp(2)).[* 10]"""
         cat.parse(code)
         with pytest.raises((TypeError, CatnipTypeError)):
@@ -133,7 +133,7 @@ list(HasOp(1), NoOp(2)).[* 10]"""
 
     def test_broadcast_filter_overloaded_cmp(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 items = list(Num(1), Num(5), Num(3))
 items.[if (x) => { x.val > 3 }]"""
         cat.parse(code)
@@ -144,7 +144,7 @@ items.[if (x) => { x.val > 3 }]"""
     def test_broadcast_empty_struct_list(self, cat):
         code = """\
 struct Num {
-    val
+    val;
     op *(self, rhs) => { Num(self.val * rhs) }
 }
 list().[* 10]"""
@@ -154,7 +154,7 @@ list().[* 10]"""
     def test_broadcast_chained_struct_ops(self, cat):
         code = """\
 struct Num {
-    val
+    val;
     op *(self, rhs) => { Num(self.val * rhs) }
 }
 result = list(Num(1), Num(2)).[* 3].[* 2]
@@ -164,21 +164,21 @@ list(result[0].val, result[1].val)"""
 
     def test_broadcast_lambda_struct_field(self, cat):
         code = """\
-struct Vec2 { x, y }
+struct Vec2 { x; y; }
 list(Vec2(1, 2), Vec2(3, 4)).[~> (v) => { v.x + v.y }]"""
         cat.parse(code)
         assert cat.execute() == [3, 7]
 
 
 # ---------------------------------------------------------------------------
-# 3. Pure/impure — purity tracking, side effects in operators
+# 3. Pure/impure - purity tracking, side effects in operators
 # ---------------------------------------------------------------------------
 
 
 class TestPureImpure:
     def test_pure_fn_broadcast_struct(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 @pure
 f = (x) => { Num(x * 2) }
 result = list(1, 2, 3).[~> f]
@@ -189,7 +189,7 @@ list(result[0].val, result[1].val, result[2].val)"""
     def test_impure_op_side_effect_counted(self, cat):
         code = """\
 struct Counter {
-    val, count = 0
+    val; count = 0;
     op +(self, rhs) => {
         self.count = self.count + 1
         Counter(self.val + rhs.val, self.count)
@@ -206,7 +206,7 @@ c.count"""
     def test_impure_op_broadcast_ordering(self, cat):
         code = """\
 struct Logger {
-    val, log = list()
+    val; log = list();
     op *(self, rhs) => {
         self.log = self.log + list(self.val)
         Logger(self.val * rhs, self.log)
@@ -220,7 +220,7 @@ list(result[0].log, result[1].log, result[2].log)"""
 
     def test_pure_fn_same_input_same_output(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 @pure
 f = (x) => { Num(x) }
 a = f(5)
@@ -243,7 +243,7 @@ counter[0]"""
 
     def test_pure_vs_impure_result_equivalence(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 @pure
 p = (x) => { Num(x * 2) }
 i = (x) => { Num(x * 2) }
@@ -255,14 +255,14 @@ list(a[0].val == b[0].val, a[1].val == b[1].val, a[2].val == b[2].val)"""
 
 
 # ---------------------------------------------------------------------------
-# 4. ND stability — ND recursion with structs and operators
+# 4. ND stability - ND recursion with structs and operators
 # ---------------------------------------------------------------------------
 
 
 class TestNDStability:
     def test_nd_recursion_struct_seed(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 ~~(Num(5), (v, recur) => {
     if v.val > 0 { recur(Num(v.val - 1)) }
     else { v.val }
@@ -282,7 +282,7 @@ struct Num { val }
     def test_nd_recursion_op_in_body(self, cat):
         code = """\
 struct Num {
-    val
+    val;
     op +(self, rhs) => { Num(self.val + rhs.val) }
 }
 r = ~~(5, (n, recur) => {
@@ -304,7 +304,7 @@ list(3, 5).[~~ (n, recur) => {
 
     def test_nd_determinism_struct(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 r1 = ~~(Num(10), (v, recur) => {
     if v.val > 0 { recur(Num(v.val - 1)) }
     else { v.val }
@@ -319,7 +319,7 @@ r1 == r2"""
 
     def test_nd_map_over_structs(self, cat):
         code = """\
-struct Num { val }
+struct Num { val; }
 ~>(list(Num(1), Num(2), Num(3)), (x) => { x.val * 10 })"""
         cat.parse(code)
         assert cat.execute() == [10, 20, 30]
@@ -327,7 +327,7 @@ struct Num { val }
     def test_nd_closure_struct_wrapper(self, cat):
         """Regression: TAG_STRUCT captured in closure leaks into child VM."""
         code = """\
-struct Num { val }
+struct Num { val; }
 fn = (seed) => {
     ~~(seed, (v, recur) => {
         if v.val > 0 { recur(Num(v.val - 1)) }

@@ -1,7 +1,14 @@
 // FILE: catnip_tools/src/debugger.rs
-/// Debugger command parsing and output formatting.
-///
-/// Pure logic: no I/O, no PyO3. Consumed via rlib by catnip_rs shims.
+//! Debugger command parsing and output formatting.
+//!
+//! Pure logic: no I/O, no PyO3. Consumed via rlib by catnip_rs shims.
+
+const DEBUGGER_TITLE: &str = "Catnip Debugger";
+const DEBUGGER_HELP_HINT: &str = "Type 'h' for help.";
+const UNKNOWN_COMMAND_PREFIX: &str = "Unknown command:";
+const AT_LINE_FRAGMENT: &str = "at line";
+const STOPPED_AT_PREFIX: &str = "Stopped at line";
+const COL_FRAGMENT: &str = "col";
 
 /// Parsed debugger command.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +23,7 @@ pub enum DebugCommand {
     Vars,
     List,
     Backtrace,
+    Repl,
     Quit,
     Help,
     Repeat,
@@ -57,6 +65,7 @@ pub fn parse_command(input: &str) -> DebugCommand {
         "v" | "vars" => DebugCommand::Vars,
         "l" | "list" => DebugCommand::List,
         "bt" | "backtrace" => DebugCommand::Backtrace,
+        "repl" => DebugCommand::Repl,
         "q" | "quit" => DebugCommand::Quit,
         "h" | "help" => DebugCommand::Help,
         _ => DebugCommand::Unknown(cmd.to_string()),
@@ -77,21 +86,25 @@ pub fn format_help() -> String {
         "  v, vars       - Show local variables",
         "  l, list       - Show source context",
         "  bt, backtrace - Show call stack",
+        "  repl          - Enter interactive REPL in current scope",
         "  q, quit       - Abort",
         "  h, help       - This help",
         "  (empty)       - Repeat last action",
+        "",
+        "In REPL mode, all debug commands are available.",
+        "Unknown input is evaluated as a Catnip expression.",
     ]
     .join("\n")
 }
 
 /// Format the session header.
 pub fn format_header() -> String {
-    "Catnip Debugger\nType 'h' for help.".to_string()
+    format!("{DEBUGGER_TITLE}\n{DEBUGGER_HELP_HINT}")
 }
 
 /// Format a pause display (stopped at line/col with snippet).
 pub fn format_pause(line: u32, col: u32, snippet: &str) -> String {
-    let mut out = format!("\nStopped at line {}, col {}", line, col);
+    let mut out = format!("\n{STOPPED_AT_PREFIX} {line}, {COL_FRAGMENT} {col}");
     if !snippet.is_empty() {
         for s in snippet.lines() {
             out.push_str(&format!("\n  {}", s));
@@ -123,14 +136,14 @@ pub fn format_backtrace(frames: &[(String, u32)]) -> String {
     frames
         .iter()
         .enumerate()
-        .map(|(i, (name, line))| format!("  #{} {} at line {}", i, name, line))
+        .map(|(i, (name, line))| format!("  #{} {} {} {}", i, name, AT_LINE_FRAGMENT, line))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// Format unknown command message.
 pub fn format_unknown_command(cmd: &str) -> String {
-    format!("Unknown command: {}. Type 'h' for help.", cmd)
+    format!("{UNKNOWN_COMMAND_PREFIX} {cmd}. {DEBUGGER_HELP_HINT}")
 }
 
 #[cfg(test)]
@@ -172,10 +185,7 @@ mod tests {
 
     #[test]
     fn test_parse_print() {
-        assert_eq!(
-            parse_command("p x + 1"),
-            DebugCommand::Print("x + 1".to_string())
-        );
+        assert_eq!(parse_command("p x + 1"), DebugCommand::Print("x + 1".to_string()));
         assert!(matches!(parse_command("p"), DebugCommand::Unknown(_)));
     }
 
@@ -189,11 +199,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_repl() {
+        assert_eq!(parse_command("repl"), DebugCommand::Repl);
+    }
+
+    #[test]
     fn test_parse_unknown() {
-        assert_eq!(
-            parse_command("xyz"),
-            DebugCommand::Unknown("xyz".to_string())
-        );
+        assert_eq!(parse_command("xyz"), DebugCommand::Unknown("xyz".to_string()));
     }
 
     #[test]

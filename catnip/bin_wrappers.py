@@ -30,17 +30,6 @@ def _find_binary(name):
     return None
 
 
-def catnip_standalone():
-    """Entry point for the catnip-standalone binary."""
-    binary = _find_binary('catnip-standalone')
-    if not binary:
-        print("Error: catnip-standalone binary not found", file=sys.stderr)
-        print("Install with: make install-bins", file=sys.stderr)
-        sys.exit(1)
-
-    os.execv(binary, [binary] + sys.argv[1:])
-
-
 def catnip_repl():
     """Entry point for the catnip-repl binary."""
     binary = _find_binary('catnip-repl')

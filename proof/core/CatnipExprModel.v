@@ -1,5 +1,5 @@
 (* FILE: proof/core/CatnipExprModel.v *)
-(* CatnipExprModel.v — Shared expression model for optimization proofs
+(* CatnipExprModel.v - Shared expression model for optimization proofs
  *
  * Defines the Expr type, environment, evaluation, structural equality,
  * and lowering to IRPure. Used by:

@@ -1,0 +1,136 @@
+#!/usr/bin/env catnip
+# Exemple : Exemples avancés
+
+print("⇒ Calculatrice avec pattern matching")
+
+calculer = (operation, a, b) => {
+    match operation {
+        '+' => { a + b }
+        '-' => { a - b }
+        '*' => { a * b }
+        '/' => {
+            match b {
+                0 => {
+                    print("Erreur: division par zéro")
+                    None
+                }
+                _ => { a / b }
+            }
+        }
+        '**' => { a ** b }
+        op => {
+            print("Opération inconnue:", op)
+            None
+        }
+    }
+}
+
+print("10 + 5 =", calculer('+', 10, 5))
+print("10 - 5 =", calculer('-', 10, 5))
+print("10 * 5 =", calculer('*', 10, 5))
+print("10 / 5 =", calculer('/', 10, 5))
+print("2 ** 10 =", calculer('**', 2, 10))
+print("10 / 0 =", calculer('/', 10, 0))
+
+print()
+print("⇒ Nombres de Fibonacci")
+
+fibonacci = (n) => {
+    match n {
+        0 => { 0 }
+        1 => { 1 }
+        n => {
+            a = 0
+            b = 1
+            i = 2
+            while i <= n {
+                temp = a + b
+                a = b
+                b = temp
+                i = i + 1
+            }
+            b
+        }
+    }
+}
+
+print("Premiers nombres de Fibonacci:")
+for i in range(15) {
+    print("  fib(", i, ") =", fibonacci(i))
+}
+
+print()
+print("⇒ Nombres premiers")
+
+est_premier = (n) => {
+    match n {
+        n if n < 2 => { False }
+        2 => { True }
+        n if n % 2 == 0 => { False }
+        n => {
+            # Vérifier les diviseurs impairs jusqu'à √n
+            diviseur = 3
+            limite = n / 2  # Approximation simple
+            premier = True
+
+            while diviseur <= limite and premier {
+                if n % diviseur == 0 {
+                    premier = False
+                }
+                diviseur = diviseur + 2
+            }
+
+            premier
+        }
+    }
+}
+
+print("Nombres premiers jusqu'à 50:")
+for n in range(2, 51) {
+    if est_premier(n) {
+        print("  ", n)
+    }
+}
+
+print()
+print("⇒ Somme avec boucle")
+
+# Calculer la somme des n premiers entiers
+somme_entiers = (n) => {
+    somme = 0
+    i = 1
+    while i <= n {
+        somme = somme + i
+        i = i + 1
+    }
+    somme
+}
+
+print("Somme 1..10:", somme_entiers(10))
+print("Somme 1..100:", somme_entiers(100))
+
+print()
+print("⇒ Conversion de température")
+
+convertir_temperature = (valeur, de, vers) => {
+    # D'abord convertir en Celsius
+    celsius = match de {
+        'C' => { valeur }
+        'F' => { (valeur - 32) * 5 / 9 }
+        'K' => { valeur - 273.15 }
+        _   => { print("Unité source inconnue"); 0 }
+    }
+
+    # Puis convertir de Celsius vers l'unité cible
+    match vers {
+        'C' => { celsius }
+        'F' => { celsius * 9 / 5 + 32 }
+        'K' => { celsius + 273.15 }
+        _   => { print("Unité cible inconnue"); 0 }
+    }
+}
+
+print("0°C en Fahrenheit:", convertir_temperature(0, 'C', 'F'))
+print("100°C en Fahrenheit:", convertir_temperature(100, 'C', 'F'))
+print("32°F en Celsius:", convertir_temperature(32, 'F', 'C'))
+print("273.15 K en Celsius:", convertir_temperature(273.15, 'K', 'C'))

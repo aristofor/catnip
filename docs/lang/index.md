@@ -18,6 +18,15 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
 - [BROADCAST](BROADCAST.md) - Notation vectorielle sur collections : opérations avec `A.[op M]`, transformations sur
   listes et dictionnaires, motifs de broadcasting
 
+- [ND_RECURSION](ND_RECURSION.md) - Récursion non-déterministe : opérateurs `~~`, `~>`, `~[]`, modes d'exécution,
+  mémoïsation et broadcast ND
+
+- [FOLD_GUIDE](FOLD_GUIDE.md) - Agrégation avec `fold` et `reduce` : patterns d'usage, composition avec broadcast,
+  structures imbriquées
+
+- [COMPREHENSIONS](COMPREHENSIONS.md) - Comprehensions Python vers Catnip : traduction des patterns map, filter, flatmap
+  et produit cartesien
+
 - [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Affectation, portée des variables et closures : résolution de
   portée, masquage (shadowing), captures et durée de vie
 

@@ -35,24 +35,32 @@ class TestHotLoopDetection:
         assert result == 150
         assert stats['hot_loops'] >= 1, "Au moins une hot loop détectée"
 
-    def test_for_loop_detected(self, vm_with_jit):
-        """Le JIT détecte une boucle for chaude."""
-        vm, c = vm_with_jit
-        code = compile_code("""
-        {
-            total = 0
-            for i in range(200) {
-                total = total + i
-            }
-            total
-        }
-        """)
+    def test_for_loop_detected(self):
+        """Le JIT détecte une boucle for chaude (subprocess pour isolation)."""
+        import os
+        import subprocess
+        import sys
+        import tempfile
 
-        result = vm.execute(code, (), {}, None)
-        stats = vm.get_jit_stats()
-
-        assert result == sum(range(200))
-        assert stats['hot_loops'] >= 1
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {**os.environ, 'CATNIP_CACHE': 'off', 'XDG_CACHE_HOME': tmpdir}
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'catnip',
+                    '-o',
+                    'jit',
+                    '-c',
+                    '{total = 0; for i in range(200) { total = total + i }; total}',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+        assert result.returncode == 0, f"Process failed:\n{result.stderr}"
+        assert int(result.stdout.strip()) == sum(range(200))
 
 
 class TestTraceRecording:

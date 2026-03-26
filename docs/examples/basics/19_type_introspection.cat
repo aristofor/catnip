@@ -1,0 +1,41 @@
+# Type introspection with typeof()
+
+# Primitive types
+typeof(42)
+# → 'int'
+
+typeof(3.14)
+# → 'float'
+
+typeof(True)
+# → 'bool'
+
+typeof(None)
+# → 'nil'
+
+typeof("Catnip")
+# → 'string'
+
+# Collections
+typeof(list(1, 2, 3))
+# → 'list'
+
+typeof(tuple(1, 2))
+# → 'tuple'
+
+# Functions
+typeof(() => { 1 })
+# → 'function'
+
+# Structs return their type name
+struct Point { x; y }
+typeof(Point(1, 2))
+# → 'Point'
+
+# BigInts are still 'int'
+typeof(2 ** 100)
+# → 'int'
+
+# Useful in conditions
+if typeof(42) == 'int' { "yes" } else { "no" }
+# → 'yes'

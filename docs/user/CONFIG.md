@@ -31,6 +31,9 @@ line_length = 120
 [cache]
 cache_max_size_mb = 100     # Limite 100 Mo ("unlimited" pour illimité)
 cache_ttl_seconds = 86400   # TTL 24 heures ("unlimited" pour pas d'expiration)
+
+[modules]
+auto = []                    # Modules chargés automatiquement au démarrage
 ```
 
 ## Configuration Par Mode
@@ -43,7 +46,7 @@ Les sections `[mode.X]` dans `catnip.toml` surchargent les valeurs globales selo
 
 - **`standalone`** : Scripts `.cat` exécutés via CLI (fichier fourni en argument)
 - **`repl`** : Session interactive (pas de fichier, stdin est un TTY)
-- **`embedded`** : Catnip importé comme bibliothèque Python
+- **`dsl`** : Catnip utilisé comme DSL (importé comme bibliothèque Python)
 
 **Ordre de priorité** :
 
@@ -99,7 +102,7 @@ tco = true       # TCO pour expérimentation
 - Debugging
 - Calculs quick
 
-### Mode `embedded` (DSL Python)
+### Mode DSL
 
 **Déclenchement** : `from catnip import Catnip` (usage library)
 
@@ -108,7 +111,7 @@ tco = true       # TCO pour expérimentation
 **Config recommandée** :
 
 ```toml
-[mode.embedded]
+[mode.dsl]
 jit = false      # Pas de JIT : intégration simple
 tco = false      # Pas de TCO : call stacks clairs
 optimize = 0     # Comportement prédictible
@@ -120,8 +123,8 @@ optimize = 0     # Comportement prédictible
 - Pandas/data wrangling DSL
 - Config DSL, rule engines
 
-> **Note** : le mode embedded n'est pas encore auto-détecté. Pour l'instant, utilisez les sections `[optimize]` et
-> `[repl]` classiques pour embedded.
+> **Note** : le mode DSL n'est pas encore auto-détecté. Pour l'instant, utilisez les sections `[optimize]` et `[repl]`
+> classiques.
 
 ## Précédence des Configurations
 
@@ -129,7 +132,7 @@ Ordre de priorité (du plus faible au plus fort) :
 
 1. **Defaults** (hardcodés)
 1. **Fichier config** (`~/.config/catnip/catnip.toml`)
-1. **Mode overrides** (`[mode.standalone]`, `[mode.repl]`, `[mode.embedded]`)
+1. **Mode overrides** (`[mode.standalone]`, `[mode.repl]`, `[mode.dsl]`)
 1. **Variables d'environnement** (`CATNIP_EXECUTOR`, `CATNIP_OPTIMIZE`, `CATNIP_THEME`, `NO_COLOR`)
 1. **Arguments CLI** (`-x`, `-o`, `--theme`, `--no-color`)
 
@@ -160,6 +163,26 @@ $ CATNIP_OPTIMIZE=jit catnip script.cat
 $ catnip -o jit:off -o level:2 script.cat
                               # jit=false, optimize=2 (cli > all)
 ```
+
+## Modules
+
+La section `[modules]` configure le chargement automatique de modules et les policies d'accès.
+
+```toml
+[modules]
+auto = ["io", "math"]            # Modules chargés au démarrage
+policy = "allow"                 # Fallback : allow ou deny
+allow = ["math", "json"]         # Patterns autorisés
+deny = ["os", "subprocess"]      # Patterns bloqués
+```
+
+`auto` charge les modules listés comme namespaces globaux avant l'exécution, équivalent à `-m` pour chaque module.
+Chaque mode (REPL, CLI, DSL) peut définir sa propre liste via `[modules.repl]`, `[modules.cli]`, `[modules.dsl]` avec
+fallback sur `[modules].auto`. Les modules passés via `-m` sont additifs (dédupliqués).
+
+Un module introuvable ou bloqué par la policy est ignoré avec un message d'erreur.
+
+Voir [MODULE_LOADING](MODULE_LOADING.md) pour la policy et l'auto-import en détail.
 
 ## Options de Cache
 
@@ -212,7 +235,7 @@ dans les deux contextes : Python (via PyO3) et standalone Rust.
 
 ## Variables d'Environnement
 
-- `CATNIP_EXECUTOR` : `vm` (défaut), `ast`
+- `CATNIP_EXECUTOR` : `vm` (défaut)
 - `CATNIP_OPTIMIZE` : syntaxe identique à `-o` (ex: `jit,tco:off,level:2`)
 - `CATNIP_THEME` : `auto` (défaut), `dark`, `light`
 - `NO_COLOR` : `1` pour désactiver les couleurs (standard freedesktop.org)
@@ -231,7 +254,7 @@ $ catnip config show --debug
 ```
 
 En REPL, `/config` (sans argument) ouvre un éditeur interactif avec navigation clavier, toggle/cycle/édition inline et
-sauvegarde immédiate. Voir [REPL.md](REPL.md#editeur-de-configuration-config) pour les détails.
+sauvegarde immédiate. Voir [REPL](REPL.md#editeur-de-configuration-config) pour les détails.
 
 <!-- doc-snapshot: config/show -->
 
@@ -271,16 +294,16 @@ Configuration from: /home/ari/.config/catnip/catnip.toml
   tco: True  [default]
   theme: 'auto'  [default]
   --- format config ---
+  format.align: True  [default]
   format.indent_size: 4  [default]
   format.line_length: 120  [default]
 ```
 
 ## Exemples Pratiques
 
-### Dev : debugging avec AST interprète
+### Dev : debugging avec optimisations désactivées
 
 ```bash
-export CATNIP_EXECUTOR=ast
 export CATNIP_OPTIMIZE=tco:off,level:0
 catnip myscript.cat
 ```

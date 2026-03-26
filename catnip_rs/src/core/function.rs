@@ -5,6 +5,7 @@
 //! and lambda execution, including the trampoline loop for tail-call
 //! optimization (TCO).
 
+use crate::constants::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
 
@@ -24,8 +25,8 @@ pub fn get_global_registry(py: Python<'_>) -> Option<Py<PyAny>> {
 }
 
 /// Rust implementation of Function.
-#[pyclass(name = "Function", module = "catnip._rs")]
-pub struct RustFunction {
+#[pyclass(module = "catnip._rs")]
+pub struct Function {
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
@@ -41,15 +42,9 @@ pub struct RustFunction {
 }
 
 #[pymethods]
-impl RustFunction {
+impl Function {
     #[new]
-    fn new(
-        py: Python<'_>,
-        name: String,
-        params: Py<PyAny>,
-        body: Py<PyAny>,
-        registry: Py<PyAny>,
-    ) -> PyResult<Self> {
+    fn new(py: Python<'_>, name: String, params: Py<PyAny>, body: Py<PyAny>, registry: Py<PyAny>) -> PyResult<Self> {
         let params_list = if params.bind(py).is_instance_of::<PyTuple>() {
             let tuple = params.cast_bound::<PyTuple>(py)?;
             let list = PyList::new(py, tuple.iter())?;
@@ -82,17 +77,11 @@ impl RustFunction {
         Python::attach(|py| {
             let params = self.params.bind(py);
             let param_names: Vec<String> = if let Ok(list) = params.cast::<PyList>() {
-                list.iter()
-                    .filter_map(|p| get_first_elem_as_string(&p))
-                    .collect()
+                list.iter().filter_map(|p| get_first_elem_as_string(&p)).collect()
             } else {
                 vec![]
             };
-            Ok(format!(
-                "<Function {}({})>",
-                self.name,
-                param_names.join(", ")
-            ))
+            Ok(format!("<Function {}({})>", self.name, param_names.join(", ")))
         })
     }
 
@@ -133,31 +122,23 @@ impl RustFunction {
     }
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let reconstruct_fn = py.import("catnip._rs")?.getattr("_reconstruct_function")?;
+        let reconstruct_fn = py.import(PY_MOD_RS)?.getattr("_reconstruct_function")?;
         let name_obj: Py<PyAny> = self.name.clone().into_pyobject(py)?.unbind().into();
         let jit_id_obj: Py<PyAny> = self.jit_func_id.clone().into_pyobject(py)?.unbind().into();
 
         let args = PyTuple::new(
             py,
-            [
-                name_obj,
-                self.params.clone_ref(py),
-                self.body.clone_ref(py),
-                jit_id_obj,
-            ],
+            [name_obj, self.params.clone_ref(py), self.body.clone_ref(py), jit_id_obj],
         )?;
 
-        let result = PyTuple::new(
-            py,
-            [reconstruct_fn.into_any().unbind(), args.into_any().unbind()],
-        )?;
+        let result = PyTuple::new(py, [reconstruct_fn.into_any().unbind(), args.into_any().unbind()])?;
         Ok(result.into_any().unbind())
     }
 }
 
 /// Rust implementation of Lambda.
-#[pyclass(name = "Lambda", module = "catnip._rs")]
-pub struct RustLambda {
+#[pyclass(module = "catnip._rs")]
+pub struct Lambda {
     #[pyo3(get)]
     pub body: Py<PyAny>,
     #[pyo3(get)]
@@ -172,15 +153,10 @@ pub struct RustLambda {
 }
 
 #[pymethods]
-impl RustLambda {
+impl Lambda {
     #[new]
     #[pyo3(signature = (body, registry, params=None))]
-    pub fn new(
-        py: Python<'_>,
-        body: Py<PyAny>,
-        registry: Py<PyAny>,
-        params: Option<Py<PyAny>>,
-    ) -> PyResult<Self> {
+    pub fn new(py: Python<'_>, body: Py<PyAny>, registry: Py<PyAny>, params: Option<Py<PyAny>>) -> PyResult<Self> {
         let params_list = if let Some(p) = params {
             if p.bind(py).is_instance_of::<PyTuple>() {
                 let tuple = p.cast_bound::<PyTuple>(py)?;
@@ -221,10 +197,7 @@ impl RustLambda {
                 if list.is_empty() {
                     return Ok("<Lambda>".to_string());
                 }
-                let param_names: Vec<String> = list
-                    .iter()
-                    .filter_map(|p| get_first_elem_as_string(&p))
-                    .collect();
+                let param_names: Vec<String> = list.iter().filter_map(|p| get_first_elem_as_string(&p)).collect();
                 Ok(format!("<Lambda ({})>", param_names.join(", ")))
             } else {
                 Ok("<Lambda>".to_string())
@@ -269,7 +242,7 @@ impl RustLambda {
     }
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let reconstruct_fn = py.import("catnip._rs")?.getattr("_reconstruct_lambda")?;
+        let reconstruct_fn = py.import(PY_MOD_RS)?.getattr("_reconstruct_lambda")?;
         let closure_vals = self
             .closure_values
             .as_ref()
@@ -287,10 +260,7 @@ impl RustLambda {
             ],
         )?;
 
-        let result = PyTuple::new(
-            py,
-            [reconstruct_fn.into_any().unbind(), args.into_any().unbind()],
-        )?;
+        let result = PyTuple::new(py, [reconstruct_fn.into_any().unbind(), args.into_any().unbind()])?;
         Ok(result.into_any().unbind())
     }
 }
@@ -321,13 +291,10 @@ fn try_jit_call(
     match (params_len, num_args) {
         (1, 1) => Ok(Some(jit_func.call1(py, (args.get_item(0)?,))?)),
         (2, 1) => Ok(Some(jit_func.call1(py, (args.get_item(0)?, 0i64))?)),
-        (2, 2) => Ok(Some(
-            jit_func.call1(py, (args.get_item(0)?, args.get_item(1)?))?,
+        (2, 2) => Ok(Some(jit_func.call1(py, (args.get_item(0)?, args.get_item(1)?))?)),
+        (3, 3) => Ok(Some(
+            jit_func.call1(py, (args.get_item(0)?, args.get_item(1)?, args.get_item(2)?))?,
         )),
-        (3, 3) => Ok(Some(jit_func.call1(
-            py,
-            (args.get_item(0)?, args.get_item(1)?, args.get_item(2)?),
-        )?)),
         _ => Ok(None),
     }
 }
@@ -343,12 +310,12 @@ fn execute_trampoline(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Import classes
-    let nodes = py.import("catnip.nodes")?;
+    let nodes = py.import(PY_MOD_NODES)?;
     let tail_call_class = nodes.getattr("TailCall")?;
     let return_value_class = nodes.getattr("ReturnValue")?;
 
     // Callable type checks (100% Rust now)
-    let rs_module = py.import("catnip._rs")?;
+    let rs_module = py.import(PY_MOD_RS)?;
     let rust_lambda = rs_module.getattr("Lambda")?;
     let rust_function = rs_module.getattr("Function")?;
 
@@ -365,14 +332,7 @@ fn execute_trampoline(
         // Bind parameters
         let params_bound = cur_params.bind(py);
         if params_bound.len()? > 0 {
-            bind_params(
-                py,
-                &cur_params,
-                &cur_registry,
-                &cur_args,
-                &cur_kwargs,
-                is_first,
-            )?;
+            bind_params(py, &cur_params, &cur_registry, &cur_args, &cur_kwargs, is_first)?;
         }
 
         // Consume pending super proxy (set by op_call for struct method calls).
@@ -404,17 +364,14 @@ fn execute_trampoline(
         if result.bind(py).is_instance(&tail_call_class)? {
             let target = result.getattr(py, "func")?;
             let new_args: Py<PyTuple> = result.getattr(py, "args")?.extract(py)?;
-            let new_kwargs: Option<Py<PyDict>> = result.getattr(py, "kwargs").ok().and_then(|k| {
-                if k.is_none(py) {
-                    None
-                } else {
-                    k.extract(py).ok()
-                }
-            });
+            let new_kwargs: Option<Py<PyDict>> = result
+                .getattr(py, "kwargs")
+                .ok()
+                .and_then(|k| if k.is_none(py) { None } else { k.extract(py).ok() });
 
             // Check if Catnip callable (100% Rust now)
-            let is_catnip = target.bind(py).is_instance(&rust_lambda)?
-                || target.bind(py).is_instance(&rust_function)?;
+            let is_catnip =
+                target.bind(py).is_instance(&rust_lambda)? || target.bind(py).is_instance(&rust_function)?;
 
             if !is_catnip {
                 let kw_ref = new_kwargs.as_ref().map(|k| k.bind(py));
@@ -525,10 +482,7 @@ fn bind_params(
 }
 
 /// Check for variadic parameter.
-fn check_variadic(
-    _py: Python<'_>,
-    params: &Bound<'_, PyList>,
-) -> PyResult<(Option<String>, usize)> {
+fn check_variadic(_py: Python<'_>, params: &Bound<'_, PyList>) -> PyResult<(Option<String>, usize)> {
     let n = params.len();
     if n == 0 {
         return Ok((None, 0));
@@ -589,9 +543,7 @@ fn get_param_default<'a>(param: &'a Bound<'a, PyAny>) -> PyResult<Bound<'a, PyAn
     } else if let Ok(l) = param.cast::<PyList>() {
         l.get_item(1)
     } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Invalid param",
-        ))
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Invalid param"))
     }
 }
 
@@ -606,8 +558,7 @@ fn capture_closure_values(py: Python<'_>, scope: &Py<PyAny>) -> PyResult<Option<
             if let Ok(dict) = symbols.cast_bound::<PyDict>(py) {
                 for (key, value) in dict.iter() {
                     let name: String = key.extract()?;
-                    if !captured.contains(&name)? && pickle.call_method1("dumps", (&value,)).is_ok()
-                    {
+                    if !captured.contains(&name)? && pickle.call_method1("dumps", (&value,)).is_ok() {
                         captured.set_item(&name, &value)?;
                     }
                 }
@@ -640,14 +591,14 @@ pub fn _reconstruct_function(
     params: Py<PyAny>,
     body: Py<PyAny>,
     jit_func_id: String,
-) -> PyResult<RustFunction> {
+) -> PyResult<Function> {
     let registry = get_global_registry(py).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No registry for pickle reconstruction. Call set_global_registry() first.",
         )
     })?;
 
-    let mut func = RustFunction::new(py, name, params, body, registry)?;
+    let mut func = Function::new(py, name, params, body, registry)?;
     func.jit_func_id = jit_func_id;
     Ok(func)
 }
@@ -660,14 +611,14 @@ pub fn _reconstruct_lambda(
     params: Py<PyAny>,
     jit_func_id: String,
     closure_values: Option<Py<PyAny>>,
-) -> PyResult<RustLambda> {
+) -> PyResult<Lambda> {
     let registry = get_global_registry(py).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No registry for pickle reconstruction. Call set_global_registry() first.",
         )
     })?;
 
-    let mut lambda = RustLambda::new(py, body, registry.clone_ref(py), Some(params))?;
+    let mut lambda = Lambda::new(py, body, registry.clone_ref(py), Some(params))?;
     lambda.jit_func_id = jit_func_id;
 
     if let Some(values) = closure_values {
@@ -685,8 +636,8 @@ pub fn _reconstruct_lambda(
 
 /// Register function module.
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<RustFunction>()?;
-    m.add_class::<RustLambda>()?;
+    m.add_class::<Function>()?;
+    m.add_class::<Lambda>()?;
     m.add_function(wrap_pyfunction!(set_global_registry, m)?)?;
     m.add_function(wrap_pyfunction!(get_global_registry, m)?)?;
     m.add_function(wrap_pyfunction!(_reconstruct_function, m)?)?;

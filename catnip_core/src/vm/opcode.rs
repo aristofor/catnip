@@ -60,22 +60,20 @@ pub enum VMOpCode {
     Nop = 30,
     Breakpoint = 31,
 
-    // === VM-only zone (32..=86) ===
+    // === VM-only zone (32..=MAX) ===
 
-    // -- Arithmetic (extends shared 1-8) --
+    // -- Operators (extends shared) --
     Div = 32,
-
-    // -- Comparison (extends shared 9-14) --
     In = 33,
     NotIn = 34,
     Is = 35,
     IsNot = 36,
 
-    // -- Conversion (37-38) --
+    // -- Conversion --
     ToBool = 37,
     TypeOf = 38,
 
-    // -- Load/Store (39-44) --
+    // -- Load/Store --
     LoadConst = 39,
     LoadLocal = 40,
     StoreLocal = 41,
@@ -83,12 +81,12 @@ pub enum VMOpCode {
     StoreScope = 43,
     LoadGlobal = 44,
 
-    // -- Stack (45-47) --
+    // -- Stack --
     PopTop = 45,
     DupTop = 46,
     RotTwo = 47,
 
-    // -- Jumps (48-54) --
+    // -- Jumps --
     Jump = 48,
     JumpIfFalse = 49,
     JumpIfTrue = 50,
@@ -97,13 +95,13 @@ pub enum VMOpCode {
     JumpIfNone = 53,
     JumpIfNotNoneOrPop = 54,
 
-    // -- Iteration (55-58) --
+    // -- Iteration --
     GetIter = 55,
     ForIter = 56,
     ForRangeInt = 57,
     ForRangeStep = 58,
 
-    // -- Functions (59-64) --
+    // -- Functions --
     Call = 59,
     CallKw = 60,
     CallMethod = 61,
@@ -111,50 +109,61 @@ pub enum VMOpCode {
     Return = 63,
     MakeFunction = 64,
 
-    // -- Collections (65-69) --
+    // -- Collections --
     BuildList = 65,
     BuildTuple = 66,
     BuildSet = 67,
     BuildDict = 68,
     BuildSlice = 69,
 
-    // -- String formatting (70-71) --
+    // -- String formatting --
     FormatValue = 70,
     BuildString = 71,
 
-    // -- Blocks (72-75) --
+    // -- Blocks --
     PushBlock = 72,
     PopBlock = 73,
     Break = 74,
     Continue = 75,
 
-    // -- Match (76-80) --
+    // -- Match --
     MatchPattern = 76,
     MatchPatternVM = 77,
     MatchAssignPatternVM = 78,
     BindMatch = 79,
     MatchFail = 80,
 
-    // -- Unpack (81-82) --
+    // -- Unpack --
     UnpackSequence = 81,
     UnpackEx = 82,
 
-    // -- Structures (83-84) --
+    // -- Definitions --
     MakeStruct = 83,
     MakeTrait = 84,
+    MakeEnum = 85,
 
-    // -- Control (85-86) --
-    Halt = 85,
-    Exit = 86,
+    // -- Control --
+    Halt = 86,
+    Exit = 87,
 
-    // -- Intrinsics (87-88) --
-    Globals = 87,
-    Locals = 88,
+    // -- Intrinsics --
+    Globals = 88,
+    Locals = 89,
+
+    // -- Exception handling --
+    SetupExcept = 90,
+    SetupFinally = 91,
+    PopHandler = 92,
+    Raise = 93,
+    CheckExcMatch = 94,
+    LoadException = 95,
+    ResumeUnwind = 96,
+    ClearException = 97,
 }
 
 impl VMOpCode {
     /// Highest opcode value. Used for range checks and cache invalidation.
-    pub const MAX: u8 = VMOpCode::Locals as u8;
+    pub const MAX: u8 = VMOpCode::ClearException as u8;
 
     /// Highest shared opcode value (same values as IROpCode).
     pub const SHARED_MAX: u8 = VMOpCode::Breakpoint as u8;
@@ -227,6 +236,11 @@ impl VMOpCode {
                 // String formatting
                 | VMOpCode::FormatValue
                 | VMOpCode::BuildString
+                // Exception handling
+                | VMOpCode::SetupExcept
+                | VMOpCode::SetupFinally
+                | VMOpCode::Raise
+                | VMOpCode::CheckExcMatch
         )
     }
 
@@ -336,15 +350,25 @@ impl VMOpCode {
             // VM: Unpack
             VMOpCode::UnpackSequence => (1, -1),
             VMOpCode::UnpackEx => (1, -1),
-            // VM: Structures
+            // VM: Definitions
             VMOpCode::MakeStruct => (0, 0),
             VMOpCode::MakeTrait => (0, 0),
+            VMOpCode::MakeEnum => (0, 0),
             // VM: Control
             VMOpCode::Halt => (0, 0),
             VMOpCode::Exit => (-1, 0),
             // VM: Intrinsics
             VMOpCode::Globals => (0, 1),
             VMOpCode::Locals => (0, 1),
+            // VM: Exception handling
+            VMOpCode::SetupExcept => (0, 0),
+            VMOpCode::SetupFinally => (0, 0),
+            VMOpCode::PopHandler => (0, 0),
+            VMOpCode::Raise => (1, 0),         // pops exception value (or 0 for bare raise)
+            VMOpCode::CheckExcMatch => (0, 1), // pushes bool
+            VMOpCode::LoadException => (0, 1), // pushes exception message
+            VMOpCode::ResumeUnwind => (0, 0),
+            VMOpCode::ClearException => (0, 0),
         }
     }
 }
@@ -385,14 +409,18 @@ mod tests {
         assert_eq!(VMOpCode::Breakpoint as u8, 31);
         assert_eq!(VMOpCode::SHARED_MAX, 31);
 
-        // VM-only zone boundaries
+        // VM-only zone: spot-check category boundaries
         assert_eq!(VMOpCode::Div as u8, 32);
         assert_eq!(VMOpCode::TypeOf as u8, 38);
-        assert_eq!(VMOpCode::Halt as u8, 85);
-        assert_eq!(VMOpCode::Exit as u8, 86);
-        assert_eq!(VMOpCode::Globals as u8, 87);
-        assert_eq!(VMOpCode::Locals as u8, 88);
-        assert_eq!(VMOpCode::MAX, 88);
+        assert_eq!(VMOpCode::MakeStruct as u8, 83);
+        assert_eq!(VMOpCode::MakeEnum as u8, 85);
+        assert_eq!(VMOpCode::Halt as u8, 86);
+        assert_eq!(VMOpCode::Exit as u8, 87);
+        assert_eq!(VMOpCode::Globals as u8, 88);
+        assert_eq!(VMOpCode::Locals as u8, 89);
+        assert_eq!(VMOpCode::SetupExcept as u8, 90);
+        assert_eq!(VMOpCode::ResumeUnwind as u8, 96);
+        assert_eq!(VMOpCode::MAX, VMOpCode::ClearException as u8);
     }
 
     #[test]
@@ -426,6 +454,7 @@ mod tests {
             VMOpCode::UnpackSequence,
             VMOpCode::MakeStruct,
             VMOpCode::MakeTrait,
+            VMOpCode::MakeEnum,
             VMOpCode::Halt,
             VMOpCode::Exit,
             VMOpCode::FormatValue,

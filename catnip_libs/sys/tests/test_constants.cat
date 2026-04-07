@@ -1,0 +1,7 @@
+# FILE: catnip_libs/sys/tests/test_constants.cat
+import('sys')
+
+if sys.platform == "" { raise ("sys.platform is empty") }
+if sys.version == "" { raise ("sys.version is empty") }
+if sys.cpu_count < 1 { raise ("sys.cpu_count < 1") }
+if sys.executable == "" { raise ("sys.executable is empty") }

@@ -4,14 +4,17 @@ Outil de formatage automatique du code Catnip avec un style opinionated.
 
 ## Vue d'ensemble
 
-Le formatteur `catnip format` applique un style cohérent sur tout le code Catnip. Contrairement à un pretty-printer qui
-reconstruit le code depuis l'AST, il utilise une approche **token-based** qui préserve :
+Le formatteur `catnip format` applique un style cohérent sur tout le code Catnip. Il utilise un pretty-printer
+**Wadler-Leijen** qui reconstruit le code depuis l'arbre syntaxique (tree-sitter CST) en préservant :
 
 - **Les commentaires** (inline et standalone)
 - **Les newlines intentionnelles** (pas de reformatage destructif)
 - **La structure du code** (seuls les espaces et l'indentation sont ajustés)
 
 Le style appliqué s'inspire de Black (Python) : un seul style, pas de configuration, zéro débat.
+
+**Code invalide** : le formatteur opère sur l'arbre syntaxique. Si le code ne parse pas correctement (noeuds ERROR dans
+tree-sitter), le texte source est préservé tel quel sans tentative de normalisation partielle.
 
 ## Utilisation CLI
 
@@ -26,6 +29,8 @@ catnip format -i script.cat
 
 # Formater un dossier (récursif, tous les .cat)
 catnip format -i src/
+
+# Si aucun .cat trouvé : affiche "No .cat files found"
 
 # Vérifier le formatage (CI)
 catnip format --check src/
@@ -169,16 +174,30 @@ func(x, y)
 (a + b)
 ```
 
-**Broadcasting** : pas d'espace après `.[`
+**Broadcasting** : pas d'espace après `.[`, espace entre opérateur et opérande
 
 ```python
 # Avant
 numbers.[ * 2 ]
 data.[ if > 10 ]
+data.[~>abs]
 
 # Après
 numbers.[* 2]
 data.[if > 10]
+data.[~> abs]
+```
+
+**Fullslice** : pas d'espace autour des `:`
+
+```python
+# Avant
+data.[ 1 : 3 ]
+data.[-2 : ]
+
+# Après
+data.[1:3]
+data.[-2:]
 ```
 
 ### Indentation
@@ -321,7 +340,7 @@ Les lignes vides (séparateurs de sections) ne sont jamais jointes.
 #### Magic trailing comma
 
 Une virgule terminale avant `)` ou `]` force le maintien de la disposition multilignes, même si tout tiendrait sur une
-seule ligne. Sans virgule terminale, les lignes sont jointes normalement.
+seule ligne.
 
 ```python
 # Virgule terminale -> multilignes préservé
@@ -336,13 +355,37 @@ points = list(
     Point(1, 1),
     Point(2, 2),  # doublon
 )
-
-# Pas de virgule terminale -> jointure en inline
-data = dict(a=1, b=2)
 ```
 
 Ce comportement s'inspire de Black (Python) et Prettier (JS) : la virgule terminale est un signal explicite du
 développeur pour conserver la disposition verticale.
+
+#### Disposition source-aware (sans trailing comma)
+
+Sans virgule terminale, le formatteur **respecte le choix du développeur** :
+
+- **Premier argument sur la même ligne que `(`** → le formatteur garde le layout inline. Les coupures se font à
+  l'intérieur des groupes imbriqués si nécessaire.
+- **Premier argument sur la ligne suivante** → le formatteur force le multiline (chaque argument sur sa propre ligne).
+
+```python
+# Inline -> reste inline (breaks internes si nécessaire)
+report = SalesReport(list(
+    Item("a", 10),
+    Item("b", 20)
+))
+
+# Multiline -> reste multiline
+data = dict(
+    a=1,
+    b=2
+)
+
+# Inline court -> reste inline
+f(a, b)
+```
+
+Ce mécanisme s'applique aux appels de fonction, `list()`, `tuple()`, `set()` et `dict()`.
 
 #### Concaténation de strings multilignes
 
@@ -462,40 +505,28 @@ filtered = numbers.[if > 3]
 
 ## Alignement en colonne
 
-Le formatteur **préserve** l'alignement existant des symboles `=`, `=>` et `#` sur les groupes de lignes consécutives.
-Activé par défaut, il ne force jamais l'alignement sur du code qui ne l'est pas.
-
-Le principe : si le développeur a pris le temps d'aligner ses `=`, le formatteur respecte cette intention et maintient
-l'alignement. Si le code n'est pas aligné, il n'est pas touché.
-
-### Détection de l'intention
-
-Le formatteur détecte l'alignement dans le source original : dans un groupe de lignes, si au moins 2 partagent la même
-colonne pour le symbole et qu'au moins une a du padding explicite, le groupe est considéré comme intentionnellement
-aligné.
-
-```python
-# Pas d'intention → pas touché
-x = 1
-longer_name = 2
-
-# Intention détectée (x a du padding) → alignement préservé
-x           = 1
-longer_name = 2
-
-# Alignement cassé par une nouvelle ligne → réparé
-x           = 1           x              = 1
-longer_name = 2     →     longer_name    = 2
-very_long_name = 3        very_long_name = 3
-```
+Le formatteur aligne les symboles `=>` (match arms) et `#` (commentaires trailing) sur les groupes de lignes
+consécutives. L'alignement des assignations `=` est désactivé : il casse dès qu'on renomme une variable et crée du bruit
+dans les diffs git.
 
 ### Symboles alignés
 
-**Assignations (`=`)** — uniquement les `=` hors parenthèses (pas les kwargs, `==`, `+=`, etc.)
-
 **Match arms (`=>`)** — alignement des flèches dans les bras de match
 
+```python
+match x {
+    1     => { "one" }
+    22    => { "twenty-two" }
+    other => { "other" }
+}
+```
+
 **Commentaires trailing (`#`)** — alignement des `#` inline (les commentaires standalone sont ignorés)
+
+```python
+x = 1       # first
+longer = 2  # second
+```
 
 ### Groupement
 
@@ -512,73 +543,94 @@ Activé par défaut. Désactivable via TOML :
 align = false
 ```
 
-Ou via l'API programmatique :
-
-```python
-config = FormatConfig(align=False)
-formatted = format_code(source, config)
-```
-
 ## Architecture interne
 
-Le formatteur utilise une approche **token-based** en 5 phases, toutes en Rust :
+Le formatteur est un **pretty-printer algébrique** Wadler-Leijen, implémenté en Rust dans `catnip_tools/src/pretty/`. Le
+pipeline a 4 étapes :
 
-### 1. Tokenisation
+```
+Tree-sitter CST
+      │
+      ▼
+  convert.rs  (dispatch récursif, ~50 types de nœuds)
+      │
+      ▼
+  Doc (arena-allocated document algebra)
+      │
+      ▼
+  layout.rs  (Leijen greedy best-fit, O(n))
+      │
+      ▼
+  (String, Vec<usize>)  ─── texte + line_map
+      │
+      ▼
+  align.rs  (post-processing optionnel)
+      │
+      ▼
+  String finale
+```
 
-Le tokenizer Tree-sitter extrait les tokens depuis l'arbre syntaxique. Chaque token contient : type, value, line,
-column, end_line, end_column. Les commentaires sont préservés comme nœuds de l'arbre. Les f-strings et b-strings sont
-traités comme tokens opaques (pas de décomposition interne).
+### 1. Conversion CST → Doc
 
-### 2. Injection de newlines
+Le convertisseur parcourt récursivement l'arbre Tree-sitter et produit un document algébrique. Chaque type de nœud a un
+traitement dédié :
 
-Les tokens sont sur la même ligne dans l'arbre. La phase 2 injecte des tokens `_NEWLINE` entre les tokens situés sur des
-lignes différentes, en respectant le nombre de lignes vides de la source (un gap de N lignes → N tokens `_NEWLINE`).
+- **Expressions** (`convert_expr.rs`) : binaires (opérateur en fin de ligne en mode break), unaires, appels, chaînes
+  d'accès, collections, kwargs
+- **Statements** (`convert_stmt.rs`) : if/elif/else, while, for, match/patterns, pragma
+- **Déclarations** (`convert_decl.rs`) : lambda, struct, trait avec champs/méthodes/extends/implements
+- **Commentaires** : rattachés au nœud précédent (trailing) ou émis en standalone selon la position source
 
-### 3. Application des règles de formatage
+L'algebra documentaire (`doc.rs`) fournit les primitives : `Text`, `Line`, `SoftLine`, `HardLine`, `Nest`, `Group`,
+`Concat`, `Verbatim`, `SourceLine`. Les combinateurs dérivés (`combinators.rs`) : `bracket`, `surround`, `intersperse`,
+`comma_line`.
 
-Le formatteur parcourt les tokens et applique les règles localement :
+### 2. Layout greedy
 
-- `needs_space_before()` : opérateurs binaires, keywords, détection du contexte unaire
-- `needs_space_after()` : virgules, point-virgules, `=>`, keywords (sauf avant `,`/`;`)
-- Gestion de l'indentation via `LBRACE`/`RBRACE` avec distinction bloc/struct init (`BraceKind`)
-- Préservation des commentaires avec exactement 2 espaces avant `#` inline
-- Tracking `after_block_keyword` pour distinguer `if x { }` (bloc) de `Point{x, y}` (struct init)
+L'algorithme de Leijen (stack-based, itératif) décide pour chaque `Group` : flat ou break.
 
-La détection unaire utilise le dernier token significatif (non-newline) pour distinguer `-x` (unaire) de `a - x`
-(binaire), même à travers des sauts de ligne.
+- Mesure la largeur flat via `flat_width()` avec short-circuit
+- Si flat tient dans la largeur restante : `Line` → espace, `SoftLine` → rien
+- Sinon break : `Line`/`SoftLine` → `\n` + indentation courante
+- `HardLine` force toujours un saut de ligne
+- `Verbatim` est émis tel quel (strings multilignes)
 
-### 4. Jointure et coupure de lignes
+Le `line_map` est construit naturellement pendant le layout via les annotations `SourceLine`.
 
-Deux passes sur le texte formaté :
+### 3. Préservation d'intention source
 
-- **Jointure** (`join_short_lines`) : fusionne les lignes de continuation qui tiennent dans `line_length`. Ne remonte
-  pas le contenu après `{` (un bloc ouvre un nouveau scope, pas une continuation)
-- **Coupure** (`wrap_long_lines`) : découpe les lignes qui dépassent `line_length` aux meilleurs points de coupure
+Le formatteur respecte les choix explicites du programmeur :
 
-### 5. Alignement en colonne (préservation)
+- **Trailing comma magic** : une virgule avant `)` force le mode multiline
+- **Disposition source-aware** : le premier argument inline → inline préservé ; premier argument à la ligne → multiline
+  préservé (appels, collections, dicts)
+- **If/elif/else** : `} else {` sur la même ligne ou `}\nelse {` sur des lignes séparées -- le choix source est préservé
+- **Method chains** : `obj.method(...)` sur une ligne reste sur une ligne ; les breaks source entre membres sont
+  préservés avec indentation
+- **Struct body** : les champs/méthodes respectent le layout source (inline `x; y;`, multiline, blank lines entre champs
+  et méthodes)
+- **Blocs multilignes** : un bloc `{ }` qui occupe plusieurs lignes dans la source reste multiline
+- **String concat multiline** : `"a" +\n "b"` où les deux opérandes sont des strings reste sur plusieurs lignes
+- **Blank lines** : un gap ≥ 2 lignes entre statements produit une ligne vide
+- **Semicolons struct** : les `;` sur les champs sont préservés si présents dans la source, pas ajoutés sinon
 
-Post-processing qui compare le texte formaté au source original. Pour chaque groupe de lignes consécutives au même
-indent, vérifie si l'alignement est intentionnel dans le source (via `has_alignment_intent` : au moins 2 lignes au même
-colonne + padding explicite). Si oui, aligne le groupe dans la sortie. Sinon, ne touche pas.
+### 4. Alignement en colonne (post-processing)
 
-### 6. Normalisation finale
+Compare le texte formaté au source original via le `line_map`. Aligne `=>` (match arms) et `#` (commentaires trailing)
+sur les groupes de lignes consécutives au même indent. L'alignement des `=` est désactivé.
 
-- Suppression des espaces en fin de ligne (trailing whitespace)
+### 5. Normalisation finale
+
 - Suppression des newlines en début de fichier
 - Maximum 2 newlines consécutives
+- Suppression du trailing whitespace sur les lignes vides
 - Exactement une newline en fin de fichier
 
-## Différences avec un pretty-printer AST
+### Références
 
-| Critère          | Pretty-printer AST             | Formatteur token-based   |
-| ---------------- | ------------------------------ | ------------------------ |
-| **Commentaires** | ✗ Perdus (ignorés par parser)  | ✓ Préservés              |
-| **Newlines**     | ✗ Reconstruites arbitrairement | ✓ Respectées             |
-| **Structure**    | ✗ Reformatée complètement      | ✓ Ajustée localement     |
-| **Fidélité**     | ✗ Code reconstruit             | ✓ Code original préservé |
-| **Performance**  | Plus lent (parse + transform)  | Plus rapide (lex only)   |
-
-Le formatteur token-based est un **formatter respectueux** comme Black, pas un **uglifier** qui détruit le code.
+- Wadler, "A prettier printer" (1998)
+- Lindig, "Strictly Pretty" (2000)
+- Leijen, "PPrint, a prettier printer" (2001)
 
 ## Utilisation programmatique
 

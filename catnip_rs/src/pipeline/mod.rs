@@ -112,6 +112,13 @@ impl Pipeline {
         self.optimize_enabled = enabled;
     }
 
+    /// Set module import policy. Must be called before execute().
+    /// The policy is passed to the VMHost when it is lazily created.
+    pub fn set_module_policy(&mut self, policy: Py<PyAny>) {
+        let executor = self.ensure_executor();
+        executor.set_module_policy(policy);
+    }
+
     /// Create a SemanticAnalyzer with current pipeline settings applied.
     fn create_analyzer(&self) -> SemanticAnalyzer {
         let mut analyzer = if self.optimize_enabled {

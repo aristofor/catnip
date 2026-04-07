@@ -1,0 +1,34 @@
+# Context managers (with)
+#
+# Le bloc with garantit __exit__ en sortie, meme en cas d'exception.
+
+import('io')
+import('contextlib')
+
+print("⇒ Lecture de fichier")
+
+with f = io.open('/dev/null') {
+    print("fichier ouvert:", f)
+    data = f.read()
+    print("lu:", len(data), "octets")
+}
+# f.__exit__() appele automatiquement ici
+
+print()
+print("⇒ Suppression d'exception")
+
+with _ = contextlib.suppress(ValueError) {
+    raise ValueError("cette erreur est ignoree")
+}
+print("apres suppress: pas d'erreur")
+
+print()
+print("⇒ Exception non supprimee")
+
+try {
+    with f = io.open('/dev/null') {
+        raise TypeError("pas supprimee")
+    }
+} except {
+    e: TypeError => { print("attrapee:", e) }
+}

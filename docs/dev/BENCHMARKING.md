@@ -821,5 +821,5 @@ python -m memory_profiler benchmark.py
 ## Références
 
 - **Optimisations** : `docs/dev/OPTIMIZATIONS.md`
-- **CFG** : `docs/dev/CFG.md`
+- **CFG** : `docs/dev/ARCHITECTURE.md` (section CFG/SSA)
 - **VM Architecture** : `docs/dev/VM.md`

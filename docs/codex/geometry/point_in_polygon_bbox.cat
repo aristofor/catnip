@@ -25,7 +25,7 @@ struct BBox {
         ymin = polygon[0].y
         xmax = xmin
         ymax = ymin
-        i    = 1
+        i = 1
         while i < len(polygon) {
             p = polygon[i]
             if p.x < xmin { xmin = p.x }
@@ -82,13 +82,13 @@ print("Bounding box :", bb)
 
 # Points de test
 tests = list(
-    Point(1, 1),   # intérieur (branche basse du L)
-    Point(1, 4),   # intérieur (branche haute du L)
-    Point(3, 3),   # extérieur (creux du L)
-    Point(3, 1),   # intérieur (branche basse)
-    Point(5, 1),   # extérieur (hors bbox)
+    Point(1, 1),  # intérieur (branche basse du L)
+    Point(1, 4),  # intérieur (branche haute du L)
+    Point(3, 3),  # extérieur (creux du L)
+    Point(3, 1),  # intérieur (branche basse)
+    Point(5, 1),  # extérieur (hors bbox)
     Point(-1, 0),  # extérieur (hors bbox)
-    Point(2, 0),   # sur l'arête (comportement limite)
+    Point(2, 0),  # sur l'arête (comportement limite)
 )
 
 for p in tests {

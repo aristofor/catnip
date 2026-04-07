@@ -6,7 +6,7 @@
 //! native globals and builtin functions.
 
 use crate::error::{VMError, VMResult};
-use crate::ops::{arith, collection, string};
+use crate::ops::{arith, collection, errors, string};
 use crate::value::Value;
 use indexmap::IndexMap;
 use rug::Integer;
@@ -91,9 +91,140 @@ pub trait ValueIter {
 // PureHost -- 100% Rust host implementation
 // ---------------------------------------------------------------------------
 
+/// Compute (start, stop, step) indices for a slice of length `len`,
+/// following Python's `slice.indices()` semantics exactly.
+/// Ref: https://docs.python.org/3/reference/datamodel.html#slice.indices
+fn slice_indices(start: Option<i64>, stop: Option<i64>, step: Option<i64>, len: i64) -> VMResult<(i64, i64, i64)> {
+    let step = step.unwrap_or(1);
+    if step == 0 {
+        return Err(VMError::ValueError("slice step cannot be zero".into()));
+    }
+
+    let clamp = |idx: i64, low: i64, high: i64| idx.clamp(low, high);
+
+    let (def_start, def_stop) = if step > 0 { (0, len) } else { (len - 1, -1) };
+
+    let resolve = |idx: i64| if idx < 0 { idx + len } else { idx };
+
+    let s = match start {
+        Some(i) => {
+            let r = resolve(i);
+            if step > 0 {
+                clamp(r, 0, len)
+            } else {
+                clamp(r, -1, len - 1)
+            }
+        }
+        None => def_start,
+    };
+    let e = match stop {
+        Some(i) => {
+            let r = resolve(i);
+            if step > 0 {
+                clamp(r, 0, len)
+            } else {
+                clamp(r, -1, len - 1)
+            }
+        }
+        None => def_stop,
+    };
+
+    Ok((s, e, step))
+}
+
+/// Collect indices produced by a slice into a Vec.
+fn collect_slice_indices(start: i64, stop: i64, step: i64) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i < stop {
+            indices.push(i as usize);
+            i += step;
+        }
+    } else {
+        while i > stop {
+            indices.push(i as usize);
+            i += step;
+        }
+    }
+    indices
+}
+
+/// Apply a slice operation. Called from the VM when GetItem has arg=1.
+/// start/stop/step are raw Values from the stack (integers or NIL).
+pub fn apply_slice(obj: Value, start: Value, stop: Value, step: Value) -> VMResult<Value> {
+    // Convert Value to Option<i64>, validating types
+    let as_bound = |v: Value, name: &str| -> VMResult<Option<i64>> {
+        if v.is_nil() {
+            return Ok(None);
+        }
+        v.as_int()
+            .map(Some)
+            .ok_or_else(|| VMError::TypeError(format!("slice {name} must be an integer")))
+    };
+    let s = as_bound(start, "start")?;
+    let e = as_bound(stop, "stop")?;
+    let st = as_bound(step, "step")?;
+
+    if obj.is_native_list() {
+        let list = unsafe { obj.as_native_list_ref().unwrap() };
+        let inner = list.as_slice_cloned();
+        let len = inner.len() as i64;
+        let (si, ei, step) = slice_indices(s, e, st, len)?;
+        let indices = collect_slice_indices(si, ei, step);
+        let result: Vec<Value> = indices
+            .into_iter()
+            .map(|i| {
+                inner[i].clone_refcount();
+                inner[i]
+            })
+            .collect();
+        // Drop the cloned refs from as_slice_cloned
+        for v in &inner {
+            v.decref();
+        }
+        return Ok(Value::from_list(result));
+    }
+    if obj.is_native_str() {
+        let s_ref = unsafe { obj.as_native_str_ref().unwrap() };
+        let chars: Vec<char> = s_ref.chars().collect();
+        let len = chars.len() as i64;
+        let (si, ei, step) = slice_indices(s, e, st, len)?;
+        let indices = collect_slice_indices(si, ei, step);
+        let result: String = indices.into_iter().map(|i| chars[i]).collect();
+        return Ok(Value::from_string(result));
+    }
+    if obj.is_native_tuple() {
+        let tuple = unsafe { obj.as_native_tuple_ref().unwrap() };
+        let items = tuple.as_slice();
+        let len = items.len() as i64;
+        let (si, ei, step) = slice_indices(s, e, st, len)?;
+        let indices = collect_slice_indices(si, ei, step);
+        let result: Vec<Value> = indices
+            .into_iter()
+            .map(|i| {
+                items[i].clone_refcount();
+                items[i]
+            })
+            .collect();
+        return Ok(Value::from_tuple(result));
+    }
+    if obj.is_native_bytes() {
+        let bytes = unsafe { obj.as_native_bytes_ref().unwrap() };
+        let data = bytes.as_bytes();
+        let len = data.len() as i64;
+        let (si, ei, step) = slice_indices(s, e, st, len)?;
+        let indices = collect_slice_indices(si, ei, step);
+        let result: Vec<u8> = indices.into_iter().map(|i| data[i]).collect();
+        return Ok(Value::from_bytes(result));
+    }
+    Err(VMError::TypeError(format!("'{}' is not sliceable", obj.type_name())))
+}
+
 /// Host backed by Rust-owned globals with native builtins.
 pub struct PureHost {
     globals: Globals,
+    plugin_registry: Option<crate::plugin::SharedPluginRegistry>,
 }
 
 impl PureHost {
@@ -101,6 +232,7 @@ impl PureHost {
     pub fn new() -> Self {
         Self {
             globals: Rc::new(RefCell::new(IndexMap::new())),
+            plugin_registry: None,
         }
     }
 
@@ -121,8 +253,18 @@ impl PureHost {
             for name in BUILTIN_NAMES {
                 g.insert(name.to_string(), Value::from_str(name));
             }
+
+            // META object
+            let meta = crate::value::NativeMeta::new();
+            meta.set("main", Value::TRUE);
+            g.insert("META".to_string(), Value::from_meta(meta));
         }
         host
+    }
+
+    /// Set the plugin registry for native plugin dispatch.
+    pub fn set_plugin_registry(&mut self, registry: crate::plugin::SharedPluginRegistry) {
+        self.plugin_registry = Some(registry);
     }
 
     /// Get a reference to globals.
@@ -132,7 +274,7 @@ impl PureHost {
 }
 
 /// Builtin function names available as globals.
-const BUILTIN_NAMES: &[&str] = &[
+pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "abs",
     "len",
     "str",
@@ -141,6 +283,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "bool",
     "type",
     "print",
+    "import",
     "min",
     "max",
     "list",
@@ -155,6 +298,23 @@ const BUILTIN_NAMES: &[&str] = &[
     "all",
     "enumerate",
     "zip",
+    "map",
+    "filter",
+    "fold",
+    "reduce",
+    "round",
+    "pow",
+    "divmod",
+    "chr",
+    "ord",
+    "hex",
+    "bin",
+    "oct",
+    "repr",
+    "hash",
+    "callable",
+    "isinstance",
+    "complex",
 ];
 
 impl Default for PureHost {
@@ -241,6 +401,15 @@ impl VmHost for PureHost {
         // Builtin functions stored as NativeStr names
         if func.is_native_str() {
             let name = unsafe { func.as_native_str_ref().unwrap() };
+            // Plugin dispatch: __plugin::module::fn
+            if crate::plugin::is_plugin_call(name) {
+                if let Some(reg) = &self.plugin_registry {
+                    if let Some(result) = reg.borrow().try_call(name, args) {
+                        return result;
+                    }
+                }
+                return Err(VMError::RuntimeError(format!("plugin function not found: '{}'", name)));
+            }
             return call_builtin(name, args);
         }
         // Callable collections: list(idx), dict(key), tuple(idx), str(idx)
@@ -253,6 +422,27 @@ impl VmHost for PureHost {
     }
 
     fn call_method(&self, obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
+        // Complex methods
+        if obj.is_complex() {
+            let (r, i) = unsafe { obj.as_complex_parts().unwrap() };
+            return match method {
+                "conjugate" => Ok(Value::from_complex(r, -i)),
+                _ => Err(VMError::TypeError(format!("'complex' has no method '{}'", method))),
+            };
+        }
+        // Plugin object method dispatch
+        if obj.is_plugin_object() {
+            let (handle, cbs) = unsafe { obj.as_plugin_object_ref().unwrap() };
+            let method_fn = cbs
+                .method
+                .ok_or_else(|| VMError::TypeError("plugin object does not support method calls".into()))?;
+            if let Some(reg) = &self.plugin_registry {
+                return reg
+                    .borrow()
+                    .call_method_on_object(handle, method_fn, method, args, &cbs);
+            }
+            return Err(VMError::RuntimeError("plugin registry not available".into()));
+        }
         // Collection method dispatch
         if let Some(result) = collection::call_method(obj, method, args)? {
             return Ok(result);
@@ -262,6 +452,7 @@ impl VmHost for PureHost {
             let s = unsafe { obj.as_native_str_ref().unwrap() };
             return str_method_with_args(s, method, args);
         }
+        // Legacy file/http methods removed -- dispatched through PluginObject above
         Err(VMError::TypeError(format!(
             "'{}' has no method '{}'",
             obj.type_name(),
@@ -270,10 +461,42 @@ impl VmHost for PureHost {
     }
 
     fn obj_getattr(&self, obj: Value, name: &str) -> VMResult<Value> {
+        // Complex attributes
+        if obj.is_complex() {
+            let (r, i) = unsafe { obj.as_complex_parts().unwrap() };
+            return match name {
+                "real" => Ok(Value::from_float(r)),
+                "imag" => Ok(Value::from_float(i)),
+                _ => Err(VMError::AttributeError(format!(
+                    "'complex' has no attribute '{}'",
+                    name
+                ))),
+            };
+        }
+        // Plugin object attribute dispatch
+        if obj.is_plugin_object() {
+            let (handle, cbs) = unsafe { obj.as_plugin_object_ref().unwrap() };
+            let getattr_fn = cbs
+                .getattr
+                .ok_or_else(|| VMError::AttributeError("plugin object does not support attribute access".into()))?;
+            if let Some(reg) = &self.plugin_registry {
+                return reg.borrow().call_getattr_on_object(handle, getattr_fn, name, &cbs);
+            }
+            return Err(VMError::RuntimeError("plugin registry not available".into()));
+        }
         // String methods (0-arg only -- called as attributes)
         if obj.is_native_str() {
             let s = unsafe { obj.as_native_str_ref().unwrap() };
             return str_method_dispatch(s, name);
+        }
+        // META attributes
+        if obj.is_meta() {
+            let m = unsafe { obj.as_meta_ref().unwrap() };
+            if let Some(v) = m.get(name) {
+                v.clone_refcount();
+                return Ok(v);
+            }
+            return Err(VMError::AttributeError(format!("META has no attribute '{}'", name)));
         }
         Err(VMError::TypeError(format!(
             "'{}' has no attribute '{}'",
@@ -282,7 +505,12 @@ impl VmHost for PureHost {
         )))
     }
 
-    fn obj_setattr(&self, obj: Value, name: &str, _val: Value) -> VMResult<()> {
+    fn obj_setattr(&self, obj: Value, name: &str, val: Value) -> VMResult<()> {
+        if obj.is_meta() {
+            let m = unsafe { obj.as_meta_ref().unwrap() };
+            m.set(name, val);
+            return Ok(());
+        }
         Err(VMError::TypeError(format!(
             "cannot set attribute '{}' on {:?}",
             name, obj
@@ -598,7 +826,7 @@ fn native_add(a: Value, b: Value) -> VMResult<Value> {
         data.extend_from_slice(bb.as_bytes());
         return Ok(Value::from_bytes(data));
     }
-    Err(VMError::TypeError("unsupported operand types for +".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_ADD.into()))
 }
 
 #[inline]
@@ -659,7 +887,7 @@ fn native_mul(a: Value, b: Value) -> VMResult<Value> {
             return Ok(Value::from_list(result));
         }
     }
-    Err(VMError::TypeError("unsupported operand types for *".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MUL.into()))
 }
 
 #[inline]
@@ -707,12 +935,25 @@ where
         let sb = unsafe { b.as_native_str_ref().unwrap() };
         return Ok(Value::from_bool(pred(sa.cmp(sb))));
     }
-    Err(VMError::TypeError("unsupported comparison".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_COMPARISON.into()))
 }
 
 // ---------------------------------------------------------------------------
 // Builtin function dispatch
 // ---------------------------------------------------------------------------
+
+/// Python-compatible banker's rounding (tie-to-even).
+fn round_half_even(x: f64) -> f64 {
+    let frac = x.fract().abs();
+    if frac == 0.5 {
+        // Tie: round to nearest even integer
+        let floor = x.floor();
+        let ceil = x.ceil();
+        if floor % 2.0 == 0.0 { floor } else { ceil }
+    } else {
+        x.round()
+    }
+}
 
 fn call_builtin(name: &str, args: &[Value]) -> VMResult<Value> {
     match name {
@@ -729,6 +970,10 @@ fn call_builtin(name: &str, args: &[Value]) -> VMResult<Value> {
             if a.is_bigint() {
                 let n = unsafe { a.as_bigint_ref().unwrap() };
                 return Ok(Value::from_bigint_or_demote(n.clone().abs()));
+            }
+            if a.is_complex() {
+                let (r, i) = unsafe { a.as_complex_parts().unwrap() };
+                return Ok(Value::from_float((r * r + i * i).sqrt()));
             }
             Err(VMError::TypeError("bad operand type for abs()".into()))
         }
@@ -920,7 +1165,86 @@ fn call_builtin(name: &str, args: &[Value]) -> VMResult<Value> {
             if args.is_empty() {
                 return Ok(Value::from_empty_dict());
             }
-            Err(VMError::TypeError("dict() takes no arguments in pure mode".into()))
+            // dict(iterable_of_pairs) - extract pairs from list/tuple of tuples/lists.
+            // set_item does its own clone_refcount, so callers must not pre-increment.
+            let iterable = &args[0];
+            let dict = Value::from_empty_dict();
+            let d = unsafe { dict.as_native_dict_ref().unwrap() };
+
+            // Collect items (as_slice_cloned / clone_refcount give owned refs).
+            let items: Vec<Value> = if iterable.is_native_list() {
+                unsafe { iterable.as_native_list_ref().unwrap().as_slice_cloned() }
+            } else if iterable.is_native_tuple() {
+                let t = unsafe { iterable.as_native_tuple_ref().unwrap() };
+                let s = t.as_slice();
+                s.iter()
+                    .map(|v| {
+                        v.clone_refcount();
+                        *v
+                    })
+                    .collect()
+            } else {
+                return Err(VMError::TypeError(
+                    "dict(): argument must be a list or tuple of pairs".into(),
+                ));
+            };
+
+            for (index, pair) in items.iter().enumerate() {
+                let result = if pair.is_native_tuple() {
+                    let t = unsafe { pair.as_native_tuple_ref().unwrap() };
+                    let s = t.as_slice();
+                    if s.len() == 2 {
+                        // as_slice borrows - set_item increments, pair.decref frees tuple+elements.
+                        match s[0].to_key() {
+                            Ok(key) => {
+                                d.set_item(key, s[1]);
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Err(VMError::TypeError(format!(
+                            "dict(): expected 2-element tuple, got {}",
+                            s.len()
+                        )))
+                    }
+                } else if pair.is_native_list() {
+                    let l = unsafe { pair.as_native_list_ref().unwrap() };
+                    let s = l.as_slice_cloned();
+                    let result = if s.len() == 2 {
+                        match s[0].to_key() {
+                            Ok(key) => {
+                                d.set_item(key, s[1]);
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Err(VMError::TypeError(format!(
+                            "dict(): expected 2-element list, got {}",
+                            s.len()
+                        )))
+                    };
+                    for value in &s {
+                        value.decref();
+                    }
+                    result
+                } else {
+                    Err(VMError::TypeError(
+                        "dict(): iterable must yield pairs (tuples or lists)".into(),
+                    ))
+                };
+
+                pair.decref();
+
+                if let Err(err) = result {
+                    for remaining in items.iter().skip(index + 1) {
+                        remaining.decref();
+                    }
+                    return Err(err);
+                }
+            }
+            Ok(dict)
         }
         "set" => {
             if args.is_empty() {
@@ -1125,6 +1449,213 @@ fn call_builtin(name: &str, args: &[Value]) -> VMResult<Value> {
                 }
             }
             Ok(Value::from_list(result))
+        }
+        // --- Batch 1: numerics + string utils ---
+        "round" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(VMError::TypeError(format!(
+                    "round() takes 1 or 2 arguments ({} given)",
+                    args.len()
+                )));
+            }
+            let a = args[0];
+            let ndigits = if args.len() == 2 {
+                args[1]
+                    .as_int()
+                    .ok_or_else(|| VMError::TypeError("ndigits must be an integer".into()))?
+            } else {
+                0
+            };
+            if let Some(f) = a.as_float() {
+                if ndigits == 0 {
+                    // Python tie-to-even (banker's rounding)
+                    return Ok(Value::from_int(round_half_even(f) as i64));
+                }
+                let factor = 10f64.powi(ndigits as i32);
+                return Ok(Value::from_float(round_half_even(f * factor) / factor));
+            }
+            if let Some(i) = a.as_int() {
+                if ndigits >= 0 {
+                    return Ok(Value::from_int(i));
+                }
+                let factor = 10i64.pow((-ndigits) as u32);
+                return Ok(Value::from_int(
+                    round_half_even(i as f64 / factor as f64) as i64 * factor,
+                ));
+            }
+            Err(VMError::TypeError("round() requires a numeric value".into()))
+        }
+        "pow" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(VMError::TypeError(format!(
+                    "pow() takes 2 or 3 arguments ({} given)",
+                    args.len()
+                )));
+            }
+            let result = crate::ops::arith::numeric_pow(args[0], args[1])?;
+            if args.len() == 3 {
+                // pow(base, exp, mod)
+                let m = args[2]
+                    .as_int()
+                    .ok_or_else(|| VMError::TypeError("pow() 3rd argument must be an integer".into()))?;
+                if m == 0 {
+                    return Err(VMError::ValueError("pow() 3rd argument cannot be 0".into()));
+                }
+                let r = result
+                    .as_int()
+                    .ok_or_else(|| VMError::TypeError("pow() with 3 arguments requires integer result".into()))?;
+                return Ok(Value::from_int(((r % m) + m) % m));
+            }
+            Ok(result)
+        }
+        "divmod" => {
+            if args.len() != 2 {
+                return Err(VMError::TypeError(format!(
+                    "divmod() takes 2 arguments ({} given)",
+                    args.len()
+                )));
+            }
+            let (a, b) = (args[0], args[1]);
+            if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
+                if bi == 0 {
+                    return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                }
+                let q = crate::ops::arith::i64_div_floor(ai, bi);
+                let r = crate::ops::arith::i64_mod_floor(ai, bi);
+                return Ok(Value::from_tuple(vec![Value::from_int(q), Value::from_int(r)]));
+            }
+            // BigInt divmod (before float fallback to keep exact precision)
+            if (a.is_bigint() || a.as_int().is_some()) && (b.is_bigint() || b.as_int().is_some()) {
+                if let (Some(ai), Some(bi)) = (crate::ops::arith::to_bigint(a), crate::ops::arith::to_bigint(b)) {
+                    if bi == 0 {
+                        return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                    }
+                    let (q, r) = ai.div_rem_floor(bi);
+                    return Ok(Value::from_tuple(vec![
+                        Value::from_bigint_or_demote(q),
+                        Value::from_bigint_or_demote(r),
+                    ]));
+                }
+            }
+            if let (Some(af), Some(bf)) = (crate::ops::arith::to_f64(a), crate::ops::arith::to_f64(b)) {
+                if bf == 0.0 {
+                    return Err(VMError::ZeroDivisionError("float divmod() by zero".into()));
+                }
+                let q = (af / bf).floor();
+                let r = af - q * bf;
+                return Ok(Value::from_tuple(vec![Value::from_float(q), Value::from_float(r)]));
+            }
+            Err(VMError::TypeError("divmod() requires numeric arguments".into()))
+        }
+        "chr" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("chr() takes 1 argument".into()))?;
+            let i = a
+                .as_int()
+                .ok_or_else(|| VMError::TypeError("chr() requires an integer".into()))?;
+            let c = char::from_u32(i as u32)
+                .ok_or_else(|| VMError::ValueError(format!("chr() arg not in range: {}", i)))?;
+            Ok(Value::from_string(c.to_string()))
+        }
+        "ord" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("ord() takes 1 argument".into()))?;
+            if !a.is_native_str() {
+                return Err(VMError::TypeError("ord() requires a string argument".into()));
+            }
+            let s = unsafe { a.as_native_str_ref().unwrap() };
+            let mut chars = s.chars();
+            let c = chars
+                .next()
+                .ok_or_else(|| VMError::TypeError("ord() expected a character, got empty string".into()))?;
+            if chars.next().is_some() {
+                return Err(VMError::TypeError(format!(
+                    "ord() expected a character, got string of length {}",
+                    s.chars().count()
+                )));
+            }
+            Ok(Value::from_int(c as i64))
+        }
+        "hex" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("hex() takes 1 argument".into()))?;
+            let i = a
+                .as_int()
+                .ok_or_else(|| VMError::TypeError("hex() requires an integer".into()))?;
+            if i < 0 {
+                Ok(Value::from_string(format!("-0x{:x}", -i)))
+            } else {
+                Ok(Value::from_string(format!("0x{:x}", i)))
+            }
+        }
+        "bin" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("bin() takes 1 argument".into()))?;
+            let i = a
+                .as_int()
+                .ok_or_else(|| VMError::TypeError("bin() requires an integer".into()))?;
+            if i < 0 {
+                Ok(Value::from_string(format!("-0b{:b}", -i)))
+            } else {
+                Ok(Value::from_string(format!("0b{:b}", i)))
+            }
+        }
+        "oct" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("oct() takes 1 argument".into()))?;
+            let i = a
+                .as_int()
+                .ok_or_else(|| VMError::TypeError("oct() requires an integer".into()))?;
+            if i < 0 {
+                Ok(Value::from_string(format!("-0o{:o}", -i)))
+            } else {
+                Ok(Value::from_string(format!("0o{:o}", i)))
+            }
+        }
+        "repr" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("repr() takes 1 argument".into()))?;
+            Ok(Value::from_string(a.repr_string()))
+        }
+        // --- Batch 2: type introspection ---
+        "hash" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("hash() takes 1 argument".into()))?;
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let key = a
+                .to_key()
+                .map_err(|_| VMError::TypeError(format!("unhashable type: '{}'", a.type_name())))?;
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            let h = hasher.finish() as i64;
+            Ok(Value::try_from_int(h).unwrap_or_else(|| Value::from_bigint(Integer::from(h))))
+        }
+        "callable" => {
+            let a = args
+                .first()
+                .ok_or_else(|| VMError::TypeError("callable() takes 1 argument".into()))?;
+            let is_callable = a.is_vmfunc() || a.is_struct_type() || {
+                // Only builtin names are callable strings, not arbitrary strings
+                a.is_native_str() && BUILTIN_NAMES.contains(&unsafe { a.as_native_str_ref().unwrap() })
+            };
+            Ok(Value::from_bool(is_callable))
+        }
+        "complex" => {
+            let real = args.first().map_or(Ok(0.0), |v| {
+                arith::to_f64(*v).ok_or_else(|| VMError::TypeError("complex() real must be a number".into()))
+            })?;
+            let imag = args.get(1).map_or(Ok(0.0), |v| {
+                arith::to_f64(*v).ok_or_else(|| VMError::TypeError("complex() imag must be a number".into()))
+            })?;
+            Ok(Value::from_complex(real, imag))
         }
         _ => Err(VMError::NameError(format!("builtin '{}' not found", name))),
     }
@@ -1716,5 +2247,192 @@ mod tests {
         let l = unsafe { list.as_native_list_ref().unwrap() };
         assert_eq!(l.len(), 1);
         list.decref();
+    }
+
+    // --- apply_slice unit tests ---
+
+    #[test]
+    fn test_apply_slice_list_basic() {
+        let list = Value::from_list(vec![
+            Value::from_int(10),
+            Value::from_int(20),
+            Value::from_int(30),
+            Value::from_int(40),
+        ]);
+        let result = apply_slice(list, Value::from_int(1), Value::from_int(3), Value::NIL).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(20));
+        assert_eq!(r.get(1).unwrap(), Value::from_int(30));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_list_negative() {
+        let list = Value::from_list(vec![
+            Value::from_int(1),
+            Value::from_int(2),
+            Value::from_int(3),
+            Value::from_int(4),
+        ]);
+        // list[:-1] -> [1, 2, 3]
+        let result = apply_slice(list, Value::NIL, Value::from_int(-1), Value::NIL).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 3);
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_list_open_end() {
+        let list = Value::from_list(vec![Value::from_int(1), Value::from_int(2), Value::from_int(3)]);
+        // list[1:]
+        let result = apply_slice(list, Value::from_int(1), Value::NIL, Value::NIL).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(2));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_string() {
+        let s = Value::from_string("hello".to_string());
+        let result = apply_slice(s, Value::from_int(1), Value::from_int(4), Value::NIL).unwrap();
+        let r = unsafe { result.as_native_str_ref().unwrap() };
+        assert_eq!(r, "ell");
+        result.decref();
+        s.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_tuple() {
+        let t = Value::from_tuple(vec![Value::from_int(10), Value::from_int(20), Value::from_int(30)]);
+        // tuple[:2]
+        let result = apply_slice(t, Value::NIL, Value::from_int(2), Value::NIL).unwrap();
+        let r = unsafe { result.as_native_tuple_ref().unwrap() };
+        assert_eq!(r.len(), 2);
+        result.decref();
+        t.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_1_ok() {
+        let list = Value::from_list(vec![Value::from_int(1), Value::from_int(2)]);
+        // step=1 is allowed
+        let result = apply_slice(list, Value::NIL, Value::NIL, Value::from_int(1)).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 2);
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_positive() {
+        // [0,1,2,3,4][::2] -> [0, 2, 4]
+        let list = Value::from_list(vec![
+            Value::from_int(0),
+            Value::from_int(1),
+            Value::from_int(2),
+            Value::from_int(3),
+            Value::from_int(4),
+        ]);
+        let result = apply_slice(list, Value::NIL, Value::NIL, Value::from_int(2)).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(0));
+        assert_eq!(r.get(1).unwrap(), Value::from_int(2));
+        assert_eq!(r.get(2).unwrap(), Value::from_int(4));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_negative_reverse() {
+        // [0,1,2,3,4][::-1] -> [4, 3, 2, 1, 0]
+        let list = Value::from_list(vec![
+            Value::from_int(0),
+            Value::from_int(1),
+            Value::from_int(2),
+            Value::from_int(3),
+            Value::from_int(4),
+        ]);
+        let result = apply_slice(list, Value::NIL, Value::NIL, Value::from_int(-1)).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 5);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(4));
+        assert_eq!(r.get(4).unwrap(), Value::from_int(0));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_negative_skip() {
+        // [0,1,2,3,4][::-2] -> [4, 2, 0]
+        let list = Value::from_list(vec![
+            Value::from_int(0),
+            Value::from_int(1),
+            Value::from_int(2),
+            Value::from_int(3),
+            Value::from_int(4),
+        ]);
+        let result = apply_slice(list, Value::NIL, Value::NIL, Value::from_int(-2)).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(4));
+        assert_eq!(r.get(1).unwrap(), Value::from_int(2));
+        assert_eq!(r.get(2).unwrap(), Value::from_int(0));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_with_bounds() {
+        // [0,1,2,3,4,5,6,7,8,9][1:8:2] -> [1, 3, 5, 7]
+        let list = Value::from_list((0..10).map(Value::from_int).collect());
+        let result = apply_slice(list, Value::from_int(1), Value::from_int(8), Value::from_int(2)).unwrap();
+        let r = unsafe { result.as_native_list_ref().unwrap() };
+        assert_eq!(r.len(), 4);
+        assert_eq!(r.get(0).unwrap(), Value::from_int(1));
+        assert_eq!(r.get(1).unwrap(), Value::from_int(3));
+        assert_eq!(r.get(2).unwrap(), Value::from_int(5));
+        assert_eq!(r.get(3).unwrap(), Value::from_int(7));
+        result.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_step_zero_rejected() {
+        let list = Value::from_list(vec![Value::from_int(1)]);
+        assert!(apply_slice(list, Value::NIL, Value::NIL, Value::from_int(0)).is_err());
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_string_reverse() {
+        // "hello"[::-1] -> "olleh"
+        let s = Value::from_string("hello".to_string());
+        let result = apply_slice(s, Value::NIL, Value::NIL, Value::from_int(-1)).unwrap();
+        let r = unsafe { result.as_native_str_ref().unwrap() };
+        assert_eq!(r, "olleh");
+        result.decref();
+        s.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_non_int_bound_rejected() {
+        let list = Value::from_list(vec![Value::from_int(1), Value::from_int(2)]);
+        let bad_start = Value::from_string("oops".to_string());
+        assert!(apply_slice(list, bad_start, Value::NIL, Value::NIL).is_err());
+        bad_start.decref();
+        list.decref();
+    }
+
+    #[test]
+    fn test_apply_slice_non_sliceable_rejected() {
+        let dict = Value::from_empty_dict();
+        assert!(apply_slice(dict, Value::NIL, Value::NIL, Value::NIL).is_err());
+        dict.decref();
     }
 }

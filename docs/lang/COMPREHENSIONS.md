@@ -176,7 +176,7 @@ ______________________________________________________________________
 
 ## Dict comprehension
 
-`dict()` est un builtin Python disponible dans Catnip. `fold` construit le dict élément par élément.
+`dict()` accepte un itérable de paires `(clé, valeur)`. Le broadcast produit la liste de paires, `dict()` la convertit.
 
 ```python
 # Python
@@ -187,7 +187,7 @@ ______________________________________________________________________
 
 ```catnip
 # Catnip
-fold(pairs, dict(), (acc, p) => { acc[p[0]] = p[1]; acc })
+dict(pairs)
 ```
 
 ### Dict depuis une transformation
@@ -199,34 +199,46 @@ fold(pairs, dict(), (acc, p) => { acc[p[0]] = p[1]; acc })
 
 ```catnip
 # Catnip
-fold(range(5), dict(), (acc, x) => { acc[x] = x ** 2; acc })
+dict(range(5).[(x) => { tuple(x, x ** 2) }])
+```
+
+### Dict depuis deux listes
+
+```python
+# Python
+dict(zip(keys, values))
+```
+
+<!-- check: no-check -->
+
+```catnip
+# Catnip
+dict(zip(keys, values))
 ```
 
 ### Dict avec filtre
 
 ```python
 # Python
-{k: v for k, v in items if v > 0}
+{x: x ** 2 for x in range(10) if x % 2 == 0}
 ```
+
+```catnip
+# Catnip : filtrer d'abord, puis transformer
+dict(range(10).[if (x) => { x % 2 == 0 }].[(x) => { tuple(x, x ** 2) }])
+```
+
+### `fold` pour les cas complexes
+
+Quand la construction du dict nécessite un accumulateur (compteurs, groupement, fusion), `fold` reste disponible.
 
 <!-- check: no-check -->
 
 ```catnip
-# Catnip : filtrer d'abord, puis accumuler
-fold(items.[if (p) => { p[1] > 0 }], dict(), (acc, p) => {
-    acc[p[0]] = p[1]; acc
+fold(words, dict(), (acc, w) => {
+    acc[w] = (acc[w] or 0) + 1; acc
 })
 ```
-
-### Note
-
-Catnip ne fournit pas de syntaxe dédiée pour les comprehensions de dictionnaire.
-
-Les opérations de transformation et de filtrage sur les dictionnaires s'expriment avec des combinateurs généraux (`map`,
-`filter`, `ND`, `fold`). Le résultat peut être plus explicite qu'en Python, qui propose une syntaxe spécialisée.
-
-Une évolution future pourrait introduire des helpers dédiés (par exemple `dict_map`, `dict_filter`) ou étendre les
-opérateurs existants pour mieux prendre en charge les mappings.
 
 ______________________________________________________________________
 
@@ -240,7 +252,7 @@ ______________________________________________________________________
 | `[x * 2 for x in data if x > 5]` | `data.[if > 5].[* 2]`                       |
 | `[x for x, m in zip(...) if m]`  | `data.[mask]`                               |
 | `[fib(n) for n in range(20)]`    | `range(20).[~~ fib]`                        |
-| `{x: x**2 for x in data}`        | `fold(data, dict(), (a, x) => { ... })`     |
+| `{x: x**2 for x in data}`        | `dict(data.[(x) => { tuple(x, x**2) }])`    |
 | produit cartésien                | boucles `for` imbriquées                    |
 | flatmap                          | `fold(nested, list(), (a, x) => { a + x })` |
 

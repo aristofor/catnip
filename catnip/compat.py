@@ -33,7 +33,21 @@ _PRAGMA_RE = re.compile(r"^@pragma:(\d+) (.+)")
 
 
 def _map_exception(exc, source_text=None):
-    """Map a RuntimeError from standalone to the appropriate Catnip exception."""
+    """Map a VM exception to the appropriate Catnip exception."""
+    # Native Python exceptions from aligned VMError -> PyErr boundary:
+    # pass through directly (they already have the right type)
+    if isinstance(exc, (ValueError, IndexError, KeyError, AttributeError, MemoryError)):
+        return exc
+    if isinstance(exc, ZeroDivisionError):
+        return CatnipRuntimeError(str(exc))
+    if isinstance(exc, TypeError):
+        return CatnipTypeError(str(exc))
+    if isinstance(exc, NameError):
+        name = extract_name_from_error(str(exc))
+        if name is not None:
+            return CatnipNameError(name)
+        return CatnipNameError(str(exc))
+
     msg = str(exc)
 
     # Pragma/semantic errors: "@pragma:BYTE message"
@@ -130,7 +144,7 @@ def _enrich_with_position(exc, pipeline, source):
     if ctx is not None:
         sb = ctx.get('start_byte', -1)
         raw = source.encode('utf-8')
-        if 0 <= sb <= len(raw) and hasattr(exc, 'line'):
+        if 0 <= sb <= len(raw):
             exc.line = raw[:sb].count(b'\n') + 1
             last_nl = raw.rfind(b'\n', 0, sb)
             exc.column = sb - last_nl - 1 if last_nl >= 0 else sb
@@ -341,7 +355,17 @@ class CatnipStandalone:
                 result = self._pipeline.execute_prepared()
             else:
                 result = self._pipeline.execute(source)
-        except RuntimeError as e:
+        except (
+            RuntimeError,
+            TypeError,
+            ValueError,
+            IndexError,
+            KeyError,
+            AttributeError,
+            NameError,
+            ZeroDivisionError,
+            MemoryError,
+        ) as e:
             mapped = _map_exception(e)
             _enrich_with_position(mapped, self._pipeline, source)
             raise mapped from None

@@ -24,7 +24,7 @@ pub use meta::CatnipMeta;
 pub use method::{BoundCatnipMethod, CatnipMethod};
 pub use nodes::{Ref, TailCall};
 pub use op::Op;
-pub use pattern::{PatternLiteral, PatternOr, PatternStruct, PatternTuple, PatternVar, PatternWildcard};
+pub use pattern::{PatternEnum, PatternLiteral, PatternOr, PatternStruct, PatternTuple, PatternVar, PatternWildcard};
 #[cfg(feature = "ast-executor")]
 pub use registry::Registry;
 pub use scope::Scope;

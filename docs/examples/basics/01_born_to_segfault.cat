@@ -1,6 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : BORN TO SEGFAULT
-# Le programme le plus simple en Catnip
+# Programme simple en Catnip
 
 print("BORN TO SEGFAULT")
 

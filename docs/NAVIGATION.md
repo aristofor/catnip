@@ -44,7 +44,6 @@ ______________________________________________________________________
 - [REPL](user/REPL.md)
 - [RUN](user/RUN.md)
 - [CONFIG](user/CONFIG.md)
-- [SHEBANG_GUIDE](user/SHEBANG_GUIDE.md)
 - [MODULE_LOADING](user/MODULE_LOADING.md)
 
 ______________________________________________________________________

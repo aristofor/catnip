@@ -13,4 +13,11 @@ catnip_core = { path = "../catnip_core" }
 catnip_grammar = { path = "../catnip_grammar" }
 tree-sitter = { workspace = true }
 indexmap = { version = "2.13", features = ["serde"] }
-rug = "1"
+rug = { version = "1", default-features = false, features = ["integer", "std"] }
+libloading = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gmp-mpfr-sys = { version = "1", default-features = false, features = ["use-system-libs"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -48,13 +48,13 @@ pub(crate) fn pyerr_to_vmerror(py: Python<'_>, err: PyErr) -> super::core::VMErr
     } else if err.is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py) {
         super::core::VMError::ZeroDivisionError(pyerr_message(py, &err))
     } else if err.is_instance_of::<pyo3::exceptions::PyIndexError>(py) {
-        super::core::VMError::RuntimeError(format!("IndexError: {}", pyerr_message(py, &err)))
+        super::core::VMError::IndexError(pyerr_message(py, &err))
     } else if err.is_instance_of::<pyo3::exceptions::PyKeyError>(py) {
-        super::core::VMError::RuntimeError(format!("KeyError: {}", pyerr_message(py, &err)))
+        super::core::VMError::KeyError(pyerr_message(py, &err))
     } else if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
-        super::core::VMError::RuntimeError(format!("ValueError: {}", pyerr_message(py, &err)))
+        super::core::VMError::ValueError(pyerr_message(py, &err))
     } else if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) {
-        super::core::VMError::RuntimeError(format!("AttributeError: {}", pyerr_message(py, &err)))
+        super::core::VMError::AttributeError(pyerr_message(py, &err))
     } else {
         // Extract Python exception class name for the prefix
         let type_name = err
@@ -649,6 +649,10 @@ fn convert_vm_value(
         let py_bytes = pyo3::types::PyBytes::new(py, b.as_bytes());
         return Value::from_pyobject(py, &py_bytes.into_any());
     }
+    if vm_val.is_complex() {
+        let (r, i) = unsafe { vm_val.as_complex_parts() }.unwrap();
+        return Ok(Value::from_complex(r, i));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "cannot convert catnip_vm value: unsupported type",
     ))
@@ -686,6 +690,13 @@ fn convert_vm_pattern(
         catnip_vm::compiler::VMPattern::Struct { name, field_slots } => Ok(RsVMPattern::Struct {
             name: name.clone(),
             field_slots: field_slots.clone(),
+        }),
+        catnip_vm::compiler::VMPattern::Enum {
+            enum_name,
+            variant_name,
+        } => Ok(RsVMPattern::Enum {
+            enum_name: enum_name.clone(),
+            variant_name: variant_name.clone(),
         }),
     }
 }

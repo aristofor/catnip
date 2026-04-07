@@ -50,7 +50,10 @@ class CatnipLexer(RegexLexer):
                         'continue',
                         'elif',
                         'else',
+                        'enum',
+                        'except',
                         'extends',
+                        'finally',
                         'for',
                         'if',
                         'implements',
@@ -60,10 +63,13 @@ class CatnipLexer(RegexLexer):
                         'not',
                         'op',
                         'or',
+                        'raise',
                         'return',
                         'struct',
                         'trait',
+                        'try',
                         'while',
+                        'with',
                         'pragma',
                     ),
                     suffix=r'\b',
@@ -174,7 +180,7 @@ class CatnipLexer(RegexLexer):
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers (excluding keywords)
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|is|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|while|with)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),
@@ -196,7 +202,10 @@ class CatnipLexer(RegexLexer):
                         'continue',
                         'elif',
                         'else',
+                        'enum',
+                        'except',
                         'extends',
+                        'finally',
                         'for',
                         'if',
                         'implements',
@@ -206,10 +215,13 @@ class CatnipLexer(RegexLexer):
                         'not',
                         'op',
                         'or',
+                        'raise',
                         'return',
                         'struct',
                         'trait',
+                        'try',
                         'while',
+                        'with',
                         'pragma',
                     ),
                     suffix=r'\b',
@@ -316,7 +328,7 @@ class CatnipLexer(RegexLexer):
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|extends|for|if|implements|in|is|list|match|not|op|or|pragma|return|set|struct|trait|tuple|while)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|while|with)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),

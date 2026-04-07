@@ -7,6 +7,7 @@
 use crate::Value;
 use crate::compiler::code_object::CodeObject;
 use crate::vm::closure::PureClosureScope;
+use catnip_core::exception::{Handler, PendingUnwind};
 use std::sync::Arc;
 
 const STACK_INIT_CAPACITY: usize = 32;
@@ -29,6 +30,13 @@ pub struct PureFrame {
     pub discard_return: bool,
     /// Closure scope for free variable resolution (set by MakeFunction/Call).
     pub closure_scope: Option<PureClosureScope>,
+    /// Exception handler stack (try/except/finally)
+    pub handler_stack: Vec<Handler>,
+    /// Active exception stack for CheckExcMatch/LoadException.
+    /// Vec (not Option) to support save/restore across nested except handlers.
+    pub active_exception_stack: Vec<catnip_core::exception::ExceptionInfo>,
+    /// Pending unwind state (saved signal during finally execution)
+    pub pending_unwind: Option<PendingUnwind>,
 }
 
 impl PureFrame {
@@ -43,6 +51,9 @@ impl PureFrame {
             match_bindings: None,
             discard_return: false,
             closure_scope: None,
+            handler_stack: Vec::new(),
+            active_exception_stack: Vec::new(),
+            pending_unwind: None,
         }
     }
 
@@ -65,6 +76,9 @@ impl PureFrame {
             match_bindings: None,
             discard_return: false,
             closure_scope: None,
+            handler_stack: Vec::new(),
+            active_exception_stack: Vec::new(),
+            pending_unwind: None,
         }
     }
 
@@ -78,6 +92,9 @@ impl PureFrame {
         self.match_bindings = None;
         self.discard_return = false;
         self.closure_scope = None;
+        self.handler_stack.clear();
+        self.active_exception_stack.clear();
+        self.pending_unwind = None;
     }
 
     // --- Stack operations ---
@@ -228,6 +245,9 @@ impl PureFramePool {
             frame.locals.resize(nlocals, fill);
             frame.code = Some(code);
             frame.ip = 0;
+            frame.handler_stack.clear();
+            frame.active_exception_stack.clear();
+            frame.pending_unwind = None;
             frame
         } else {
             PureFrame::with_code(code)

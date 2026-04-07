@@ -22,7 +22,7 @@ impl<'py> PythonCache<'py> {
     fn new(py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             nodes_module: py.import(PY_MOD_NODES)?.as_any().clone(),
-            rs_module: py.import("catnip._rs")?.as_any().clone(),
+            rs_module: py.import(PY_MOD_RS)?.as_any().clone(),
             builtins: py.import("builtins")?.as_any().clone(),
         })
     }
@@ -235,6 +235,15 @@ fn ir_pure_to_python_impl(py: Python, ir: IR, cache: &PythonCache) -> PyResult<P
             let pattern_class = cache.nodes_module.getattr("PatternStruct")?;
             let fields_list = PyList::new(py, &fields)?;
             Ok(pattern_class.call1((name, fields_list))?.unbind())
+        }
+
+        // Enum pattern
+        IR::PatternEnum {
+            enum_name,
+            variant_name,
+        } => {
+            let pattern_class = cache.nodes_module.getattr("PatternEnum")?;
+            Ok(pattern_class.call1((enum_name, variant_name))?.unbind())
         }
 
         // Broadcast

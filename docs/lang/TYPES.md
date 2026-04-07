@@ -81,7 +81,7 @@ ci-dessous est purement démonstratif : il montre qu'on peut aussi utiliser Pyth
 
 ```catnip
 # python Decimal (démonstratif, préférer le suffixe d)
-import("decimal", "Decimal")
+import('decimal', 'Decimal')
 Decimal("3.14")
 # → 3.14d
 ```
@@ -353,7 +353,7 @@ data
 """
 
 # Chargement de modules Python (voir docs/user/)
-orjson = import("orjson")
+orjson = import('orjson')
 json_bytes = orjson.dumps(dict(key="value"))  # Retourne bytes
 ```
 
@@ -442,6 +442,21 @@ Code équivalent explosé :
 
 > `??` est le seul opérateur qui distingue `None` de `False`. Les autres s'en remettent à la truthiness, qui ne fait pas
 > de différence entre les deux.
+
+## Enums
+
+Les enums déclarent un type avec un ensemble fini de variantes nommées. Chaque variante est une valeur distincte,
+accessible par qualification (`Color.red`). Les variantes sont toujours truthy et supportent le pattern matching.
+
+```catnip
+enum Color { red; green; blue }
+
+c = Color.red
+c == Color.red
+# → True
+```
+
+Pour la syntaxe complète (déclaration, matching, limitations), voir [ENUMS](ENUMS.md).
 
 ## Listes
 
@@ -659,10 +674,11 @@ typeof(2 ** 100)       # → "int"
 | set                | `"set"`                   |
 | fonction / lambda  | `"function"`              |
 | instance de struct | nom du type               |
+| variante d'enum    | nom de l'enum             |
 | objet Python       | nom de classe (lowercase) |
 
 `typeof()` est un intrinsic du langage, pas une fonction first-class. L'expression `f = typeof` ne fonctionne pas. Pour
-accéder au `type` Python original : `import("builtins").type`.
+accéder au `type` Python original : `import('builtins').type`.
 
 > `typeof()` inspecte directement le tag NaN-boxed de la valeur (4 bits, O(1)). Les types natifs ne passent jamais par
 > Python. Les PyObjects font un lookup par type pointer pour les cas courants, et retournent le `qualname` de la classe
@@ -716,7 +732,7 @@ ______________________________________________________________________
 ## Namespaces builtin
 
 Catnip fournit des namespaces en lecture seule, accessibles sans import. Ils suivent la convention CAPS (`META`, `ND`,
-`INT`).
+`RUNTIME`).
 
 ### META
 
@@ -737,13 +753,13 @@ ND.process      # → "process"
 pragma("nd_mode", ND.thread)
 ```
 
-### INT
+### RUNTIME
 
-Bornes du type entier immédiat (SmallInt, 47 bits signés). Au-delà, promotion automatique en BigInt.
+Constantes internes de la runtime Catnip.
 
 ```catnip
-INT.max   # → 70368744177663  (2^46 - 1)
-INT.min   # → -70368744177664 (-2^46)
+RUNTIME.smallint_max   # → 70368744177663  (2^46 - 1)
+RUNTIME.smallint_min   # → -70368744177664 (-2^46)
 
-INT.max + 1   # → BigInt, toujours exact
+RUNTIME.smallint_max + 1   # → BigInt, toujours exact
 ```

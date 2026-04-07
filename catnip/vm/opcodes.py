@@ -99,10 +99,19 @@ class VMOp(IntEnum):
     UNPACK_EX = 82
     MAKE_STRUCT = 83
     MAKE_TRAIT = 84
-    HALT = 85
-    EXIT = 86
-    GLOBALS = 87
-    LOCALS = 88
+    MAKE_ENUM = 85
+    HALT = 86
+    EXIT = 87
+    GLOBALS = 88
+    LOCALS = 89
+    SETUP_EXCEPT = 90
+    SETUP_FINALLY = 91
+    POP_HANDLER = 92
+    RAISE = 93
+    CHECK_EXC_MATCH = 94
+    LOAD_EXCEPTION = 95
+    RESUME_UNWIND = 96
+    CLEAR_EXCEPTION = 97
 
 
 # Stack effect: (pops, pushes) for each opcode
@@ -191,6 +200,13 @@ STACK_EFFECT = {
     VMOp.MATCH_FAIL: (0, 0),
     VMOp.MATCH_ASSIGN_PATTERN_VM: (1, 1),
     VMOp.EXIT: (-1, 0),
+    VMOp.SETUP_EXCEPT: (0, 0),
+    VMOp.SETUP_FINALLY: (0, 0),
+    VMOp.POP_HANDLER: (0, 0),
+    VMOp.RAISE: (1, 0),
+    VMOp.CHECK_EXC_MATCH: (0, 1),
+    VMOp.LOAD_EXCEPTION: (0, 1),
+    VMOp.RESUME_UNWIND: (0, 0),
 }
 
 
@@ -236,6 +252,10 @@ HAS_ARG = frozenset(
         VMOp.CALL_METHOD,
         VMOp.MATCH_FAIL,
         VMOp.MATCH_ASSIGN_PATTERN_VM,
+        VMOp.SETUP_EXCEPT,
+        VMOp.SETUP_FINALLY,
+        VMOp.RAISE,
+        VMOp.CHECK_EXC_MATCH,
         VMOp.EXIT,
     }
 )

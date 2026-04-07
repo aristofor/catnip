@@ -25,9 +25,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = [
-    "mcp>=1.26",
-]
 test = [
     "pytest>=9.0,<10",
     "pytest-xdist>=3.8,<4",
@@ -189,6 +186,7 @@ lint = "catnip.cli.commands.lint:cmd_lint"
 module = "catnip.cli.commands.module:cmd_module"
 plugins = "catnip.cli.commands.plugins:cmd_plugins"
 lsp = "catnip.cli.commands.lsp:cmd_lsp"
+new-lib = "catnip.cli.commands.new_lib:cmd_new_lib"
 repl = "catnip.cli.commands.repl:cmd_repl"
 
 [tool.pytest.ini_options]
@@ -247,14 +245,30 @@ before-all = [
 # Optimisations de compilation
 # -march=x86-64-v2: baseline moderne (SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT)
 # Compatible avec CPUs post-2009 (Core i3/i5/i7, AMD Bulldozer+)
+[tool.cibuildwheel.linux]
+# manylinux2014 (CentOS 7) en EOL depuis 2024-06 -- repos yum cassés.
+# manylinux_2_28 (AlmaLinux 8) supporté jusqu'en 2029, dnf opérationnel.
+manylinux-x86_64-image = "manylinux_2_28"
+before-build = "dnf install -y gmp-devel && rpm -q gmp-devel && ls -la /usr/include/gmp.h"
+
 [tool.cibuildwheel.linux.environment]
 PATH = "$HOME/.cargo/bin:$PATH"
 CFLAGS = "-O3 -pipe -march=x86-64-v2"
 LDFLAGS = "-Wl,-O1"
 MAX_JOBS = "$(nproc)"
 
+[tool.cibuildwheel.macos]
+before-build = "brew install gmp"
+
+# CPATH/LIBRARY_PATH sont lus directement par clang/ld via l'env POSIX
+# (insensibles à ce que cc-rs/setuptools-rust font avec CFLAGS/LDFLAGS).
+# PKG_CONFIG_PATH permet à gmp-mpfr-sys de localiser gmp via pkg-config.
 [tool.cibuildwheel.macos.environment]
 PATH = "$HOME/.cargo/bin:$PATH"
-CFLAGS = "-O3 -pipe -march=core2"
-LDFLAGS = "-Wl,-O1"
-MAX_JOBS = "0"
+CFLAGS = "-O3 -pipe -I/opt/homebrew/opt/gmp/include"
+LDFLAGS = "-L/opt/homebrew/opt/gmp/lib -Wl,-O1"
+CPATH = "/opt/homebrew/opt/gmp/include"
+LIBRARY_PATH = "/opt/homebrew/opt/gmp/lib"
+PKG_CONFIG_PATH = "/opt/homebrew/opt/gmp/lib/pkgconfig"
+ARCHFLAGS = "-arch arm64"
+MAX_JOBS = "2"

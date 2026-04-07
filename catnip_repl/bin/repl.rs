@@ -34,14 +34,13 @@ fn main() -> io::Result<()> {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        eprintln!("\n{}", ExitReason::Abort.message());
+        eprintln!("{}", ExitReason::Abort.message());
         default_hook(info);
     }));
 
     let reason = app.run(&mut terminal)?;
 
     disable_raw_mode()?;
-    println!();
 
     // Exit code selon la raison
     match reason {

@@ -1,5 +1,5 @@
 // FILE: catnip_rs/src/core/builtins.rs
-//! Builtin constant namespaces (ND, INT, ...).
+//! Builtin constant namespaces (ND, RUNTIME, ...).
 //!
 //! Frozen namespaces injected into globals, following the META convention.
 //! Prepares the ground for future enum types.
@@ -67,14 +67,14 @@ pub fn make_nd(py: Python<'_>) -> FrozenNamespace {
     ns
 }
 
-/// Build the INT namespace: INT.max, INT.min
-pub fn make_int(py: Python<'_>) -> FrozenNamespace {
+/// Build the RUNTIME namespace: RUNTIME.smallint_max, RUNTIME.smallint_min
+pub fn make_runtime(py: Python<'_>) -> FrozenNamespace {
     use catnip_core::nanbox::{SMALLINT_MAX, SMALLINT_MIN};
     let max: i64 = SMALLINT_MAX;
     let min: i64 = SMALLINT_MIN;
-    let mut ns = FrozenNamespace::new("INT");
-    ns.set("max", max.into_pyobject(py).unwrap().unbind().into_any());
-    ns.set("min", min.into_pyobject(py).unwrap().unbind().into_any());
+    let mut ns = FrozenNamespace::new("RUNTIME");
+    ns.set("smallint_max", max.into_pyobject(py).unwrap().unbind().into_any());
+    ns.set("smallint_min", min.into_pyobject(py).unwrap().unbind().into_any());
     ns
 }
 
@@ -85,8 +85,8 @@ pub fn build_nd(py: Python<'_>) -> FrozenNamespace {
 }
 
 #[pyfunction]
-pub fn build_int(py: Python<'_>) -> FrozenNamespace {
-    make_int(py)
+pub fn build_runtime(py: Python<'_>) -> FrozenNamespace {
+    make_runtime(py)
 }
 
 #[cfg(test)]
@@ -106,13 +106,13 @@ mod tests {
     }
 
     #[test]
-    fn test_int_namespace() {
+    fn test_runtime_namespace() {
         Python::attach(|py| {
-            let int_ns = make_int(py);
-            assert_eq!(int_ns.attrs.len(), 2);
-            let max = int_ns.__getattr__(py, "max").unwrap();
+            let rt = make_runtime(py);
+            assert_eq!(rt.attrs.len(), 2);
+            let max = rt.__getattr__(py, "smallint_max").unwrap();
             assert_eq!(max.extract::<i64>(py).unwrap(), (1_i64 << 46) - 1);
-            let min = int_ns.__getattr__(py, "min").unwrap();
+            let min = rt.__getattr__(py, "smallint_min").unwrap();
             assert_eq!(min.extract::<i64>(py).unwrap(), -(1_i64 << 46));
         });
     }

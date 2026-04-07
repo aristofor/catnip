@@ -82,7 +82,7 @@ fn read_examples(base_path: &Path, topic: &str, uri: &str) -> Result<ReadResourc
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "cat") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    // Use stem (without .cat extension) and "code" key to match Python MCP
+                    // Use stem (without .cat extension) and "code" key
                     let name = path.file_stem().unwrap().to_string_lossy().to_string();
                     entries.push(serde_json::json!({
                         "name": name,
@@ -115,7 +115,7 @@ fn read_codex(base_path: &Path, category: &str, module: &str, uri: &str) -> Resu
 
 fn read_docs_topic(base_path: &Path, section: &str, topic: &str, uri: &str) -> Result<ReadResourceResult, ErrorData> {
     let docs_dir = base_path.join("docs").join(section);
-    // Normalize: dashes → underscores (align with Python MCP behavior)
+    // Normalize: dashes → underscores
     let normalized = topic.to_uppercase().replace('-', "_");
     let lower = docs_dir.join(format!("{topic}.md"));
     let upper = docs_dir.join(format!("{normalized}.md"));
@@ -152,7 +152,7 @@ fn read_docs_section(base_path: &Path, section: &str, uri: &str) -> Result<ReadR
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "md") {
                 if let Some(stem) = path.file_stem() {
-                    // Normalize underscores → dashes to match Python MCP
+                    // Normalize underscores → dashes
                     let name = stem.to_string_lossy().to_lowercase().replace('_', "-");
                     if name != "index" {
                         topics.push(name);

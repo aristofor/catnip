@@ -6,6 +6,7 @@ Flow: Python context.py (source) → Rust targets (generated)
 
 Targets:
 - catnip_tools/src/linter.rs       BUILTINS (scope analysis)
+- catnip_tools/src/lint_cfg.rs     BUILTINS (CFG definite-assignment)
 - catnip_repl/src/completer.rs     BUILTINS (completion suggestions)
 - catnip_core/src/constants.rs     JIT_PURE_BUILTINS (pure function tracking)
 
@@ -15,14 +16,28 @@ Each target uses its own marker pair for replacement.
 import re
 from pathlib import Path
 
-# Names the linter should know but that aren't in context.py globals
-EXTRA_LINTER_NAMES = [
-    "_",            # wildcard pattern
+# Runtime names not in context.py globals but always available at execution.
+# Used by both linter (E200 scope) and CFG (W310 definite-assignment).
+EXTRA_RUNTIME_NAMES = [
+    "True",         # boolean literal (also a name in scope)
+    "False",        # boolean literal
+    "None",         # none literal
+    "print",        # builtin function (injected by Python, not in globals.update)
+    "input",        # builtin function
+    "open",         # builtin function
     "breakpoint",   # transformed to opcode by semantic analyzer
     "typeof",       # intrinsic, handled by VM directly
+    "pragma",       # intrinsic directive
+]
+
+# Syntax-only names the linter scope tracker needs to suppress E200,
+# but that are NOT runtime variables (decorator keywords, Python internals).
+# Excluded from CFG analysis to avoid masking W310 on user variables.
+EXTRA_LINTER_ONLY_NAMES = [
+    "_",            # wildcard pattern
     "static",       # decorator keyword
     "abstract",     # decorator keyword
-    "globals",      # Python builtin
+    "globals",      # Python builtin (not exposed in Catnip runtime)
     "locals",       # Python builtin
     "exec",         # Python builtin
     "eval",         # Python builtin
@@ -101,7 +116,7 @@ def main():
 
     # ── 1. Linter builtins ────────────────────────────────────────────
     linter_path = base / "catnip_tools" / "src" / "linter.rs"
-    linter_names = globals_names + EXTRA_LINTER_NAMES
+    linter_names = globals_names + EXTRA_RUNTIME_NAMES + EXTRA_LINTER_ONLY_NAMES
     linter_lines = generate_rust_array(linter_names, "const BUILTINS: &[&str]")
 
     changed = replace_between_markers(
@@ -112,7 +127,21 @@ def main():
     )
     print(f"  linter:    {'updated' if changed else 'up to date'} ({len(sorted(set(linter_names)))} names)")
 
-    # ── 2. REPL completer builtins ────────────────────────────────────
+    # ── 2. CFG linter builtins ────────────────────────────────────────
+    # Runtime names only (no decorator/syntax-only pseudo builtins).
+    cfg_path = base / "catnip_tools" / "src" / "lint_cfg.rs"
+    cfg_names = globals_names + EXTRA_RUNTIME_NAMES
+    cfg_lines = generate_rust_array(cfg_names, "const BUILTINS: &[&str]")
+
+    changed = replace_between_markers(
+        cfg_path,
+        "// @generated-cfg-builtins-start",
+        "// @generated-cfg-builtins-end",
+        cfg_lines,
+    )
+    print(f"  cfg lint:  {'updated' if changed else 'up to date'} ({len(sorted(set(cfg_names)))} names)")
+
+    # ── 3. REPL completer builtins ────────────────────────────────────
     # Intrinsics not in context.py but available to users
     extra_completer = ["typeof", "breakpoint"]
     completer_path = base / "catnip_repl" / "src" / "completer.rs"
@@ -126,7 +155,7 @@ def main():
     )
     print(f"  completer: {'updated' if changed else 'up to date'} ({len(sorted(set(globals_names)))} names)")
 
-    # ── 3. JIT pure builtins ──────────────────────────────────────────
+    # ── 4. JIT pure builtins ──────────────────────────────────────────
     constants_path = base / "catnip_core" / "src" / "constants.rs"
     pure_lines = generate_rust_array(pure_names, "pub const JIT_PURE_BUILTINS: &[&str]")
 
@@ -138,7 +167,7 @@ def main():
     )
     print(f"  jit pure:  {'updated' if changed else 'up to date'} ({len(sorted(set(pure_names)))} names)")
 
-    print("\nDone! Flow: context.py (source) -> linter.rs + completer.rs + constants.rs")
+    print("\nDone! Flow: context.py (source) -> linter.rs + lint_cfg.rs + completer.rs + constants.rs")
 
 
 if __name__ == "__main__":

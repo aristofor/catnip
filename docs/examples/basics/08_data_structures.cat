@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Structures de données et itérables
+# Structures de données et itérables
 
 print("⇒ Range : Génération de séquences")
 

@@ -3,7 +3,7 @@
 # Script d'application utilisant l'API de l'app
 
 # Charger le module d'API de l'app
-app = import('07_app_api')
+app = import('03_app_api')
 
 # Récupérer tous les utilisateurs
 users = app.get_users()

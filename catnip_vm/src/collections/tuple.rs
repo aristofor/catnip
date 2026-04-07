@@ -1,6 +1,7 @@
 // FILE: catnip_vm/src/collections/tuple.rs
 //! NativeTuple -- immutable sequence backed by Box<[Value]>.
 
+use super::clamp_slice_index;
 use crate::collections::list::normalize_index;
 use crate::error::{VMError, VMResult};
 use crate::value::Value;
@@ -55,8 +56,8 @@ impl NativeTuple {
     /// Slice with Python semantics.
     pub fn slice(&self, start: Option<i64>, end: Option<i64>) -> Vec<Value> {
         let len = self.inner.len() as i64;
-        let s = clamp_index(start.unwrap_or(0), len);
-        let e = clamp_index(end.unwrap_or(len), len);
+        let s = clamp_slice_index(start.unwrap_or(0), len);
+        let e = clamp_slice_index(end.unwrap_or(len), len);
         if s >= e {
             return vec![];
         }
@@ -78,17 +79,6 @@ impl Drop for NativeTuple {
         for v in self.inner.iter() {
             v.decref();
         }
-    }
-}
-
-fn clamp_index(index: i64, len: i64) -> usize {
-    if index < 0 {
-        let i = index + len;
-        if i < 0 { 0 } else { i as usize }
-    } else if index > len {
-        len as usize
-    } else {
-        index as usize
     }
 }
 

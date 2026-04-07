@@ -14,6 +14,7 @@ Exemples plus costauds, à lire après les bases. Ici, on passe en mode expert.
 - [`08_advanced_techniques.cat`](08_advanced_techniques.cat) - panorama des techniques (calculatrice, Fibonacci,
   premiers)
 - [`09_turing_completeness.cat`](09_turing_completeness.cat) - démonstration Turing-complétude
+- [`10_enums.cat`](10_enums.cat) - types énumérés, pattern matching et machine à états
 
 ## Lancer
 

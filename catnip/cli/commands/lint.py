@@ -6,6 +6,8 @@ from pathlib import Path
 
 import click
 
+from ..utils import expand_file_args
+
 
 @click.command('lint')
 @click.argument('files', nargs=-1, type=click.Path())
@@ -17,15 +19,32 @@ import click
     help="Analysis level (default: all)",
 )
 @click.option('--deep', is_flag=True, help="Enable deep IR analysis (opt-in)")
-@click.option('--check-names', is_flag=True, help="Check for undefined names (E300, opt-in)")
+@click.option('--check-names', is_flag=True, help="Check for undefined names (E200, opt-in)")
+@click.option('--max-depth', type=click.IntRange(min=0), default=5, help="Max nesting depth (I200, default: 5, 0=off)")
+@click.option(
+    '--max-complexity',
+    type=click.IntRange(min=0),
+    default=10,
+    help="Max cyclomatic complexity (I201, default: 10, 0=off)",
+)
+@click.option(
+    '--max-length',
+    type=click.IntRange(min=0),
+    default=30,
+    help="Max function length in statements (I202, default: 30, 0=off)",
+)
+@click.option(
+    '--max-params', type=click.IntRange(min=0), default=6, help="Max parameters per function (I203, default: 6, 0=off)"
+)
 @click.option('--stdin', is_flag=True, help="Read from stdin")
 @click.pass_context
-def cmd_lint(ctx, files, level, deep, check_names, stdin):
+def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, max_length, max_params, stdin):
     """Full code analysis (syntax + style + semantic).
 
     \b
     Examples:
         catnip lint script.cat
+        catnip lint src/                      # All .cat files recursively
         catnip lint --level syntax script.cat
         catnip lint -l style *.cat
         catnip lint --check-names script.cat
@@ -41,22 +60,31 @@ def cmd_lint(ctx, files, level, deep, check_names, stdin):
     file_list = []
     if stdin:
         file_list.append(None)  # Marker for stdin
-    for f in files:
-        if f == '--':
-            if sys.stdin.isatty():
-                raise click.UsageError("'--' requires piped input")
-            file_list.append(None)
-        else:
-            file_list.append(Path(f))
+    stdin_args = [f for f in files if f == '--']
+    file_args = [f for f in files if f != '--']
+    for _ in stdin_args:
+        if sys.stdin.isatty():
+            raise click.UsageError("'--' requires piped input")
+        file_list.append(None)
+    file_list.extend(expand_file_args(file_args))
 
     if not file_list:
-        raise click.UsageError("Provide at least one FILE or use --stdin")
+        if not file_args:
+            raise click.UsageError("Provide at least one FILE or use --stdin")
+        click.echo("No .cat files found", err=True)
+        sys.exit(0)
 
     # Configure checks
     check_syntax = level in ('syntax', 'all')
     check_style = level in ('style', 'all')
     check_semantic = level in ('semantic', 'all')
     check_ir = deep
+    threshold_kwargs = dict(
+        max_nesting_depth=max_depth,
+        max_cyclomatic_complexity=max_complexity,
+        max_function_length=max_length,
+        max_parameters=max_params,
+    )
 
     exit_code = 0
     all_diagnostics = []
@@ -74,6 +102,7 @@ def cmd_lint(ctx, files, level, deep, check_names, stdin):
                 check_semantic=check_semantic,
                 check_ir=check_ir,
                 check_names=check_names,
+                **threshold_kwargs,
             )
             prefix = '<stdin>:'
             all_diagnostics.extend(result.diagnostics)
@@ -84,6 +113,9 @@ def cmd_lint(ctx, files, level, deep, check_names, stdin):
                 exit_code = 1
                 continue
 
+            if not file_path.is_file():
+                continue
+
             result = lint_file(
                 file_path,
                 check_syntax=check_syntax,
@@ -91,6 +123,7 @@ def cmd_lint(ctx, files, level, deep, check_names, stdin):
                 check_semantic=check_semantic,
                 check_ir=check_ir,
                 check_names=check_names,
+                **threshold_kwargs,
             )
             prefix = f"{file_path}:"
             all_diagnostics.extend(result.diagnostics)

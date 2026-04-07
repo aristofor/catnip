@@ -28,8 +28,8 @@
 //!
 //!   0b1110 = 14  StructType callable struct type (type_id as u32)
 //!
-//!   Reserved:
-//!   0b1111 = 15  (available)
+//!   Extended (future-proof overflow tag):
+//!   0b1111 = 15  Extended    Arc<ExtendedValue> (Module, future: Enum, ...)
 //!
 //! Regular floats are stored directly. Detection via quiet NaN pattern.
 
@@ -38,6 +38,7 @@ use catnip_core::nanbox::{
     CANON_NAN, PAYLOAD_MASK, QNAN_BASE, SMALLINT_MAX, SMALLINT_MIN, SMALLINT_SIGN_BIT, SMALLINT_SIGN_EXT, TAG_BIGINT,
     TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SMALLINT, TAG_SYMBOL, TAG_VMFUNC,
 };
+use indexmap::IndexMap;
 use rug::Integer;
 use std::fmt;
 use std::sync::Arc;
@@ -97,6 +98,91 @@ pub(crate) const TAG_NATIVEDICT: u64 = 10 << TAG_SHIFT;
 pub(crate) const TAG_NATIVETUPLE: u64 = 11 << TAG_SHIFT;
 pub(crate) const TAG_NATIVESET: u64 = 12 << TAG_SHIFT;
 pub(crate) const TAG_NATIVEBYTES: u64 = 13 << TAG_SHIFT;
+pub(crate) const TAG_EXTENDED: u64 = 15 << TAG_SHIFT;
+
+// ---------------------------------------------------------------------------
+// Extended values (tag 15) -- future-proof overflow tag
+// ---------------------------------------------------------------------------
+
+/// Module namespace: maps exported attribute names to values.
+pub struct ModuleNamespace {
+    pub name: String,
+    pub attrs: IndexMap<String, Value>,
+    /// Child pipeline's globals Rc, kept alive so closure scopes
+    /// in exported functions can still resolve module-level names.
+    pub module_globals: crate::host::Globals,
+}
+
+// ---------------------------------------------------------------------------
+// NativeFile -- file handle for io.open in pure mode
+// ---------------------------------------------------------------------------
+
+use std::cell::RefCell;
+
+// ---------------------------------------------------------------------------
+// NativeMeta -- META object for module export declarations
+// ---------------------------------------------------------------------------
+
+/// META namespace: attribute bag for module metadata (file, exports, etc.).
+pub struct NativeMeta {
+    pub attrs: RefCell<IndexMap<String, Value>>,
+}
+
+impl Default for NativeMeta {
+    fn default() -> Self {
+        Self {
+            attrs: RefCell::new(IndexMap::new()),
+        }
+    }
+}
+
+impl NativeMeta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, name: &str, val: Value) {
+        self.attrs.borrow_mut().insert(name.to_string(), val);
+    }
+
+    pub fn get(&self, name: &str) -> Option<Value> {
+        self.attrs.borrow().get(name).copied()
+    }
+}
+
+/// Extended value types sharing tag 15.
+/// Single tag slot, unlimited future variants.
+pub enum ExtendedValue {
+    Module(ModuleNamespace),
+    /// Enum type marker (type_id into EnumRegistry).
+    EnumType(u32),
+    /// META object for module metadata.
+    Meta(NativeMeta),
+    /// Opaque plugin object with method/attr/drop callbacks.
+    PluginObject {
+        handle: u64,
+        callbacks: crate::plugin::PluginObjectCallbacks,
+    },
+    /// Native complex number (real, imag).
+    Complex(f64, f64),
+}
+
+impl Drop for ExtendedValue {
+    fn drop(&mut self) {
+        if let ExtendedValue::PluginObject { handle, callbacks } = self {
+            if let Some(drop_fn) = callbacks.drop {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    drop_fn(*handle);
+                }));
+            }
+        }
+    }
+}
+
+// SAFETY: PureVM is single-threaded. ExtendedValue may contain Rc (via
+// module_globals) which is !Send, but we never share across threads.
+unsafe impl Send for ExtendedValue {}
+unsafe impl Sync for ExtendedValue {}
 
 // ---------------------------------------------------------------------------
 // Value
@@ -214,6 +300,48 @@ impl Value {
         Value(QNAN_BASE | TAG_STRUCTTYPE | (type_id as u64))
     }
 
+    /// Create an Extended value (module, future: enum, union, ...).
+    #[inline]
+    pub fn from_extended(ext: ExtendedValue) -> Self {
+        let arc = Arc::new(ext);
+        let ptr = Arc::into_raw(arc) as u64;
+        debug_assert!(
+            ptr & !PAYLOAD_MASK == 0,
+            "Extended Arc pointer exceeds 47-bit address space"
+        );
+        Value(QNAN_BASE | TAG_EXTENDED | (ptr & PAYLOAD_MASK))
+    }
+
+    /// Convenience: create a Module value.
+    #[inline]
+    pub fn from_module(ns: ModuleNamespace) -> Self {
+        Self::from_extended(ExtendedValue::Module(ns))
+    }
+
+    /// Create an enum type marker value.
+    #[inline]
+    pub fn from_enum_type(type_id: u32) -> Self {
+        Self::from_extended(ExtendedValue::EnumType(type_id))
+    }
+
+    /// Create a META object value.
+    #[inline]
+    pub fn from_meta(m: NativeMeta) -> Self {
+        Self::from_extended(ExtendedValue::Meta(m))
+    }
+
+    /// Create a plugin object value from an opaque handle and callbacks.
+    #[inline]
+    pub fn from_plugin_object(handle: u64, callbacks: crate::plugin::PluginObjectCallbacks) -> Self {
+        Self::from_extended(ExtendedValue::PluginObject { handle, callbacks })
+    }
+
+    /// Create a complex number value.
+    #[inline]
+    pub fn from_complex(real: f64, imag: f64) -> Self {
+        Self::from_extended(ExtendedValue::Complex(real, imag))
+    }
+
     // NativeStr constructors are defined in the second impl block below,
     // after the NativeString type definition.
 
@@ -319,6 +447,12 @@ impl Value {
     #[inline]
     pub fn is_struct_type(self) -> bool {
         (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_STRUCTTYPE)
+    }
+
+    /// Check if this is an Extended value (tag 15).
+    #[inline]
+    pub fn is_extended(self) -> bool {
+        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_EXTENDED)
     }
 
     /// Check if this is the INVALID canary.
@@ -514,6 +648,130 @@ impl Value {
         }
     }
 
+    /// Borrow the ExtendedValue behind the Arc without cloning.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the Arc is still alive.
+    #[inline]
+    pub unsafe fn as_extended_ref(&self) -> Option<&ExtendedValue> {
+        if self.is_extended() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const ExtendedValue;
+            Some(&*ptr)
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the ModuleNamespace behind the Arc without cloning.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the Arc is still alive and the value is a Module.
+    #[inline]
+    pub unsafe fn as_module_ref(&self) -> Option<&ModuleNamespace> {
+        match self.as_extended_ref()? {
+            ExtendedValue::Module(ns) => Some(ns),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a module namespace.
+    #[inline]
+    pub fn is_module(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Module(_)))
+    }
+
+    /// Check if this is an enum type marker.
+    #[inline]
+    pub fn is_enum_type(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::EnumType(_)))
+    }
+
+    /// Extract enum type_id if this is an enum type marker.
+    #[inline]
+    pub fn as_enum_type_id(self) -> Option<u32> {
+        if !self.is_extended() {
+            return None;
+        }
+        match unsafe { self.as_extended_ref()? } {
+            ExtendedValue::EnumType(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a META object.
+    #[inline]
+    pub fn is_meta(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Meta(_)))
+    }
+
+    /// Borrow the NativeMeta behind the Arc.
+    ///
+    /// # Safety
+    /// Caller must ensure the Arc is still alive and the value is a Meta.
+    #[inline]
+    pub unsafe fn as_meta_ref(&self) -> Option<&NativeMeta> {
+        match self.as_extended_ref()? {
+            ExtendedValue::Meta(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a plugin object.
+    #[inline]
+    pub fn is_plugin_object(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        matches!(
+            unsafe { self.as_extended_ref() },
+            Some(ExtendedValue::PluginObject { .. })
+        )
+    }
+
+    /// Borrow the plugin object handle and callbacks.
+    ///
+    /// # Safety
+    /// Caller must ensure the Arc is still alive.
+    #[inline]
+    pub unsafe fn as_plugin_object_ref(&self) -> Option<(u64, crate::plugin::PluginObjectCallbacks)> {
+        match self.as_extended_ref()? {
+            ExtendedValue::PluginObject { handle, callbacks } => Some((*handle, callbacks.clone())),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a complex number.
+    #[inline]
+    pub fn is_complex(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Complex(_, _)))
+    }
+
+    /// Extract (real, imag) parts from a complex value.
+    ///
+    /// # Safety
+    /// Caller must ensure the Arc is still alive.
+    #[inline]
+    pub unsafe fn as_complex_parts(&self) -> Option<(f64, f64)> {
+        match self.as_extended_ref()? {
+            ExtendedValue::Complex(r, i) => Some((*r, *i)),
+            _ => None,
+        }
+    }
+
     // --- Refcount management ---
 
     /// Increment refcount for heap-allocated values.
@@ -531,6 +789,7 @@ impl Value {
             TAG_NATIVETUPLE => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeTuple) },
             TAG_NATIVESET => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeSet) },
             TAG_NATIVEBYTES => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeBytes) },
+            TAG_EXTENDED => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const ExtendedValue) },
             _ => {}
         }
     }
@@ -549,6 +808,7 @@ impl Value {
             TAG_NATIVETUPLE => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeTuple) },
             TAG_NATIVESET => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeSet) },
             TAG_NATIVEBYTES => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeBytes) },
+            TAG_EXTENDED => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const ExtendedValue) },
             _ => {}
         }
     }
@@ -589,9 +849,12 @@ impl Value {
             unsafe { !self.as_native_set_ref().unwrap().is_empty() }
         } else if self.is_native_bytes() {
             unsafe { !self.as_native_bytes_ref().unwrap().is_empty() }
-        } else if self.is_struct_instance() || self.is_struct_type() {
-            true
+        } else if self.is_complex() {
+            let (r, i) = unsafe { self.as_complex_parts().unwrap() };
+            r != 0.0 || i != 0.0
         } else {
+            // Struct instances, struct types, extended values, and
+            // any other non-nil heap object are truthy.
             true
         }
     }
@@ -692,6 +955,19 @@ impl Value {
             format!("<struct #{}>", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_struct_type() {
             format!("<type #{}>", (self.0 & PAYLOAD_MASK) as u32)
+        } else if self.is_module() {
+            let ns = unsafe { self.as_module_ref().unwrap() };
+            format!("<module '{}'>", ns.name)
+        } else if self.is_meta() {
+            "<META>".to_string()
+        } else if self.is_complex() {
+            let (r, i) = unsafe { self.as_complex_parts().unwrap() };
+            format_complex(r, i)
+        } else if self.is_plugin_object() {
+            let (handle, _) = unsafe { self.as_plugin_object_ref().unwrap() };
+            format!("<plugin object {:#x}>", handle)
+        } else if self.is_extended() {
+            "<extended>".to_string()
         } else {
             format!("???({:#x})", self.0)
         }
@@ -719,6 +995,28 @@ fn format_float(f: f64) -> String {
         format!("{:.1}", f)
     } else {
         format!("{}", f)
+    }
+}
+
+/// Format a complex number like Python:
+/// - real == 0: "{imag}j"
+/// - real != 0: "({real}+{imag}j)" or "({real}-{imag}j)"
+fn format_complex(r: f64, i: f64) -> String {
+    let imag_str = format_float(i.abs());
+    if r == 0.0 && !r.is_sign_negative() {
+        // Pure imaginary
+        if i < 0.0 || (i == 0.0 && i.is_sign_negative()) {
+            format!("-{}j", imag_str)
+        } else {
+            format!("{}j", imag_str)
+        }
+    } else {
+        let real_str = format_float(r);
+        if i < 0.0 || (i == 0.0 && i.is_sign_negative()) {
+            format!("({}-{}j)", real_str, imag_str)
+        } else {
+            format!("({}+{}j)", real_str, imag_str)
+        }
     }
 }
 
@@ -898,6 +1196,11 @@ impl fmt::Debug for Value {
             write!(f, "struct#{}", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_struct_type() {
             write!(f, "structtype#{}", (self.0 & PAYLOAD_MASK) as u32)
+        } else if self.is_module() {
+            let ns = unsafe { self.as_module_ref().unwrap() };
+            write!(f, "module({})", ns.name)
+        } else if self.is_extended() {
+            write!(f, "extended")
         } else {
             write!(f, "???({:#x})", self.0)
         }
@@ -944,6 +1247,12 @@ impl PartialEq for Value {
             let a = unsafe { self.as_native_bytes_ref().unwrap() };
             let b = unsafe { other.as_native_bytes_ref().unwrap() };
             a.as_bytes() == b.as_bytes()
+        } else if self.is_complex() && other.is_complex() {
+            unsafe {
+                let (ar, ai) = self.as_complex_parts().unwrap();
+                let (br, bi) = other.as_complex_parts().unwrap();
+                ar == br && ai == bi
+            }
         } else {
             false
         }

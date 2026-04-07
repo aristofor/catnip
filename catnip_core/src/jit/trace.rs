@@ -560,6 +560,16 @@ impl TraceRecorder {
             OpCode::RotTwo | OpCode::PushBlock | OpCode::PopBlock | OpCode::Nop => {
                 return true; // Skip, handled implicitly
             }
+            // Exception handling aborts trace (non-compilable control flow)
+            OpCode::SetupExcept
+            | OpCode::SetupFinally
+            | OpCode::PopHandler
+            | OpCode::Raise
+            | OpCode::ResumeUnwind
+            | OpCode::ClearException => {
+                self.abort();
+                return false;
+            }
             // Control flow that aborts trace
             OpCode::Return | OpCode::Break | OpCode::Continue | OpCode::Halt => {
                 trace.ops.push(TraceOp::Exit);

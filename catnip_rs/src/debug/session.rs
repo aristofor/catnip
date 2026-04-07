@@ -116,7 +116,7 @@ impl DebugSession {
         // Store globals ref for eval
         self.catnip_globals = Some(context.getattr("globals")?.unbind());
 
-        let vm_executor_mod = py.import("catnip.vm.executor")?;
+        let vm_executor_mod = py.import(PY_MOD_VM_EXECUTOR)?;
         let vm_executor_cls = vm_executor_mod.getattr("VMExecutor")?;
         let executor = vm_executor_cls.call1((&registry, &context))?;
 

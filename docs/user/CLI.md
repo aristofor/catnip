@@ -311,7 +311,7 @@ Sélectionne une policy de modules nommée depuis `[modules.policies.<name>]` da
 
 ```bash
 catnip --policy sandbox script.cat
-catnip --policy sandbox -c 'import("os")'
+catnip --policy sandbox -c 'import('os')'
 # => CatnipRuntimeError: module 'os' blocked by policy
 ```
 
@@ -490,22 +490,18 @@ catnip config show --debug
 
 #### `-V, --version`
 
-Affiche la version de Catnip :
+Affiche la version de Catnip. `-V` donne la version courte, `--version` inclut le commit et la date de build :
 
 <!-- doc-snapshot: cli/version -->
 
 ```console
+$ catnip -V
+catnip 0.0.8
+
 $ catnip --version
-catnip 0.0.7
-```
-
-Avec `--full`, affiche aussi le commit et la date de build :
-
-```bash
-$ catnip --version --full
-Catnip 0.0.7
-  commit  a98f4a9
-  build   2026-03-14-10:23:45
+catnip 0.0.8
+  commit  6e0fe146
+  build   2026-03-27-17:55:58
 ```
 
 #### `--help`
@@ -635,9 +631,16 @@ catnip lint -l semantic script.cat
 
 # Depuis stdin
 echo "x = y + 1" | catnip lint --stdin
+
+# Seuils de métriques (0 = désactiver la règle)
+catnip lint --max-depth 8 script.cat       # I200: nesting (défaut: 5)
+catnip lint --max-complexity 15 script.cat  # I201: cyclomatique (défaut: 10)
+catnip lint --max-length 50 script.cat      # I202: longueur fn (défaut: 30)
+catnip lint --max-params 8 script.cat       # I203: paramètres (défaut: 6)
 ```
 
-Voir [docs/tools/lint](../tools/lint.md) pour les codes de diagnostic.
+Suppression inline par commentaire `# noqa` (bare ou avec codes spécifiques). Voir [docs/tools/lint](../tools/lint.md)
+pour les codes de diagnostic et la syntaxe noqa.
 
 ### `commands`
 
@@ -1161,8 +1164,8 @@ Pour alias et chargement par nom, utiliser `import()` dans le code :
 <!-- check: no-check -->
 
 ```catnip
-m = import("math")
-host = import("host", protocol="py")
+m = import('math')
+host = import('host', protocol='py')
 ```
 
 ### Debugging

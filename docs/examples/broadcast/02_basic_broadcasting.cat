@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Broadcasting de base
+# Broadcasting de base
 # Opérations arithmétiques simples sur des listes
 
 print("⇒ Broadcasting de base")

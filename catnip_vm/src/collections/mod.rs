@@ -13,6 +13,19 @@ pub use self::list::NativeList;
 pub use self::set::NativeSet;
 pub use self::tuple::NativeTuple;
 
+/// Clamp a slice index to [0, len] (Python-style).
+/// Negative indices wrap around; out-of-range values clamp silently.
+pub fn clamp_slice_index(index: i64, len: i64) -> usize {
+    if index < 0 {
+        let i = index + len;
+        if i < 0 { 0 } else { i as usize }
+    } else if index > len {
+        len as usize
+    } else {
+        index as usize
+    }
+}
+
 use crate::error::{VMError, VMResult};
 use crate::value::{GmpInt, NativeString, TAG_NATIVESTR, Value};
 use catnip_core::nanbox::{PAYLOAD_MASK, QNAN_BASE, TAG_BIGINT};
@@ -33,6 +46,7 @@ pub enum ValueKey {
     Str(Arc<NativeString>),
     BigInt(Arc<GmpInt>),
     Tuple(Arc<[ValueKey]>),
+    Complex(u64, u64), // (real bits, imag bits) -- imag != 0.0
 }
 
 /// Try to normalize a numeric ValueKey to i64 for cross-type hashing/equality.
@@ -94,6 +108,11 @@ impl Hash for ValueKey {
                 6u8.hash(state);
                 elems.hash(state);
             }
+            ValueKey::Complex(r_bits, i_bits) => {
+                7u8.hash(state);
+                r_bits.hash(state);
+                i_bits.hash(state);
+            }
             // Int/Bool always handled by numeric_as_i64 above
             _ => unreachable!(),
         }
@@ -108,6 +127,11 @@ impl PartialEq for ValueKey {
             (ValueKey::Symbol(a), ValueKey::Symbol(b)) => return a == b,
             (ValueKey::Str(a), ValueKey::Str(b)) => return a == b,
             (ValueKey::Tuple(a), ValueKey::Tuple(b)) => return a == b,
+            _ => {}
+        }
+        // Complex equality
+        match (self, other) {
+            (ValueKey::Complex(ar, ai), ValueKey::Complex(br, bi)) => return ar == br && ai == bi,
             _ => {}
         }
         // Numeric cross-type equality
@@ -157,6 +181,7 @@ impl ValueKey {
                 let values: Vec<Value> = elems.iter().map(|k| k.to_value()).collect();
                 Value::from_tuple(values)
             }
+            ValueKey::Complex(r_bits, i_bits) => Value::from_complex(f64::from_bits(*r_bits), f64::from_bits(*i_bits)),
         }
     }
 }
@@ -190,6 +215,14 @@ impl Value {
             unsafe { Arc::increment_strong_count(ptr) };
             let arc = unsafe { Arc::from_raw(ptr) };
             return Ok(ValueKey::BigInt(arc));
+        }
+        if self.is_complex() {
+            let (r, i) = unsafe { self.as_complex_parts().unwrap() };
+            if i == 0.0 {
+                // Pure real complex hashes like float for cross-type equality
+                return Ok(ValueKey::Float(r.to_bits()));
+            }
+            return Ok(ValueKey::Complex(r.to_bits(), i.to_bits()));
         }
         if self.is_native_tuple() {
             let t = unsafe { self.as_native_tuple_ref().unwrap() };
@@ -227,6 +260,18 @@ impl Value {
             "struct"
         } else if self.is_struct_type() {
             "type"
+        } else if self.is_symbol() {
+            "enum"
+        } else if self.is_module() {
+            "module"
+        } else if self.is_enum_type() {
+            "type"
+        } else if self.is_complex() {
+            "complex"
+        } else if self.is_meta() {
+            "meta"
+        } else if self.is_extended() {
+            "extended"
         } else {
             "unknown"
         }

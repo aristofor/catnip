@@ -5,7 +5,7 @@ use crate::formatter::format_code;
 use catnip_grammar::node_kinds as NK;
 use catnip_grammar::symbols;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 const PARSE_FAILED_MESSAGE: &str = "Parse failed";
@@ -72,13 +72,127 @@ pub fn lint_code(source: &str, config: &LintConfig) -> Result<Vec<Diagnostic>, S
     // Phase 4: Improvement suggestions
     if config.check_semantic {
         if let Some(ref tree) = tree {
-            check_improvements(tree.root_node(), source, &source_lines, &mut diagnostics);
+            check_improvements(tree.root_node(), source, &source_lines, config, &mut diagnostics);
         }
+    }
+
+    // Phase 5: Deep analysis (CFG-based)
+    if config.check_ir {
+        if let Some(ref tree) = tree {
+            let deep_diags = crate::lint_cfg::check_deep(tree.root_node(), source, config);
+            diagnostics.extend(deep_diags);
+        }
+    }
+
+    // Filter noqa-suppressed diagnostics using tree-sitter comment nodes
+    if let Some(ref tree) = tree {
+        let noqa = collect_noqa_directives(tree.root_node(), source);
+        diagnostics.retain(|d| match noqa.get(&d.line) {
+            Some(NoqaDirective::All) => false,
+            Some(NoqaDirective::Codes(codes)) => !codes.iter().any(|c| c == &d.code),
+            None => true,
+        });
     }
 
     diagnostics.sort_by(|a, b| a.line.cmp(&b.line).then(a.column.cmp(&b.column)));
 
     Ok(diagnostics)
+}
+
+// --- noqa suppression ---
+
+/// Collect noqa suppressions: line -> set of suppressed codes (empty = suppress all).
+/// Public API for callers that append diagnostics after lint_code().
+pub fn collect_noqa(source: &str) -> HashMap<usize, HashSet<String>> {
+    let tree = match parse_silent(source) {
+        Some(t) => t,
+        None => return HashMap::new(),
+    };
+    let directives = collect_noqa_directives(tree.root_node(), source);
+    let mut result = HashMap::new();
+    for (line, directive) in directives {
+        match directive {
+            NoqaDirective::All => {
+                result.insert(line, HashSet::new()); // empty = all
+            }
+            NoqaDirective::Codes(codes) => {
+                result.insert(line, codes.into_iter().collect());
+            }
+        }
+    }
+    result
+}
+
+enum NoqaDirective {
+    All,
+    Codes(Vec<String>),
+}
+
+/// Walk tree-sitter COMMENT nodes to find `# noqa` directives.
+/// Only matches real comments, not `"# noqa"` inside strings.
+fn collect_noqa_directives(root: Node, source: &str) -> HashMap<usize, NoqaDirective> {
+    let mut map = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == NK::COMMENT {
+            if let Some(directive) = parse_noqa_comment(&source[node.byte_range()]) {
+                map.insert(node.start_position().row + 1, directive);
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    map
+}
+
+/// Parse a comment node's text for a noqa directive.
+///
+/// Supported forms:
+/// - `# noqa` -- suppress all
+/// - `# noqa: W200` -- suppress W200 only
+/// - `# noqa: W200, I100` -- suppress multiple codes
+/// - `# noqa: W200 -- reason` -- suppress W200 (trailing text ignored)
+/// - `# noqa -- reason` -- suppress all
+///
+/// Rejects non-directives like `# noqa123`.
+fn parse_noqa_comment(comment: &str) -> Option<NoqaDirective> {
+    let text = comment.strip_prefix('#')?.trim_start();
+    if !text.starts_with("noqa") {
+        return None;
+    }
+    let rest = &text[4..]; // skip "noqa"
+    if rest.is_empty() {
+        return Some(NoqaDirective::All);
+    }
+    // "noqa" must be followed by a word boundary, not "noqa123"
+    if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if let Some(codes_str) = rest.strip_prefix(':') {
+        // "# noqa: W200, I100 -- reason"
+        // Take first word of each comma-separated chunk
+        let codes: Vec<String> = codes_str
+            .split(',')
+            .filter_map(|chunk| {
+                let word = chunk.trim().split_whitespace().next()?;
+                if word.is_empty() || word.starts_with('-') {
+                    None
+                } else {
+                    Some(word.to_string())
+                }
+            })
+            .collect();
+        if codes.is_empty() {
+            Some(NoqaDirective::All)
+        } else {
+            Some(NoqaDirective::Codes(codes))
+        }
+    } else {
+        Some(NoqaDirective::All)
+    }
 }
 
 // --- Phase 1: Syntax ---
@@ -165,7 +279,7 @@ fn check_style(source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagno
             for (i, (orig, fmt)) in source_lines.iter().zip(formatted_lines.iter()).enumerate() {
                 if orig != fmt {
                     diagnostics.push(make_diagnostic(
-                        "W200",
+                        "W100",
                         "Line differs from formatted version",
                         Severity::Warning,
                         i + 1,
@@ -178,7 +292,7 @@ fn check_style(source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagno
 
             if source_lines.len() != formatted_lines.len() {
                 diagnostics.push(make_diagnostic(
-                    "W202",
+                    "W102",
                     &format!("Expected {} lines, got {}", formatted_lines.len(), source_lines.len()),
                     Severity::Info,
                     source_lines.len(),
@@ -195,7 +309,7 @@ fn check_style(source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagno
         let trimmed = line.trim_end();
         if trimmed.len() < line.len() {
             diagnostics.push(make_diagnostic(
-                "W201",
+                "W101",
                 "Trailing whitespace",
                 Severity::Warning,
                 i + 1,
@@ -209,70 +323,146 @@ fn check_style(source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagno
 
 // --- Phase 3: Semantic (CST walk) ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefKind {
+    Local,
+    Param,
+    VariadicParam,
+    ForVar,
+    MatchVar,
+    WithVar,
+    ExceptVar,
+}
+
+#[derive(Debug, Clone)]
 struct DefInfo {
     name: String,
+    kind: DefKind,
     line: usize,
     column: usize,
     scope_depth: usize,
 }
 
-struct ScopeTracker {
-    scopes: Vec<HashSet<String>>,
+#[derive(Debug, Default)]
+struct ScopeFrame {
+    names: HashSet<String>,
     definitions: Vec<DefInfo>,
     used: HashSet<String>,
+}
+
+struct ScopeTracker {
+    scopes: Vec<ScopeFrame>,
     check_names: bool,
 }
 
 impl ScopeTracker {
     fn new(check_names: bool) -> Self {
         Self {
-            scopes: vec![HashSet::new()],
-            definitions: Vec::new(),
-            used: HashSet::new(),
+            scopes: vec![ScopeFrame::default()],
             check_names,
         }
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(ScopeFrame::default());
     }
 
-    fn pop_scope(&mut self) {
+    fn pop_scope(&mut self, diagnostics: &mut Vec<Diagnostic>, source_lines: &[&str]) {
         if self.scopes.len() > 1 {
-            self.scopes.pop();
+            if let Some(frame) = self.scopes.pop() {
+                self.emit_unused_diagnostics(frame, diagnostics, source_lines);
+            }
         }
     }
 
-    fn define(&mut self, name: &str, line: usize, column: usize) {
+    fn define(&mut self, name: &str, line: usize, column: usize, kind: DefKind) {
         let depth = self.scopes.len() - 1;
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string());
+        if let Some(frame) = self.scopes.last_mut() {
+            frame.names.insert(name.to_string());
+            frame.definitions.push(DefInfo {
+                name: name.to_string(),
+                kind,
+                line,
+                column,
+                scope_depth: depth,
+            });
         }
-        self.definitions.push(DefInfo {
-            name: name.to_string(),
-            line,
-            column,
-            scope_depth: depth,
-        });
+    }
+
+    fn define_local(&mut self, name: &str, line: usize, column: usize) {
+        self.define(name, line, column, DefKind::Local);
     }
 
     fn define_builtin(&mut self, name: &str) {
         if let Some(scope) = self.scopes.first_mut() {
-            scope.insert(name.to_string());
+            scope.names.insert(name.to_string());
         }
     }
 
+    fn is_defined_in_current_scope(&self, name: &str) -> bool {
+        self.scopes.last().is_some_and(|scope| scope.names.contains(name))
+    }
+
+    fn is_defined_in_parent_scope(&self, name: &str) -> bool {
+        if self.scopes.len() <= 1 {
+            return false;
+        }
+        self.scopes[..self.scopes.len() - 1]
+            .iter()
+            .rev()
+            .any(|scope| scope.names.contains(name))
+    }
+
     fn use_name(&mut self, name: &str) {
-        self.used.insert(name.to_string());
+        for depth in (0..self.scopes.len()).rev() {
+            if self.scopes[depth].names.contains(name) {
+                self.scopes[depth].used.insert(name.to_string());
+                return;
+            }
+        }
     }
 
     fn is_defined(&self, name: &str) -> bool {
         for scope in self.scopes.iter().rev() {
-            if scope.contains(name) {
+            if scope.names.contains(name) {
                 return true;
             }
         }
         false
+    }
+
+    fn emit_unused_diagnostics(&self, frame: ScopeFrame, diagnostics: &mut Vec<Diagnostic>, source_lines: &[&str]) {
+        for def in frame.definitions {
+            if def.scope_depth == 0 || def.name.starts_with('_') {
+                continue;
+            }
+            if frame.used.contains(&def.name) {
+                continue;
+            }
+
+            let code = match def.kind {
+                DefKind::Param | DefKind::VariadicParam if def.name != "self" => "W201",
+                DefKind::Param | DefKind::VariadicParam => continue,
+                _ => "W200",
+            };
+
+            let message = match def.kind {
+                DefKind::Param | DefKind::VariadicParam => {
+                    format!("Parameter '{}' is never used", def.name)
+                }
+                _ => format!("Variable '{}' is defined but never used", def.name),
+            };
+
+            diagnostics.push(make_diagnostic(
+                code,
+                &message,
+                Severity::Warning,
+                def.line,
+                def.column,
+                source_lines.get(def.line.saturating_sub(1)).map(|s| s.to_string()),
+                None,
+            ));
+        }
     }
 }
 
@@ -280,9 +470,24 @@ impl ScopeTracker {
 // Run: python catnip_tools/gen_builtins.py
 // @generated-builtins-start
 const BUILTINS: &[&str] = &[
-    "INT",
+    "ArithmeticError",
+    "AttributeError",
+    "Exception",
+    "False",
+    "IndexError",
+    "KeyError",
+    "LookupError",
     "META",
+    "MemoryError",
     "ND",
+    "NameError",
+    "None",
+    "RUNTIME",
+    "RuntimeError",
+    "True",
+    "TypeError",
+    "ValueError",
+    "ZeroDivisionError",
     "_",
     "__import__",
     "_cache",
@@ -323,6 +528,7 @@ const BUILTINS: &[&str] = &[
     "hex",
     "id",
     "import",
+    "input",
     "int",
     "isinstance",
     "issubclass",
@@ -338,8 +544,11 @@ const BUILTINS: &[&str] = &[
     "next",
     "object",
     "oct",
+    "open",
     "ord",
     "pow",
+    "pragma",
+    "print",
     "property",
     "pure",
     "range",
@@ -382,31 +591,7 @@ fn check_semantic(
     }
 
     walk_node(root, source, &mut tracker, diagnostics, source_lines);
-
-    let builtin_set: HashSet<&str> = BUILTINS.iter().copied().collect();
-    for def in &tracker.definitions {
-        // Global scope symbols may be used externally (module API)
-        if def.scope_depth == 0 {
-            continue;
-        }
-        if builtin_set.contains(def.name.as_str()) {
-            continue;
-        }
-        if def.name.starts_with('_') {
-            continue;
-        }
-        if !tracker.used.contains(&def.name) {
-            diagnostics.push(make_diagnostic(
-                "W310",
-                &format!("Variable '{}' is defined but never used", def.name),
-                Severity::Warning,
-                def.line,
-                def.column,
-                source_lines.get(def.line.saturating_sub(1)).map(|s| s.to_string()),
-                None,
-            ));
-        }
-    }
+    check_dead_code_after_return(root, source_lines, diagnostics);
 }
 
 fn walk_node(
@@ -446,7 +631,7 @@ fn walk_node(
                 let name = node_text(name_node, source);
                 let line = name_node.start_position().row + 1;
                 let col = name_node.start_position().column + 1;
-                tracker.define(&name, line, col);
+                tracker.define_local(&name, line, col);
             }
             // Walk implements/extends clauses (they reference outer names)
             let mut cursor = node.walk();
@@ -460,8 +645,23 @@ fn walk_node(
             }
         }
 
-        NK::IF_EXPR | NK::ELIF_CLAUSE | NK::ELSE_CLAUSE | NK::WHILE_STMT => {
+        NK::IF_EXPR
+        | NK::ELIF_CLAUSE
+        | NK::ELSE_CLAUSE
+        | NK::WHILE_STMT
+        | NK::TRY_STMT
+        | NK::EXCEPT_BLOCK
+        | NK::FINALLY_CLAUSE
+        | NK::RAISE_STMT => {
             walk_children(node, source, tracker, diagnostics, source_lines);
+        }
+
+        NK::WITH_STMT => {
+            walk_with_stmt(node, source, tracker, diagnostics, source_lines);
+        }
+
+        NK::EXCEPT_CLAUSE => {
+            walk_except_clause(node, source, tracker, diagnostics, source_lines);
         }
 
         NK::CHAINED => {
@@ -524,6 +724,123 @@ fn walk_children(
     for child in node.children(&mut cursor) {
         walk_node(child, source, tracker, diagnostics, source_lines);
     }
+}
+
+fn first_named_child(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let child = node.children(&mut cursor).find(|child| child.is_named());
+    child
+}
+
+fn statement_payload(statement: Node) -> Option<Node> {
+    if statement.kind() == NK::STATEMENT {
+        return first_named_child(statement);
+    }
+    Some(statement)
+}
+
+fn check_dead_code_after_return(root: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::BLOCK {
+            check_block_dead_code_after_return(current, source_lines, diagnostics);
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn check_block_dead_code_after_return(block: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let mut return_seen = false;
+    let mut return_line = None;
+    let mut cursor = block.walk();
+    for child in block.children(&mut cursor) {
+        if child.kind() != NK::STATEMENT {
+            continue;
+        }
+        let Some(payload) = statement_payload(child) else {
+            continue;
+        };
+        if return_seen {
+            if Some(payload.start_position().row + 1) == return_line {
+                continue;
+            }
+            let line = payload.start_position().row + 1;
+            let col = payload.start_position().column + 1;
+            diagnostics.push(make_diagnostic(
+                "W300",
+                "Unreachable code after return",
+                Severity::Warning,
+                line,
+                col,
+                source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                None,
+            ));
+            continue;
+        }
+
+        if payload.kind() == NK::RETURN_STMT {
+            return_seen = true;
+            return_line = Some(payload.start_position().row + 1);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BindingInfo {
+    name: String,
+    line: usize,
+    column: usize,
+}
+
+fn collect_lvalue_bindings(node: Node, source: &str, bindings: &mut Vec<BindingInfo>) {
+    match node.kind() {
+        NK::IDENTIFIER => {
+            bindings.push(BindingInfo {
+                name: node_text(node, source),
+                line: node.start_position().row + 1,
+                column: node.start_position().column + 1,
+            });
+        }
+        NK::LVALUE | NK::UNPACK_TARGET | NK::UNPACK_TUPLE | NK::UNPACK_SEQUENCE | NK::UNPACK_ITEMS => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_lvalue_bindings(child, source, bindings);
+            }
+        }
+        NK::VARIADIC_PARAM => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == NK::IDENTIFIER {
+                    bindings.push(BindingInfo {
+                        name: node_text(child, source),
+                        line: child.start_position().row + 1,
+                        column: child.start_position().column + 1,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn subtree_reads_identifier_skip_nested_lambdas(node: Node, name: &str, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.id() != node.id() && current.kind() == NK::LAMBDA_EXPR {
+            continue;
+        }
+        if current.kind() == NK::IDENTIFIER && node_text(current, source) == name {
+            return true;
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    false
 }
 
 /// Detect `import("module", "Name")` and define `Name` in scope.
@@ -650,13 +967,18 @@ fn walk_assignment(
         }
     }
 
-    // W311: assignment of wild import (returns None)
+    let mut bindings = Vec::new();
+    for lv in &lvalue_nodes {
+        collect_lvalue_bindings(*lv, source, &mut bindings);
+    }
+
+    // W202: assignment of wild import (returns None)
     if let Some(rv) = rvalue_node {
         if !lvalue_nodes.is_empty() && is_wild_import_call(rv, source) {
             let line = node.start_position().row + 1;
             let col = node.start_position().column + 1;
             diagnostics.push(make_diagnostic(
-                "W311",
+                "W202",
                 "Wild import returns None; assignment is useless",
                 Severity::Warning,
                 line,
@@ -676,19 +998,66 @@ fn walk_assignment(
         }
     }
 
-    for lv in &lvalue_nodes {
-        define_lvalue(*lv, source, tracker, diagnostics, source_lines);
-    }
-
     if let Some(rv) = rvalue_node {
         walk_node(rv, source, tracker, diagnostics, source_lines);
+
+        for binding in bindings {
+            check_keyword_name(&binding.name, binding.line, binding.column, source_lines, diagnostics);
+
+            if tracker.is_defined_in_current_scope(&binding.name) {
+                continue;
+            }
+
+            let shadows_parent = tracker.is_defined_in_parent_scope(&binding.name);
+            let mutates_capture =
+                shadows_parent && subtree_reads_identifier_skip_nested_lambdas(rv, &binding.name, source);
+
+            if shadows_parent && !mutates_capture && binding.name != "_" && !binding.name.starts_with('_') {
+                diagnostics.push(make_diagnostic(
+                    "W204",
+                    &format!("'{}' shadows variable from outer scope", binding.name),
+                    Severity::Warning,
+                    binding.line,
+                    binding.column,
+                    source_lines.get(binding.line.saturating_sub(1)).map(|s| s.to_string()),
+                    None,
+                ));
+            }
+
+            if !mutates_capture {
+                tracker.define_local(&binding.name, binding.line, binding.column);
+            }
+        }
+    } else {
+        for binding in bindings {
+            check_keyword_name(&binding.name, binding.line, binding.column, source_lines, diagnostics);
+
+            if tracker.is_defined_in_current_scope(&binding.name) {
+                continue;
+            }
+            if tracker.is_defined_in_parent_scope(&binding.name)
+                && binding.name != "_"
+                && !binding.name.starts_with('_')
+            {
+                diagnostics.push(make_diagnostic(
+                    "W204",
+                    &format!("'{}' shadows variable from outer scope", binding.name),
+                    Severity::Warning,
+                    binding.line,
+                    binding.column,
+                    source_lines.get(binding.line.saturating_sub(1)).map(|s| s.to_string()),
+                    None,
+                ));
+            }
+            tracker.define_local(&binding.name, binding.line, binding.column);
+        }
     }
 }
 
 fn check_keyword_name(name: &str, line: usize, col: usize, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
     if symbols::is_keyword(name) {
         diagnostics.push(make_diagnostic(
-            "W320",
+            "W203",
             &format!("'{}' is a language keyword, avoid using it as a name", name),
             Severity::Warning,
             line,
@@ -705,6 +1074,7 @@ fn define_lvalue(
     tracker: &mut ScopeTracker,
     diagnostics: &mut Vec<Diagnostic>,
     source_lines: &[&str],
+    def_kind: DefKind,
 ) {
     let kind = node.kind();
     match kind {
@@ -713,12 +1083,12 @@ fn define_lvalue(
             let line = node.start_position().row + 1;
             let col = node.start_position().column + 1;
             check_keyword_name(&name, line, col, source_lines, diagnostics);
-            tracker.define(&name, line, col);
+            tracker.define(&name, line, col, def_kind);
         }
         NK::LVALUE | NK::UNPACK_TARGET | NK::UNPACK_TUPLE | NK::UNPACK_SEQUENCE | NK::UNPACK_ITEMS => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                define_lvalue(child, source, tracker, diagnostics, source_lines);
+                define_lvalue(child, source, tracker, diagnostics, source_lines, def_kind);
             }
         }
         NK::SETATTR => {}
@@ -730,7 +1100,7 @@ fn define_lvalue(
                     let line = child.start_position().row + 1;
                     let col = child.start_position().column + 1;
                     check_keyword_name(&name, line, col, source_lines, diagnostics);
-                    tracker.define(&name, line, col);
+                    tracker.define(&name, line, col, DefKind::VariadicParam);
                 }
             }
         }
@@ -760,7 +1130,7 @@ fn walk_lambda(
         }
     }
 
-    tracker.pop_scope();
+    tracker.pop_scope(diagnostics, source_lines);
 }
 
 fn define_lambda_params(
@@ -782,7 +1152,7 @@ fn define_lambda_params(
                         let line = param_child.start_position().row + 1;
                         let col = param_child.start_position().column + 1;
                         check_keyword_name(&name, line, col, source_lines, diagnostics);
-                        tracker.define(&name, line, col);
+                        tracker.define(&name, line, col, DefKind::Param);
                         saw_name = true;
                     } else if saw_name && param_child.kind() != "=" {
                         walk_node(param_child, source, tracker, diagnostics, source_lines);
@@ -797,7 +1167,7 @@ fn define_lambda_params(
                         let line = param_child.start_position().row + 1;
                         let col = param_child.start_position().column + 1;
                         check_keyword_name(&name, line, col, source_lines, diagnostics);
-                        tracker.define(&name, line, col);
+                        tracker.define(&name, line, col, DefKind::VariadicParam);
                     }
                 }
             }
@@ -824,7 +1194,7 @@ fn walk_for(
     for child in &children {
         match child.kind() {
             NK::UNPACK_TARGET | NK::IDENTIFIER if !defined_target => {
-                define_lvalue(*child, source, tracker, diagnostics, source_lines);
+                define_lvalue(*child, source, tracker, diagnostics, source_lines, DefKind::ForVar);
                 defined_target = true;
             }
             "in" => {
@@ -840,7 +1210,7 @@ fn walk_for(
         }
     }
 
-    tracker.pop_scope();
+    tracker.pop_scope(diagnostics, source_lines);
 }
 
 fn walk_match(
@@ -890,7 +1260,77 @@ fn walk_match_case(
         }
     }
 
-    tracker.pop_scope();
+    tracker.pop_scope(diagnostics, source_lines);
+}
+
+/// Walk an except clause: `e: TypeError => { handler }`.
+/// Binding is scoped to the handler block.
+fn walk_except_clause(
+    node: Node,
+    source: &str,
+    tracker: &mut ScopeTracker,
+    diagnostics: &mut Vec<Diagnostic>,
+    source_lines: &[&str],
+) {
+    tracker.push_scope();
+
+    // Define binding if present
+    if let Some(binding) = node.child_by_field_name("binding") {
+        let name = node_text(binding, source);
+        let line = binding.start_position().row + 1;
+        let col = binding.start_position().column + 1;
+        tracker.define(&name, line, col, DefKind::ExceptVar);
+    }
+
+    // Walk exception type references and handler block
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            NK::EXCEPT_PATTERN | NK::EXCEPT_TYPES => {
+                // Type names are references (mark as read)
+                let mut inner_cursor = child.walk();
+                for inner in child.children(&mut inner_cursor) {
+                    if inner.kind() == NK::IDENTIFIER {
+                        walk_node(inner, source, tracker, diagnostics, source_lines);
+                    }
+                }
+            }
+            NK::BLOCK => {
+                walk_node(child, source, tracker, diagnostics, source_lines);
+            }
+            _ => {}
+        }
+    }
+
+    tracker.pop_scope(diagnostics, source_lines);
+}
+
+fn walk_with_stmt(
+    node: Node,
+    source: &str,
+    tracker: &mut ScopeTracker,
+    diagnostics: &mut Vec<Diagnostic>,
+    source_lines: &[&str],
+) {
+    // Define binding names and walk value expressions
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "with_binding" {
+            // Walk value expression first (may reference outer scope)
+            if let Some(value) = child.child_by_field_name("value") {
+                walk_node(value, source, tracker, diagnostics, source_lines);
+            }
+            // Define the binding name
+            if let Some(name_node) = child.child_by_field_name("name") {
+                let name = node_text(name_node, source);
+                let line = name_node.start_position().row + 1;
+                let col = name_node.start_position().column + 1;
+                tracker.define(&name, line, col, DefKind::WithVar);
+            }
+        } else if child.kind() == "block" {
+            walk_node(child, source, tracker, diagnostics, source_lines);
+        }
+    }
 }
 
 fn define_pattern_vars(node: Node, source: &str, tracker: &mut ScopeTracker) {
@@ -904,7 +1344,7 @@ fn define_pattern_vars(node: Node, source: &str, tracker: &mut ScopeTracker) {
                     if name != "_" {
                         let line = child.start_position().row + 1;
                         let col = child.start_position().column + 1;
-                        tracker.define(&name, line, col);
+                        tracker.define(&name, line, col, DefKind::MatchVar);
                     }
                 }
             }
@@ -919,7 +1359,7 @@ fn define_pattern_vars(node: Node, source: &str, tracker: &mut ScopeTracker) {
                         let name = node_text(child, source);
                         let line = child.start_position().row + 1;
                         let col = child.start_position().column + 1;
-                        tracker.define(&name, line, col);
+                        tracker.define(&name, line, col, DefKind::MatchVar);
                     }
                 }
             }
@@ -931,7 +1371,7 @@ fn define_pattern_vars(node: Node, source: &str, tracker: &mut ScopeTracker) {
                     let name = node_text(child, source);
                     let line = child.start_position().row + 1;
                     let col = child.start_position().column + 1;
-                    tracker.define(&name, line, col);
+                    tracker.define(&name, line, col, DefKind::MatchVar);
                 }
             }
         }
@@ -1001,7 +1441,7 @@ fn check_reference(
         let line = node.start_position().row + 1;
         let col = node.start_position().column + 1;
         diagnostics.push(make_diagnostic(
-            "E300",
+            "E200",
             &format!("Name '{}' is not defined", name),
             Severity::Error,
             line,
@@ -1014,10 +1454,31 @@ fn check_reference(
 
 // --- Phase 4: Improvement suggestions ---
 
-fn check_improvements(root: Node, source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+fn check_improvements(
+    root: Node,
+    source: &str,
+    source_lines: &[&str],
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     check_tco_opportunities(root, source, source_lines, diagnostics);
     check_redundant_boolean(root, source, source_lines, diagnostics);
     check_self_assignment(root, source, source_lines, diagnostics);
+    check_static_dead_branches(root, source_lines, diagnostics);
+    check_detectable_infinite_loops(root, source_lines, diagnostics);
+    if config.max_nesting_depth > 0 {
+        check_nesting_depth(root, source_lines, config.max_nesting_depth, diagnostics);
+    }
+    if config.max_cyclomatic_complexity > 0 {
+        check_cyclomatic_complexity(root, source_lines, config.max_cyclomatic_complexity, diagnostics);
+    }
+    if config.max_function_length > 0 {
+        check_function_length(root, source_lines, config.max_function_length, diagnostics);
+    }
+    if config.max_parameters > 0 {
+        check_too_many_parameters(root, source, source_lines, config.max_parameters, diagnostics);
+    }
+    check_match_without_wildcard(root, source_lines, diagnostics);
 }
 
 /// I100: Detect recursive calls not in tail position
@@ -1089,7 +1550,75 @@ fn find_lambda_body(lambda: Node) -> Option<Node> {
     body
 }
 
-/// Walk the lambda body looking for recursive calls, check tail position
+/// Branch-boundary node kinds: if/else/match/block/lambda and short-circuit
+/// operators create exclusive execution paths. Recursive calls in different
+/// branches are independent (not tree recursion).
+const BRANCH_BOUNDARIES: &[&str] = &[
+    NK::IF_EXPR,
+    NK::ELIF_CLAUSE,
+    NK::ELSE_CLAUSE,
+    NK::MATCH_EXPR,
+    NK::BLOCK,
+    NK::LAMBDA_EXPR,
+    // Short-circuit operators: only one side executes
+    NK::BOOL_OR,
+    NK::BOOL_AND,
+    "null_coalesce", // ?? operator (no NK constant)
+];
+
+/// Check if a recursive call is part of a tree recursion expression, i.e.
+/// a sibling in the same expression subtree is also a recursive call to the
+/// same function. Example: `f(n-1) + f(n-2)` in an `additive` node.
+/// Calls in exclusive branches (`if/else`) are NOT tree recursion.
+fn is_tree_recursion_call(call_node: Node, fn_name: &str, source: &str) -> bool {
+    let mut node = call_node;
+    while let Some(parent) = node.parent() {
+        // Stop at branch boundaries -- siblings beyond here are exclusive paths
+        if BRANCH_BOUNDARIES.contains(&parent.kind()) {
+            return false;
+        }
+        // Check if any sibling subtree of this parent also contains a recursive call
+        let mut cursor = parent.walk();
+        for child in parent.children(&mut cursor) {
+            if child.id() == node.id() {
+                continue;
+            }
+            if contains_recursive_call(child, fn_name, source) {
+                return true;
+            }
+        }
+        node = parent;
+    }
+    false
+}
+
+/// Check if a subtree contains a call to `fn_name`.
+/// Stops at nested lambdas (different scope -- call may not run in this frame).
+fn contains_recursive_call(node: Node, fn_name: &str, source: &str) -> bool {
+    if node.kind() == NK::CALL {
+        if let Some(callee) = node.child(0) {
+            if callee.kind() == NK::IDENTIFIER && node_text(callee, source) == fn_name {
+                return true;
+            }
+        }
+    }
+    // Don't descend into nested lambdas
+    if node.kind() == NK::LAMBDA_EXPR {
+        return false;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if contains_recursive_call(child, fn_name, source) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk the lambda body looking for recursive calls, check tail position.
+/// Calls that are part of tree recursion (e.g. `f(a) + f(b)`) are skipped
+/// since they cannot be restructured for TCO. Calls in exclusive branches
+/// (`if/else`) are still checked individually.
 fn find_non_tail_calls(
     fn_name: &str,
     body: Node,
@@ -1106,6 +1635,10 @@ fn find_non_tail_calls(
             let first_child = current.children(&mut cursor).next();
             if let Some(callee) = first_child {
                 if callee.kind() == NK::IDENTIFIER && node_text(callee, source) == fn_name {
+                    // Skip tree recursion (e.g. f(a) + f(b)) -- not a TCO candidate
+                    if is_tree_recursion_call(current, fn_name, source) {
+                        continue;
+                    }
                     // Found a recursive call - check if it's in tail position
                     if !is_in_tail_position(current, lambda) {
                         let line = current.start_position().row + 1;
@@ -1187,8 +1720,8 @@ fn is_last_significant_child(child: Node, parent: Node) -> bool {
     let mut cursor = parent.walk();
     let mut last_significant = None;
     for c in parent.children(&mut cursor) {
-        // Skip punctuation and anonymous nodes
-        if c.is_named() {
+        // Skip punctuation, anonymous nodes, and comments.
+        if c.is_named() && c.kind() != NK::COMMENT {
             last_significant = Some(c.id());
         }
     }
@@ -1362,6 +1895,374 @@ fn check_assignment_self(node: Node, source: &str, source_lines: &[&str], diagno
     }
 }
 
+fn check_static_dead_branches(root: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::IF_EXPR {
+            check_if_static_dead_branches(current, source_lines, diagnostics);
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn check_if_static_dead_branches(node: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let Some(condition) = node.child_by_field_name("condition") else {
+        return;
+    };
+    match is_bool_literal(condition) {
+        Some(true) => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == NK::ELIF_CLAUSE || child.kind() == NK::ELSE_CLAUSE {
+                    let line = child.start_position().row + 1;
+                    let col = child.start_position().column + 1;
+                    diagnostics.push(make_diagnostic(
+                        "W301",
+                        "Dead branch: previous condition is always True",
+                        Severity::Warning,
+                        line,
+                        col,
+                        source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                        None,
+                    ));
+                }
+            }
+        }
+        Some(false) => {
+            if let Some(consequence) = node.child_by_field_name("consequence") {
+                let line = consequence.start_position().row + 1;
+                let col = consequence.start_position().column + 1;
+                diagnostics.push(make_diagnostic(
+                    "W301",
+                    "Dead branch: condition is always False",
+                    Severity::Warning,
+                    line,
+                    col,
+                    source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                    None,
+                ));
+            }
+        }
+        None => {}
+    }
+}
+
+fn check_detectable_infinite_loops(root: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::WHILE_STMT && while_condition_is_true(current) && !loop_body_has_break(current) {
+            let line = current.start_position().row + 1;
+            let col = current.start_position().column + 1;
+            diagnostics.push(make_diagnostic(
+                "W302",
+                "Loop condition is always True and body has no break",
+                Severity::Warning,
+                line,
+                col,
+                source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                None,
+            ));
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn while_condition_is_true(node: Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.is_named() && child.kind() != NK::BLOCK && is_bool_literal(child) == Some(true) {
+            return true;
+        }
+    }
+    false
+}
+
+fn loop_body_has_break(loop_node: Node) -> bool {
+    let mut cursor = loop_node.walk();
+    let Some(body) = loop_node.children(&mut cursor).find(|child| child.kind() == NK::BLOCK) else {
+        return false;
+    };
+
+    let mut stack = vec![body];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            NK::BREAK_STMT => return true,
+            NK::LAMBDA_EXPR | NK::FOR_STMT | NK::WHILE_STMT => continue,
+            _ => {}
+        }
+
+        let mut child_cursor = current.walk();
+        for child in current.children(&mut child_cursor) {
+            stack.push(child);
+        }
+    }
+
+    false
+}
+
+fn check_nesting_depth(root: Node, source_lines: &[&str], max_depth: usize, diagnostics: &mut Vec<Diagnostic>) {
+    walk_nesting_depth(root, 0, source_lines, max_depth, diagnostics);
+}
+
+fn walk_nesting_depth(
+    node: Node,
+    depth: usize,
+    source_lines: &[&str],
+    max_depth: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // Reset depth at function boundaries -- nesting is per-function, not per-file
+    if node.kind() == NK::LAMBDA_EXPR {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_nesting_depth(child, 0, source_lines, max_depth, diagnostics);
+        }
+        return;
+    }
+
+    let is_control = matches!(
+        node.kind(),
+        NK::IF_EXPR | NK::WHILE_STMT | NK::FOR_STMT | NK::MATCH_EXPR | NK::TRY_STMT
+    );
+    let next_depth = if is_control { depth + 1 } else { depth };
+
+    if is_control && next_depth > max_depth {
+        let line = node.start_position().row + 1;
+        let col = node.start_position().column + 1;
+        diagnostics.push(make_diagnostic(
+            "I200",
+            &format!("Nesting depth {} exceeds threshold {}", next_depth, max_depth),
+            Severity::Hint,
+            line,
+            col,
+            source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+            None,
+        ));
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_nesting_depth(child, next_depth, source_lines, max_depth, diagnostics);
+    }
+}
+
+fn check_cyclomatic_complexity(
+    root: Node,
+    source_lines: &[&str],
+    max_complexity: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::LAMBDA_EXPR {
+            let complexity = compute_lambda_cyclomatic_complexity(current);
+            if complexity > max_complexity {
+                let line = current.start_position().row + 1;
+                let col = current.start_position().column + 1;
+                diagnostics.push(make_diagnostic(
+                    "I201",
+                    &format!(
+                        "Function cyclomatic complexity is {}, threshold is {}",
+                        complexity, max_complexity
+                    ),
+                    Severity::Hint,
+                    line,
+                    col,
+                    source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                    None,
+                ));
+            }
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn compute_lambda_cyclomatic_complexity(lambda: Node) -> usize {
+    let Some(body) = find_lambda_body(lambda) else {
+        return 1;
+    };
+
+    let mut complexity = 1;
+    let mut stack = vec![body];
+
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::LAMBDA_EXPR {
+            continue;
+        }
+
+        match current.kind() {
+            NK::IF_EXPR | NK::ELIF_CLAUSE | NK::WHILE_STMT | NK::FOR_STMT => complexity += 1,
+            NK::MATCH_EXPR => complexity += count_match_cases(current).saturating_sub(1),
+            NK::BOOL_AND | NK::BOOL_OR => complexity += 1,
+            _ => {}
+        }
+
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    complexity
+}
+
+fn count_match_cases(node: Node) -> usize {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| child.kind() == NK::MATCH_CASE)
+        .count()
+}
+
+fn check_function_length(root: Node, source_lines: &[&str], max_length: usize, diagnostics: &mut Vec<Diagnostic>) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::LAMBDA_EXPR {
+            if let Some(body) = find_lambda_body(current) {
+                let statements = count_direct_statements(body);
+                if statements > max_length {
+                    let line = current.start_position().row + 1;
+                    let col = current.start_position().column + 1;
+                    diagnostics.push(make_diagnostic(
+                        "I202",
+                        &format!("Function has {} statements, threshold is {}", statements, max_length),
+                        Severity::Hint,
+                        line,
+                        col,
+                        source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                        None,
+                    ));
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn count_direct_statements(block: Node) -> usize {
+    let mut cursor = block.walk();
+    block
+        .children(&mut cursor)
+        .filter(|child| child.kind() == NK::STATEMENT)
+        .count()
+}
+
+fn check_too_many_parameters(
+    root: Node,
+    source: &str,
+    source_lines: &[&str],
+    max_params: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::LAMBDA_EXPR {
+            let count = count_lambda_parameters(current, source);
+            if count > max_params {
+                let line = current.start_position().row + 1;
+                let col = current.start_position().column + 1;
+                diagnostics.push(make_diagnostic(
+                    "I203",
+                    &format!("Function has {} parameters, threshold is {}", count, max_params),
+                    Severity::Hint,
+                    line,
+                    col,
+                    source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                    None,
+                ));
+            }
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn count_lambda_parameters(lambda: Node, source: &str) -> usize {
+    let mut cursor = lambda.walk();
+    for child in lambda.children(&mut cursor) {
+        if child.kind() == NK::LAMBDA_PARAMS {
+            let mut params_cursor = child.walk();
+            return child
+                .children(&mut params_cursor)
+                .filter(|param| {
+                    (param.kind() == NK::LAMBDA_PARAM || param.kind() == NK::VARIADIC_PARAM)
+                        && node_text(*param, source) != "self"
+                })
+                .count();
+        }
+    }
+    0
+}
+
+fn check_match_without_wildcard(root: Node, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.kind() == NK::MATCH_EXPR && !match_has_unconditional_catchall(current) {
+            let line = current.start_position().row + 1;
+            let col = current.start_position().column + 1;
+            diagnostics.push(make_diagnostic(
+                "I103",
+                "Match has no wildcard branch; exhaustiveness depends on runtime values",
+                Severity::Hint,
+                line,
+                col,
+                source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                Some("_ => { ... }".to_string()),
+            ));
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn match_has_unconditional_catchall(node: Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() != NK::MATCH_CASE || child.child_by_field_name("guard").is_some() {
+            continue;
+        }
+
+        let mut case_cursor = child.walk();
+        for case_child in child.children(&mut case_cursor) {
+            if (case_child.kind() == NK::PATTERN || case_child.kind() == NK::PATTERN_OR)
+                && pattern_is_catchall(case_child)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A pattern is a catch-all if it contains a wildcard `_` or a bare variable binding.
+fn pattern_is_catchall(node: Node) -> bool {
+    if node.kind() == NK::PATTERN_WILDCARD || node.kind() == NK::PATTERN_VAR {
+        return true;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if pattern_is_catchall(child) {
+            return true;
+        }
+    }
+    false
+}
+
 // --- Helpers ---
 
 fn node_text(node: Node, source: &str) -> String {
@@ -1404,7 +2305,7 @@ mod tests {
     #[test]
     fn test_scope_tracker_basic() {
         let mut tracker = ScopeTracker::new(false);
-        tracker.define("x", 1, 1);
+        tracker.define("x", 1, 1, DefKind::Local);
         assert!(tracker.is_defined("x"));
         assert!(!tracker.is_defined("y"));
     }
@@ -1412,12 +2313,12 @@ mod tests {
     #[test]
     fn test_scope_tracker_nested() {
         let mut tracker = ScopeTracker::new(false);
-        tracker.define("x", 1, 1);
+        tracker.define("x", 1, 1, DefKind::Local);
         tracker.push_scope();
-        tracker.define("y", 2, 1);
+        tracker.define("y", 2, 1, DefKind::Local);
         assert!(tracker.is_defined("x"));
         assert!(tracker.is_defined("y"));
-        tracker.pop_scope();
+        tracker.pop_scope(&mut Vec::new(), &[]);
         assert!(tracker.is_defined("x"));
         assert!(!tracker.is_defined("y"));
     }
@@ -1429,8 +2330,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
@@ -1440,7 +2341,7 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("'x'"));
     }
@@ -1453,7 +2354,7 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W200").collect();
         assert!(warnings.is_empty());
     }
 
@@ -1465,7 +2366,7 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W200").collect();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("'y'"));
     }
@@ -1477,7 +2378,7 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        let warnings: Vec<_> = diags.iter().filter(|d| d.code == "W200").collect();
         assert!(warnings.is_empty());
     }
 
@@ -1488,8 +2389,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
@@ -1499,8 +2400,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
@@ -1510,8 +2411,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
@@ -1521,16 +2422,16 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
     fn test_lint_full_pipeline() {
         let config = LintConfig::default();
         let result = lint_code("x = 1\nprint(x)", &config).unwrap();
-        // Should not have E300 errors
-        let errors: Vec<_> = result.iter().filter(|d| d.code == "E300").collect();
+        // Should not have E200 errors
+        let errors: Vec<_> = result.iter().filter(|d| d.code == "E200").collect();
         assert!(errors.is_empty());
     }
 
@@ -1542,7 +2443,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
         assert_eq!(hints.len(), 1, "Expected 1 I100 hint, got: {:?}", hints);
         assert!(hints[0].message.contains("fact"));
@@ -1554,9 +2455,108 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
         assert!(hints.is_empty(), "Unexpected I100: {:?}", hints);
+    }
+
+    #[test]
+    fn test_tco_tail_ok_with_trailing_comment_in_branch() {
+        let source = "countdown = (n) => {\n    if n == 0 { \"Done\" } else {\n        print(n)\n        countdown(n - 1)  # tail call\n    }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        assert!(hints.is_empty(), "Unexpected I100: {:?}", hints);
+    }
+
+    #[test]
+    fn test_tco_tail_ok_with_trailing_comment_after_if_expr() {
+        let source = "range_sum = (start, end, acc=0) => {\n    if start > end { acc }\n    else { range_sum(start + 1, end, acc + start) }  # tail call\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        assert!(hints.is_empty(), "Unexpected I100: {:?}", hints);
+    }
+
+    #[test]
+    fn test_tco_tree_recursion_no_hint() {
+        // Double recursion (divide & conquer) is not a TCO candidate
+        let source = "hull_rec = (points, a, b) => {\n    if len(points) == 0 { list() }\n    else {\n        c = farthest(points, a, b)\n        hull_rec(left_of(points, a, c), a, c) + list(c) + hull_rec(left_of(points, c, b), c, b)\n    }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        assert!(hints.is_empty(), "Tree recursion should not emit I100: {:?}", hints);
+    }
+
+    #[test]
+    fn test_tco_fib_tree_recursion_no_hint() {
+        // fib(n-1) + fib(n-2) is tree recursion, not a TCO candidate
+        let source = "fib = (n) => {\n    if n <= 1 { n }\n    else { fib(n - 1) + fib(n - 2) }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        assert!(hints.is_empty(), "Tree recursion should not emit I100: {:?}", hints);
+    }
+
+    #[test]
+    fn test_tco_exclusive_branches_still_hint() {
+        // Two recursive calls in exclusive if/else branches: each runs alone,
+        // so the non-tail one is still a valid I100 candidate
+        let source = "f = (n) => {\n    if n > 0 { f(n - 1) } else { 1 + f(n + 1) }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        assert_eq!(
+            hints.len(),
+            1,
+            "Non-tail call in else branch should emit I100: {:?}",
+            hints
+        );
+    }
+
+    #[test]
+    fn test_tco_short_circuit_not_tree_recursion() {
+        // f(n-1) or f(n-2): short-circuit means exclusive branches, not tree recursion
+        let source = "f = (n) => {\n    if n == 0 { 0 } else { f(n - 1) or f(n - 2) }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        // Both calls are non-tail (wrapped in bool_or), should emit I100
+        assert!(
+            !hints.is_empty(),
+            "Short-circuit calls should still emit I100: {:?}",
+            hints
+        );
+    }
+
+    #[test]
+    fn test_tco_nested_lambda_not_tree_recursion() {
+        // f(n-1) next to a lambda containing f -- the lambda f is a different scope
+        let source = "f = (n) => {\n    if n == 0 { 0 } else { helper(f(n - 1), () => { f(0) }) }\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
+        let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
+        // f(n-1) is non-tail (inside helper() call), should emit I100
+        // f(0) in the lambda is a different scope, should NOT make this tree recursion
+        assert!(
+            !hints.is_empty(),
+            "Call next to nested lambda should still emit I100: {:?}",
+            hints
+        );
     }
 
     #[test]
@@ -1565,7 +2565,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I100").collect();
         assert!(hints.is_empty());
     }
@@ -1578,7 +2578,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I101").collect();
         assert_eq!(hints.len(), 1, "Expected 1 I101 hint, got: {:?}", hints);
         assert_eq!(hints[0].suggestion.as_deref(), Some("x"));
@@ -1590,7 +2590,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I101").collect();
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].suggestion.as_deref(), Some("x"));
@@ -1602,7 +2602,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I101").collect();
         assert!(hints.is_empty());
     }
@@ -1615,7 +2615,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I102").collect();
         assert_eq!(hints.len(), 1, "Expected 1 I102 hint, got: {:?}", hints);
     }
@@ -1626,7 +2626,7 @@ mod tests {
         let tree = parse_silent(source).unwrap();
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
-        check_improvements(tree.root_node(), source, &lines, &mut diags);
+        check_improvements(tree.root_node(), source, &lines, &LintConfig::default(), &mut diags);
         let hints: Vec<_> = diags.iter().filter(|d| d.code == "I102").collect();
         assert!(hints.is_empty());
     }
@@ -1638,8 +2638,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
     }
 
     #[test]
@@ -1649,7 +2649,273 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut diags = Vec::new();
         check_semantic(tree.root_node(), source, &lines, true, &mut diags);
-        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E300").collect();
-        assert!(errors.is_empty(), "Unexpected E300: {:?}", errors);
+        let errors: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(errors.is_empty(), "Unexpected E200: {:?}", errors);
+    }
+
+    // --- Custom threshold tests ---
+
+    fn config_with_thresholds(nesting: usize, complexity: usize, length: usize, params: usize) -> LintConfig {
+        LintConfig {
+            max_nesting_depth: nesting,
+            max_cyclomatic_complexity: complexity,
+            max_function_length: length,
+            max_parameters: params,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_nesting_depth_custom_threshold() {
+        // depth 2: if > for -- should trigger at threshold 1 but not at 5
+        let source = "if True { for i in range(10) { i } }";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut diags = Vec::new();
+        check_nesting_depth(tree.root_node(), &lines, 1, &mut diags);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == "I200").count(),
+            1,
+            "depth 2 should exceed threshold 1"
+        );
+
+        let mut diags = Vec::new();
+        check_nesting_depth(tree.root_node(), &lines, 5, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I200").count() == 0,
+            "depth 2 should not exceed threshold 5"
+        );
+    }
+
+    #[test]
+    fn test_nesting_depth_disabled_when_zero() {
+        let source = "if True { if True { if True { if True { if True { if True { 1 } } } } } }";
+        let config = config_with_thresholds(0, 10, 30, 6);
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &config, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I200").count() == 0,
+            "nesting check should be disabled when 0"
+        );
+    }
+
+    #[test]
+    fn test_cyclomatic_complexity_custom_threshold() {
+        // 4 branches = complexity 5 (1 base + 4 if)
+        let source = "f = (x) => { if x > 1 { 1 } elif x > 2 { 2 } elif x > 3 { 3 } elif x > 4 { 4 } else { 5 } }";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut diags = Vec::new();
+        check_cyclomatic_complexity(tree.root_node(), &lines, 3, &mut diags);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == "I201").count(),
+            1,
+            "complexity should exceed threshold 3"
+        );
+
+        let mut diags = Vec::new();
+        check_cyclomatic_complexity(tree.root_node(), &lines, 10, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I201").count() == 0,
+            "complexity should not exceed threshold 10"
+        );
+    }
+
+    #[test]
+    fn test_cyclomatic_complexity_disabled_when_zero() {
+        let source = "f = (x) => { if x > 1 { 1 } elif x > 2 { 2 } elif x > 3 { 3 } elif x > 4 { 4 } else { 5 } }";
+        let config = config_with_thresholds(5, 0, 30, 6);
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &config, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I201").count() == 0,
+            "complexity check should be disabled when 0"
+        );
+    }
+
+    #[test]
+    fn test_function_length_custom_threshold() {
+        // 4 statements
+        let source = "f = () => {\na = 1\nb = 2\nc = 3\nd = 4\n}";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut diags = Vec::new();
+        check_function_length(tree.root_node(), &lines, 3, &mut diags);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == "I202").count(),
+            1,
+            "4 statements should exceed threshold 3"
+        );
+
+        let mut diags = Vec::new();
+        check_function_length(tree.root_node(), &lines, 30, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I202").count() == 0,
+            "4 statements should not exceed threshold 30"
+        );
+    }
+
+    #[test]
+    fn test_function_length_disabled_when_zero() {
+        let source = "f = () => {\na = 1\nb = 2\nc = 3\nd = 4\n}";
+        let config = config_with_thresholds(5, 10, 0, 6);
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &config, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I202").count() == 0,
+            "length check should be disabled when 0"
+        );
+    }
+
+    #[test]
+    fn test_too_many_parameters_custom_threshold() {
+        let source = "f = (a, b, c) => { a + b + c }";
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut diags = Vec::new();
+        check_too_many_parameters(tree.root_node(), source, &lines, 2, &mut diags);
+        assert_eq!(
+            diags.iter().filter(|d| d.code == "I203").count(),
+            1,
+            "3 params should exceed threshold 2"
+        );
+
+        let mut diags = Vec::new();
+        check_too_many_parameters(tree.root_node(), source, &lines, 6, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I203").count() == 0,
+            "3 params should not exceed threshold 6"
+        );
+    }
+
+    #[test]
+    fn test_too_many_parameters_disabled_when_zero() {
+        let source = "f = (a, b, c, d, e, f, g, h) => { a }";
+        let config = config_with_thresholds(5, 10, 30, 0);
+        let tree = parse_silent(source).unwrap();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut diags = Vec::new();
+        check_improvements(tree.root_node(), source, &lines, &config, &mut diags);
+        assert!(
+            diags.iter().filter(|d| d.code == "I203").count() == 0,
+            "params check should be disabled when 0"
+        );
+    }
+
+    // --- noqa suppression ---
+
+    #[test]
+    fn test_noqa_bare_suppresses_all() {
+        let source = "y = x + 1 # noqa";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        assert!(diags.is_empty(), "Expected all suppressed, got: {:?}", diags);
+    }
+
+    #[test]
+    fn test_noqa_specific_code() {
+        let source = "y = x + 1 # noqa: E200";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(e300.is_empty(), "E200 should be suppressed");
+    }
+
+    #[test]
+    fn test_noqa_wrong_code_not_suppressed() {
+        let source = "y = x + 1 # noqa: W200";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert_eq!(e300.len(), 1, "E200 should NOT be suppressed by W200 noqa");
+    }
+
+    #[test]
+    fn test_noqa_multiple_codes() {
+        let source = "y = x + 1 # noqa: E200, W200";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(e300.is_empty(), "E200 should be suppressed");
+    }
+
+    #[test]
+    fn test_noqa_does_not_affect_other_lines() {
+        let source = "y = x + 1 # noqa\nz = w + 2";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert_eq!(e300.len(), 1, "Line 2 E200 should remain");
+        assert_eq!(e300[0].line, 2);
+    }
+
+    #[test]
+    fn test_noqa_in_string_does_not_suppress() {
+        // "# noqa" inside a string must not suppress diagnostics on that line
+        let source = "f = () => { y = \"# noqa\"; 1 }";
+        let config = LintConfig {
+            check_style: false,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W200").collect();
+        assert_eq!(w310.len(), 1, "W200 should NOT be suppressed by # noqa in string");
+    }
+
+    #[test]
+    fn test_noqa_code_with_trailing_reason() {
+        let source = "y = x + 1 # noqa: E200 -- false positive";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert!(e300.is_empty(), "E200 should be suppressed even with trailing reason");
+    }
+
+    #[test]
+    fn test_noqa_not_a_directive() {
+        // "# noqa123" is not a valid noqa directive
+        let source = "y = x + 1 # noqa123";
+        let config = LintConfig {
+            check_style: false,
+            check_names: true,
+            ..Default::default()
+        };
+        let diags = lint_code(source, &config).unwrap();
+        let e300: Vec<_> = diags.iter().filter(|d| d.code == "E200").collect();
+        assert_eq!(e300.len(), 1, "noqa123 should not suppress anything");
     }
 }

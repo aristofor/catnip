@@ -17,13 +17,17 @@ struct Book {
 # Extraction d'un Book depuis un élément XML
 
 book_from_xml = (node) => {
-    Book(
-        node.get('id'),
-        node.find('title').text,
-        node.find('author').text,
-        node.find('year').text,
-        node.get('category'),
-    )
+    try {
+        Book(
+            node.get('id'),
+            node.find('title').text,
+            node.find('author').text,
+            node.find('year').text,
+            node.get('category'),
+        )
+    } except {
+        _ => { None }
+    }
 }
 
 # Données XML
@@ -48,8 +52,18 @@ xml_string = '<?xml version="1.0"?>
 </catalog>
 '
 
+# XML malformé
+
+print("⇒ XML malformé")
+try {
+    ET.fromstring("<broken><no-close>")
+} except {
+    e: RuntimeError => { print(f"  Attrapé: {e}") }
+}
+
 # Parsing
 
+print()
 print("⇒ Parsing XML")
 root = ET.fromstring(xml_string)
 print(f"  Tag racine: {root.tag}")
@@ -61,7 +75,10 @@ print()
 print("⇒ Conversion en structs Book")
 books = list()
 for node in root {
-    books = books + list(book_from_xml(node))
+    book = book_from_xml(node)
+    if book != None {
+        books = books + list(book)
+    }
 }
 for book in books {
     print(f"  {book}")
@@ -115,9 +132,9 @@ for node in root {
 print()
 print("⇒ Livres par décennie")
 decades = books.[(b) => {
-        decade=int(b.year) - int(b.year) % 10
-        f"  {b.title} → {decade}s"
-    }]
+    decade = int(b.year) - int(b.year) % 10
+    f"  {b.title} → {decade}s"
+}]
 for d in decades {
     print(d)
 }

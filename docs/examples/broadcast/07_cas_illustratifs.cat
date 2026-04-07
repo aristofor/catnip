@@ -1,6 +1,6 @@
 #!/usr/bin/env catnip
-# Exemple : Cas d'usage illustratifs
-# Applications illustratives du broadcasting
+# Cas d'usage illustratifs
+# Applications du broadcasting
 
 print("⇒ Analyse de données de ventes")
 

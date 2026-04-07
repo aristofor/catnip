@@ -41,7 +41,7 @@ def _convert_rust_exception(exc: Exception) -> Exception:
         return CatnipNameError(msg)
     if isinstance(exc, ZeroDivisionError):
         return CatnipRuntimeError(msg)
-    if isinstance(exc, (IndexError, KeyError, AttributeError)):
+    if isinstance(exc, (ValueError, IndexError, KeyError, AttributeError)):
         return exc  # Pass through as-is
 
     # Strip "runtime error: " prefix if present

@@ -17,22 +17,22 @@ struct Location {
     distance_to(self, other) => {
         dlat = math.radians(other.lat - self.lat)
         dlon = math.radians(other.lon - self.lon)
-        a    = math.sin(dlat / 2) ** 2 + math.cos(math.radians(self.lat)) * math.cos(math.radians(other.lat)) *
-            math.sin(dlon / 2) ** 2
+        a = math.sin(dlat / 2) ** 2 +
+            math.cos(math.radians(self.lat)) * math.cos(math.radians(other.lat)) * math.sin(dlon / 2) ** 2
         2 * R * math.asin(math.sqrt(a))
     }
 }
 
 # Coordonnées de villes
 
-paris     = Location(48.8566, 2.3522)
-london    = Location(51.5074, -0.1278)
-new_york  = Location(40.7128, -74.0060)
-tokyo     = Location(35.6762, 139.6503)
-sydney    = Location(-33.8688, 151.2093)
+paris = Location(48.8566, 2.3522)
+london = Location(51.5074, -0.1278)
+new_york = Location(40.7128, -74.0060)
+tokyo = Location(35.6762, 139.6503)
+sydney = Location(-33.8688, 151.2093)
 cape_town = Location(-33.9249, 18.4241)
-rio       = Location(-22.9068, -43.1729)
-moscow    = Location(55.7558, 37.6173)
+rio = Location(-22.9068, -43.1729)
+moscow = Location(55.7558, 37.6173)
 
 # Distance directe entre paires
 
@@ -45,7 +45,7 @@ print("  → Sydney   :", round(paris.distance_to(sydney), 1), "km")
 # Broadcasting : distances d'un point de référence vers toutes les villes
 
 cities = list(london, new_york, tokyo, sydney, cape_town, rio, moscow)
-names  = list("Londres", "New York", "Tokyo", "Sydney", "Le Cap", "Rio", "Moscou")
+names = list("Londres", "New York", "Tokyo", "Sydney", "Le Cap", "Rio", "Moscou")
 
 distances = cities.[(city) => { round(paris.distance_to(city), 1) }]
 
@@ -57,7 +57,7 @@ for i in range(len(names)) {
 
 # Plus proche et plus lointaine
 
-closest  = min(distances)
+closest = min(distances)
 farthest = max(distances)
 
 print()
@@ -85,7 +85,7 @@ for i in range(len(names)) {
 print()
 print("⇒ Matrice de distances (km)")
 
-sample       = list(paris, london, new_york, tokyo, sydney)
+sample = list(paris, london, new_york, tokyo, sydney)
 sample_names = list("Paris", "Londres", "New York", "Tokyo", "Sydney")
 
 matrix = sample.[(a) => { sample.[(b) => { round(a.distance_to(b)) }] }]

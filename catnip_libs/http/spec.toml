@@ -1,0 +1,58 @@
+[module]
+name = "http"
+version = "0.1.0"
+description = "Micro HTTP server built on tiny_http"
+
+[exports]
+symbols = ["PROTOCOL", "VERSION", "Server", "Request", "serve"]
+
+[exports.Server]
+signature = "(addr: str) -> Server"
+description = "Create a blocking HTTP server bound to addr (e.g. '0.0.0.0:8080')"
+
+[exports.Server.recv]
+signature = "() -> Request | nil"
+description = "Block until a request arrives (GIL released). Returns nil on close()"
+
+[exports.Server.try_recv]
+signature = "() -> Request | nil"
+description = "Non-blocking: return pending request or nil"
+
+[exports.Server.recv_timeout]
+signature = "(seconds: float) -> Request | nil"
+description = "Block up to `seconds` for a request (GIL released)"
+
+[exports.Server.close]
+signature = "() -> nil"
+description = "Stop accepting connections, unblock pending recv()"
+
+[exports.Request.url]
+signature = "str"
+description = "Request URL path"
+
+[exports.Request.method]
+signature = "str"
+description = "HTTP method (GET, POST, ...)"
+
+[exports.Request.headers]
+signature = "dict[str, str]"
+description = "Request headers as a dictionary"
+
+[exports.Request.body]
+signature = "() -> str"
+description = "Read request body as string"
+
+[exports.Request.respond]
+signature = "(body: str, status: int = 200, content_type: str = 'text/plain') -> nil"
+description = "Send response (consumes the request)"
+
+[exports.serve]
+signature = "(body: str, port: int = 0, content_type: str | nil = nil, open_browser: bool = true) -> nil"
+description = "Serve static content: bind, open browser, wait for one request, respond, return"
+
+[backends]
+rust = "rust/"
+pyo3 = false
+
+[compat]
+notes = "Synchronous, blocking server. One request at a time. Uses tiny_http crate. PureVM only (no PyO3 backend)."

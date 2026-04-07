@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Fonctions
+# Fonctions
 
 print("⇒ Fonctions simples")
 

@@ -184,6 +184,17 @@ impl Registry {
                 }
                 Ok(Some(bindings))
             }
+            TAG_ENUM => {
+                let pat = pattern.cast::<PatternEnum>().unwrap();
+                let enum_name = pat.borrow().enum_name.clone();
+                let variant_name = pat.borrow().variant_name.clone();
+                // Resolve EnumName.variant via context lookup + getattr
+                let ctx = self.ctx.bind(py);
+                let enum_obj = ctx.call_method1("get_local", (enum_name.as_str(),))?;
+                let variant_val = enum_obj.getattr(variant_name.as_str())?;
+                let is_equal = variant_val.eq(value.bind(py))?;
+                if is_equal { Ok(Some(Vec::new())) } else { Ok(None) }
+            }
             _ => unreachable!(),
         }
     }

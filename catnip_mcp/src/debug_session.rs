@@ -60,19 +60,12 @@ impl DebugHook for ChannelHook {
         }
 
         // Wait for command (with timeout to avoid hanging forever)
-        loop {
-            match self.command_rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(SessionCommand::Continue) => return DebugCommand::Continue,
-                Ok(SessionCommand::StepInto) => return DebugCommand::StepInto,
-                Ok(SessionCommand::StepOver) => return DebugCommand::StepOver,
-                Ok(SessionCommand::StepOut) => return DebugCommand::StepOut,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return DebugCommand::Continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return DebugCommand::Continue;
-                }
-            }
+        match self.command_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(SessionCommand::Continue) => DebugCommand::Continue,
+            Ok(SessionCommand::StepInto) => DebugCommand::StepInto,
+            Ok(SessionCommand::StepOver) => DebugCommand::StepOver,
+            Ok(SessionCommand::StepOut) => DebugCommand::StepOut,
+            Err(_) => DebugCommand::Continue,
         }
     }
 }

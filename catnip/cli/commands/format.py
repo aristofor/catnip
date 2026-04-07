@@ -2,10 +2,11 @@
 """Format command - Catnip code formatting."""
 
 import sys
-from glob import glob
 from pathlib import Path
 
 import click
+
+from ..utils import expand_file_args
 
 
 @click.command('format')
@@ -85,18 +86,11 @@ def cmd_format(ctx, files, stdin, in_place, check, indent_size, line_length, ali
     if not files:
         raise click.UsageError("Provide FILES or use --stdin")
 
-    # Expand globs and directories
-    expanded_files = []
-    for pattern in files:
-        p = Path(pattern)
-        if p.is_dir():
-            expanded_files.extend(sorted(p.rglob('*.cat')))
-        else:
-            matches = glob(pattern, recursive=True)
-            if matches:
-                expanded_files.extend(matches)
-            else:
-                expanded_files.append(pattern)
+    expanded_files = expand_file_args(files)
+
+    if not expanded_files:
+        click.echo("No .cat files found", err=True)
+        sys.exit(0)
 
     exit_code = 0
     for file_path in expanded_files:

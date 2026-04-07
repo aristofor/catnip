@@ -35,10 +35,13 @@ struct Point {
 
 # Point pivot : y minimal, puis x minimal
 find_pivot = (points) => {
-    reduce(points, (p, q) => {
+    reduce(
+        points,
+        (p, q) => {
             if q.y < p.y or (q.y == p.y and q.x < p.x) { q }
             else { p }
-        })
+        }
+    )
 }
 
 graham_hull = (points) => {
@@ -56,7 +59,8 @@ graham_hull = (points) => {
                     math.atan2(p.y - pivot.y, p.x - pivot.x),
                     pivot.sqdist(p),
                 )
-            })
+            }
+        )
 
         stack = list()
         i = 0

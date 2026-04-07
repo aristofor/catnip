@@ -43,13 +43,17 @@ Str = sa.String
 Num = sa.Numeric
 Col = sa.Column
 
-customers_table = sa.Table("customers", metadata,
+customers_table = sa.Table(
+    "customers",
+    metadata,
     Col("id", Int(), primary_key=True, autoincrement=False),
     Col("name", Str()),
     Col("country", Str()),
 )
 
-orders_table = sa.Table("orders", metadata,
+orders_table = sa.Table(
+    "orders",
+    metadata,
     Col("id", Int(), primary_key=True, autoincrement=False),
     Col("customer_id", Int()),
     Col("product", Str()),
@@ -98,8 +102,8 @@ print()
 print("⇒ Commandes avec JOIN")
 total_col = (orders_table.c.qty * orders_table.c.price).label("total")
 stmt = sa.select(customers_table.c.name, orders_table.c.product, total_col).select_from(
-    customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))
-).order_by(sa.desc("total")).limit(5)
+        customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))
+    ).order_by(sa.desc("total")).limit(5)
 
 for row in conn.execute(stmt) {
     print(f"  {row[0]} - {row[1]} : {round(row[2], 2)} €")
@@ -109,11 +113,13 @@ for row in conn.execute(stmt) {
 print()
 print("⇒ CA par client (GROUP BY)")
 stmt = sa.select(
-    customers_table.c.name,
-    sa.func.count(orders_table.c.id).label("n"),
-    sa.func.sum(orders_table.c.qty * orders_table.c.price).label("ca"),
-).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))
-).group_by(customers_table.c.id, customers_table.c.name).order_by(sa.desc("ca"))
+        customers_table.c.name,
+        sa.func.count(orders_table.c.id).label("n"),
+        sa.func.sum(orders_table.c.qty * orders_table.c.price).label("ca"),
+    ).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))).group_by(
+        customers_table.c.id,
+        customers_table.c.name
+    ).order_by(sa.desc("ca"))
 
 for row in conn.execute(stmt) {
     print(f"  {row[0]} : {row[1]} commandes, {round(row[2], 2)} €")
@@ -124,10 +130,12 @@ print()
 print("⇒ Commandes > moyenne (sous-requête)")
 avg_sq = sa.select(sa.func.avg(orders_table.c.qty * orders_table.c.price)).scalar_subquery()
 stmt = sa.select(
-    customers_table.c.name, orders_table.c.product,
-    (orders_table.c.qty * orders_table.c.price).label("t"),
-).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))).where(
-    (orders_table.c.qty * orders_table.c.price).__gt__(avg_sq)).order_by(sa.desc("t"))
+        customers_table.c.name,
+        orders_table.c.product,
+        (orders_table.c.qty * orders_table.c.price).label("t"),
+    ).select_from(customers_table.join(orders_table, customers_table.c.id.__eq__(orders_table.c.customer_id))).where(
+        (orders_table.c.qty * orders_table.c.price).__gt__(avg_sq)
+    ).order_by(sa.desc("t"))
 
 for row in conn.execute(stmt) {
     print(f"  {row[0]} - {row[1]} : {round(row[2], 2)} €")
@@ -137,9 +145,9 @@ for row in conn.execute(stmt) {
 print()
 print("⇒ Produits vendus > 1 fois (HAVING)")
 stmt = sa.select(
-    orders_table.c.product,
-    sa.func.sum(orders_table.c.qty).label("q"),
-).group_by(orders_table.c.product).having(sa.func.count(orders_table.c.id).__gt__(1))
+        orders_table.c.product,
+        sa.func.sum(orders_table.c.qty).label("q"),
+    ).group_by(orders_table.c.product).having(sa.func.count(orders_table.c.id).__gt__(1))
 
 for row in conn.execute(stmt) {
     print(f"  {row[0]} : {row[1]} unités")
@@ -148,10 +156,12 @@ for row in conn.execute(stmt) {
 # Window function QUALIFY (SQL brut DuckDB)
 print()
 print("⇒ Window function QUALIFY (SQL brut DuckDB)")
-sql = sa.text("SELECT c.name, o.product, o.qty * o.price as amount " +
-    "FROM customers c JOIN orders o ON c.id = o.customer_id " +
-    "QUALIFY RANK() OVER (PARTITION BY c.id ORDER BY o.qty * o.price DESC) = 1 " +
-    "ORDER BY amount DESC")
+sql = sa.text(
+    "SELECT c.name, o.product, o.qty * o.price as amount " +
+        "FROM customers c JOIN orders o ON c.id = o.customer_id " +
+        "QUALIFY RANK() OVER (PARTITION BY c.id ORDER BY o.qty * o.price DESC) = 1 " +
+        "ORDER BY amount DESC"
+)
 for row in conn.execute(sql) {
     print(f"  {row[0]} - top: {row[1]} ({round(row[2], 2)} €)")
 }
@@ -167,9 +177,9 @@ reports = list(
 print()
 print("⇒ Stats globales")
 reports.[(r) => {
-        lines=r.run(conn)
-        for line in lines { print(line) }
-    }]
+    lines = r.run(conn)
+    for line in lines { print(line) }
+}]
 
 conn.close()
 engine.dispose()

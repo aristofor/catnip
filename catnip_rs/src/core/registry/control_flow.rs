@@ -1,5 +1,5 @@
 // FILE: catnip_rs/src/core/registry/control_flow.rs
-//! Control flow operations: if, while, for, block, return, break, continue, set_locals
+//! Control flow operations: if, while, for, block, return, break, continue, try, raise, set_locals
 
 use super::Registry;
 use crate::constants::*;
@@ -892,14 +892,19 @@ impl Registry {
             let globals_dict = ctx.getattr("globals")?;
 
             // Build MRO lookup: for each known struct, get its mro
+            // Fallback to built-in exception hierarchy for extends(RuntimeError) etc.
             let mro_result = crate::vm::mro::c3_linearize(&name, &base_names, |n| {
                 let parent_obj = globals_dict.call_method1("get", (n, py.None())).ok()?;
                 if parent_obj.is_none() {
-                    return None;
+                    return catnip_core::exception::ExceptionKind::from_name(n).map(|k| k.mro());
                 }
-                let parent_st = parent_obj.cast::<crate::vm::CatnipStructType>().ok()?;
-                let parent = parent_st.borrow();
-                Some(parent.mro.clone())
+                match parent_obj.cast::<crate::vm::CatnipStructType>() {
+                    Ok(parent_st) => {
+                        let parent = parent_st.borrow();
+                        Some(parent.mro.clone())
+                    }
+                    Err(_) => catnip_core::exception::ExceptionKind::from_name(n).map(|k| k.mro()),
+                }
             });
             let mro = mro_result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -909,6 +914,11 @@ impl Registry {
             let mut mro_field_defaults: Vec<Option<Py<PyAny>>> = Vec::new();
 
             for mro_type_name in mro.iter().skip(1) {
+                // Built-in exception types have no fields/methods to inherit
+                if catnip_core::exception::ExceptionKind::from_name(mro_type_name).is_some() {
+                    continue;
+                }
+
                 let parent_obj = globals_dict.call_method1("get", (mro_type_name.as_str(), py.None()))?;
                 if parent_obj.is_none() {
                     return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -1443,5 +1453,238 @@ impl Registry {
         }
 
         Ok(py.None())
+    }
+
+    /// Enum definition: register enum type and store in globals.
+    /// Args: [name_string, variants_tuple]
+    pub(crate) fn op_enum(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        use crate::vm::enums::CatnipEnumType;
+
+        if args.len() < 2 {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "enum: expected (name, variants)",
+            ));
+        }
+
+        let name: String = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?.extract(py)?;
+        let variants_obj = self.exec_stmt_impl(py, args.get_item(1)?.unbind())?;
+        let variants_tuple = variants_obj.bind(py).cast::<pyo3::types::PyTuple>()?;
+
+        let mut variant_names: Vec<String> = Vec::new();
+        for v in variants_tuple.iter() {
+            variant_names.push(v.extract()?);
+        }
+
+        let enum_type_obj = Py::new(py, CatnipEnumType::new(name.clone(), 0, &variant_names))?;
+
+        // Store in context globals
+        let ctx = self.ctx.bind(py);
+        ctx.call_method1("set_local", (name.as_str(), &enum_type_obj))?;
+
+        Ok(py.None())
+    }
+
+    // ========================================================================
+    // Error handling: try/except/finally, raise
+    // ========================================================================
+
+    /// Map a Python exception class name to the Catnip exception type name
+    /// used in except clauses.
+    fn exception_mro(py: Python<'_>, exc: &PyErr) -> Option<Vec<String>> {
+        // Check if a struct exception MRO was attached by op_raise
+        if let Ok(mro_attr) = exc.value(py).getattr("_struct_mro") {
+            if let Ok(mro) = mro_attr.extract::<Vec<String>>() {
+                return Some(mro);
+            }
+        }
+
+        let type_name = exc.get_type(py).name().ok()?;
+        let s = type_name.to_string();
+        let kind = match s.as_str() {
+            "CatnipTypeError" => Some(catnip_core::exception::ExceptionKind::TypeError),
+            "CatnipNameError" => Some(catnip_core::exception::ExceptionKind::NameError),
+            "CatnipRuntimeError" | "CatnipArityError" | "CatnipPatternError" => {
+                Some(catnip_core::exception::ExceptionKind::RuntimeError)
+            }
+            _ => catnip_core::exception::ExceptionKind::from_name(&s),
+        };
+        kind.map(|k| k.mro())
+    }
+
+    /// Check if a PyErr is a control flow signal (ReturnValue, BreakLoop, ContinueLoop).
+    fn is_control_flow_signal(py: Python<'_>, exc: &PyErr) -> bool {
+        if let Ok(type_name) = exc.get_type(py).name() {
+            matches!(
+                type_name.to_string().as_str(),
+                "ReturnValue" | "BreakLoop" | "ContinueLoop"
+            )
+        } else {
+            false
+        }
+    }
+
+    /// try/except/finally
+    ///
+    /// args[0]: body block (unevaluated)
+    /// args[1]: handlers list -- List[Tuple(types_list, binding_or_nil, handler_block)]
+    /// args[2]: finally block or None
+    pub(crate) fn op_try(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let body = args.get_item(0)?;
+        let handlers_list = args.get_item(1)?;
+        let finally_node = args.get_item(2)?;
+        let has_finally = !finally_node.is_none();
+
+        let mut result: Py<PyAny> = py.None();
+        let mut pending_signal: Option<PyErr> = None;
+        let mut pending_exception: Option<PyErr> = None;
+
+        // 1. Execute body
+        match self.exec_stmt_impl(py, body.unbind()) {
+            Ok(val) => {
+                result = val;
+            }
+            Err(e) => {
+                if Self::is_control_flow_signal(py, &e) {
+                    // return/break/continue: save for after finally
+                    pending_signal = Some(e);
+                } else if let Some(exc_mro) = Self::exception_mro(py, &e) {
+                    // Catchable exception: try handlers (MRO-based matching)
+                    let mut handled = false;
+                    let handlers_iter = handlers_list.try_iter()?;
+                    for handler_result in handlers_iter {
+                        let handler = handler_result?;
+                        let handler_tuple: &Bound<'_, PyTuple> = handler.cast()?;
+                        let types_list = handler_tuple.get_item(0)?;
+                        let binding = handler_tuple.get_item(1)?;
+                        let handler_body = handler_tuple.get_item(2)?;
+
+                        // Check if this handler matches (any handler type in exc MRO)
+                        let types_iter = types_list.try_iter()?;
+                        let types_vec: Vec<String> =
+                            types_iter.filter_map(|t| t.ok()?.extract::<String>().ok()).collect();
+
+                        let matches = if types_vec.is_empty() {
+                            // Wildcard: catch all
+                            true
+                        } else {
+                            types_vec.iter().any(|t| exc_mro.iter().any(|m| m == t))
+                        };
+
+                        if matches {
+                            // Save/restore active exception (nested try/except
+                            // inside a handler must not clobber the outer context)
+                            let prev = self.active_exception.borrow_mut().take();
+                            *self.active_exception.borrow_mut() = Some(e.clone_ref(py));
+
+                            // Bind exception message if binding present
+                            if !binding.is_none() {
+                                let binding_name: String = binding.extract()?;
+                                let exc_msg = e.value(py).str()?.to_string();
+                                let ctx = self.ctx.bind(py);
+                                let locals = ctx.getattr("locals")?;
+                                locals.call_method1("_set", (binding_name, exc_msg))?;
+                            }
+                            // Execute handler
+                            let handler_result = self.exec_stmt_impl(py, handler_body.unbind());
+
+                            // Restore previous active exception
+                            *self.active_exception.borrow_mut() = prev;
+
+                            result = handler_result?;
+                            handled = true;
+                            break;
+                        }
+                    }
+                    if !handled {
+                        pending_exception = Some(e);
+                    }
+                } else {
+                    // Unknown exception type: propagate after finally
+                    pending_exception = Some(e);
+                }
+            }
+        }
+
+        // 2. Execute finally (always)
+        if has_finally {
+            // If finally itself raises, that exception replaces any pending
+            self.exec_stmt_impl(py, finally_node.unbind())?;
+        }
+
+        // 3. Re-raise pending signal or exception
+        if let Some(sig) = pending_signal {
+            return Err(sig);
+        }
+        if let Some(exc) = pending_exception {
+            return Err(exc);
+        }
+
+        Ok(result)
+    }
+
+    /// raise [expr]
+    ///
+    /// args[0] (optional): expression to raise
+    /// If no args: bare raise (re-raise current exception)
+    pub(crate) fn op_raise(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        if args.is_empty() {
+            // Bare raise: re-raise the active exception
+            if let Some(exc) = self.active_exception.borrow().as_ref() {
+                return Err(exc.clone_ref(py));
+            }
+            let exc_module = py.import(PY_MOD_EXC)?;
+            let runtime_error = exc_module.getattr("CatnipRuntimeError")?;
+            return Err(PyErr::from_value(
+                runtime_error.call1(("raise: no active exception to re-raise",))?,
+            ));
+        }
+
+        // raise <expr>
+        let val = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?;
+        let val_bound = val.bind(py);
+
+        // If the value is a string, wrap in RuntimeError
+        if val_bound.is_instance_of::<pyo3::types::PyString>() {
+            let msg: String = val_bound.extract()?;
+            let exc_module = py.import(PY_MOD_EXC)?;
+            let runtime_error = exc_module.getattr("CatnipRuntimeError")?;
+            return Err(PyErr::from_value(runtime_error.call1((msg,))?));
+        }
+
+        // If the value is already a Python exception instance, raise it directly
+        if val_bound.is_instance_of::<pyo3::exceptions::PyBaseException>() {
+            return Err(PyErr::from_value(val_bound.clone()));
+        }
+
+        // Struct instance extending an exception type: attach MRO to the exception
+        if let Ok(proxy) = val_bound.cast::<crate::vm::CatnipStructProxy>() {
+            let proxy_ref = proxy.borrow();
+            if let Some(st) = &proxy_ref.struct_type {
+                let st_ref = st.bind(py).borrow();
+                if st_ref
+                    .mro
+                    .iter()
+                    .any(|t| catnip_core::exception::ExceptionKind::from_name(t).is_some())
+                {
+                    let msg = proxy_ref
+                        .field_values
+                        .first()
+                        .map(|v| v.bind(py).str().map(|s| s.to_string()).unwrap_or_default())
+                        .unwrap_or_default();
+                    let mro_list = pyo3::types::PyList::new(py, &st_ref.mro)?;
+                    let exc_module = py.import(PY_MOD_EXC)?;
+                    let runtime_error = exc_module.getattr("CatnipRuntimeError")?;
+                    let exc_instance = runtime_error.call1((msg,))?;
+                    exc_instance.setattr("_struct_mro", mro_list)?;
+                    return Err(PyErr::from_value(exc_instance));
+                }
+            }
+        }
+
+        // Otherwise: try to use it as a message
+        let msg = val_bound.str()?.to_string();
+        let exc_module = py.import(PY_MOD_EXC)?;
+        let runtime_error = exc_module.getattr("CatnipRuntimeError")?;
+        Err(PyErr::from_value(runtime_error.call1((msg,))?))
     }
 }

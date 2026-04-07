@@ -56,10 +56,14 @@ quickhull = (points) => {
         points
     } else {
         # Extrêmes gauche/droite en un seul pass
-        (min_p, max_p) = fold(points, tuple(points[0], points[0]), (acc, p) => {
-            (lo, hi) = acc
-            tuple(if p < lo { p } else { lo }, if p > hi { p } else { hi })
-        })
+        (min_p, max_p) = fold(
+            points,
+            tuple(points[0], points[0]),
+            (acc, p) => {
+                (lo, hi) = acc
+                tuple(if p < lo { p } else { lo }, if p > hi { p } else { hi })
+            }
+        )
         upper = left_of(points, min_p, max_p)
         lower = left_of(points, max_p, min_p)
         # Assemblage CCW : min → upper hull → max → lower hull
@@ -79,7 +83,7 @@ points = list(
     Point(0, 3),
     Point(1, 2),
     Point(2, 2),  # doublon
-    Point(4, 2),  # doublon
+    Point(4, 2),
 )
 
 hull = quickhull(points)

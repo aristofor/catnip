@@ -2,6 +2,7 @@
 # Import Op, Pattern classes, and Node classes from Rust implementation
 from catnip._rs import (
     Op,
+    PatternEnum,
     PatternLiteral,
     PatternOr,
     PatternStruct,

@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Lambdas et blocs anonymes
+# Lambdas et blocs anonymes
 
 print("⇒ Lambdas simples")
 

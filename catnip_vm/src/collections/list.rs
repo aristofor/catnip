@@ -1,6 +1,7 @@
 // FILE: catnip_vm/src/collections/list.rs
 //! NativeList -- mutable list backed by RefCell<Vec<Value>>.
 
+use super::clamp_slice_index;
 use crate::error::{VMError, VMResult};
 use crate::value::Value;
 use std::cell::RefCell;
@@ -198,18 +199,6 @@ pub fn normalize_index(index: i64, len: usize) -> VMResult<usize> {
         )));
     }
     Ok(idx as usize)
-}
-
-/// Clamp a slice index to [0, len].
-fn clamp_slice_index(index: i64, len: i64) -> usize {
-    if index < 0 {
-        let i = index + len;
-        if i < 0 { 0 } else { i as usize }
-    } else if index > len {
-        len as usize
-    } else {
-        index as usize
-    }
 }
 
 /// Compare two Values for ordering.

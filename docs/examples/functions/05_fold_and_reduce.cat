@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : fold et reduce
+# fold et reduce
 
 print("⇒ fold : agregation avec valeur initiale")
 
@@ -26,9 +26,13 @@ print()
 print("⇒ fold un seul niveau")
 
 # fold n'effectue pas de descente récursive
-taille_totale = fold(list(list(1, 2), list(3, 4)), 0, (acc, row) => {
+taille_totale = fold(
+    list(list(1, 2), list(3, 4)),
+    0,
+    (acc, row) => {
         acc + len(row)
-    })
+    }
+)
 print("Éléments dans sous-listes:", taille_totale)
 
 print()
@@ -39,9 +43,12 @@ somme = reduce(list(10, 20, 30), (acc, x) => { acc + x })
 print("reduce sum:", somme)
 
 # Maximum artisanal
-maximum = reduce(list(3, 1, 4, 1, 5, 9, 2, 6), (acc, x) => {
+maximum = reduce(
+    list(3, 1, 4, 1, 5, 9, 2, 6),
+    (acc, x) => {
         if x > acc { x } else { acc }
-    })
+    }
+)
 print("Maximum:", maximum)
 
 print()

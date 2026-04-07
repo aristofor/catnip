@@ -3,8 +3,8 @@
 # Arithmetic exacte : 0.1d + 0.2d == 0.3d
 
 # Litteraux
-prix  = 99.99d
-taxe  = 0.08d
+prix = 99.99d
+taxe = 0.08d
 total = prix + prix * taxe
 print(total)
 

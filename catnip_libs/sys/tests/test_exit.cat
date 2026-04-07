@@ -1,0 +1,5 @@
+# FILE: catnip_libs/sys/tests/test_exit.cat
+import('sys')
+
+# sys.exit(0) should terminate cleanly
+sys.exit(0)

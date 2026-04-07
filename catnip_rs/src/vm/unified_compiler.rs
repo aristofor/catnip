@@ -39,6 +39,42 @@ fn freeze_ir_body(body: &CompilerNode<'_>) -> Option<Arc<Vec<u8>>> {
 /// Delegates state and helpers to `CompilerCore` via Deref.
 pub struct UnifiedCompiler {
     core: CompilerCore,
+    /// Stack of active finally bodies as cloned Pure IR (for inlining on break/continue/return).
+    finally_stack: Vec<UCFinallyInfo>,
+}
+
+struct UCFinallyInfo {
+    body: UCFinallyBody,
+    has_except: bool,
+    needs_clear_exception: bool,
+}
+
+enum UCFinallyBody {
+    Pure(catnip_core::ir::pure::IR),
+    PyObj(pyo3::Py<pyo3::PyAny>),
+}
+
+impl Clone for UCFinallyInfo {
+    fn clone(&self) -> Self {
+        Self {
+            body: self.body.clone(),
+            has_except: self.has_except,
+            needs_clear_exception: self.needs_clear_exception,
+        }
+    }
+}
+
+impl Clone for UCFinallyBody {
+    fn clone(&self) -> Self {
+        match self {
+            UCFinallyBody::Pure(ir) => UCFinallyBody::Pure(ir.clone()),
+            UCFinallyBody::PyObj(obj) => {
+                // Safe: clone only happens during compilation which holds the GIL
+                let py = unsafe { pyo3::Python::assume_attached() };
+                UCFinallyBody::PyObj(obj.clone_ref(py))
+            }
+        }
+    }
 }
 
 struct FunctionCompileSpec<'a, 'py> {
@@ -75,6 +111,7 @@ impl UnifiedCompiler {
     pub fn new() -> Self {
         Self {
             core: CompilerCore::new(),
+            finally_stack: Vec::new(),
         }
     }
 
@@ -94,11 +131,15 @@ impl UnifiedCompiler {
     pub fn compile_pure(&mut self, py: Python<'_>, node: &IR) -> PyResult<CodeObject> {
         let mut pure_compiler = catnip_vm::compiler::PureCompiler::new();
         match pure_compiler.compile(node) {
-            Ok(output) => crate::vm::py_interop::convert_pure_compile_output(py, &output),
+            Ok(output) => Ok(crate::vm::py_interop::convert_pure_compile_output(py, &output)?),
             Err(catnip_vm::compiler::CompileError::UnsupportedLiteral(_)) => {
                 // Fallback: IR contains Decimal/Imaginary that need Python
                 let cn = CompilerNode::Pure(node);
                 self.compile(py, &cn)
+            }
+            Err(catnip_vm::compiler::CompileError::NotImplemented(msg)) => {
+                // Opcodes not yet lowered to bytecode
+                Err(pyo3::exceptions::PyNotImplementedError::new_err(msg))
             }
             Err(e) => Err(pyo3::exceptions::PySyntaxError::new_err(e.to_string())),
         }
@@ -238,10 +279,7 @@ impl UnifiedCompiler {
                 let imag: f64 = s.parse().map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid imaginary: {}", e))
                 })?;
-                let builtins = py.import("builtins")?;
-                let complex_cls = builtins.getattr("complex")?;
-                let obj = complex_cls.call1((0.0, imag))?;
-                let idx = self.add_const_pyobj(py, &obj);
+                let idx = self.core.add_const(Value::from_complex(0.0, imag));
                 self.emit(VMOpCode::LoadConst, idx as u32);
                 Ok(())
             }
@@ -392,7 +430,8 @@ impl UnifiedCompiler {
             | IR::PatternWildcard
             | IR::PatternOr(_)
             | IR::PatternTuple(_)
-            | IR::PatternStruct { .. } => {
+            | IR::PatternStruct { .. }
+            | IR::PatternEnum { .. } => {
                 let idx = self.core.add_const(Value::NIL);
                 self.emit(VMOpCode::LoadConst, idx as u32);
                 Ok(())
@@ -633,8 +672,8 @@ impl UnifiedCompiler {
             IROpCode::OpFor => self.compile_for(py, args),
             IROpCode::OpBlock => self.compile_block(py, args),
             IROpCode::OpReturn => self.compile_return(py, args),
-            IROpCode::OpBreak => self.core.compile_break(),
-            IROpCode::OpContinue => self.core.compile_continue(),
+            IROpCode::OpBreak => self.compile_break_with_finally(py),
+            IROpCode::OpContinue => self.compile_continue_with_finally(py),
 
             // Functions
             IROpCode::Call => self.compile_call(py, args, kwargs, tail),
@@ -706,6 +745,12 @@ impl UnifiedCompiler {
                 Ok(())
             }
 
+            IROpCode::ExcInfo => {
+                // Push (exc_type, exc_value, None) from active exception
+                self.emit(VMOpCode::LoadException, 1);
+                Ok(())
+            }
+
             IROpCode::Globals => {
                 self.emit(VMOpCode::Globals, 0);
                 Ok(())
@@ -718,6 +763,10 @@ impl UnifiedCompiler {
 
             IROpCode::OpStruct => self.compile_struct(py, args),
             IROpCode::TraitDef => self.compile_trait(py, args),
+            IROpCode::EnumDef => self.compile_enum(py, args),
+
+            IROpCode::OpTry => self.compile_try(py, args),
+            IROpCode::OpRaise => self.compile_raise(py, args),
 
             _ => Err(pyo3::exceptions::PyNotImplementedError::new_err(format!(
                 "UnifiedCompiler: cannot compile IR opcode: {}",
@@ -1418,6 +1467,11 @@ impl UnifiedCompiler {
             let idx = self.core.add_const(Value::NIL);
             self.emit(VMOpCode::LoadConst, idx as u32);
         }
+        if self.core.finally_depth > 0 {
+            let n = self.finally_stack.len();
+            self.emit_finally_unwind(py)?;
+            self.core.finally_depth += n;
+        }
         self.emit(VMOpCode::Return, 0);
         Ok(())
     }
@@ -2082,6 +2136,33 @@ impl UnifiedCompiler {
         Ok(())
     }
 
+    // ========== 15b. Enum definition ==========
+
+    fn compile_enum<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
+        let name = args[0].as_name(py).unwrap_or_default();
+
+        // args[1] = tuple of variant name strings
+        let variant_nodes = args[1].children(py)?;
+        let mut variant_names: Vec<Bound<'py, PyAny>> = Vec::new();
+        for v in &variant_nodes {
+            let vname = v.as_name(py).unwrap_or_default();
+            variant_names.push(vname.into_pyobject(py)?.into_any());
+        }
+        let variants_tuple = PyTuple::new(py, &variant_names)?;
+
+        let enum_info = PyTuple::new(
+            py,
+            &[
+                name.as_str().into_pyobject(py)?.into_any().as_any().clone(),
+                variants_tuple.into_any(),
+            ],
+        )?;
+
+        let idx = self.add_const_pyobj(py, &enum_info.into_any());
+        self.emit(VMOpCode::MakeEnum, idx as u32);
+        Ok(())
+    }
+
     // ========== 16. ND operations ==========
 
     fn compile_nd_recursion<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
@@ -2179,7 +2260,264 @@ impl UnifiedCompiler {
         Ok(())
     }
 
-    // ========== 18. Helper methods ==========
+    // ========== 18. Exception handling ==========
+
+    /// Emit inline finally cleanup for break/continue/return paths.
+    fn emit_finally_unwind<'py>(&mut self, py: Python<'py>) -> PyResult<()> {
+        let bodies: Vec<UCFinallyInfo> = self.finally_stack.iter().rev().cloned().collect();
+        for info in &bodies {
+            if info.needs_clear_exception {
+                self.emit(VMOpCode::ClearException, 0);
+            }
+            if info.has_except {
+                self.emit(VMOpCode::PopHandler, 0);
+            }
+            self.emit(VMOpCode::PopHandler, 0);
+            self.core.finally_depth -= 1;
+            match &info.body {
+                UCFinallyBody::Pure(ir) => {
+                    let cn = CompilerNode::Pure(ir);
+                    self.compile_node(py, &cn)?;
+                }
+                UCFinallyBody::PyObj(obj) => {
+                    let cn = CompilerNode::PyObj(obj.bind(py).clone());
+                    self.compile_node(py, &cn)?;
+                }
+            }
+            self.emit(VMOpCode::PopTop, 0);
+        }
+        Ok(())
+    }
+
+    fn compile_break_with_finally<'py>(&mut self, py: Python<'py>) -> PyResult<()> {
+        if self.core.finally_depth == 0 {
+            return self
+                .core
+                .compile_break()
+                .map_err(|e| pyo3::exceptions::PySyntaxError::new_err(e.to_string()));
+        }
+        let n = self.finally_stack.len();
+        self.emit_finally_unwind(py)?;
+        let result = self.core.compile_break();
+        self.core.finally_depth += n;
+        result.map_err(|e| pyo3::exceptions::PySyntaxError::new_err(e.to_string()))
+    }
+
+    fn compile_continue_with_finally<'py>(&mut self, py: Python<'py>) -> PyResult<()> {
+        if self.core.finally_depth == 0 {
+            return self
+                .core
+                .compile_continue()
+                .map_err(|e| pyo3::exceptions::PySyntaxError::new_err(e.to_string()));
+        }
+        let n = self.finally_stack.len();
+        self.emit_finally_unwind(py)?;
+        let result = self.core.compile_continue();
+        self.core.finally_depth += n;
+        result.map_err(|e| pyo3::exceptions::PySyntaxError::new_err(e.to_string()))
+    }
+
+    fn compile_try<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
+        let body = &args[0];
+        let handlers_node = &args[1];
+        let finally_node = &args[2];
+        let has_finally = !finally_node.is_none_value();
+
+        let handlers = if handlers_node.is_list_or_tuple() {
+            handlers_node.children(py)?
+        } else {
+            Vec::new()
+        };
+        let has_except = !handlers.is_empty();
+
+        let mut finally_setup_addr = None;
+        let mut except_setup_addr = None;
+
+        // Install handlers (Finally first, Except on top)
+        if has_finally {
+            finally_setup_addr = Some(self.emit(VMOpCode::SetupFinally, 0));
+            self.core.finally_depth += 1;
+            let body = match finally_node {
+                CompilerNode::Pure(ir) => UCFinallyBody::Pure((*ir).clone()),
+                CompilerNode::PyObj(obj) => UCFinallyBody::PyObj(obj.clone().unbind()),
+            };
+            self.finally_stack.push(UCFinallyInfo {
+                body,
+                has_except,
+                needs_clear_exception: false,
+            });
+        }
+        if has_except {
+            except_setup_addr = Some(self.emit(VMOpCode::SetupExcept, 0));
+        }
+
+        // Try body
+        self.compile_node(py, body)?;
+
+        // Happy path: pop handlers
+        if has_except {
+            self.emit(VMOpCode::PopHandler, 0);
+        }
+        // Save the finally body before popping (needed for handler bodies below)
+        let saved_finally_body = if has_finally {
+            self.finally_stack.last().map(|info| info.body.clone())
+        } else {
+            None
+        };
+        if has_finally {
+            self.emit(VMOpCode::PopHandler, 0);
+            self.core.finally_depth -= 1;
+            self.finally_stack.pop();
+        }
+
+        // Inline finally on happy path
+        if has_finally {
+            self.compile_node(py, finally_node)?;
+            self.emit(VMOpCode::PopTop, 0);
+        }
+        let end_jump = self.emit(VMOpCode::Jump, 0);
+        let mut handler_end_jumps: Vec<usize> = Vec::new();
+
+        // Except dispatch
+        if has_except {
+            let except_addr = self.instructions.len();
+            if let Some(addr) = except_setup_addr {
+                self.core.patch(addr, except_addr as u32);
+            }
+
+            // Restore finally context for handler bodies so break/continue inline ClearException + finally
+            if let Some(ref body) = saved_finally_body {
+                self.core.finally_depth += 1;
+                self.finally_stack.push(UCFinallyInfo {
+                    body: body.clone(),
+                    has_except: false,
+                    needs_clear_exception: true,
+                });
+            }
+
+            for handler_node in &handlers {
+                let handler_len = handler_node.children_len(py)?;
+                if handler_len < 3 {
+                    continue;
+                }
+                let types_node = handler_node.child(py, 0)?;
+                let binding_node = handler_node.child(py, 1)?;
+                let handler_body = handler_node.child(py, 2)?;
+
+                let type_list = if types_node.is_list_or_tuple() {
+                    types_node.children(py)?
+                } else {
+                    Vec::new()
+                };
+                let is_wildcard = type_list.is_empty();
+
+                if !is_wildcard {
+                    // Typed handler: check each exception type
+                    let mut type_match_jumps = Vec::new();
+                    for type_ir in &type_list {
+                        let type_name = type_ir.as_string()?;
+                        let py_str = type_name.into_pyobject(py)?.into_any();
+                        let const_idx = self.add_const_pyobj(py, &py_str);
+                        self.emit(VMOpCode::CheckExcMatch, const_idx as u32);
+                        type_match_jumps.push(self.emit(VMOpCode::JumpIfTrue, 0));
+                    }
+                    let skip_jump = self.emit(VMOpCode::Jump, 0);
+
+                    // Handler body start
+                    let handler_start = self.instructions.len() as u32;
+                    for addr in type_match_jumps {
+                        self.core.patch(addr, handler_start);
+                    }
+
+                    // Bind exception message if binding present
+                    if !binding_node.is_none_value() {
+                        if let Ok(name) = binding_node.as_string() {
+                            self.emit(VMOpCode::LoadException, 0);
+                            let slot = self.add_local(&name);
+                            self.emit(VMOpCode::StoreLocal, slot as u32);
+                        }
+                    }
+
+                    self.compile_node(py, &handler_body)?;
+
+                    // Pop exception stack + inline finally
+                    self.emit(VMOpCode::ClearException, 0);
+                    if has_finally {
+                        self.emit(VMOpCode::PopHandler, 0);
+                        self.compile_node(py, finally_node)?;
+                        self.emit(VMOpCode::PopTop, 0);
+                    }
+                    handler_end_jumps.push(self.emit(VMOpCode::Jump, 0));
+
+                    let next = self.instructions.len() as u32;
+                    self.core.patch(skip_jump, next);
+                } else {
+                    // Wildcard handler
+                    if !binding_node.is_none_value() {
+                        if let Ok(name) = binding_node.as_string() {
+                            self.emit(VMOpCode::LoadException, 0);
+                            let slot = self.add_local(&name);
+                            self.emit(VMOpCode::StoreLocal, slot as u32);
+                        }
+                    }
+
+                    self.compile_node(py, &handler_body)?;
+
+                    // Pop exception stack + inline finally
+                    self.emit(VMOpCode::ClearException, 0);
+                    if has_finally {
+                        self.emit(VMOpCode::PopHandler, 0);
+                        self.compile_node(py, finally_node)?;
+                        self.emit(VMOpCode::PopTop, 0);
+                    }
+                    handler_end_jumps.push(self.emit(VMOpCode::Jump, 0));
+                    break; // Wildcard is always last
+                }
+            }
+
+            // Restore finally context
+            if saved_finally_body.is_some() {
+                self.core.finally_depth -= 1;
+                self.finally_stack.pop();
+            }
+
+            // No handler matched: bare re-raise (goes through handler stack for finally)
+            self.emit(VMOpCode::Raise, 1);
+        }
+
+        // Finally landing pad (reached by VM when it pops a Finally handler)
+        if has_finally {
+            let finally_landing = self.instructions.len() as u32;
+            if let Some(addr) = finally_setup_addr {
+                self.core.patch(addr, finally_landing);
+            }
+            self.compile_node(py, finally_node)?;
+            self.emit(VMOpCode::PopTop, 0);
+            self.emit(VMOpCode::ResumeUnwind, 0);
+        }
+
+        // End label: all paths (happy, handler, finally-only) converge here
+        let end_addr = self.instructions.len() as u32;
+        self.core.patch(end_jump, end_addr);
+        for addr in handler_end_jumps {
+            self.core.patch(addr, end_addr);
+        }
+        Ok(())
+    }
+
+    fn compile_raise<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
+        if args.is_empty() {
+            // Bare raise
+            self.emit(VMOpCode::Raise, 1);
+        } else {
+            // raise expr
+            self.compile_node(py, &args[0])?;
+            self.emit(VMOpCode::Raise, 0);
+        }
+        Ok(())
+    }
+
+    // ========== 19. Helper methods ==========
 
     /// Add a Python object constant (fallback to NIL on conversion error).
     fn add_const_pyobj(&mut self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> usize {
@@ -2385,6 +2723,13 @@ impl UnifiedCompiler {
                     field_slots,
                 }))
             }
+            IR::PatternEnum {
+                enum_name,
+                variant_name,
+            } => Ok(Some(VMPattern::Enum {
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+            })),
             _ => Ok(None),
         }
     }

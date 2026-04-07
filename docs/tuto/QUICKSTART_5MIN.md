@@ -180,7 +180,7 @@ def double(x):
 
 ```catnip
 # Dans le script :
-tools = import("tools", protocol="py")
+tools = import('tools', protocol="py")
 result = tools.double(21)
 ```
 

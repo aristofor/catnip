@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : pattern matching
+# Pattern matching
 
 print("⇒ Match sur valeurs littérales")
 
@@ -150,6 +150,27 @@ match origin {
 v = Vec3(1, 2, 3)
 match v {
     Vec3{x, y, z} => { print("Vecteur:", x, y, z, "- Norme²:", x ** 2 + y ** 2 + z ** 2) }
+}
+
+print()
+print("⇒ Struct dans tuple")
+
+# Struct pattern à l'intérieur d'un tuple pattern
+data = tuple(Point(1, 2), "label")
+match data {
+    (Point{x, y}, name) => { print("Struct in tuple:", x + y, name) }
+    _ => { print("no match") }
+}
+
+# Deux structs dans un tuple
+match tuple(Point(1, 2), Color(255, 0, 128)) {
+    (Point{x, y}, Color{r, g, b}) => { print("Multi-struct:", x, y, r, g, b) }
+}
+
+# Avec guard
+match tuple(Point(0, 5), 10) {
+    (Point{x, y}, z) if x == 0 => { print("Origin x, y*z =", y * z) }
+    (Point{x, y}, z) => { print("General:", x + y + z) }
 }
 
 print()

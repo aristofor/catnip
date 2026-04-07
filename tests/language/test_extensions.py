@@ -190,6 +190,34 @@ class TestLoaderDetection:
         finally:
             sys.modules.pop(mod_name, None)
 
+    def test_extension_exports_override_existing_global(self):
+        """Extension exports overwrite pre-existing globals (matches Python API)."""
+        mod_name = '_catnip_test_ext_override'
+        m = types.ModuleType(mod_name)
+        m.__catnip_extension__ = {
+            'name': 'override-test',
+            'version': '0.1.0',
+            'exports': {'ext_val': 99},
+        }
+        sys.modules[mod_name] = m
+        try:
+            from catnip import Catnip
+
+            # First call sets ext_val via extension
+            c = Catnip()
+            c.parse(f'import("{mod_name}"); ext_val')
+            result = c.execute()
+            assert result == 99
+
+            # Second import with different value overwrites
+            m.__catnip_extension__['exports']['ext_val'] = 200
+            c2 = Catnip()
+            c2.parse(f'import("{mod_name}"); ext_val')
+            result2 = c2.execute()
+            assert result2 == 200
+        finally:
+            sys.modules.pop(mod_name, None)
+
 
 # ---------------------------------------------------------------------------
 # Runtime introspection (catnip.extensions)

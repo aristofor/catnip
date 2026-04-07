@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Knapsack (0/1)
+# Knapsack (0/1)
 
 struct Item { name; weight; value; }
 
@@ -42,20 +42,23 @@ print("⇒ ND-memoized")
 
 pragma('nd_memoize', True)
 
-best = ~~(tuple(n, capacity), (state, recur) => {
-    i = state[0]
-    w = state[1]
-    if i == 0 or w == 0 { 0 }
-    else {
-        item = items[i - 1]
-        if item.weight > w { recur(tuple(i - 1, w)) }
+best = ~~(
+    tuple(n, capacity),
+    (state, recur) => {
+        i = state[0]
+        w = state[1]
+        if i == 0 or w == 0 { 0 }
         else {
-            skip = recur(tuple(i - 1, w))
-            take = item.value + recur(tuple(i - 1, w - item.weight))
-            if take > skip { take } else { skip }
+            item = items[i - 1]
+            if item.weight > w { recur(tuple(i - 1, w)) }
+            else {
+                skip = recur(tuple(i - 1, w))
+                take = item.value + recur(tuple(i - 1, w - item.weight))
+                if take > skip { take } else { skip }
+            }
         }
     }
-})
+)
 
 print(f"max value = {best}")
 

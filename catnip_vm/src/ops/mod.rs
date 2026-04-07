@@ -3,4 +3,5 @@
 
 pub mod arith;
 pub mod collection;
+pub mod errors;
 pub mod string;

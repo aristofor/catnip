@@ -6,13 +6,17 @@
 
 pub mod cfg;
 pub mod constants;
+pub mod exception;
 pub mod freeze;
 pub mod ir;
 pub mod jit;
+pub mod loader;
 pub mod nanbox;
 pub mod parser;
 pub mod paths;
 pub mod pipeline;
+pub mod policy;
 pub mod semantic;
+pub mod symbols;
 pub mod types;
 pub mod vm;

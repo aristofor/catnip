@@ -429,6 +429,32 @@ class TestNewResolution(unittest.TestCase):
         result = catnip.execute()
         self.assertTrue(result)
 
+    def test_runtime_import_cache_is_scoped_by_caller_dir(self):
+        """The runtime ImportLoader must not reuse a module across different caller dirs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dir_a = root / "a"
+            dir_b = root / "b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+            (dir_a / "helper.py").write_text('VALUE = "A"\n')
+            (dir_b / "helper.py").write_text('VALUE = "B"\n')
+
+            catnip = Catnip()
+            meta = catnip.context.globals["META"]
+
+            meta.file = str(dir_a / "main.cat")
+            catnip._pipeline.inject_globals(catnip.context.globals)
+            mod_a = catnip._fixed_import("helper")
+
+            meta.file = str(dir_b / "main.cat")
+            catnip._pipeline.inject_globals(catnip.context.globals)
+            mod_b = catnip._fixed_import("helper")
+
+            self.assertEqual(mod_a.VALUE, "A")
+            self.assertEqual(mod_b.VALUE, "B")
+            self.assertIsNot(mod_a, mod_b)
+
 
 class TestPackages(unittest.TestCase):
     """Tests for lib.toml package resolution."""
@@ -707,6 +733,90 @@ class TestRelativeImports(unittest.TestCase):
             catnip.parse('m = import(".mylib")\nm.greet()')
             result = catnip.execute()
             self.assertEqual(result, "hello")
+
+
+class TestImportStatement(unittest.TestCase):
+    """Tests for the import statement syntax: import('spec') with auto-binding."""
+
+    def test_import_statement_basic(self):
+        """import('math') binds math in scope."""
+        catnip = Catnip()
+        catnip.parse("import('math')\nmath.sqrt(81)")
+        result = catnip.execute()
+        self.assertEqual(result, 9)
+
+    def test_import_statement_double_quotes(self):
+        """import("math") with double quotes."""
+        catnip = Catnip()
+        catnip.parse('import("math")\nmath.pi')
+        result = catnip.execute()
+        self.assertAlmostEqual(result, 3.141592653589793)
+
+    def test_import_statement_relative(self):
+        """import('.utils') binds utils from caller dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "utils.cat").write_text('double = (x) => { x * 2 }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse("import('.utils')\nutils.double(5)")
+            result = catnip.execute()
+            self.assertEqual(result, 10)
+
+    def test_import_statement_dotted_no_binding(self):
+        """import('os.path') in statement form does not auto-bind (ambiguous name)."""
+        catnip = Catnip()
+        catnip.parse("import('os.path')")
+        catnip.execute()
+        # No auto-binding: neither 'os' nor 'path' should be in globals
+        self.assertNotIn('os', catnip.context.globals)
+        self.assertNotIn('path', catnip.context.globals)
+
+    def test_import_expression_unchanged(self):
+        """m = import('math') still works as expression."""
+        catnip = Catnip()
+        catnip.parse('m = import("math")\nm.sqrt(81)')
+        result = catnip.execute()
+        self.assertEqual(result, 9)
+
+    def test_import_selective_unchanged(self):
+        """import('math', 'sqrt') still works as function call."""
+        catnip = Catnip()
+        catnip.parse('import("math", "sqrt")\nsqrt(144)')
+        result = catnip.execute()
+        self.assertEqual(result, 12.0)
+
+    def test_import_statement_catnip_module(self):
+        """import('mod') binds a .cat module."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "mymod.cat").write_text('add1 = (x) => { x + 1 }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse("import('.mymod')\nmymod.add1(9)")
+            result = catnip.execute()
+            self.assertEqual(result, 10)
+
+
+class TestImportStatementNoDesugar(unittest.TestCase):
+    """Verify that import() with non-literal args does NOT auto-bind."""
+
+    def test_dynamic_spec_no_binding(self):
+        """import(spec("math")) should not auto-bind math."""
+        catnip = Catnip()
+        catnip.parse('spec = (x) => { x }; import(spec("math"))')
+        catnip.execute()
+        self.assertNotIn('math', catnip.context.globals)
+
+    def test_concat_spec_no_binding(self):
+        """import("ma" + "th") should not auto-bind."""
+        catnip = Catnip()
+        catnip.parse('import("ma" + "th")')
+        catnip.execute()
+        self.assertNotIn('math', catnip.context.globals)
+
+    def test_fstring_spec_no_binding(self):
+        """import(f"math") should not auto-bind."""
+        catnip = Catnip()
+        catnip.parse('x = "math"; import(f"{x}")')
+        catnip.execute()
+        self.assertNotIn('math', catnip.context.globals)
 
 
 if __name__ == "__main__":

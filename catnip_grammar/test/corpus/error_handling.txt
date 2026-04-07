@@ -1,0 +1,219 @@
+================================================================================
+try/except with wildcard
+================================================================================
+
+try { f() } except { _ => { g() } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (except_block
+        (except_clause
+          (except_pattern
+            (pattern_wildcard))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments)))))))))
+
+================================================================================
+try/except with typed clause and binding
+================================================================================
+
+try { f() } except { e: TypeError => { g(e) } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (except_block
+        (except_clause
+          binding: (identifier)
+          (except_pattern
+            (except_types
+              (identifier)))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments
+                  (args
+                    (identifier)))))))))))
+
+================================================================================
+try/except with multiple types
+================================================================================
+
+try { f() } except { e: ValueError | KeyError => { g(e) } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (except_block
+        (except_clause
+          binding: (identifier)
+          (except_pattern
+            (except_types
+              (identifier)
+              (identifier)))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments
+                  (args
+                    (identifier)))))))))))
+
+================================================================================
+try/except with multiple clauses
+================================================================================
+
+try { f() } except { e: TypeError => { a() } _ => { b() } }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (except_block
+        (except_clause
+          binding: (identifier)
+          (except_pattern
+            (except_types
+              (identifier)))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments)))))
+        (except_clause
+          (except_pattern
+            (pattern_wildcard))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments)))))))))
+
+================================================================================
+try/finally
+================================================================================
+
+try { f() } finally { cleanup() }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (finally_clause
+        body: (block
+          (statement
+            (call
+              (identifier)
+              (arguments))))))))
+
+================================================================================
+try/except/finally
+================================================================================
+
+try { f() } except { e: TypeError => { g(e) } _ => { h() } } finally { cleanup() }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (try_stmt
+      body: (block
+        (statement
+          (call
+            (identifier)
+            (arguments))))
+      (except_block
+        (except_clause
+          binding: (identifier)
+          (except_pattern
+            (except_types
+              (identifier)))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments
+                  (args
+                    (identifier)))))))
+        (except_clause
+          (except_pattern
+            (pattern_wildcard))
+          handler: (block
+            (statement
+              (call
+                (identifier)
+                (arguments))))))
+      (finally_clause
+        body: (block
+          (statement
+            (call
+              (identifier)
+              (arguments))))))))
+
+================================================================================
+raise with expression
+================================================================================
+
+raise ValueError("msg")
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (raise_stmt
+      value: (call
+        (identifier)
+        (arguments
+          (args
+            (literal
+              (string))))))))
+
+================================================================================
+bare raise
+================================================================================
+
+raise
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (raise_stmt)))

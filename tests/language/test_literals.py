@@ -491,6 +491,61 @@ class TestDictKwargs(unittest.TestCase):
         assert c.context.globals['x'] == {'a': 1, 'b': 2}
 
 
+class TestDictFromIterable(unittest.TestCase):
+    """Test dict(iterable_of_pairs) - construct dict from a single iterable."""
+
+    def test_dict_from_list_of_tuples(self):
+        c = Catnip()
+        c.parse('x = dict(list(tuple("a", 1), tuple("b", 2)))')
+        c.execute()
+        assert c.context.globals['x'] == {'a': 1, 'b': 2}
+
+    def test_dict_from_zip(self):
+        c = Catnip()
+        c.parse('x = dict(zip(list("x", "y", "z"), list(1, 2, 3)))')
+        c.execute()
+        assert c.context.globals['x'] == {'x': 1, 'y': 2, 'z': 3}
+
+    def test_dict_from_broadcast(self):
+        c = Catnip()
+        c.parse('x = dict(range(5).[(n) => { tuple(n, n ** 2) }])')
+        c.execute()
+        assert c.context.globals['x'] == {0: 0, 1: 1, 2: 4, 3: 9, 4: 16}
+
+    def test_dict_from_filtered_broadcast(self):
+        c = Catnip()
+        c.parse('x = dict(range(10).[if (n) => { n % 2 == 0 }].[(n) => { tuple(n, n * 10) }])')
+        c.execute()
+        assert c.context.globals['x'] == {0: 0, 2: 20, 4: 40, 6: 60, 8: 80}
+
+    def test_dict_from_variable(self):
+        c = Catnip()
+        c.parse('pairs = list(tuple("a", 1), tuple("b", 2)); x = dict(pairs)')
+        c.execute()
+        assert c.context.globals['x'] == {'a': 1, 'b': 2}
+
+    def test_dict_from_iterable_with_kwargs(self):
+        c = Catnip()
+        c.parse('x = dict(list(tuple("a", 1)), extra=42)')
+        c.execute()
+        assert c.context.globals['x'] == {'a': 1, 'extra': 42}
+
+    def test_dict_from_iterable_with_spread(self):
+        c = Catnip()
+        c.parse('base = dict(x=10); x = dict(list(tuple("a", 1)), **base)')
+        c.execute()
+        assert c.context.globals['x'] == {'a': 1, 'x': 10}
+
+    def test_dict_from_iterable_preserves_existing_syntax(self):
+        """Existing dict() forms still work."""
+        c = Catnip()
+        c.parse('a = dict(); b = dict(x=1); c = dict(("k", 2))')
+        c.execute()
+        assert c.context.globals['a'] == {}
+        assert c.context.globals['b'] == {'x': 1}
+        assert c.context.globals['c'] == {'k': 2}
+
+
 class TestCombined(unittest.TestCase):
     """Test combining lists, tuples, sets, and dicts."""
 
@@ -660,6 +715,154 @@ class TestCollectionSpreadLiterals(unittest.TestCase):
         c.parse('x = dict(**dict(a=1), ("b", 2), c=3, **dict(d=4))')
         c.execute()
         assert c.context.globals['x'] == {'a': 1, 'b': 2, 'c': 3, 'd': 4}
+
+
+class TestBracketListLiterals(unittest.TestCase):
+    """Test bracket list literal syntax [...]."""
+
+    def test_empty(self):
+        c = Catnip()
+        c.parse("x = []")
+        c.execute()
+        assert c.context.globals['x'] == []
+
+    def test_numbers(self):
+        c = Catnip()
+        c.parse("x = [1, 2, 3]")
+        c.execute()
+        assert c.context.globals['x'] == [1, 2, 3]
+
+    def test_strings(self):
+        c = Catnip()
+        c.parse('x = ["a", "b", "c"]')
+        c.execute()
+        assert c.context.globals['x'] == ["a", "b", "c"]
+
+    def test_expressions(self):
+        c = Catnip()
+        c.parse("x = [1 + 1, 2 * 3]")
+        c.execute()
+        assert c.context.globals['x'] == [2, 6]
+
+    def test_nested(self):
+        c = Catnip()
+        c.parse("x = [[1, 2], [3, 4]]")
+        c.execute()
+        assert c.context.globals['x'] == [[1, 2], [3, 4]]
+
+    def test_trailing_comma(self):
+        c = Catnip()
+        c.parse("x = [1, 2, 3,]")
+        c.execute()
+        assert c.context.globals['x'] == [1, 2, 3]
+
+    def test_index(self):
+        c = Catnip()
+        c.parse("x = [10, 20, 30][1]")
+        c.execute()
+        assert c.context.globals['x'] == 20
+
+    def test_spread(self):
+        c = Catnip()
+        c.parse("a = [1, 2]; x = [*a, 3, 4]")
+        c.execute()
+        assert c.context.globals['x'] == [1, 2, 3, 4]
+
+    def test_in_function_arg(self):
+        c = Catnip()
+        c.parse("x = len([1, 2, 3])")
+        c.execute()
+        assert c.context.globals['x'] == 3
+
+    def test_single_element(self):
+        c = Catnip()
+        c.parse("x = [42]")
+        c.execute()
+        assert c.context.globals['x'] == [42]
+
+    def test_method_call(self):
+        c = Catnip()
+        c.parse("x = [3, 1, 2]; x.sort()")
+        c.execute()
+        assert c.context.globals['x'] == [1, 2, 3]
+
+
+class TestBracketDictLiterals(unittest.TestCase):
+    """Test bracket dict literal syntax {key: value}."""
+
+    def test_string_keys(self):
+        c = Catnip()
+        c.parse('x = {"a": 1, "b": 2}')
+        c.execute()
+        assert c.context.globals['x'] == {"a": 1, "b": 2}
+
+    def test_number_keys(self):
+        c = Catnip()
+        c.parse('x = {1: "one", 2: "two"}')
+        c.execute()
+        assert c.context.globals['x'] == {1: "one", 2: "two"}
+
+    def test_expressions(self):
+        c = Catnip()
+        c.parse('x = {"sum": 1 + 2}')
+        c.execute()
+        assert c.context.globals['x'] == {"sum": 3}
+
+    def test_index(self):
+        c = Catnip()
+        c.parse('x = {"a": 1, "b": 2}["a"]')
+        c.execute()
+        assert c.context.globals['x'] == 1
+
+    def test_nested(self):
+        c = Catnip()
+        c.parse('x = {"inner": {"a": 1}}')
+        c.execute()
+        assert c.context.globals['x'] == {"inner": {"a": 1}}
+
+    def test_with_bracket_list_values(self):
+        c = Catnip()
+        c.parse('x = {"nums": [1, 2, 3], "names": ["a", "b"]}')
+        c.execute()
+        assert c.context.globals['x'] == {"nums": [1, 2, 3], "names": ["a", "b"]}
+
+    def test_trailing_comma(self):
+        c = Catnip()
+        c.parse('x = {"a": 1,}')
+        c.execute()
+        assert c.context.globals['x'] == {"a": 1}
+
+    def test_spread(self):
+        c = Catnip()
+        c.parse('base = dict(a=1); x = {**base, "b": 2}')
+        c.execute()
+        assert c.context.globals['x'] == {"a": 1, "b": 2}
+
+    def test_single_pair(self):
+        c = Catnip()
+        c.parse('x = {"only": 42}')
+        c.execute()
+        assert c.context.globals['x'] == {"only": 42}
+
+    def test_bool_key(self):
+        c = Catnip()
+        c.parse('x = {True: "yes", False: "no"}')
+        c.execute()
+        assert c.context.globals['x'] == {True: "yes", False: "no"}
+
+
+class TestBlockRegression(unittest.TestCase):
+    """Ensure blocks still work after adding bracket dict."""
+
+    def test_block_returns_last(self):
+        c = Catnip()
+        c.parse("{ 42 }")
+        assert c.execute() == 42
+
+    def test_block_with_statements(self):
+        c = Catnip()
+        c.parse("{ a = 1; a + 1 }")
+        assert c.execute() == 2
 
 
 if __name__ == "__main__":

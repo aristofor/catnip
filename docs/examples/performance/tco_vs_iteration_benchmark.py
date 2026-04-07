@@ -141,10 +141,7 @@ def main(n: int, iterations: int, warmup: int, optimize: int, fast: bool) -> Non
 
     click.echo("Catnip performance: TCO vs iteration")
     click.echo("=" * 80)
-    click.echo(
-        f"workload=sum(1..{n}), vm_mode=on, optimize={optimize}, "
-        f"iterations={iterations}, warmup={warmup}"
-    )
+    click.echo(f"workload=sum(1..{n}), vm_mode=on, optimize={optimize}, " f"iterations={iterations}, warmup={warmup}")
 
     py_loop_stats, py_loop_result = benchmark_callable(make_python_loop(n), iterations, warmup)
     cat_loop = run_catnip_case(

@@ -16,10 +16,7 @@ We inject pandas DataFrames directly into the Catnip context for testing.
 
 Known Limitations:
 ------------------
-- Comparison operators (>, <, ==) on Series not yet supported
-- Boolean indexing (df[mask]) not yet supported
 - Indexed assignment (df['col'][0] = value) not yet supported
-- List/dict literals needed for some pandas operations
 
 These limitations are Catnip syntax issues, not pandas integration problems.
 The tests document what works and what doesn't to help developers understand
@@ -433,12 +430,8 @@ def test_comparison_operators_on_series(cat):
     assert list(result) == list(expected)
 
 
-def test_limitation_boolean_indexing(cat):
-    """Document that boolean indexing is not yet fully supported.
-
-    This test demonstrates that while boolean Series work, using them
-    for filtering (df[mask]) is not yet supported in Catnip.
-    """
+def test_boolean_indexing_with_precomputed_mask(cat):
+    """Boolean indexing with a pre-computed mask variable."""
     import pandas as pd
 
     df = pd.DataFrame({'x': [1, 2, 3, 4, 5]})
@@ -447,42 +440,27 @@ def test_limitation_boolean_indexing(cat):
     cat.registry.ctx.globals['df'] = df
     cat.registry.ctx.globals['mask'] = mask
 
-    # Boolean indexing syntax not yet supported in Catnip
-    # This would work in pandas: df[mask]
-    # For now, we can only access the mask itself
-    cat.parse("mask")
+    cat.parse("df[mask]")
     result = cat.execute()
-    assert list(result) == [False, False, False, True, True]
+    assert len(result) == 2
+    assert list(result['x']) == [4, 5]
 
 
 # --- Advanced pandas features ---
 
 
-@pytest.mark.skip(reason="Boolean indexing df[mask] not supported in Catnip yet")
 def test_dataframe_filtering_boolean_indexing(cat):
-    """Test DataFrame filtering with boolean indexing.
-
-    This requires both:
-    1. Comparison operators on Series (df['x'] > 5)
-    2. Boolean indexing syntax (df[mask])
-
-    Neither is currently supported in Catnip.
-    """
+    """Boolean indexing with inline comparison: df[df["x"] > 3]."""
     import pandas as pd
 
     df = pd.DataFrame({'x': [1, 2, 3, 4, 5], 'y': [10, 20, 30, 40, 50]})
     cat.registry.ctx.globals['df'] = df
 
-    # This would be the ideal Catnip syntax (when supported):
-    # cat.parse('df[df["x"] > 3]')
-    # For now, we can create the filter in Python
-    filtered = df[df['x'] > 3]
-    cat.registry.ctx.globals['filtered'] = filtered
-
-    cat.parse("filtered")
+    cat.parse('df[df["x"] > 3]')
     result = cat.execute()
     assert len(result) == 2
     assert list(result['x']) == [4, 5]
+    assert list(result['y']) == [40, 50]
 
 
 def test_groupby_basic(cat):
@@ -735,31 +713,17 @@ def test_pandas_datetime_operations(cat):
     assert list(result) == [1, 6, 12]
 
 
-@pytest.mark.skip(reason="Catnip doesn't have dict/list literal syntax yet")
 def test_dataframe_creation_from_catnip(cat):
-    """Test creating DataFrame directly in Catnip code.
-
-    This requires Catnip to have:
-    1. Dict literal syntax: {"key": value}
-    2. List literal syntax: [1, 2, 3]
-
-    When these are available, this test can be enabled.
-    """
+    """Create DataFrame directly in Catnip using bracket dict/list syntax."""
     import pandas as pd
 
     cat.registry.ctx.globals['pd'] = pd
 
-    # Ideal future syntax (when dict/list literals are supported):
-    # cat.parse('pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})')
-
-    # For now, we have to create data structures in Python
-    data = {"a": [1, 2, 3], "b": [4, 5, 6]}
-    cat.registry.ctx.globals['data'] = data
-
-    cat.parse("pd.DataFrame(data)")
+    cat.parse('pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})')
     result = cat.execute()
     assert isinstance(result, pd.DataFrame)
-    assert list(result.columns) == ["a", "b"]
+    assert list(result['a']) == [1, 2, 3]
+    assert list(result['b']) == [4, 5, 6]
 
 
 def test_pandas_pivot_table(cat):

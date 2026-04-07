@@ -8,8 +8,11 @@ pub mod collections;
 pub mod compiler;
 pub mod error;
 pub mod host;
+pub mod loader;
 pub mod ops;
 pub mod pipeline;
+pub mod plugin;
+pub mod stdlib;
 pub mod value;
 pub mod vm;
 

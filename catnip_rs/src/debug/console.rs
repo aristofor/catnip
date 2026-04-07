@@ -306,7 +306,7 @@ pub fn run_debugger(
     let context = catnip.getattr("context")?;
     let catnip_globals: Py<PyAny> = context.getattr("globals")?.unbind();
 
-    let vm_executor_mod = py.import("catnip.vm.executor")?;
+    let vm_executor_mod = py.import(PY_MOD_VM_EXECUTOR)?;
     let vm_executor_cls = vm_executor_mod.getattr("VMExecutor")?;
     let executor = vm_executor_cls.call1((&registry, &context))?;
 

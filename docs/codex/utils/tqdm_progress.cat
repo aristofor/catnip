@@ -4,8 +4,8 @@
 #
 # DEPS: tqdm
 
-tqdm   = import('tqdm')
-time   = import('time')
+tqdm = import('tqdm')
+time = import('time')
 random = import('random')
 
 random.seed(42)

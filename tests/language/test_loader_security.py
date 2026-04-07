@@ -57,3 +57,21 @@ def test_failed_import_does_not_leave_partial_module_in_sys_modules(tmp_path, mo
         loader.import_module(module_name)
 
     assert module_name not in sys.modules
+
+
+def test_bare_import_cache_is_scoped_by_caller_dir(tmp_path):
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "helper.py").write_text('VALUE = "A"\n')
+    (dir_b / "helper.py").write_text('VALUE = "B"\n')
+
+    loader = ModuleLoader(Context())
+
+    mod_a = loader.import_module("helper", caller_dir=dir_a)
+    mod_b = loader.import_module("helper", caller_dir=dir_b)
+
+    assert mod_a.VALUE == "A"
+    assert mod_b.VALUE == "B"
+    assert mod_a is not mod_b

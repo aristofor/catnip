@@ -7,6 +7,7 @@ import pytest
 
 from catnip import Catnip
 from catnip.cachesys import Memoization, MemoryCache
+from catnip.context import Context
 
 
 def test_function_cache_basic():
@@ -189,6 +190,36 @@ def test_cache_stats_builtin():
     assert 'misses' in stats
     assert stats['hits'] >= 1  # At least one hit
     assert stats['misses'] >= 2  # At least two misses
+
+
+def test_cached_wrapper_caches_none_results():
+    ctx = Context()
+    calls = {'n': 0}
+
+    def returns_none(x):
+        calls['n'] += 1
+        return None
+
+    wrapped = ctx.globals['cached'](returns_none)
+
+    assert wrapped(1) is None
+    assert wrapped(1) is None
+    assert calls['n'] == 1
+
+
+def test_cached_wrapper_normalizes_kwargs_order():
+    ctx = Context()
+    calls = {'n': 0}
+
+    def build_result(**kwargs):
+        calls['n'] += 1
+        return calls['n']
+
+    wrapped = ctx.globals['cached'](build_result)
+
+    assert wrapped(a=1, b=2) == 1
+    assert wrapped(b=2, a=1) == 1
+    assert calls['n'] == 1
 
 
 def test_cache_enable_disable():

@@ -9,9 +9,13 @@ use catnip_core::parser::transform_pure;
 use catnip_core::pipeline::SemanticAnalyzer;
 use tree_sitter::Parser;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::compiler::PureCompiler;
 use crate::error::{VMError, VMResult};
 use crate::host::PureHost;
+use crate::plugin::{PluginRegistry, SharedPluginRegistry};
 use crate::value::Value;
 use crate::vm::PureVM;
 use crate::vm::debug::DebugHook;
@@ -25,6 +29,7 @@ pub struct PurePipeline {
     vm: PureVM,
     host: PureHost,
     tco_enabled: bool,
+    plugin_registry: SharedPluginRegistry,
 }
 
 impl PurePipeline {
@@ -36,15 +41,37 @@ impl PurePipeline {
             .set_language(&language)
             .map_err(|e| format!("failed to set language: {e}"))?;
 
+        let registry: SharedPluginRegistry = Rc::new(RefCell::new(PluginRegistry::new()));
+
+        let mut loader = crate::loader::PureImportLoader::new(None);
+        loader.set_plugin_registry(Rc::clone(&registry));
+
+        let mut vm = PureVM::new();
+        vm.import_loader = Some(loader);
+
+        let mut host = PureHost::with_builtins();
+        host.set_plugin_registry(Rc::clone(&registry));
+        Self::init_exception_types(&mut vm, &host);
+
         Ok(Self {
             parser,
-            vm: PureVM::new(),
-            host: PureHost::with_builtins(),
+            vm,
+            host,
             tco_enabled: true,
+            plugin_registry: registry,
         })
     }
 
     /// Enable or disable tail-call optimization marking.
+    /// Register built-in exception types in the VM and inject into globals.
+    fn init_exception_types(vm: &mut PureVM, host: &PureHost) {
+        use crate::host::VmHost;
+        let mapping = crate::vm::structs::register_builtin_exceptions(&mut vm.struct_registry);
+        for (kind, type_id) in &mapping {
+            host.store_global(kind.name(), Value::from_struct_type(*type_id));
+        }
+    }
+
     pub fn set_tco_enabled(&mut self, enabled: bool) {
         self.tco_enabled = enabled;
     }
@@ -133,10 +160,63 @@ impl PurePipeline {
         self.vm.set_source(source.as_bytes());
     }
 
+    /// Override sys.argv for scripts executed by this pipeline.
+    pub fn set_argv(&mut self, argv: Vec<String>) {
+        if let Some(ref mut loader) = self.vm.import_loader {
+            loader.set_sys_argv(argv);
+        }
+    }
+
+    /// Override sys.executable for scripts executed by this pipeline.
+    pub fn set_sys_executable(&mut self, exe: String) {
+        if let Some(ref mut loader) = self.vm.import_loader {
+            loader.set_sys_executable(exe);
+        }
+    }
+
+    /// Set the module import policy (deny-wins).
+    pub fn set_policy(&mut self, policy: catnip_core::policy::ModulePolicyCore) {
+        if let Some(ref mut loader) = self.vm.import_loader {
+            loader.set_policy(policy);
+        }
+    }
+
+    /// Set the import loader on the VM.
+    /// Automatically binds the pipeline's shared plugin registry to the loader.
+    pub fn set_import_loader(&mut self, mut loader: crate::loader::PureImportLoader) {
+        loader.set_plugin_registry(Rc::clone(&self.plugin_registry));
+        self.vm.import_loader = Some(loader);
+    }
+
+    /// Get the shared plugin registry.
+    pub fn plugin_registry(&self) -> &SharedPluginRegistry {
+        &self.plugin_registry
+    }
+
+    /// Get a reference to the PureHost.
+    pub fn host(&self) -> &PureHost {
+        &self.host
+    }
+
+    /// Get a reference to the PureVM.
+    pub fn vm(&self) -> &PureVM {
+        &self.vm
+    }
+
     /// Reset all persistent state. Next execute() starts fresh.
+    /// Preserves the import loader but clears module cache and plugin registry.
     pub fn reset(&mut self) {
+        let loader = self.vm.import_loader.take();
+        if let Some(ref l) = loader {
+            l.clear_cache();
+        }
+        self.plugin_registry.borrow_mut().clear();
         self.vm = PureVM::new();
-        self.host = PureHost::with_builtins();
+        self.vm.import_loader = loader;
+        let mut host = PureHost::with_builtins();
+        host.set_plugin_registry(Rc::clone(&self.plugin_registry));
+        self.host = host;
+        Self::init_exception_types(&mut self.vm, &self.host);
     }
 }
 
@@ -1220,5 +1300,400 @@ Val(1) < Val(2)
             )
             .unwrap();
         assert_eq!(r.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_list_slice() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("x = [10, 20, 30, 40, 50]; x[1:3]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(20));
+        assert_eq!(list.get(1).unwrap(), Value::from_int(30));
+    }
+
+    #[test]
+    fn test_list_slice_negative() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("[1, 2, 3, 4][:-1]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn test_list_slice_open_start() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("[1, 2, 3][1:]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(2));
+    }
+
+    #[test]
+    fn test_string_slice() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute(r#""hello"[1:4]"#).unwrap();
+        let s = unsafe { r.as_native_str_ref().unwrap() };
+        assert_eq!(s, "ell");
+    }
+
+    #[test]
+    fn test_list_slice_step() {
+        let mut p = PurePipeline::new().unwrap();
+        // [0,1,2,3,4][::2] -> [0, 2, 4]
+        let r = p.execute("[0, 1, 2, 3, 4][::2]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(0));
+        assert_eq!(list.get(1).unwrap(), Value::from_int(2));
+        assert_eq!(list.get(2).unwrap(), Value::from_int(4));
+    }
+
+    #[test]
+    fn test_list_slice_reverse() {
+        let mut p = PurePipeline::new().unwrap();
+        // [1,2,3][::-1] -> [3, 2, 1]
+        let r = p.execute("[1, 2, 3][::-1]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(3));
+        assert_eq!(list.get(1).unwrap(), Value::from_int(2));
+        assert_eq!(list.get(2).unwrap(), Value::from_int(1));
+    }
+
+    #[test]
+    fn test_string_slice_reverse() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute(r#""hello"[::-1]"#).unwrap();
+        let s = unsafe { r.as_native_str_ref().unwrap() };
+        assert_eq!(s, "olleh");
+    }
+
+    #[test]
+    fn test_list_slice_step_with_bounds() {
+        let mut p = PurePipeline::new().unwrap();
+        // [0,1,2,3,4,5,6,7,8,9][1:8:2] -> [1, 3, 5, 7]
+        let r = p.execute("[0, 1, 2, 3, 4, 5, 6, 7, 8, 9][1:8:2]").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 4);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(1));
+        assert_eq!(list.get(3).unwrap(), Value::from_int(7));
+    }
+
+    // --- Higher-order function builtins ---
+
+    #[test]
+    fn test_map() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("map((x) => { x * 2 }, [1, 2, 3])").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.get(0).unwrap().as_int(), Some(2));
+        assert_eq!(list.get(1).unwrap().as_int(), Some(4));
+        assert_eq!(list.get(2).unwrap().as_int(), Some(6));
+    }
+
+    #[test]
+    fn test_map_with_builtin() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("map(str, [1, 2, 3])").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+        assert_eq!(unsafe { list.get(0).unwrap().as_native_str_ref() }, Some("1"));
+    }
+
+    #[test]
+    fn test_filter() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("filter((x) => { x > 2 }, [1, 2, 3, 4, 5])").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.get(0).unwrap().as_int(), Some(3));
+        assert_eq!(list.get(1).unwrap().as_int(), Some(4));
+        assert_eq!(list.get(2).unwrap().as_int(), Some(5));
+    }
+
+    #[test]
+    fn test_fold() {
+        let mut p = PurePipeline::new().unwrap();
+        // fold(iterable, init, func)
+        let r = p.execute("fold([1, 2, 3, 4], 0, (acc, x) => { acc + x })").unwrap();
+        assert_eq!(r.as_int(), Some(10));
+    }
+
+    #[test]
+    fn test_fold_with_string() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p
+            .execute(r#"fold(["a", "b", "c"], "", (acc, x) => { acc + x })"#)
+            .unwrap();
+        assert_eq!(unsafe { r.as_native_str_ref() }, Some("abc"));
+    }
+
+    #[test]
+    fn test_reduce() {
+        let mut p = PurePipeline::new().unwrap();
+        // reduce(iterable, func)
+        let r = p.execute("reduce([1, 2, 3, 4], (acc, x) => { acc + x })").unwrap();
+        assert_eq!(r.as_int(), Some(10));
+    }
+
+    #[test]
+    fn test_reduce_empty_error() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("reduce([], (acc, x) => { acc + x })");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_map_empty() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("map((x) => { x * 2 }, [])").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_fold_in_function() {
+        let mut p = PurePipeline::new().unwrap();
+        // HOF called from within a user function (tests re-entrant dispatch)
+        let r = p
+            .execute("total = (xs) => { fold(xs, 0, (a, x) => { a + x }) }\ntotal([10, 20, 30])")
+            .unwrap();
+        assert_eq!(r.as_int(), Some(60));
+    }
+
+    #[test]
+    fn test_hof_chained() {
+        let mut p = PurePipeline::new().unwrap();
+        // map then fold: sum of squares of even numbers
+        let r = p
+            .execute(
+                "xs = filter((x) => { x % 2 == 0 }, [1,2,3,4,5,6])\n\
+                 sq = map((x) => { x * x }, xs)\n\
+                 fold(sq, 0, (a, x) => { a + x })",
+            )
+            .unwrap();
+        // 2^2 + 4^2 + 6^2 = 4 + 16 + 36 = 56
+        assert_eq!(r.as_int(), Some(56));
+    }
+
+    #[test]
+    fn test_hof_with_tuple_input() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("fold(tuple(1,2,3), 0, (a, x) => { a + x })").unwrap();
+        assert_eq!(r.as_int(), Some(6));
+    }
+
+    #[test]
+    fn test_map_not_iterable_error() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("map((x) => { x }, 42)");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_fold_wrong_arity_error() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("fold([1,2], (a, x) => { a + x })");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_map_with_range() {
+        let mut p = PurePipeline::new().unwrap();
+        // range() produces a non-list iterable
+        let r = p.execute("map((x) => { x * x }, range(5))").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 5);
+        assert_eq!(list.get(0).unwrap().as_int(), Some(0));
+        assert_eq!(list.get(4).unwrap().as_int(), Some(16));
+    }
+
+    #[test]
+    fn test_fold_with_range() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("fold(range(5), 0, (a, x) => { a + x })").unwrap();
+        assert_eq!(r.as_int(), Some(10)); // 0+1+2+3+4
+    }
+
+    #[test]
+    fn test_filter_with_range() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("filter((x) => { x % 2 == 0 }, range(6))").unwrap();
+        let list = unsafe { r.as_native_list_ref().unwrap() };
+        assert_eq!(list.len(), 3); // 0, 2, 4
+        assert_eq!(list.get(0).unwrap().as_int(), Some(0));
+        assert_eq!(list.get(2).unwrap().as_int(), Some(4));
+    }
+
+    #[test]
+    fn test_reduce_with_range() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("reduce(range(1, 5), (a, x) => { a * x })").unwrap();
+        assert_eq!(r.as_int(), Some(24)); // 1*2*3*4
+    }
+
+    // --- Builtin batch: numerics + string utils ---
+
+    #[test]
+    fn test_round() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(p.execute("round(3.7)").unwrap().as_int(), Some(4));
+        assert_eq!(p.execute("round(3.2)").unwrap().as_int(), Some(3));
+        assert!((p.execute("round(3.14159, 2)").unwrap().as_float().unwrap() - 3.14).abs() < 1e-10);
+        assert_eq!(p.execute("round(5)").unwrap().as_int(), Some(5));
+        // Banker's rounding: tie-to-even
+        assert_eq!(p.execute("round(2.5)").unwrap().as_int(), Some(2));
+        assert_eq!(p.execute("round(3.5)").unwrap().as_int(), Some(4));
+        assert_eq!(p.execute("round(0.5)").unwrap().as_int(), Some(0));
+        assert_eq!(p.execute("round(1.5)").unwrap().as_int(), Some(2));
+    }
+
+    #[test]
+    fn test_pow() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(p.execute("pow(2, 10)").unwrap().as_int(), Some(1024));
+        assert!((p.execute("pow(2.0, 0.5)").unwrap().as_float().unwrap() - std::f64::consts::SQRT_2).abs() < 1e-10);
+        assert_eq!(p.execute("pow(2, 10, 100)").unwrap().as_int(), Some(24));
+    }
+
+    #[test]
+    fn test_divmod() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("divmod(17, 5)").unwrap();
+        let t = unsafe { r.as_native_tuple_ref().unwrap() };
+        assert_eq!(t.get(0).unwrap().as_int(), Some(3));
+        assert_eq!(t.get(1).unwrap().as_int(), Some(2));
+    }
+
+    #[test]
+    fn test_divmod_negative() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("divmod(-7, 3)").unwrap();
+        let t = unsafe { r.as_native_tuple_ref().unwrap() };
+        // Python floor division: -7 // 3 = -3, -7 % 3 = 2
+        assert_eq!(t.get(0).unwrap().as_int(), Some(-3));
+        assert_eq!(t.get(1).unwrap().as_int(), Some(2));
+    }
+
+    #[test]
+    fn test_chr_ord() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("chr(65)").unwrap();
+        assert_eq!(unsafe { r.as_native_str_ref() }, Some("A"));
+        assert_eq!(p.execute(r#"ord("A")"#).unwrap().as_int(), Some(65));
+        assert_eq!(p.execute(r#"ord("€")"#).unwrap().as_int(), Some(8364));
+    }
+
+    #[test]
+    fn test_hex_bin_oct() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(
+            unsafe { p.execute("hex(255)").unwrap().as_native_str_ref() },
+            Some("0xff")
+        );
+        assert_eq!(
+            unsafe { p.execute("hex(-1)").unwrap().as_native_str_ref() },
+            Some("-0x1")
+        );
+        assert_eq!(
+            unsafe { p.execute("bin(10)").unwrap().as_native_str_ref() },
+            Some("0b1010")
+        );
+        assert_eq!(
+            unsafe { p.execute("oct(8)").unwrap().as_native_str_ref() },
+            Some("0o10")
+        );
+    }
+
+    #[test]
+    fn test_repr() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute(r#"repr("hello")"#).unwrap();
+        assert_eq!(unsafe { r.as_native_str_ref() }, Some("'hello'"));
+        let r2 = p.execute("repr(42)").unwrap();
+        assert_eq!(unsafe { r2.as_native_str_ref() }, Some("42"));
+    }
+
+    #[test]
+    fn test_hash() {
+        let mut p = PurePipeline::new().unwrap();
+        // hash returns a numeric value (may be bigint if hash exceeds SmallInt range)
+        let h1 = p.execute("hash(42)").unwrap();
+        assert!(h1.as_int().is_some() || h1.is_bigint());
+        // same value -> same hash (compare via display_string since may be bigint)
+        let h2 = p.execute("hash(42)").unwrap();
+        assert_eq!(h1.display_string(), h2.display_string());
+        // unhashable type errors
+        assert!(p.execute("hash([1, 2])").is_err());
+    }
+
+    #[test]
+    fn test_callable() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(p.execute("callable((x) => { x })").unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute("callable(42)").unwrap().as_bool(), Some(false));
+        assert_eq!(p.execute("callable(len)").unwrap().as_bool(), Some(true));
+        // Arbitrary strings are NOT callable
+        assert_eq!(p.execute(r#"callable("hello")"#).unwrap().as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_hash_tuple() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("hash(tuple(1, 2))").unwrap();
+        assert!(r.as_int().is_some() || r.is_bigint());
+    }
+
+    // --- isinstance ---
+
+    #[test]
+    fn test_isinstance_builtin_types() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(p.execute(r#"isinstance(42, "int")"#).unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute(r#"isinstance("hi", "str")"#).unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute(r#"isinstance(3.14, "float")"#).unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute(r#"isinstance(true, "bool")"#).unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute(r#"isinstance([1], "list")"#).unwrap().as_bool(), Some(true));
+        assert_eq!(p.execute(r#"isinstance(42, "str")"#).unwrap().as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_isinstance_tuple_of_types() {
+        let mut p = PurePipeline::new().unwrap();
+        assert_eq!(
+            p.execute(r#"isinstance(42, tuple("int", "str"))"#).unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            p.execute(r#"isinstance(3.14, tuple("int", "str"))"#).unwrap().as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_isinstance_struct() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p.execute("struct Foo { x }\nf = Foo(1)\nisinstance(f, Foo)").unwrap();
+        assert_eq!(r.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_isinstance_struct_inheritance() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p
+            .execute("struct Base { x }\nstruct Child extends(Base) { y }\nc = Child(1, 2)\nisinstance(c, Base)")
+            .unwrap();
+        assert_eq!(r.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_isinstance_struct_negative() {
+        let mut p = PurePipeline::new().unwrap();
+        let r = p
+            .execute("struct A { x }\nstruct B { y }\na = A(1)\nisinstance(a, B)")
+            .unwrap();
+        assert_eq!(r.as_bool(), Some(false));
     }
 }

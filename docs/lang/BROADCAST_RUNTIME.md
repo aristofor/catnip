@@ -183,8 +183,8 @@ Ces wrappers ne sont pas interdits dans le broadcasting, mais leur usage n'a pas
 Préférer un appel direct :
 
 ```catnip
-math = import("math")
-json = import("json")
+math = import('math')
+json = import('json')
 ```
 
 > Le broadcasting ne juge pas. Il applique la séquence. Trois modules à charger en parallèle, et la matrice

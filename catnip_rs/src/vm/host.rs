@@ -11,7 +11,7 @@ use super::py_interop::{
     PyResultExt, call_binary_op, delete_ctx_global, lookup_ctx_global, resolve_registry, store_ctx_global,
 };
 use super::value::Value;
-use crate::constants::PY_MOD_ND;
+use crate::constants::{PY_MOD_MEMOIZATION, PY_MOD_ND, PY_MOD_RS};
 use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -566,6 +566,11 @@ impl GlobalsProxy {
     pub fn new(globals: Globals) -> Self {
         Self { globals }
     }
+
+    /// Expose the inner Rc for use by ImportLoader.
+    pub fn globals_rc(&self) -> Globals {
+        Rc::clone(&self.globals)
+    }
 }
 
 #[pymethods]
@@ -714,6 +719,8 @@ pub struct VMHost {
     /// SAFETY: RefCell is correct here because VMHost is only accessed from the VM thread.
     /// VmHost trait methods take &self, but NdMode::Process needs mutability for lazy init.
     worker_pool: RefCell<Option<crate::nd::worker_pool::WorkerPool>>,
+    /// Module import policy (set via --policy CLI flag).
+    module_policy: Option<Py<PyAny>>,
 }
 
 type FrozenCapture = (String, catnip_core::freeze::FrozenValue);
@@ -749,6 +756,10 @@ impl VMHost {
 
     /// Build a standalone host with builtins injected into globals.
     pub fn new(py: Python<'_>) -> PyResult<Self> {
+        Self::new_with_policy(py, None)
+    }
+
+    pub fn new_with_policy(py: Python<'_>, module_policy: Option<Py<PyAny>>) -> PyResult<Self> {
         let globals: Globals = Rc::new(RefCell::new(IndexMap::new()));
         let (ops, iter_fn, cached_contains) = Self::setup_operators(py)?;
 
@@ -833,7 +844,7 @@ impl VMHost {
                     g.insert("pure".to_string(), val);
                 }
             }
-            if let Ok(memo_mod) = py.import("catnip.cachesys.memoization") {
+            if let Ok(memo_mod) = py.import(PY_MOD_MEMOIZATION) {
                 if let Ok(cached_fn) = memo_mod.getattr("standalone_cached") {
                     if let Ok(val) = Value::from_pyobject(py, &cached_fn) {
                         g.insert("cached".to_string(), val);
@@ -847,7 +858,7 @@ impl VMHost {
         // then try wrap_pyfunction (works in embedded/standalone mode).
         {
             let mut g = globals.borrow_mut();
-            let injected = if let Ok(rs_mod) = py.import("catnip._rs") {
+            let injected = if let Ok(rs_mod) = py.import(PY_MOD_RS) {
                 let mut ok = false;
                 for name in &["freeze", "thaw"] {
                     if let Ok(func) = rs_mod.getattr(*name) {
@@ -974,96 +985,52 @@ def __catnip_spread_dict(entries):
             globals.borrow_mut().insert("META".to_string(), val);
         }
 
-        // Inject builtin constant namespaces (ND, INT)
+        // Inject builtin constant namespaces (ND, RUNTIME)
         {
             let nd = Py::new(py, crate::core::builtins::make_nd(py))?;
             if let Ok(val) = Value::from_pyobject(py, nd.bind(py)) {
                 globals.borrow_mut().insert("ND".to_string(), val);
             }
-            let int_ns = Py::new(py, crate::core::builtins::make_int(py))?;
-            if let Ok(val) = Value::from_pyobject(py, int_ns.bind(py)) {
-                globals.borrow_mut().insert("INT".to_string(), val);
+            let rt = Py::new(py, crate::core::builtins::make_runtime(py))?;
+            if let Ok(val) = Value::from_pyobject(py, rt.bind(py)) {
+                globals.borrow_mut().insert("RUNTIME".to_string(), val);
             }
         }
 
-        // Inject import() builtin via _ImportWrapper + GlobalsProxy
+        // Inject import() builtin via Rust ImportLoader
         {
-            let proxy = GlobalsProxy {
-                globals: Rc::clone(&globals),
-            };
+            let proxy = GlobalsProxy::new(Rc::clone(&globals));
             let proxy_obj = Py::new(py, proxy)?;
-            // Build a fake context with .globals pointing to the proxy
-            let types = py.import("types")?;
-            let ns = types.getattr("SimpleNamespace")?.call0()?;
-            ns.setattr("globals", proxy_obj)?;
-            let import_ns = PyDict::new(py);
+
+            // .cat loading callback: delegates to Python ModuleLoader
+            let cat_loader_ns = PyDict::new(py);
             py.run(
                 c"
-def _parse_import_name(raw):
-    if not isinstance(raw, str):
-        from catnip.exc import CatnipTypeError
-        raise CatnipTypeError(f'import name must be a string, got {type(raw).__name__}')
-    if not raw:
-        raise ValueError('import name cannot be empty')
-    name, _, alias = raw.partition(':')
-    if not name:
-        raise ValueError(f\"empty name in import spec '{raw}'\")
-    if _ and not alias:
-        raise ValueError(f\"empty alias in import spec '{raw}'\")
-    return (name, alias) if alias else (name, name)
-
-class _StandaloneImportWrapper:
-    def __init__(self, ctx):
-        self.ctx = ctx
-        self._loader = None
-
-    def _get_loader(self):
-        if self._loader is None:
-            from catnip.loader import ModuleLoader
-            self._loader = ModuleLoader(self.ctx)
-        return self._loader
-
-    def __call__(self, spec, *names, wild=False, protocol=None):
-        from pathlib import Path
-
-        caller_dir = None
-        meta = self.ctx.globals.get('META')
-        if meta is not None:
-            try:
-                caller_dir = Path(meta.file).parent
-            except AttributeError:
-                pass
-
-        namespace = self._get_loader().import_module(spec, caller_dir=caller_dir, protocol=protocol)
-        if names and wild:
-            from catnip.exc import CatnipTypeError
-            raise CatnipTypeError('cannot combine selective names with wild=True')
-        if names:
-            resolved = []
-            for raw in names:
-                name, alias = _parse_import_name(raw)
-                if not hasattr(namespace, name):
-                    raise AttributeError(f\"module '{spec}' has no attribute '{name}'\")
-                resolved.append((alias, getattr(namespace, name)))
-            for alias, value in resolved:
-                self.ctx.globals[alias] = value
-            return None
-        if wild:
-            for name in dir(namespace):
-                if name.startswith('_') or name == 'META':
-                    continue
-                self.ctx.globals[name] = getattr(namespace, name)
-            return None
-        return namespace
+def _make_cat_loader(globals_proxy):
+    import types
+    ctx = types.SimpleNamespace(globals=globals_proxy)
+    from catnip.loader import ModuleLoader
+    loader = ModuleLoader(ctx)
+    def cat_loader(path, name):
+        return loader.load_catnip_module(path, module_name=name)
+    return cat_loader
 ",
-                Some(&import_ns),
+                Some(&cat_loader_ns),
                 None,
             )?;
-            let wrapper_cls = import_ns
-                .get_item("_StandaloneImportWrapper")?
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing import wrapper"))?;
-            let import_fn = wrapper_cls.call1((ns,))?;
-            if let Ok(val) = Value::from_pyobject(py, &import_fn) {
+            let make_fn = cat_loader_ns
+                .get_item("_make_cat_loader")?
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing _make_cat_loader"))?;
+            let cat_loader = make_fn.call1((proxy_obj.bind(py),))?;
+
+            // Create the Rust ImportLoader
+            let loader = crate::loader::ImportLoader::create(
+                py,
+                Rc::clone(&globals),
+                module_policy.as_ref().map(|p| p.clone_ref(py)),
+                Some(cat_loader.unbind()),
+            )?;
+            if let Ok(val) = Value::from_pyobject(py, loader.bind(py)) {
                 globals.borrow_mut().insert("import".to_string(), val);
             }
         }
@@ -1076,6 +1043,7 @@ class _StandaloneImportWrapper:
             no_context: None,
             nd_config: NdConfig::default(),
             worker_pool: RefCell::new(None),
+            module_policy,
         })
     }
 
@@ -1090,6 +1058,7 @@ class _StandaloneImportWrapper:
             no_context: None,
             nd_config: NdConfig::default(),
             worker_pool: RefCell::new(None),
+            module_policy: None,
         })
     }
 
@@ -1101,6 +1070,11 @@ class _StandaloneImportWrapper:
     /// Set the Python context for pass_context and registry access.
     pub fn set_context(&mut self, context: Py<PyAny>) {
         self.no_context = Some(context);
+    }
+
+    /// Set module import policy (used by --policy CLI flag).
+    pub fn set_module_policy(&mut self, policy: Py<PyAny>) {
+        self.module_policy = Some(policy);
     }
 
     /// Set the ND broadcast mode.

@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Structures imbriquées
+# Structures imbriquées
 # Broadcasting sur des listes de listes
 
 print("⇒ Broadcasting sur listes imbriquées")

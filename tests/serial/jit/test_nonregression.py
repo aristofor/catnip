@@ -248,3 +248,46 @@ def test_jit_multiple_hot_loops(vm_with_jit):
     stats = vm.get_jit_stats()
     # Au moins 2 loops devraient être trackées
     assert stats['total_loops_tracked'] >= 2
+
+
+def test_jit_abort_on_exception_opcodes_then_compile(vm_with_jit):
+    """Hot loop with try/except aborts trace, but subsequent hot loop still compiles."""
+    vm, catnip = vm_with_jit
+
+    # Loop with try/except -- trace should abort on exception opcodes
+    code_with_try = compile_code('''
+    total = 0
+    i = 0
+    while i < 150 {
+        try {
+            total = total + i
+        } except {
+            _ => { 0 }
+        }
+        i = i + 1
+    }
+    total
+    ''')
+
+    result = vm.execute(code_with_try, (), {}, None)
+    assert result == sum(range(150))
+
+    stats_after_try = vm.get_jit_stats()
+    compiled_after_try = stats_after_try['compiled_loops']
+
+    # Pure arithmetic loop -- should still compile in the same VM session
+    code_pure = compile_code('''
+    total = 0
+    for i in range(1, 151) {
+        total = total + i
+    }
+    total
+    ''')
+
+    result = vm.execute(code_pure, (), {}, None)
+    assert result == sum(range(1, 151))
+
+    stats_after_pure = vm.get_jit_stats()
+    assert (
+        stats_after_pure['compiled_loops'] > compiled_after_try
+    ), 'JIT should still compile loops after a trace abort from exception opcodes'

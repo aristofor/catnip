@@ -78,7 +78,7 @@ print("power(3, 5) =", power(3, 5))      # 243
 fib_non_tail = (n) => {
     if n <= 1 { n }
     else {
-        fib_non_tail(n - 1) + fib_non_tail(n - 2)  # Addition after calls
+        fib_non_tail(n - 1) + fib_non_tail(n - 2)  # tree recursion, not a TCO candidate
     }
 }
 

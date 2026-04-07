@@ -22,7 +22,7 @@ impl History {
                     .lines()
                     // Skipper le header reedline #V2 si present
                     .filter(|line| !line.starts_with("#V2") && !line.is_empty())
-                    .map(|s| s.to_string())
+                    .map(|s| s.replace('\x1e', "\n"))
                     .collect(),
                 Err(_) => Vec::new(),
             }
@@ -39,17 +39,21 @@ impl History {
         hist
     }
 
-    /// Save to disk
+    /// Save to disk.
+    /// Multiline entries use \x1e (Record Separator) in place of \n.
     pub fn save(&self) -> io::Result<()> {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.file_path, self.entries.join("\n") + "\n")
+        let encoded: Vec<String> = self.entries.iter().map(|e| e.replace('\n', "\x1e")).collect();
+        fs::write(&self.file_path, encoded.join("\n") + "\n")
     }
 
     /// Add an entry, deduplicate consecutive duplicates, truncate
     pub fn push(&mut self, entry: &str) {
-        let trimmed = entry.trim();
+        // Strip \x1e (Record Separator) -- reserved for multiline serialization
+        let clean = entry.replace('\x1e', "");
+        let trimmed = clean.trim();
         if trimmed.is_empty() {
             return;
         }
@@ -236,6 +240,25 @@ mod tests {
         // Empty query
         assert!(hist.search("").is_empty());
 
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_multiline_roundtrip() {
+        let tmp = std::env::temp_dir().join("catnip_test_history_multiline");
+        let _ = fs::remove_file(&tmp);
+        {
+            let mut hist = History::load(&tmp, 100);
+            hist.push("f = (x) => {\n    x * 2\n}");
+            hist.push("single");
+            hist.save().unwrap();
+        }
+        {
+            let hist = History::load(&tmp, 100);
+            assert_eq!(hist.len(), 2);
+            assert_eq!(hist.get(0), Some("single"));
+            assert_eq!(hist.get(1), Some("f = (x) => {\n    x * 2\n}"));
+        }
         let _ = fs::remove_file(&tmp);
     }
 

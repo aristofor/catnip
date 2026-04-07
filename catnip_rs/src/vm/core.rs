@@ -4,6 +4,7 @@
 //! Stack-based VM that executes bytecode without growing the Python stack.
 
 use super::OpCode;
+use super::enums::{CatnipEnumType, EnumRegistry};
 use super::frame::{CodeObject, Frame, FramePool, NativeClosureScope, PyCodeObject, VMFunction};
 use super::host::{BinaryOp, VmHost};
 use super::iter::SeqIter;
@@ -16,10 +17,12 @@ use super::structs::{
     cascade_decref_fields,
 };
 use super::traits::{TraitDef, TraitField, TraitRegistry};
+use super::value::resolve_symbol_by_name;
 use super::value::{FuncSlot, FunctionTable, Value};
 use crate::constants::*;
 use crate::jit::builtin_dispatch::builtin_name_to_id;
 use crate::jit::{HotLoopDetector, JITExecutor, TraceOp, TraceRecorder};
+use catnip_core::symbols::{SymbolTable, qualified_name};
 use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -60,6 +63,8 @@ fn resolve_jit_guard_value(
 fn decref_discard(registry: &mut StructRegistry, val: Value) {
     if val.is_bigint() {
         val.decref_bigint();
+    } else if val.is_complex() {
+        val.decref();
     } else if val.is_struct_instance() {
         let idx = val.as_struct_instance_idx().unwrap();
         if let Some(fields) = registry.decref(idx) {
@@ -267,10 +272,16 @@ pub enum VMError {
     StackUnderflow,
     FrameOverflow,
     NameError(String),
+    AttributeError(String),
     TypeError(String),
     RuntimeError(String),
+    ValueError(String),
+    IndexError(String),
+    KeyError(String),
     ZeroDivisionError(String),
     MemoryLimitExceeded(String),
+    /// User-defined or struct-based exception with full MRO.
+    UserException(catnip_core::exception::ExceptionInfo),
     Interrupted,
     Exit(i32),
     Return(Value),
@@ -291,10 +302,15 @@ impl std::fmt::Display for VMError {
                     write!(f, "NameError: {}", catnip_core::constants::format_name_error(s))
                 }
             }
+            VMError::AttributeError(s) => write!(f, "AttributeError: {}", s),
             VMError::TypeError(s) => write!(f, "TypeError: {}", s),
             VMError::RuntimeError(s) => write!(f, "{}", s),
+            VMError::ValueError(s) => write!(f, "ValueError: {}", s),
+            VMError::IndexError(s) => write!(f, "IndexError: {}", s),
+            VMError::KeyError(s) => write!(f, "KeyError: {}", s),
             VMError::ZeroDivisionError(s) => write!(f, "ZeroDivisionError: {}", s),
             VMError::MemoryLimitExceeded(s) => write!(f, "MemoryLimitExceeded: {}", s),
+            VMError::UserException(info) => write!(f, "{}: {}", info.type_name, info.message),
             VMError::Interrupted => write!(f, "KeyboardInterrupt"),
             VMError::Exit(code) => write!(f, "exit({})", code),
             VMError::Return(_) => write!(f, "return signal"),
@@ -305,6 +321,82 @@ impl std::fmt::Display for VMError {
 }
 
 impl std::error::Error for VMError {}
+
+impl VMError {
+    /// Extract ExceptionInfo for catchable exceptions.
+    pub fn exception_info(&self) -> Option<catnip_core::exception::ExceptionInfo> {
+        use catnip_core::exception::{ExceptionInfo, ExceptionKind};
+        match self {
+            VMError::TypeError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::TypeError, msg.clone())),
+            VMError::ValueError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::ValueError, msg.clone())),
+            VMError::NameError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::NameError, msg.clone())),
+            VMError::IndexError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::IndexError, msg.clone())),
+            VMError::KeyError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::KeyError, msg.clone())),
+            VMError::AttributeError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::AttributeError, msg.clone())),
+            VMError::ZeroDivisionError(msg) => {
+                Some(ExceptionInfo::from_kind(ExceptionKind::ZeroDivisionError, msg.clone()))
+            }
+            VMError::RuntimeError(msg) => Some(ExceptionInfo::from_kind(ExceptionKind::RuntimeError, msg.clone())),
+            VMError::MemoryLimitExceeded(msg) => {
+                Some(ExceptionInfo::from_kind(ExceptionKind::MemoryError, msg.clone()))
+            }
+            VMError::UserException(info) => Some(info.clone()),
+            _ => None,
+        }
+    }
+
+    /// Reconstruct VMError from stored exception info.
+    pub fn from_exception_info(type_name: &str, msg: &str) -> VMError {
+        match type_name {
+            "TypeError" => VMError::TypeError(msg.into()),
+            "ValueError" => VMError::ValueError(msg.into()),
+            "NameError" => VMError::NameError(msg.into()),
+            "IndexError" => VMError::IndexError(msg.into()),
+            "KeyError" => VMError::KeyError(msg.into()),
+            "AttributeError" => VMError::AttributeError(msg.into()),
+            "ZeroDivisionError" => VMError::ZeroDivisionError(msg.into()),
+            "MemoryError" => VMError::MemoryLimitExceeded(msg.into()),
+            _ => VMError::RuntimeError(msg.into()),
+        }
+    }
+
+    /// True for user-catchable exceptions (not control flow or internal errors).
+    pub fn is_catchable(&self) -> bool {
+        matches!(
+            self,
+            VMError::TypeError(_)
+                | VMError::ValueError(_)
+                | VMError::NameError(_)
+                | VMError::IndexError(_)
+                | VMError::KeyError(_)
+                | VMError::AttributeError(_)
+                | VMError::ZeroDivisionError(_)
+                | VMError::RuntimeError(_)
+                | VMError::MemoryLimitExceeded(_)
+                | VMError::UserException(_)
+        )
+    }
+
+    /// Convert to PendingUnwind for finally block processing.
+    pub fn to_pending_unwind(&self) -> catnip_core::exception::PendingUnwind {
+        use catnip_core::exception::PendingUnwind;
+        match self {
+            VMError::Return(_) => PendingUnwind::Return,
+            VMError::Break => PendingUnwind::Break,
+            VMError::Continue => PendingUnwind::Continue,
+            other => {
+                if let Some(info) = other.exception_info() {
+                    PendingUnwind::Exception(info)
+                } else {
+                    PendingUnwind::Exception(catnip_core::exception::ExceptionInfo::from_name(
+                        "RuntimeError".into(),
+                        format!("{:?}", other),
+                    ))
+                }
+            }
+        }
+    }
+}
 
 type VMResult<T> = Result<T, VMError>;
 
@@ -465,6 +557,12 @@ pub struct VM {
     struct_type_map: HashMap<usize, StructTypeId>,
     /// Trait registry for trait composition
     pub trait_registry: TraitRegistry,
+    /// Enum type registry
+    pub enum_registry: EnumRegistry,
+    /// Symbol interning table (used by enums)
+    pub symbol_table: SymbolTable,
+    /// PyObject ptr -> enum_type_id, populated by MakeEnum
+    enum_type_map: HashMap<usize, u32>,
     /// Stack of pre-existing global names at each module-level PushBlock
     block_globals_snapshot: Vec<Vec<String>>,
     /// Last source byte offset seen in dispatch loop (for error context)
@@ -533,6 +631,9 @@ impl VM {
             struct_registry: StructRegistry::new(),
             struct_type_map: HashMap::new(),
             trait_registry: TraitRegistry::new(),
+            enum_registry: EnumRegistry::new(),
+            symbol_table: SymbolTable::new(),
+            enum_type_map: HashMap::new(),
             block_globals_snapshot: Vec::new(),
             last_src_byte: 0,
             memory_limit_bytes: MEMORY_LIMIT_DEFAULT_MB * 1024 * 1024,
@@ -725,10 +826,15 @@ impl VM {
     fn capture_error_context(&mut self, error: &VMError) {
         let (error_type, message) = match error {
             VMError::NameError(s) => ("NameError".to_string(), s.clone()),
+            VMError::AttributeError(s) => ("AttributeError".to_string(), s.clone()),
             VMError::TypeError(s) => ("TypeError".to_string(), s.clone()),
+            VMError::ValueError(s) => ("ValueError".to_string(), s.clone()),
+            VMError::IndexError(s) => ("IndexError".to_string(), s.clone()),
+            VMError::KeyError(s) => ("KeyError".to_string(), s.clone()),
             VMError::ZeroDivisionError(s) => ("ZeroDivisionError".to_string(), s.clone()),
             VMError::RuntimeError(s) => ("RuntimeError".to_string(), s.clone()),
             VMError::MemoryLimitExceeded(s) => ("MemoryError".to_string(), s.clone()),
+            VMError::UserException(info) => (info.type_name.clone(), info.message.clone()),
             VMError::StackUnderflow => ("RuntimeError".to_string(), "WeirdError: VM stack underflow".to_string()),
             VMError::FrameOverflow => (
                 "RuntimeError".to_string(),
@@ -787,6 +893,7 @@ impl VM {
         py: Python<'_>,
         inst_val: Value,
         init_fn: Option<Py<PyAny>>,
+        frame: &mut Frame,
     ) -> VMResult<bool> {
         let Some(init_fn) = init_fn else { return Ok(false) };
         let init_bound = init_fn.bind(py);
@@ -803,14 +910,14 @@ impl VM {
         };
         if let Some((new_code, native_closure)) = init_data {
             self.struct_registry.incref(inst_val.as_struct_instance_idx().unwrap());
-            let frame = self.frame_stack.last_mut().unwrap();
             frame.push(inst_val);
             let mut new_frame = Frame::with_code(new_code);
             new_frame.set_local(0, inst_val);
             new_frame.closure_scope = native_closure;
             new_frame.discard_return = true;
             self.setup_super_proxy(py, inst_val, None, &mut new_frame)?;
-            self.frame_stack.push(new_frame);
+            let old = std::mem::replace(frame, new_frame);
+            self.frame_stack.push(old);
             return Ok(true);
         }
         Ok(false)
@@ -929,11 +1036,13 @@ impl VM {
         self.call_stack.clear();
 
         // Install thread-local pointers for Value conversions.
-        // Note: save/restore is handled by the PyRustVM wrapper (lib.rs),
-        // NOT here, because the caller may still need to_pyobject after
-        // execute returns (globals sync, result conversion).
+        // Save previous pointers so re-entrant VM calls (e.g. import) restore them.
+        let prev_sym = super::value::save_symbol_table();
+        let prev_enum = super::value::save_enum_registry();
         super::value::set_struct_registry(&self.struct_registry as *const _);
         super::value::set_func_table(&self.func_table as *const _);
+        super::value::set_symbol_table(&self.symbol_table as *const _ as *mut _);
+        super::value::set_enum_registry(&self.enum_registry as *const _ as *mut _);
 
         // Run dispatch loop
         let result = match self.run(py) {
@@ -944,6 +1053,8 @@ impl VM {
                 while let Some(frame) = self.frame_stack.pop() {
                     self.frame_pool.free(frame, &mut self.struct_registry);
                 }
+                super::value::restore_symbol_table(prev_sym);
+                super::value::restore_enum_registry(prev_enum);
                 return Err(e);
             }
         };
@@ -953,6 +1064,8 @@ impl VM {
             self.frame_pool.free(frame, &mut self.struct_registry);
         }
 
+        super::value::restore_symbol_table(prev_sym);
+        super::value::restore_enum_registry(prev_enum);
         Ok(result)
     }
 
@@ -973,8 +1086,12 @@ impl VM {
         self.last_error_context = None;
         self.call_stack.clear();
 
+        let prev_sym = super::value::save_symbol_table();
+        let prev_enum = super::value::save_enum_registry();
         super::value::set_struct_registry(&self.struct_registry as *const _);
         super::value::set_func_table(&self.func_table as *const _);
+        super::value::set_symbol_table(&self.symbol_table as *const _ as *mut _);
+        super::value::set_enum_registry(&self.enum_registry as *const _ as *mut _);
 
         let result = match self.run_with_host(py, host) {
             Ok(v) => v,
@@ -984,6 +1101,8 @@ impl VM {
                 while let Some(frame) = self.frame_stack.pop() {
                     self.frame_pool.free(frame, &mut self.struct_registry);
                 }
+                super::value::restore_symbol_table(prev_sym);
+                super::value::restore_enum_registry(prev_enum);
                 return Err(e);
             }
         };
@@ -992,6 +1111,8 @@ impl VM {
             self.frame_pool.free(frame, &mut self.struct_registry);
         }
 
+        super::value::restore_symbol_table(prev_sym);
+        super::value::restore_enum_registry(prev_enum);
         Ok(result)
     }
 
@@ -1015,17 +1136,61 @@ impl VM {
         self.dispatch(py, host)
     }
 
-    /// Core dispatch loop, parameterized by host.
+    /// Outer dispatch loop with exception unwinding.
     fn dispatch(&mut self, py: Python<'_>, host: &dyn super::host::VmHost) -> VMResult<Value> {
+        let mut frame = match self.frame_stack.pop() {
+            Some(f) => f,
+            None => return Ok(Value::NIL),
+        };
+        'outer: loop {
+            match self.dispatch_inner(&mut frame, py, host) {
+                Ok(val) => {
+                    // Normal exit: opcodes balanced refcounts, just drop
+                    drop(frame);
+                    return Ok(val);
+                }
+                Err(err) => {
+                    // Try to unwind to an exception handler
+                    if self.unwind_exception(&mut frame, &err) {
+                        continue 'outer;
+                    }
+                    // No handler found. Handle Return specially (frame pop).
+                    if let VMError::Return(val) = err {
+                        if let Some(caller) = self.frame_stack.pop() {
+                            let discard = frame.discard_return;
+                            let old = std::mem::replace(&mut frame, caller);
+                            drop(old);
+                            self.handle_nd_frame_pop(py, val);
+                            if discard {
+                                // discard_return: don't push result to caller
+                            } else {
+                                frame.push(val);
+                            }
+                            continue 'outer;
+                        }
+                        drop(frame);
+                        return Ok(val);
+                    }
+                    // Error path: frames may have unbalanced refcounts, use free for cleanup
+                    while let Some(f) = self.frame_stack.pop() {
+                        self.frame_pool.free(f, &mut self.struct_registry);
+                    }
+                    self.frame_pool.free(frame, &mut self.struct_registry);
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Inner dispatch loop. Returns Ok on clean exit, Err on any signal/exception.
+    fn dispatch_inner(&mut self, frame: &mut Frame, py: Python<'_>, host: &dyn super::host::VmHost) -> VMResult<Value> {
+        #[allow(unused_assignments)]
         let mut last_result = Value::NIL;
 
-        while let Some(frame) = self.frame_stack.last_mut() {
+        loop {
             let code = match &frame.code {
                 Some(c) => c.clone(),
-                None => {
-                    self.frame_stack.pop();
-                    continue;
-                }
+                None => return Ok(Value::NIL),
             };
             // SAFETY: code Arc is kept alive by the frame (never replaced during execution).
             // Raw pointer avoids atomic refcount on every instruction fetch.
@@ -1033,16 +1198,24 @@ impl VM {
 
             // Check if we've reached the end of bytecode
             if frame.ip >= code.instructions.len() {
-                last_result = frame.pop();
-                let discard = frame.discard_return;
-                self.frame_stack.pop();
-                self.handle_nd_frame_pop(py, last_result);
-                if !discard {
-                    if let Some(caller) = self.frame_stack.last_mut() {
-                        caller.push(last_result);
+                let result = if !frame.stack.is_empty() {
+                    frame.pop()
+                } else {
+                    Value::NIL
+                };
+                if let Some(caller) = self.frame_stack.pop() {
+                    let discard = frame.discard_return;
+                    let old = std::mem::replace(frame, caller);
+                    // Don't call frame_pool.free: opcodes balance refcounts,
+                    // so decref in free() would double-decrement.
+                    drop(old);
+                    self.handle_nd_frame_pop(py, result);
+                    if !discard {
+                        frame.push(result);
                     }
+                    continue;
                 }
-                continue;
+                return Ok(result);
             }
 
             // Fetch instruction + source position
@@ -1077,7 +1250,13 @@ impl VM {
             }
 
             if self.trace {
-                eprintln!("[TRACE] {:?} arg={}", instr.op, instr.arg);
+                eprintln!(
+                    "[TRACE] ip={} {:?} arg={} stack_len={}",
+                    frame.ip - 1,
+                    instr.op,
+                    instr.arg,
+                    frame.stack.len()
+                );
             }
 
             if self.profile {
@@ -1159,7 +1338,11 @@ impl VM {
                     // Default to int for other ops
                     _ => true,
                 };
-                self.jit_recorder.record_opcode(instr.op, instr.arg, is_int_value, ip);
+                if !self.jit_recorder.record_opcode(instr.op, instr.arg, is_int_value, ip) {
+                    // Trace was aborted (e.g. exception opcodes) -- reset tracing state
+                    self.jit_tracing = false;
+                    self.jit_tracing_func_id = None;
+                }
             }
 
             // Dispatch via match - compiles to jump table
@@ -1465,7 +1648,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             // Fallback to Python for strings, lists, etc.
@@ -1491,7 +1677,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             host.binary_op(py, BinaryOp::Sub, a, b)?
@@ -1516,7 +1705,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             // Fallback to Python for string * int, etc.
@@ -1538,7 +1730,10 @@ impl VM {
                             new_frame.set_local(i, *arg);
                         }
                         new_frame.closure_scope = closure;
-                        self.frame_stack.push(new_frame);
+                        {
+                            let old = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old);
+                        }
                         continue;
                     }
                     let result = match binary_div(a, b) {
@@ -1564,7 +1759,10 @@ impl VM {
                             new_frame.set_local(i, *arg);
                         }
                         new_frame.closure_scope = closure;
-                        self.frame_stack.push(new_frame);
+                        {
+                            let old = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old);
+                        }
                         continue;
                     }
                     let result = match binary_floordiv(a, b) {
@@ -1589,7 +1787,10 @@ impl VM {
                             new_frame.set_local(i, *arg);
                         }
                         new_frame.closure_scope = closure;
-                        self.frame_stack.push(new_frame);
+                        {
+                            let old = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old);
+                        }
                         continue;
                     }
                     let result = match binary_mod(a, b) {
@@ -1618,7 +1819,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             host.binary_op(py, BinaryOp::Pow, a, b)?
@@ -1642,7 +1846,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             let py_a = a.to_pyobject(py);
@@ -1665,7 +1872,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                         return Err(VMError::TypeError("bad operand type for unary +: struct".to_string()));
@@ -1689,7 +1899,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             return Err(VMError::TypeError("unsupported operand type(s) for |".to_string()));
@@ -1714,7 +1927,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             return Err(VMError::TypeError("unsupported operand type(s) for ^".to_string()));
@@ -1739,7 +1955,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             return Err(VMError::TypeError("unsupported operand type(s) for &".to_string()));
@@ -1762,10 +1981,13 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
-                            return Err(VMError::TypeError("bad operand type for unary ~".to_string()));
+                            return Err(VMError::TypeError(errors::ERR_BAD_UNARY_NOT.to_string()));
                         }
                         Err(e) => return Err(e),
                     };
@@ -1787,7 +2009,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             return Err(VMError::TypeError("unsupported operand type(s) for <<".to_string()));
@@ -1812,7 +2037,10 @@ impl VM {
                                     new_frame.set_local(i, *arg);
                                 }
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             }
                             return Err(VMError::TypeError("unsupported operand type(s) for >>".to_string()));
@@ -1835,7 +2063,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -1859,7 +2090,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -1883,7 +2117,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -1907,7 +2144,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -1932,7 +2172,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -1973,7 +2216,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -2014,7 +2260,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -2034,7 +2283,10 @@ impl VM {
                                 new_frame.set_local(i, *arg);
                             }
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                     }
@@ -2496,7 +2748,6 @@ impl VM {
                             }
                         } else {
                             // Varargs or >8 args: use bind_args with Vec
-                            let frame = self.frame_stack.last_mut().unwrap();
                             let args: Vec<Value> = frame.stack[args_start..args_start + nargs].to_vec();
                             frame.stack.truncate(func_pos);
                             new_frame.bind_args(py, &args, None);
@@ -2513,7 +2764,10 @@ impl VM {
                             name: fn_name,
                             call_start_byte,
                         });
-                        self.frame_stack.push(new_frame);
+                        {
+                            let old = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old);
+                        }
                         continue;
                     }
 
@@ -2556,7 +2810,6 @@ impl VM {
                                 drop(r);
                                 let value = Value::from_pyobject(py, cached.bind(py))
                                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                                let frame = self.frame_stack.last_mut().unwrap();
                                 frame.push(value);
                                 continue;
                             }
@@ -2584,7 +2837,10 @@ impl VM {
                                 memo_key: key,
                             });
 
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                             continue;
                         }
                         // No vm_code: fall through to Python slow path
@@ -2623,10 +2879,9 @@ impl VM {
                             let idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(idx);
 
-                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                            if self.push_struct_init_frame(py, inst_val, init_func, frame)? {
                                 continue;
                             }
-                            let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
                         }
@@ -2816,7 +3071,7 @@ impl VM {
                                             );
                                             self.jit_tracing = true;
                                             self.jit_tracing_func_id = Some(func_id.clone());
-                                            self.jit_tracing_depth = self.frame_stack.len() + 1; // Depth after frame push
+                                            self.jit_tracing_depth = self.frame_stack.len() + 2; // Depth after frame push (current frame not on stack)
                                             self.jit_pending_function_trace = None; // Clear pending
 
                                             if self.trace {
@@ -2866,7 +3121,7 @@ impl VM {
                                             );
                                             self.jit_tracing = true;
                                             self.jit_tracing_func_id = Some(func_id);
-                                            self.jit_tracing_depth = self.frame_stack.len() + 1; // Depth after frame push
+                                            self.jit_tracing_depth = self.frame_stack.len() + 2; // Depth after frame push (current frame not on stack)
 
                                             if self.trace {
                                                 eprintln!(
@@ -2902,7 +3157,10 @@ impl VM {
                                 name: fn_name,
                                 call_start_byte,
                             });
-                            self.frame_stack.push(new_frame);
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
                         }
                         continue;
                     } else {
@@ -3102,10 +3360,9 @@ impl VM {
 
                             let inst_idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(inst_idx);
-                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                            if self.push_struct_init_frame(py, inst_val, init_func, frame)? {
                                 continue;
                             }
-                            let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
                         }
@@ -3178,7 +3435,10 @@ impl VM {
                             name: fn_name,
                             call_start_byte,
                         });
-                        self.frame_stack.push(new_frame);
+                        {
+                            let old = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old);
+                        }
                         continue;
                     } else {
                         // Python function - call with kwargs
@@ -3254,10 +3514,9 @@ impl VM {
                             let idx = self.struct_registry.create_instance(type_id, field_values);
                             let inst_val = Value::from_struct_instance(idx);
 
-                            if self.push_struct_init_frame(py, inst_val, init_func)? {
+                            if self.push_struct_init_frame(py, inst_val, init_func, frame)? {
                                 continue;
                             }
-                            let frame = self.frame_stack.last_mut().unwrap();
                             frame.push(inst_val);
                             continue;
                         }
@@ -3509,7 +3768,10 @@ impl VM {
                                 let mut new_frame = Frame::with_code(new_code);
                                 new_frame.bind_args(py, &args, None);
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             } else {
                                 // Python callable field
@@ -3540,7 +3802,10 @@ impl VM {
                                 new_frame.closure_scope = closure;
                                 // Setup super proxy
                                 self.setup_super_proxy(py, obj, None, &mut new_frame)?;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             } else {
                                 // Python method
@@ -3564,7 +3829,10 @@ impl VM {
                                 let mut new_frame = Frame::with_code(new_code);
                                 new_frame.bind_args(py, &args, None);
                                 new_frame.closure_scope = closure;
-                                self.frame_stack.push(new_frame);
+                                {
+                                    let old = std::mem::replace(frame, new_frame);
+                                    self.frame_stack.push(old);
+                                }
                                 continue;
                             } else {
                                 let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
@@ -3596,7 +3864,10 @@ impl VM {
                                     let mut new_frame = Frame::with_code(new_code);
                                     new_frame.bind_args(py, &args, None);
                                     new_frame.closure_scope = closure;
-                                    self.frame_stack.push(new_frame);
+                                    {
+                                        let old = std::mem::replace(frame, new_frame);
+                                        self.frame_stack.push(old);
+                                    }
                                     continue;
                                 } else {
                                     // Python static method
@@ -3645,7 +3916,10 @@ impl VM {
                                     new_frame.closure_scope = closure;
                                     // Setup super chain for parent of parent
                                     self.setup_super_proxy(py, inst_val, Some(source_type), &mut new_frame)?;
-                                    self.frame_stack.push(new_frame);
+                                    {
+                                        let old = std::mem::replace(frame, new_frame);
+                                        self.frame_stack.push(old);
+                                    }
                                     continue;
                                 } else {
                                     let args_py: Vec<Py<PyAny>> = all_args.iter().map(|v| v.to_pyobject(py)).collect();
@@ -3664,6 +3938,22 @@ impl VM {
                             let msg = e.to_string();
                             VMError::RuntimeError(py_attr_error_msg(py_bound, method_name, &msg))
                         })?;
+                        // Inline VMFunction calls (avoid VMFunction.__call__ which
+                        // creates a fresh VM without the parent's enum/symbol tables).
+                        if let Ok(vm_func) = method.cast::<VMFunction>() {
+                            let vm_ref = vm_func.borrow();
+                            let new_code = Arc::clone(&vm_ref.vm_code.borrow(py).inner);
+                            let closure = vm_ref.native_closure.clone();
+                            drop(vm_ref);
+                            let mut new_frame = Frame::with_code(new_code);
+                            new_frame.bind_args(py, &args, None);
+                            new_frame.closure_scope = closure;
+                            {
+                                let old = std::mem::replace(frame, new_frame);
+                                self.frame_stack.push(old);
+                            }
+                            continue;
+                        }
                         let args_py: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
                         let args_tuple = PyTuple::new(py, args_py).to_vm(py)?;
                         let result = method.call1(args_tuple).to_vm(py)?;
@@ -3673,6 +3963,20 @@ impl VM {
                 }
 
                 OpCode::Return => {
+                    // If handler_stack has Finally, handle inline (don't exit dispatch_inner)
+                    if !frame.handler_stack.is_empty() {
+                        let val = frame.pop();
+                        let err = VMError::Return(val);
+                        if self.try_unwind_to_handler(frame, &err) {
+                            continue;
+                        }
+                        // No Finally handler, fall through to normal return
+                        // Recover the value from the error
+                        if let VMError::Return(v) = err {
+                            frame.push(v);
+                        }
+                    }
+
                     // Decrement recursive depth BEFORE processing return
                     // This ensures we resume tracing at the correct point
                     if self.jit_recursive_depth > 0 {
@@ -3690,32 +3994,33 @@ impl VM {
 
                     // Check if we should finalize function trace
                     // We finalize when returning to the depth where tracing started
-                    // Note: frame_stack still contains the current frame at this point
-                    let current_depth = self.frame_stack.len();
+                    // current frame is NOT on frame_stack, so depth = frame_stack.len() + 1
+                    let current_depth = self.frame_stack.len() + 1;
                     let should_finalize_trace = self.jit_tracing
                         && self.jit_tracing_func_id.is_some()
                         && current_depth == self.jit_tracing_depth;
 
-                    // Pop the frame -- struct refcounts are balanced by
-                    // LoadLocal (incref) / PopTop+StoreLocal (decref) pairs.
-                    // frame_pool.free() handles cleanup on error/abort paths.
-                    self.frame_stack.pop();
-                    self.handle_nd_frame_pop(py, last_result);
+                    // Pop caller from frame_stack and replace current frame
+                    if let Some(caller) = self.frame_stack.pop() {
+                        let old = std::mem::replace(frame, caller);
+                        // Don't call frame_pool.free: opcodes balance refcounts
+                        drop(old);
+                        self.handle_nd_frame_pop(py, last_result);
 
-                    // Push result to caller if any (unless init whose return is discarded)
-                    if !discard {
-                        if let Some(caller) = self.frame_stack.last_mut() {
-                            caller.push(last_result);
+                        // Push result to caller (unless init whose return is discarded)
+                        if !discard {
+                            frame.push(last_result);
                         }
-                    }
 
-                    // Restore caller's bytecode hash for JIT
-                    if self.jit_enabled {
-                        if let Some(caller_frame) = self.frame_stack.last() {
-                            if let Some(ref caller_code) = caller_frame.code {
+                        // Restore caller's bytecode hash for JIT
+                        if self.jit_enabled {
+                            if let Some(ref caller_code) = frame.code {
                                 self.update_jit_bytecode_hash_value(caller_code.bytecode_hash());
                             }
                         }
+                    } else {
+                        // No caller: return from top-level, let outer dispatch handle it
+                        return Err(VMError::Return(last_result));
                     }
 
                     // Finalize trace if needed (after frame is popped)
@@ -3778,21 +4083,17 @@ impl VM {
                     // Function frames use LoadScope (resolves from closure chain),
                     // so they don't need sync. Syncing to function frames would
                     // overwrite locals with stale ctx_globals values.
-                    if self.frame_stack.len() == 1 {
-                        if let Some(caller) = self.frame_stack.last_mut() {
-                            let updates: Vec<(usize, Value)> = if let Some(ref code) = caller.code {
-                                code.slotmap
-                                    .iter()
-                                    .filter_map(|(name, &slot_idx)| {
-                                        self.globals.get(name.as_str()).map(|&v| (slot_idx, v))
-                                    })
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
-                            for (slot_idx, v) in updates {
-                                caller.set_local(slot_idx, v);
-                            }
+                    if self.frame_stack.is_empty() {
+                        let updates: Vec<(usize, Value)> = if let Some(ref code) = frame.code {
+                            code.slotmap
+                                .iter()
+                                .filter_map(|(name, &slot_idx)| self.globals.get(name.as_str()).map(|&v| (slot_idx, v)))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        for (slot_idx, v) in updates {
+                            frame.set_local(slot_idx, v);
                         }
                     }
                     continue;
@@ -3980,9 +4281,40 @@ impl VM {
                             } else {
                                 return Err(VMError::RuntimeError(attr_error_msg(ty, attr_name)));
                             }
+                        } else if let Some(&enum_type_id) = self.enum_type_map.get(&ptr) {
+                            let ety = self.enum_registry.get_type(enum_type_id).unwrap();
+                            if let Some(sym_id) = ety.variant_symbol(attr_name) {
+                                frame.push(Value::from_symbol(sym_id));
+                            } else {
+                                return Err(VMError::RuntimeError(format!(
+                                    "enum '{}' has no variant '{}'",
+                                    ety.name, attr_name
+                                )));
+                            }
                         } else {
-                            let value = host.obj_getattr(py, obj, attr_name)?;
-                            frame.push(value);
+                            // Check if this is a CatnipEnumType from an imported module
+                            // that isn't yet registered in our enum_type_map
+                            if let Ok(etype) = py_bound.cast::<CatnipEnumType>() {
+                                let et = etype.borrow();
+                                // Lazily register the imported enum type
+                                let type_id =
+                                    self.enum_registry
+                                        .register(&et.name, &et.variant_names, &mut self.symbol_table);
+                                self.enum_type_map.insert(ptr, type_id);
+                                // Now resolve the variant
+                                let ety = self.enum_registry.get_type(type_id).unwrap();
+                                if let Some(sym_id) = ety.variant_symbol(attr_name) {
+                                    frame.push(Value::from_symbol(sym_id));
+                                } else {
+                                    return Err(VMError::RuntimeError(format!(
+                                        "enum '{}' has no variant '{}'",
+                                        ety.name, attr_name
+                                    )));
+                                }
+                            } else {
+                                let value = host.obj_getattr(py, obj, attr_name)?;
+                                frame.push(value);
+                            }
                         }
                     }
                 }
@@ -4019,10 +4351,26 @@ impl VM {
                 }
 
                 OpCode::GetItem => {
-                    let index = frame.pop();
-                    let obj = frame.pop();
-                    let value = host.obj_getitem(py, obj, index)?;
-                    frame.push(value);
+                    if instr.arg == 1 {
+                        // Fused slice mode: stack has [obj, start, stop, step]
+                        let step = frame.pop();
+                        let stop = frame.pop();
+                        let start = frame.pop();
+                        let obj = frame.pop();
+                        let slice_type = py.get_type::<pyo3::types::PySlice>();
+                        let py_start = start.to_pyobject(py);
+                        let py_stop = stop.to_pyobject(py);
+                        let py_step = step.to_pyobject(py);
+                        let slice = slice_type.call1((&py_start, &py_stop, &py_step)).to_vm(py)?;
+                        let index = Value::from_owned_pyobject(slice.unbind());
+                        let value = host.obj_getitem(py, obj, index)?;
+                        frame.push(value);
+                    } else {
+                        let index = frame.pop();
+                        let obj = frame.pop();
+                        let value = host.obj_getitem(py, obj, index)?;
+                        frame.push(value);
+                    }
                 }
 
                 OpCode::SetItem => {
@@ -4075,11 +4423,19 @@ impl VM {
 
                 // --- Control signals ---
                 OpCode::Break => {
-                    return Err(VMError::Break);
+                    let err = VMError::Break;
+                    if self.try_unwind_to_handler(frame, &err) {
+                        continue;
+                    }
+                    return Err(err);
                 }
 
                 OpCode::Continue => {
-                    return Err(VMError::Continue);
+                    let err = VMError::Continue;
+                    if self.try_unwind_to_handler(frame, &err) {
+                        continue;
+                    }
+                    return Err(err);
                 }
 
                 // --- Broadcasting ---
@@ -4142,7 +4498,7 @@ impl VM {
 
                 // --- Pattern matching ---
                 OpCode::MatchPattern => {
-                    return Err(VMError::RuntimeError("legacy MatchPattern is no longer emitted".into()));
+                    return Err(VMError::RuntimeError(errors::ERR_LEGACY_MATCH.into()));
                 }
 
                 OpCode::MatchPatternVM => {
@@ -4739,7 +5095,13 @@ impl VM {
                     } else if val.is_nil() {
                         "nil"
                     } else if val.is_symbol() {
-                        "string"
+                        // Enum variant: resolve to the enum type name
+                        let sym_idx = val.as_symbol().unwrap();
+                        if let Some((type_id, _)) = self.enum_registry.lookup_symbol(sym_idx) {
+                            &self.enum_registry.get_type(type_id).unwrap().name
+                        } else {
+                            "symbol"
+                        }
                     } else if val.is_bigint() {
                         "int"
                     } else if val.is_vmfunc() {
@@ -5013,9 +5375,12 @@ impl VM {
                     // Phase 1: extends(B, C, ...) merges parent fields+methods via C3 MRO.
                     let (mut merged_fields, mut merged_methods, mut merged_static, struct_mro) =
                         if !base_names.is_empty() {
-                            // Compute C3 MRO
+                            // Compute C3 MRO (fallback to built-in exception hierarchy)
                             let struct_mro = super::mro::c3_linearize(&name, &base_names, |n| {
-                                self.struct_registry.find_type_by_name(n).map(|ty| ty.mro.clone())
+                                self.struct_registry
+                                    .find_type_by_name(n)
+                                    .map(|ty| ty.mro.clone())
+                                    .or_else(|| catnip_core::exception::ExceptionKind::from_name(n).map(|k| k.mro()))
                             })
                             .map_err(VMError::RuntimeError)?;
 
@@ -5366,6 +5731,185 @@ impl VM {
                     self.trait_registry.register_trait(trait_def);
                 }
 
+                OpCode::MakeEnum => {
+                    let const_idx = instr.arg as usize;
+                    let enum_info_val = code.constants[const_idx];
+                    let enum_info_py = enum_info_val.to_pyobject(py);
+                    let info_tuple = enum_info_py
+                        .bind(py)
+                        .cast::<PyTuple>()
+                        .map_err(|e| VMError::RuntimeError(format!("MakeEnum: bad constant: {e}")))?;
+
+                    let name: String = tuple_extract(info_tuple, 0)?;
+                    let variants_obj = tuple_get(info_tuple, 1)?;
+                    let variants_tuple = cast_tuple(&variants_obj)?;
+
+                    let mut variant_names: Vec<String> = Vec::new();
+                    for v in variants_tuple.iter() {
+                        let vname: String = v.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        variant_names.push(vname);
+                    }
+
+                    let type_id = self
+                        .enum_registry
+                        .register(&name, &variant_names, &mut self.symbol_table);
+
+                    // Create a Python marker object for the enum type and store as global
+                    let enum_type_obj = Py::new(py, CatnipEnumType::new(name.clone(), type_id, &variant_names))
+                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                    let marker_ptr = enum_type_obj.as_ptr() as usize;
+                    self.enum_type_map.insert(marker_ptr, type_id);
+
+                    let val = Value::from_owned_pyobject(enum_type_obj.into_any());
+                    val.clone_refcount();
+                    host.store_global(py, &name, val)?;
+                    self.globals.insert(name, val);
+                }
+
+                // --- Exception handling ---
+                OpCode::SetupExcept => {
+                    frame.handler_stack.push(catnip_core::exception::Handler {
+                        handler_type: catnip_core::exception::HandlerType::Except,
+                        target_addr: instr.arg as usize,
+                        stack_depth: frame.stack.len(),
+                        block_depth: frame.block_stack.len(),
+                    });
+                }
+                OpCode::SetupFinally => {
+                    frame.handler_stack.push(catnip_core::exception::Handler {
+                        handler_type: catnip_core::exception::HandlerType::Finally,
+                        target_addr: instr.arg as usize,
+                        stack_depth: frame.stack.len(),
+                        block_depth: frame.block_stack.len(),
+                    });
+                }
+                OpCode::PopHandler => {
+                    frame.handler_stack.pop();
+                }
+                OpCode::CheckExcMatch => {
+                    let const_val = code.constants[instr.arg as usize];
+                    let py_obj = const_val.to_pyobject(py);
+                    let type_name_to_match: String = py_obj.bind(py).str().map(|s| s.to_string()).unwrap_or_default();
+                    let matches = if let Some(exc_info) = frame.active_exception_stack.last() {
+                        exc_info.matches(&type_name_to_match)
+                    } else {
+                        false
+                    };
+                    frame.push(Value::from_bool(matches));
+                }
+                OpCode::LoadException => {
+                    if instr.arg == 1 {
+                        // ExcInfo mode: push (exc_type_class, exc_instance, None) tuple
+                        if let Some(exc_info) = frame.active_exception_stack.last() {
+                            let builtins = py.import("builtins").unwrap();
+                            let exc_type = builtins
+                                .getattr(exc_info.type_name.as_str())
+                                .unwrap_or_else(|_| builtins.getattr("RuntimeError").unwrap());
+                            let exc_val = exc_type
+                                .call1((&exc_info.message,))
+                                .unwrap_or_else(|_| py.None().into_bound(py));
+                            let tuple = pyo3::types::PyTuple::new(
+                                py,
+                                &[exc_type.unbind().into_any(), exc_val.unbind().into_any(), py.None()],
+                            )
+                            .unwrap();
+                            frame.push(Value::from_owned_pyobject(tuple.unbind().into_any()));
+                        } else {
+                            let tuple = pyo3::types::PyTuple::new(py, &[py.None(), py.None(), py.None()]).unwrap();
+                            frame.push(Value::from_owned_pyobject(tuple.unbind().into_any()));
+                        }
+                    } else if let Some(exc_info) = frame.active_exception_stack.last() {
+                        let py_str = PyString::new(py, &exc_info.message);
+                        frame.push(Value::from_owned_pyobject(py_str.unbind().into_any()));
+                    } else {
+                        frame.push(Value::NIL);
+                    }
+                }
+                OpCode::Raise => {
+                    if instr.arg == 1 {
+                        // Bare raise: re-raise preserving full MRO
+                        if let Some(exc_info) = frame.active_exception_stack.last().cloned() {
+                            return Err(VMError::UserException(exc_info));
+                        } else {
+                            return Err(VMError::RuntimeError(errors::ERR_NO_ACTIVE_EXCEPTION.into()));
+                        }
+                    } else {
+                        // raise expr: pop value, detect exception type
+                        let val = frame.pop();
+                        let err = if let Some(inst_idx) = val.as_struct_instance_idx() {
+                            // Struct instance: get real type name from registry
+                            // (to_pyobject wraps in CatnipStruct proxy, losing the name)
+                            let type_name = self
+                                .struct_registry
+                                .get_instance(inst_idx)
+                                .and_then(|inst| self.struct_registry.get_type(inst.type_id))
+                                .map(|ty| ty.name.clone())
+                                .unwrap_or_else(|| "RuntimeError".to_string());
+                            let msg = self
+                                .struct_registry
+                                .get_instance(inst_idx)
+                                .and_then(|inst| inst.fields.first().copied())
+                                .map(|v| {
+                                    let obj = v.to_pyobject(py);
+                                    obj.bind(py).str().map(|s| s.to_string()).unwrap_or_default()
+                                })
+                                .unwrap_or_default();
+                            let mro = self
+                                .struct_registry
+                                .find_type_by_name(&type_name)
+                                .map(|ty| ty.mro.clone())
+                                .unwrap_or_else(|| vec![type_name.clone(), "Exception".to_string()]);
+                            VMError::UserException(catnip_core::exception::ExceptionInfo::new(type_name, msg, mro))
+                        } else {
+                            // Python object: detect type from Python introspection
+                            let py_obj = val.to_pyobject(py);
+                            let bound = py_obj.bind(py);
+                            let msg = bound.str().map(|s| s.to_string()).unwrap_or_default();
+                            let type_name = bound.get_type().name().map(|n| n.to_string()).unwrap_or_default();
+                            if let Some(kind) = catnip_core::exception::ExceptionKind::from_name(&type_name) {
+                                // Known exception: dedicated variant when available,
+                                // UserException for group types that would lose identity
+                                let test_err = VMError::from_exception_info(&type_name, &msg);
+                                if matches!(&test_err, VMError::RuntimeError(_)) && type_name != "RuntimeError" {
+                                    VMError::UserException(catnip_core::exception::ExceptionInfo::from_kind(kind, msg))
+                                } else {
+                                    test_err
+                                }
+                            } else {
+                                VMError::RuntimeError(msg)
+                            }
+                        };
+                        decref_discard(&mut self.struct_registry, val);
+                        return Err(err);
+                    }
+                }
+                OpCode::ResumeUnwind => {
+                    if let Some(pending) = frame.pending_unwind.take() {
+                        match pending {
+                            catnip_core::exception::PendingUnwind::Exception(info) => {
+                                return Err(VMError::UserException(info));
+                            }
+                            catnip_core::exception::PendingUnwind::Return => {
+                                let val = frame.pop();
+                                return Err(VMError::Return(val));
+                            }
+                            catnip_core::exception::PendingUnwind::Break => {
+                                return Err(VMError::Break);
+                            }
+                            catnip_core::exception::PendingUnwind::Continue => {
+                                return Err(VMError::Continue);
+                            }
+                        }
+                    } else if let Some(exc_info) = frame.active_exception_stack.last().cloned() {
+                        // Fallback: re-raise from active exception (except no-match -> finally case)
+                        return Err(VMError::UserException(exc_info));
+                    }
+                    // No pending unwind: finally on happy path, just continue
+                }
+                OpCode::ClearException => {
+                    frame.active_exception_stack.pop();
+                }
+
                 // --- ND Operations ---
                 OpCode::NdEmptyTopos => {
                     // Get cached NDTopos singleton or create it
@@ -5545,8 +6089,8 @@ impl VM {
                     } else {
                         Vec::new()
                     };
-                    // Check if main frame before dropping borrow
-                    let is_main_frame = self.frame_stack.len() == 1;
+                    // Check if main frame (current frame is not on stack)
+                    let is_main_frame = self.frame_stack.is_empty();
                     if is_main_frame {
                         for (name, val) in sync_data {
                             self.globals.insert(name, val);
@@ -5589,8 +6133,62 @@ impl VM {
                 continue;
             }
         }
+    }
 
-        Ok(last_result)
+    // --- Exception unwinding ---
+
+    /// Try to unwind to a handler in the current frame, or walk up the call stack.
+    fn unwind_exception(&mut self, frame: &mut Frame, err: &VMError) -> bool {
+        // Try current frame
+        if self.try_unwind_to_handler(frame, err) {
+            return true;
+        }
+        // For catchable exceptions, walk up the call stack
+        if err.is_catchable() {
+            while let Some(caller) = self.frame_stack.pop() {
+                let old = std::mem::replace(frame, caller);
+                self.frame_pool.free(old, &mut self.struct_registry);
+                if self.try_unwind_to_handler(frame, err) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Try to find and activate a handler in the current frame.
+    fn try_unwind_to_handler(&mut self, frame: &mut Frame, err: &VMError) -> bool {
+        while let Some(handler) = frame.handler_stack.last() {
+            match handler.handler_type {
+                catnip_core::exception::HandlerType::Except => {
+                    if err.is_catchable() {
+                        let handler = frame.handler_stack.pop().unwrap();
+                        if let Some(info) = err.exception_info() {
+                            frame.active_exception_stack.push(info);
+                        }
+                        frame.stack.truncate(handler.stack_depth);
+                        frame.block_stack.truncate(handler.block_depth);
+                        frame.ip = handler.target_addr;
+                        return true;
+                    }
+                    // Control flow signal: skip Except handler
+                    frame.handler_stack.pop();
+                }
+                catnip_core::exception::HandlerType::Finally => {
+                    let handler = frame.handler_stack.pop().unwrap();
+                    frame.pending_unwind = Some(err.to_pending_unwind());
+                    frame.stack.truncate(handler.stack_depth);
+                    frame.block_stack.truncate(handler.block_depth);
+                    // For Return, save the value on the stack
+                    if let VMError::Return(val) = err {
+                        frame.push(*val);
+                    }
+                    frame.ip = handler.target_addr;
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -5604,6 +6202,7 @@ impl Default for VM {
 
 // Floor div/mod helpers -- shared from catnip_vm (type-independent, no Value dependency).
 use catnip_vm::ops::arith::{i64_div_floor, i64_mod_floor};
+use catnip_vm::ops::errors;
 
 // NOTE: binary_*, compare_*, eq_without_python, to_f64, to_bigint, bigint_binop, bigint_cmp
 // remain local because catnip_rs::vm::value::Value is a distinct type from catnip_vm::Value.
@@ -5687,6 +6286,33 @@ fn to_f64(v: Value) -> Option<f64> {
     })
 }
 
+#[inline]
+fn to_complex(v: Value) -> Option<(f64, f64)> {
+    if v.is_complex() {
+        return unsafe { v.as_complex_parts() };
+    }
+    to_f64(v).map(|f| (f, 0.0))
+}
+
+fn complex_pow(ar: f64, ai: f64, br: f64, bi: f64) -> VMResult<Value> {
+    if br == 0.0 && bi == 0.0 {
+        return Ok(Value::from_complex(1.0, 0.0));
+    }
+    if ar == 0.0 && ai == 0.0 {
+        if bi == 0.0 && br > 0.0 {
+            return Ok(Value::from_complex(0.0, 0.0));
+        }
+        return Err(VMError::ZeroDivisionError("0.0 to a negative or complex power".into()));
+    }
+    let r = (ar * ar + ai * ai).sqrt();
+    let theta = ai.atan2(ar);
+    let ln_r = r.ln();
+    let exp_r = br * ln_r - bi * theta;
+    let exp_i = br * theta + bi * ln_r;
+    let mag = exp_r.exp();
+    Ok(Value::from_complex(mag * exp_i.cos(), mag * exp_i.sin()))
+}
+
 /// Compare two Values in Rust when possible; returns None if Python fallback needed.
 #[inline]
 fn eq_without_python(a: Value, b: Value) -> Option<bool> {
@@ -5702,6 +6328,11 @@ fn eq_without_python(a: Value, b: Value) -> Option<bool> {
     if let (Some(ab), Some(bb)) = (a.as_bool(), b.as_bool()) {
         return Some(ab == bb);
     }
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Some(ar == br && ai == bi);
+        }
+    }
     if a.is_bigint() || b.is_bigint() {
         return bigint_cmp(a, b, |x, y| x == y);
     }
@@ -5715,6 +6346,11 @@ fn eq_without_python(a: Value, b: Value) -> Option<bool> {
 
 #[inline]
 fn binary_add(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar + br, ai + bi));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(sum) = ai.checked_add(bi) {
             if let Some(v) = Value::try_from_int(sum) {
@@ -5740,11 +6376,16 @@ fn binary_add(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af + bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for +".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_ADD.into()))
 }
 
 #[inline]
 fn binary_sub(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar - br, ai - bi));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(diff) = ai.checked_sub(bi) {
             if let Some(v) = Value::try_from_int(diff) {
@@ -5770,11 +6411,16 @@ fn binary_sub(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af - bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for -".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_SUB.into()))
 }
 
 #[inline]
 fn binary_mul(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar * br - ai * bi, ar * bi + ai * br));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(prod) = ai.checked_mul(bi) {
             if let Some(v) = Value::try_from_int(prod) {
@@ -5800,35 +6446,47 @@ fn binary_mul(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af * bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for *".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MUL.into()))
 }
 
 #[inline]
 fn binary_div(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            let denom = br * br + bi * bi;
+            if denom == 0.0 {
+                return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
+            }
+            return Ok(Value::from_complex(
+                (ar * br + ai * bi) / denom,
+                (ai * br - ar * bi) / denom,
+            ));
+        }
+    }
     if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("division by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
         }
         return Ok(Value::from_float(af / bf));
     }
-    Err(VMError::TypeError("unsupported operand types for /".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_DIV.into()))
 }
 
 #[inline]
 fn binary_floordiv(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         return Ok(Value::from_int(i64_div_floor(ai, bi)));
     }
     if a.is_bigint() || b.is_bigint() {
         if b.is_bigint() {
             if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).div_floor(y)) {
             return Ok(v);
@@ -5838,28 +6496,28 @@ fn binary_floordiv(a: Value, b: Value) -> VMResult<Value> {
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("float floor division by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_FLOORDIV_ZERO.into()));
         }
         return Ok(Value::from_float((af / bf).floor()));
     }
-    Err(VMError::TypeError("unsupported operand types for //".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_FLOORDIV.into()))
 }
 
 #[inline]
 fn binary_mod(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         return Ok(Value::from_int(i64_mod_floor(ai, bi)));
     }
     if a.is_bigint() || b.is_bigint() {
         if b.is_bigint() {
             if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).rem_floor(y)) {
             return Ok(v);
@@ -5869,15 +6527,20 @@ fn binary_mod(a: Value, b: Value) -> VMResult<Value> {
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("float modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_MOD_ZERO.into()));
         }
         return Ok(Value::from_float(af - bf * (af / bf).floor()));
     }
-    Err(VMError::TypeError("unsupported operand types for %".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MOD.into()))
 }
 
 #[inline]
 fn binary_pow(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return complex_pow(ar, ai, br, bi);
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi >= 0 {
             if bi <= 64 {
@@ -5915,11 +6578,15 @@ fn binary_pow(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_float(af.powf(bf)));
     }
-    Err(VMError::TypeError("unsupported operand types for **".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_POW.into()))
 }
 
 #[inline]
 fn unary_neg(a: Value) -> VMResult<Value> {
+    if a.is_complex() {
+        let (r, i) = unsafe { a.as_complex_parts().unwrap() };
+        return Ok(Value::from_complex(-r, -i));
+    }
     if let Some(i) = a.as_int() {
         if let Some(v) = Value::try_from_int(-i) {
             return Ok(v);
@@ -5933,7 +6600,7 @@ fn unary_neg(a: Value) -> VMResult<Value> {
     if let Some(f) = a.as_float() {
         return Ok(Value::from_float(-f));
     }
-    Err(VMError::TypeError("bad operand type for unary -".into()))
+    Err(VMError::TypeError(errors::ERR_BAD_UNARY_NEG.into()))
 }
 
 // --- Comparison operations ---
@@ -5953,7 +6620,7 @@ fn compare_lt(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af < bf));
     }
-    Err(VMError::TypeError("'<' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_LT.into()))
 }
 
 #[inline]
@@ -5971,7 +6638,7 @@ fn compare_le(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af <= bf));
     }
-    Err(VMError::TypeError("'<=' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_LE.into()))
 }
 
 #[inline]
@@ -5989,7 +6656,7 @@ fn compare_gt(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af > bf));
     }
-    Err(VMError::TypeError("'>' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_GT.into()))
 }
 
 #[inline]
@@ -6007,7 +6674,7 @@ fn compare_ge(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af >= bf));
     }
-    Err(VMError::TypeError("'>=' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_GE.into()))
 }
 
 // --- Struct operator dispatch ---
@@ -6097,7 +6764,7 @@ fn bitwise_or(a: Value, b: Value) -> VMResult<Value> {
             return Ok(v);
         }
     }
-    Err(VMError::TypeError("unsupported operand types for |".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITOR.into()))
 }
 
 #[inline]
@@ -6110,7 +6777,7 @@ fn bitwise_xor(a: Value, b: Value) -> VMResult<Value> {
             return Ok(v);
         }
     }
-    Err(VMError::TypeError("unsupported operand types for ^".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITXOR.into()))
 }
 
 #[inline]
@@ -6123,7 +6790,7 @@ fn bitwise_and(a: Value, b: Value) -> VMResult<Value> {
             return Ok(v);
         }
     }
-    Err(VMError::TypeError("unsupported operand types for &".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITAND.into()))
 }
 
 #[inline]
@@ -6135,7 +6802,7 @@ fn bitwise_not(a: Value) -> VMResult<Value> {
         let n = unsafe { a.as_bigint_ref().unwrap() };
         return Ok(Value::from_bigint_or_demote(Integer::from(!n)));
     }
-    Err(VMError::TypeError("bad operand type for unary ~".into()))
+    Err(VMError::TypeError(errors::ERR_BAD_UNARY_NOT.into()))
 }
 
 #[inline]
@@ -6162,7 +6829,7 @@ fn bitwise_lshift(a: Value, b: Value) -> VMResult<Value> {
             }
         }
     }
-    Err(VMError::TypeError("unsupported operand types for <<".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_LSHIFT.into()))
 }
 
 #[inline]
@@ -6181,7 +6848,7 @@ fn bitwise_rshift(a: Value, b: Value) -> VMResult<Value> {
             }
         }
     }
-    Err(VMError::TypeError("unsupported operand types for >>".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_RSHIFT.into()))
 }
 
 #[inline]
@@ -6362,13 +7029,31 @@ fn vm_match_pattern(
             let py_val = value.to_pyobject(py);
             let py_bound = py_val.bind(py);
 
-            // Check type name matches
+            // CatnipStructProxy: use type_name field, not Python class name
+            if let Ok(proxy) = py_bound.cast::<crate::vm::structs::CatnipStructProxy>() {
+                let p = proxy.borrow();
+                if p.type_name != *name {
+                    return Ok(None);
+                }
+                let mut bindings = Vec::new();
+                for (field_name, slot) in field_slots {
+                    match p.field_names.iter().position(|n| n == field_name.as_str()) {
+                        Some(i) => {
+                            let val = Value::from_pyobject(py, p.field_values[i].bind(py))?;
+                            bindings.push((*slot, val));
+                        }
+                        None => return Ok(None),
+                    }
+                }
+                return Ok(Some(bindings));
+            }
+
+            // Generic Python object path
             let value_type_name: String = py_bound.get_type().name()?.extract()?;
             if value_type_name != *name {
                 return Ok(None);
             }
 
-            // Extract field values as bindings (missing field = no match)
             let mut bindings = Vec::new();
             for (field_name, slot) in field_slots {
                 let field_value = match py_bound.getattr(field_name.as_str()) {
@@ -6379,6 +7064,30 @@ fn vm_match_pattern(
                 bindings.push((*slot, val));
             }
             Ok(Some(bindings))
+        }
+        VMPattern::Enum {
+            enum_name,
+            variant_name,
+        } => {
+            // Resolve the expected symbol by looking up "EnumName.variant" in the SymbolTable
+            let qname = qualified_name(enum_name, variant_name);
+            if let Some(expected_sym) = resolve_symbol_by_name(&qname) {
+                let expected = Value::from_symbol(expected_sym);
+                if value.to_raw() == expected.to_raw() {
+                    Ok(Some(Vec::new()))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                // Fallback: compare via Python
+                let py_value = value.to_pyobject(py);
+                let expected_str = qname.into_pyobject(py).unwrap().into_any();
+                if py_value.bind(py).eq(&expected_str)? {
+                    Ok(Some(Vec::new()))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 }
@@ -6483,7 +7192,7 @@ fn vm_match_assign_pattern(
                 Ok(bindings)
             }
         }
-        VMPattern::Literal(_) | VMPattern::Or(_) | VMPattern::Struct { .. } => {
+        VMPattern::Literal(_) | VMPattern::Or(_) | VMPattern::Struct { .. } | VMPattern::Enum { .. } => {
             // Assignment patterns compiled by VM should not produce these nodes.
             // Fallback to generic runtime mismatch.
             let _ = registry;
@@ -7672,6 +8381,7 @@ mod tests {
             assert!(repr.contains("y=20"));
 
             crate::vm::value::clear_struct_registry();
+            crate::vm::value::clear_symbol_table();
         });
     }
 

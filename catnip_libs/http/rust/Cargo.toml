@@ -1,0 +1,15 @@
+[package]
+name = "catnip-http"
+version.workspace = true
+edition.workspace = true
+description = "Catnip http stdlib plugin (native ABI v2, tiny_http)"
+
+[lib]
+name = "catnip_http"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+catnip_vm = { path = "../../../catnip_vm" }
+tiny_http = "0.12"
+open = "5"
+indexmap = "2"

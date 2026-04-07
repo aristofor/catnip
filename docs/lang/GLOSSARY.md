@@ -288,7 +288,7 @@ Graph"
 - `cache`: Cache de parsing (`True`/`False`)
 - `debug`: Mode debug (`True`/`False`)
 - `feature`: (**deprecated**, remplace par `import()`) Charger un module Catnip ou Python (pur ou binaire) par nom ou
-  chemin (`alias = import("module")`)
+  chemin (`alias = import('module')`)
 
 **Exemples**:
 
@@ -297,9 +297,9 @@ Graph"
 ```catnip
 pragma("tco", True)
 pragma("optimize", 3)
-json = import("json")
-pd = import("pandas")
-tools = import("toolbox")
+json = import('json')
+pd = import('pandas')
+tools = import('toolbox')
 ```
 
 **Module**: `pragma.py`
@@ -685,7 +685,7 @@ result = cat.parse('db.query("SELECT * FROM users")').execute()
 ```catnip
 pragma("tco", True)
 pragma("optimize", 3)
-json = import("json")
+json = import('json')
 
 factorial = (n, acc=1) => {
     if n <= 1 { acc } else { factorial(n - 1, n * acc) }

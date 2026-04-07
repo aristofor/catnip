@@ -106,7 +106,7 @@ setup:
 # Install Python package + MCP dependencies (skip if already installed)
 install-lang: build-deps $(RS_EXT)
 	@$(VENV_PYTHON) -c "from importlib.metadata import version; version('catnip-lang')" 2>/dev/null || \
-		uv pip install -e ".[mcp]" --no-build-isolation
+		uv pip install -e "." --no-build-isolation
 
 # Install and register MCP server (project .mcp.json + global config if exists)
 install-mcp: install-lang
@@ -150,12 +150,12 @@ format-rs:
 	cd catnip_rs && cargo fmt --all
 
 format-py:
-	uvx --no-config --python 3.13 black $(PY_SOURCES) catnip_mcp/ tests/
+	uvx --python 3.13 black $(PY_SOURCES) catnip_mcp/ tests/
 
 format: format-rs format-py
 
 check:
-	uvx --no-config ruff check $(PY_SOURCES) tests/ dev/
+	uvx ruff check $(PY_SOURCES) tests/ dev/
 
 proof:
 	cd proof && coq_makefile -f _CoqProject -o Makefile.coq && $(MAKE) -f Makefile.coq

@@ -33,7 +33,7 @@ print(_)     # _ contient la dernière valeur calculée: 30
 ### Affectation d'attributs
 
 ```catnip
-types = import("types")
+types = import('types')
 
 obj = types.SimpleNamespace()
 obj.x = 10

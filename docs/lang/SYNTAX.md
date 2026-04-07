@@ -168,6 +168,114 @@ print(resultat)
 
 ______________________________________________________________________
 
+## Enums
+
+Le mot-clé `enum` déclare un type à variantes finies :
+
+```catnip
+enum Direction { up; down; left; right }
+Direction.up
+# → Direction.up
+```
+
+Les variantes sont qualifiées (`Direction.up`, pas `up`). Dans un pattern `match`, un identifiant nu est une capture de
+variable -- utiliser la forme qualifiée pour tester une variante :
+
+<!-- check: no-check -->
+
+```catnip
+match d {
+    Direction.up => { "haut" }
+    Direction.down => { "bas" }
+    _ => { "autre" }
+}
+```
+
+Voir [ENUMS](ENUMS.md) pour la référence complète.
+
+______________________________________________________________________
+
+## Gestion d'erreurs
+
+### try/except/finally
+
+Le bloc `except` utilise une syntaxe match-like avec `=>` :
+
+```catnip
+try {
+    resultat = operation_risquee()
+} except {
+    e: TypeError => { gerer_type(e) }
+    e: ValueError | KeyError => { gerer_valeur(e) }
+    _ => { gerer_tout() }
+} finally {
+    cleanup()
+}
+```
+
+Regles :
+
+- `try` + bloc obligatoire
+- `except` optionnel, contient 1..N clauses `pattern => { body }`
+- `finally` optionnel, execute dans tous les cas (succes, exception, return, break)
+- au moins un `except` ou `finally` requis
+- `_` (catch-all) doit etre la derniere clause
+- binding optionnel : `e: TypeError` bind le message d'erreur dans `e`
+- union de types : `ValueError | KeyError` match l'un ou l'autre
+
+### raise
+
+```catnip
+raise ValueError("message")    # lever une exception typee
+raise "message"                 # lever un RuntimeError
+raise                           # re-lever l'exception courante (dans except)
+```
+
+### Types d'exception
+
+Hierarchie compatible Python :
+
+```
+Exception
+├── TypeError
+├── ValueError
+├── NameError
+├── AttributeError
+├── RuntimeError
+├── MemoryError
+├── ArithmeticError
+│   └── ZeroDivisionError
+└── LookupError
+    ├── IndexError
+    └── KeyError
+```
+
+Le matching `except` suit la hierarchie : `except { e: ArithmeticError => { ... } }` catch aussi `ZeroDivisionError`.
+`except { e: Exception => { ... } }` catch tout.
+
+### with (context managers)
+
+```catnip
+with f = open("data.csv") {
+    f.read()
+}
+
+# Multi-binding (cleanup en ordre inverse)
+with a = open("in"), b = open("out") {
+    b.write(a.read())
+}
+```
+
+Regles :
+
+- `with` + au moins un binding `name = expr` + bloc obligatoire
+- bindings separes par `,`, chacun visible pour les suivants
+- `__enter__()` appele de gauche a droite, `__exit__()` de droite a gauche
+- si `__exit__` retourne truthy, l'exception est supprimee
+- traceback toujours `None` (ecart avec Python)
+
+______________________________________________________________________
+
 ## Astuces et pièges à éviter
 
 ### Évaluation court-circuit

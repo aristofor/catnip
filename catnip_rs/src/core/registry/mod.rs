@@ -73,6 +73,9 @@ pub(crate) struct OpCodeCache {
     pub op_return: i32,
     pub op_break: i32,
     pub op_continue: i32,
+    pub op_try: i32,
+    pub op_raise: i32,
+    pub exc_info: i32,
     pub set_locals: i32,
     pub call: i32,
 
@@ -108,6 +111,9 @@ pub(crate) struct OpCodeCache {
 
     // Trait
     pub trait_def: i32,
+
+    // Enum
+    pub enum_def: i32,
 
     // Nil-coalescing
     pub null_coalesce: i32,
@@ -170,6 +176,9 @@ impl OpCodeCache {
             op_return: get("OP_RETURN")?,
             op_break: get("OP_BREAK")?,
             op_continue: get("OP_CONTINUE")?,
+            op_try: get("OP_TRY")?,
+            op_raise: get("OP_RAISE")?,
+            exc_info: get("EXC_INFO")?,
             set_locals: get("SET_LOCALS")?,
             call: get("CALL")?,
 
@@ -198,6 +207,8 @@ impl OpCodeCache {
             op_struct: get("OP_STRUCT")?,
 
             trait_def: get("TRAIT_DEF")?,
+
+            enum_def: get("ENUM_DEF")?,
 
             null_coalesce: get("NULL_COALESCE")?,
 
@@ -316,6 +327,9 @@ pub struct Registry {
 
     /// Cached operator functions for fast op dispatch
     pub(crate) operator_cache: OperatorCache,
+
+    /// Active exception for bare raise in except handlers
+    pub(crate) active_exception: RefCell<Option<PyErr>>,
 }
 
 #[pymethods]
@@ -345,6 +359,7 @@ impl Registry {
             control_flow_ops,
             opcodes,
             operator_cache,
+            active_exception: RefCell::new(None),
         };
 
         // Register operations in internals for semantic analysis
@@ -974,6 +989,9 @@ impl Registry {
         self.register_op(py, "return", get_opcode("OP_RETURN")?)?;
         self.register_op(py, "break", get_opcode("OP_BREAK")?)?;
         self.register_op(py, "continue", get_opcode("OP_CONTINUE")?)?;
+        self.register_op(py, "try", get_opcode("OP_TRY")?)?;
+        self.register_op(py, "raise", get_opcode("OP_RAISE")?)?;
+        self.register_op(py, "exc_info", get_opcode("EXC_INFO")?)?;
 
         // Function operations (100% Rust: lambda factory + call with TCO detection)
         self.register_op(py, "lambda", get_opcode("OP_LAMBDA")?)?;
@@ -999,6 +1017,9 @@ impl Registry {
 
         // Trait
         self.register_op(py, "trait_def", get_opcode("TRAIT_DEF")?)?;
+
+        // Enum
+        self.register_op(py, "enum_def", get_opcode("ENUM_DEF")?)?;
 
         // Membership
         self.register_op(py, "in", get_opcode("IN")?)?;

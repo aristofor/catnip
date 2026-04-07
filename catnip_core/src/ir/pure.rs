@@ -93,6 +93,10 @@ pub enum IR {
         name: String,
         fields: Vec<String>,
     },
+    PatternEnum {
+        enum_name: String,
+        variant_name: String,
+    },
 
     /// Slice object (for array/list slicing)
     Slice {
@@ -322,6 +326,12 @@ impl IR {
             }
             IR::PatternStruct { name, fields } => {
                 json!({"pat_struct": {"name": name, "fields": fields}})
+            }
+            IR::PatternEnum {
+                enum_name,
+                variant_name,
+            } => {
+                json!({"pat_enum": {"enum": enum_name, "variant": variant_name}})
             }
 
             IR::Slice { start, stop, step } => {

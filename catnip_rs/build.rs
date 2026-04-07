@@ -12,14 +12,68 @@ fn main() {
 
     // Grammar is compiled by catnip_tools (linked via cargo dependency)
 
+    // Embed git commit hash and build timestamp
+    emit_build_info();
+
     // Generate theme constants from visual.toml
     generate_theme();
 
-    // Link against Python when embedded feature is enabled
-    // NOTE: embedded requires --no-default-features to avoid extension-module
-    if std::env::var("CARGO_FEATURE_EMBEDDED").is_ok() {
+    let is_embedded = std::env::var("CARGO_FEATURE_EMBEDDED").is_ok();
+    let is_extension_module = std::env::var("CARGO_FEATURE_EXTENSION_MODULE").is_ok();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    // Linux manylinux: libpython3.x.so symlink absent, and symbols are resolved
+    // by the interpreter at load time — don't link.
+    // macOS/Windows: libpython.dylib/.lib exists and must be linked explicitly.
+    // Embedded standalone binaries: always link Python.
+    if is_embedded || (is_extension_module && target_os != "linux") {
         link_python();
     }
+}
+
+fn emit_build_info() {
+    // Last commit that touched actual source code (not docs/changelog/etc.)
+    // :/ prefix = repo-root-relative (build.rs CWD is crate dir, not repo root)
+    let source_paths = [
+        ":/catnip/",
+        ":/catnip_rs/",
+        ":/catnip_core/",
+        ":/catnip_vm/",
+        ":/catnip_grammar/",
+        ":/catnip_tools/",
+        ":/catnip_repl/",
+        ":/catnip_lsp/",
+        ":/catnip_mcp/",
+    ];
+    let commit = Command::new("git")
+        .arg("log")
+        .arg("-1")
+        .arg("--format=%h")
+        .arg("--")
+        .args(source_paths)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=CATNIP_COMMIT_HASH={}", commit);
+
+    // Commit date (stable: same commit = same date)
+    let date = if !commit.is_empty() {
+        Command::new("git")
+            .args(["log", "-1", "--format=%cd", "--date=format:%F-%T", "--"])
+            .args(source_paths)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    println!("cargo:rustc-env=CATNIP_BUILD_DATE={}", date);
 }
 
 // ============================================================================
@@ -297,11 +351,14 @@ fn generate_theme() {
 // ============================================================================
 
 fn link_python() {
-    // Try different python-config binary names
-    let config_names = ["python3-config", "x86_64-linux-gnu-python3-config"];
+    let config_names: &[&str] = if cfg!(target_os = "macos") {
+        &["python3-config", "python-config"]
+    } else {
+        &["python3-config", "x86_64-linux-gnu-python3-config"]
+    };
 
     let mut output = None;
-    for name in &config_names {
+    for name in config_names {
         if let Ok(result) = Command::new(name).args(["--embed", "--ldflags"]).output() {
             if result.status.success() {
                 output = Some(result);
@@ -315,12 +372,22 @@ fn link_python() {
 
     let ldflags = String::from_utf8_lossy(&output.stdout);
 
-    // Parse ldflags and emit cargo instructions
-    for flag in ldflags.split_whitespace() {
+    // Parse ldflags and emit cargo instructions.
+    // On macOS, python3-config emits `-framework CoreFoundation` which needs special handling.
+    let flags: Vec<&str> = ldflags.split_whitespace().collect();
+    let mut i = 0;
+    while i < flags.len() {
+        let flag = flags[i];
         if let Some(lib) = flag.strip_prefix("-l") {
-            println!("cargo:rustc-link-lib={}", lib);
+            println!("cargo:rustc-link-lib={lib}");
         } else if let Some(path) = flag.strip_prefix("-L") {
-            println!("cargo:rustc-link-search=native={}", path);
+            println!("cargo:rustc-link-search=native={path}");
+        } else if flag == "-framework" {
+            if let Some(name) = flags.get(i + 1) {
+                println!("cargo:rustc-link-lib=framework={name}");
+                i += 1;
+            }
         }
+        i += 1;
     }
 }

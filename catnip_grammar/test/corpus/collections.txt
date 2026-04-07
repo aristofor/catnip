@@ -230,3 +230,147 @@ obj.method(1, 2)
             (literal
               (number
                 (integer)))))))))
+
+================================================================================
+Bracket list literal
+================================================================================
+
+[1, 2, 3]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_list
+      (collection_items
+        (collection_item
+          (literal (number (integer))))
+        (collection_item
+          (literal (number (integer))))
+        (collection_item
+          (literal (number (integer))))))))
+
+================================================================================
+Empty bracket list
+================================================================================
+
+[]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_list)))
+
+================================================================================
+Bracket list with trailing comma
+================================================================================
+
+[1, 2,]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_list
+      (collection_items
+        (collection_item
+          (literal (number (integer))))
+        (collection_item
+          (literal (number (integer))))))))
+
+================================================================================
+Bracket list with spread
+================================================================================
+
+[*xs, 1]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_list
+      (collection_items
+        (collection_item
+          (collection_spread
+            value: (identifier)))
+        (collection_item
+          (literal (number (integer))))))))
+
+================================================================================
+Bracket dict literal
+================================================================================
+
+{"a": 1, "b": 2}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_dict
+      (bracket_dict_items
+        (colon_pair
+          key: (literal (string))
+          value: (literal (number (integer))))
+        (colon_pair
+          key: (literal (string))
+          value: (literal (number (integer))))))))
+
+================================================================================
+Bracket dict with spread
+================================================================================
+
+{**base, "x": 1}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (bracket_dict
+      (bracket_dict_items
+        (dict_spread
+          value: (identifier))
+        (colon_pair
+          key: (literal (string))
+          value: (literal (number (integer))))))))
+
+================================================================================
+Bracket list chained index
+================================================================================
+
+[1, 2, 3][0]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (bracket_list
+        (collection_items
+          (collection_item
+            (literal (number (integer))))
+          (collection_item
+            (literal (number (integer))))
+          (collection_item
+            (literal (number (integer))))))
+      (index
+        (literal (number (integer)))))))
+
+================================================================================
+Bracket dict chained index
+================================================================================
+
+{"a": 1}["a"]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chained
+      (bracket_dict
+        (bracket_dict_items
+          (colon_pair
+            key: (literal (string))
+            value: (literal (number (integer))))))
+      (index
+        (literal (string))))))

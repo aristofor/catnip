@@ -5,13 +5,16 @@ pub mod broadcast;
 pub mod closure;
 pub mod core;
 pub mod debug;
+pub mod enums;
 pub mod frame;
 pub mod func_table;
 pub mod structs;
 
+pub use catnip_core::symbols::SymbolTable;
 pub use closure::PureClosureScope;
 pub use core::PureVM;
 pub use debug::{DebugCommand, DebugHook, PauseInfo};
+pub use enums::PureEnumRegistry;
 pub use frame::{PureFrame, PureFramePool};
 pub use func_table::{PureFuncSlot, PureFunctionTable};
 pub use structs::{PureStructRegistry, PureTraitRegistry};

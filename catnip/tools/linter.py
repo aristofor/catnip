@@ -73,6 +73,10 @@ def lint_code(
     check_semantic: bool = True,
     check_ir: bool = False,
     check_names: bool = False,
+    max_nesting_depth: int = 5,
+    max_cyclomatic_complexity: int = 10,
+    max_function_length: int = 30,
+    max_parameters: int = 6,
 ) -> LintResult:
     config = LintConfig(
         check_syntax=check_syntax,
@@ -80,6 +84,10 @@ def lint_code(
         check_semantic=check_semantic,
         check_ir=check_ir,
         check_names=check_names,
+        max_nesting_depth=max_nesting_depth,
+        max_cyclomatic_complexity=max_cyclomatic_complexity,
+        max_function_length=max_function_length,
+        max_parameters=max_parameters,
     )
     diagnostics = _rs_lint_code(source, config)
     return LintResult(diagnostics=diagnostics, source=source, filename=filename)

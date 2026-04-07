@@ -52,14 +52,22 @@ for p in persons {
 
 # Arêtes : collaborations (topologie hub-spoke + sous-clusters)
 edges = list(
-    tuple("alice", "bob"), tuple("alice", "charlie"),
-    tuple("alice", "diana"), tuple("alice", "eve"),
-    tuple("alice", "grace"), tuple("bob", "charlie"),
-    tuple("bob", "frank"), tuple("bob", "iris"),
-    tuple("charlie", "frank"), tuple("charlie", "iris"),
-    tuple("diana", "eve"), tuple("eve", "hector"),
-    tuple("eve", "grace"), tuple("grace", "hector"),
-    tuple("frank", "jules"), tuple("iris", "jules"),
+    tuple("alice", "bob"),
+    tuple("alice", "charlie"),
+    tuple("alice", "diana"),
+    tuple("alice", "eve"),
+    tuple("alice", "grace"),
+    tuple("bob", "charlie"),
+    tuple("bob", "frank"),
+    tuple("bob", "iris"),
+    tuple("charlie", "frank"),
+    tuple("charlie", "iris"),
+    tuple("diana", "eve"),
+    tuple("eve", "hector"),
+    tuple("eve", "grace"),
+    tuple("grace", "hector"),
+    tuple("frank", "jules"),
+    tuple("iris", "jules"),
 )
 
 G.add_edges_from(edges)
@@ -73,13 +81,14 @@ bet = nx.betweenness_centrality(G)
 
 # Broadcasting : construction des rapports depuis les métriques
 reports = persons.[(p) => {
-        NodeReport(
-            p.name, p.role,
-            round(deg[p.name], 3),
-            round(bet[p.name], 3),
-            classify(bet[p.name], deg[p.name]),
-        )
-    }]
+    NodeReport(
+        p.name,
+        p.role,
+        round(deg[p.name], 3),
+        round(bet[p.name], 3),
+        classify(bet[p.name], deg[p.name]),
+    )
+}]
 
 sorted_reports = sorted(reports, key=(r) => { -r.betweenness })
 
@@ -91,18 +100,20 @@ for r in sorted_reports[:5] {
 
 # Plus court chemin
 
-src  = "jules"
-dst  = "diana"
+src = "jules"
+dst = "diana"
 path = nx.shortest_path(G, src, dst)
 
-print(f"\n⇒ Plus court chemin {src} → {dst}")
+print()
+print(f"⇒ Plus court chemin {src} → {dst}")
 print(f"  {' → '.join(path)} ({len(path) - 1} sauts)")
 
 # Communautés (Clauset-Newman-Moore greedy modularity)
 
 communities = nx.community.greedy_modularity_communities(G)
 
-print(f"\n⇒ Communautés détectées ({len(communities)})")
+print()
+print(f"⇒ Communautés détectées ({len(communities)})")
 for i in range(len(communities)) {
     print(f"  Communauté {i + 1} : {', '.join(sorted(communities[i]))}")
 }

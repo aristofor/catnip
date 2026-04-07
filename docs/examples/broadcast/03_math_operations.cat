@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Opérations mathématiques avancées
+# Opérations mathématiques avancées
 # Puissance, modulo, division entière, etc.
 
 print("⇒ Opérations mathématiques")

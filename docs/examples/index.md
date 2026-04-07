@@ -68,6 +68,7 @@ Fonctionnalités avancées :
 - [`07_knapsack.cat`](advanced/07_knapsack.cat) - Problème du sac à dos (brute force + ND-mémoïsé)
 - [`08_advanced_techniques.cat`](advanced/08_advanced_techniques.cat) - Techniques avancées combinées
 - [`09_turing_completeness.cat`](advanced/09_turing_completeness.cat) - Démonstration de Turing-complétude
+- [`10_enums.cat`](advanced/10_enums.cat) - Types énumérés, pattern matching et machine à états
 
 ## Broadcasting (`broadcast/`)
 

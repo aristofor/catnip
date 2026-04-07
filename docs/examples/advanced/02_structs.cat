@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Structures
+# Structures
 
 print("⇒ Déclaration et instanciation")
 

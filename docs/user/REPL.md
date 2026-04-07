@@ -70,7 +70,7 @@ Les commandes commencent par `/` :
 | `/version`       | Afficher la version                   |
 
 **Note** : `exit()` n'est pas un builtin du langage. Pour quitter la REPL, utiliser `/exit`, `/quit` ou Ctrl+D. Pour
-terminer un programme depuis le code, utiliser `sys = import("sys"); sys.exit(code)`.
+terminer un programme depuis le code, utiliser `sys = import('sys'); sys.exit(code)`.
 
 <!-- doc-snapshot: repl/version -->
 
@@ -209,7 +209,7 @@ Tab ouvre un popup de complétion contextuelle. Chaque suggestion est catégoris
 | `method`   | Méthodes/attributs après `.`                     |
 
 Après un `.`, le compléteur utilise `dir()` sur la variable pour proposer ses attributs réels. Par exemple,
-`io = import("io")` puis `io.` propose les attributs du module `io`. Les instances de struct exposent leurs champs et
+`io = import('io')` puis `io.` propose les attributs du module `io`. Les instances de struct exposent leurs champs et
 méthodes : `p = Point(1, 2)` puis `p.` propose `x`, `y` et les méthodes définies. Si la variable n'est pas connue,
 fallback sur les méthodes hardcodées de `str`, `list` et `dict`.
 
@@ -260,8 +260,8 @@ parenthèses, crochets).
 
 ```catnip
 ▸ f = (x) => {
-▹     x * 2
-▹ }
+      x * 2
+  }
 ▸ f(21)
 42
 ```

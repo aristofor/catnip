@@ -82,7 +82,7 @@ class TestNDMemoization:
         """
         code_with_memoize = """
         pragma("nd_memoize", True)
-        ~~(20, (n, recur) => {
+        ~~(25, (n, recur) => {
             if n <= 1 { n }
             else { recur(n - 1) + recur(n - 2) }
         })
@@ -90,7 +90,7 @@ class TestNDMemoization:
 
         code_without_memoize = """
         pragma("nd_memoize", False)
-        ~~(20, (n, recur) => {
+        ~~(25, (n, recur) => {
             if n <= 1 { n }
             else { recur(n - 1) + recur(n - 2) }
         })
@@ -107,7 +107,7 @@ class TestNDMemoization:
         time_no_memoize = time.time() - start
 
         # Validate results
-        assert result_memoized == result_no_memoize == 6765
+        assert result_memoized == result_no_memoize == 75025
 
         # Memoization should be at least 3x faster
         speedup = time_no_memoize / time_memoized

@@ -12,11 +12,23 @@ pub const TRAIT_STMT: &str = "trait_stmt";
 pub const FOR_STMT: &str = "for_stmt";
 pub const WHILE_STMT: &str = "while_stmt";
 pub const RETURN_STMT: &str = "return_stmt";
+pub const BREAK_STMT: &str = "break_stmt";
+pub const CONTINUE_STMT: &str = "continue_stmt";
 pub const IF_EXPR: &str = "if_expr";
 pub const ELIF_CLAUSE: &str = "elif_clause";
 pub const ELSE_CLAUSE: &str = "else_clause";
 pub const MATCH_EXPR: &str = "match_expr";
 pub const MATCH_CASE: &str = "match_case";
+pub const ENUM_STMT: &str = "enum_stmt";
+pub const ENUM_VARIANT: &str = "enum_variant";
+pub const TRY_STMT: &str = "try_stmt";
+pub const EXCEPT_BLOCK: &str = "except_block";
+pub const EXCEPT_CLAUSE: &str = "except_clause";
+pub const EXCEPT_PATTERN: &str = "except_pattern";
+pub const EXCEPT_TYPES: &str = "except_types";
+pub const FINALLY_CLAUSE: &str = "finally_clause";
+pub const RAISE_STMT: &str = "raise_stmt";
+pub const WITH_STMT: &str = "with_stmt";
 pub const BLOCK: &str = "block";
 pub const STATEMENT: &str = "statement";
 
@@ -47,6 +59,7 @@ pub const PATTERN_OR: &str = "pattern_or";
 pub const PATTERN_TUPLE: &str = "pattern_tuple";
 pub const PATTERN_STAR: &str = "pattern_star";
 pub const PATTERN_STRUCT: &str = "pattern_struct";
+pub const PATTERN_ENUM: &str = "pattern_enum";
 
 // Literals & identifiers
 pub const IDENTIFIER: &str = "identifier";
@@ -71,6 +84,8 @@ pub const ARGUMENTS: &str = "arguments";
 pub const VARIADIC_PARAM: &str = "variadic_param";
 pub const COMPARISON: &str = "comparison";
 pub const COMP_OP: &str = "comp_op";
+pub const BOOL_AND: &str = "bool_and";
+pub const BOOL_OR: &str = "bool_or";
 
 // Unpack
 pub const LVALUE: &str = "lvalue";

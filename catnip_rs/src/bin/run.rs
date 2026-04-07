@@ -26,6 +26,11 @@ use pyo3::prelude::*;
 #[derive(Parser)]
 #[command(name = "catnip")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(long_version = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n  commit  ", env!("CATNIP_COMMIT_HASH"),
+    "\n  build   ", env!("CATNIP_BUILD_DATE"),
+))]
 #[command(about = "Catnip runtime with embedded Python")]
 #[command(after_help = "\
 Python subcommands: cache, commands, config, debug, format, lint, lsp, module, plugins, repl\n\
@@ -63,6 +68,10 @@ struct Cli {
     #[arg(short = 'b', long = "bench", value_name = "N")]
     bench: Option<usize>,
 
+    /// Module policy profile name (from catnip.toml [modules.policies.<name>])
+    #[arg(long = "policy", value_name = "PROFILE")]
+    policy: Option<String>,
+
     #[command(subcommand)]
     command_type: Option<Commands>,
 }
@@ -71,13 +80,11 @@ struct Cli {
 enum Commands {
     /// Show runtime information
     Info,
-    /// Benchmark a script (run N times)
+    /// Benchmark a script: bench [N] <FILE>
     Bench {
-        /// Number of iterations
-        #[arg(default_value_t = _rs::constants::BENCH_DEFAULT_ITERATIONS)]
-        iterations: usize,
-        /// Script file
-        file: PathBuf,
+        /// [iterations] <file> - if one arg, it's the file; if two, first is iterations
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<String>,
     },
     /// Internal: ND worker process (IPC over stdin/stdout, not user-facing)
     #[command(hide = true)]
@@ -100,6 +107,30 @@ const PYTHON_SUBCOMMANDS: &[&str] = &[
     "repl",
 ];
 
+/// Options that consume the next arg as a value.
+/// Shared between should_delegate_to_python and extract_script_args.
+fn is_value_option(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-c" | "--command"
+            | "-b"
+            | "--bench"
+            | "--jit-threshold"
+            | "-o"
+            | "--optimize"
+            | "-m"
+            | "--module"
+            | "-x"
+            | "--executor"
+            | "-p"
+            | "--parsing"
+            | "--config"
+            | "--theme"
+            | "--format"
+            | "--policy"
+    )
+}
+
 /// Check if the first positional argument is a Python CLI subcommand.
 /// Skips options and their values, returns true only for known Python subcommands.
 fn should_delegate_to_python(args: &[String]) -> bool {
@@ -113,26 +144,7 @@ fn should_delegate_to_python(args: &[String]) -> bool {
 
         if arg.starts_with('-') {
             // Options that take a value: skip next arg too
-            // Includes both Rust-native and Python-only options
-            if matches!(
-                arg.as_str(),
-                "-c" | "--command"
-                    | "-b"
-                    | "--bench"
-                    | "--jit-threshold"
-                    | "-o"
-                    | "--optimize"
-                    | "-m"
-                    | "--module"
-                    | "-x"
-                    | "--executor"
-                    | "-p"
-                    | "--parsing"
-                    | "--config"
-                    | "--theme"
-                    | "--format"
-                    | "--policy"
-            ) {
+            if is_value_option(arg) {
                 i += 2;
             } else {
                 i += 1;
@@ -146,6 +158,64 @@ fn should_delegate_to_python(args: &[String]) -> bool {
     false
 }
 
+/// Rust-native subcommands (handled by Clap, not delegated to Python).
+const RUST_SUBCOMMANDS: &[&str] = &["bench", "info", "worker"];
+
+/// Split raw args into (args for Clap, script args after FILE).
+/// Everything after the first positional (the script file) is a script arg.
+/// Rust subcommands pass everything to Clap without splitting.
+fn extract_script_args(raw_args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut clap_args = vec![raw_args[0].clone()];
+    let mut script_args = Vec::new();
+    let mut file_found = false;
+    let mut i = 1;
+
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
+
+        if file_found {
+            script_args.push(arg.clone());
+            i += 1;
+            continue;
+        }
+
+        if arg == "--" {
+            // After --, first arg is FILE, rest are script args
+            if i + 1 < raw_args.len() {
+                clap_args.push(raw_args[i + 1].clone());
+                script_args.extend(raw_args[i + 2..].iter().cloned());
+            }
+            break;
+        }
+
+        if arg.starts_with('-') {
+            clap_args.push(arg.clone());
+            if is_value_option(arg) {
+                if i + 1 < raw_args.len() {
+                    clap_args.push(raw_args[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        // Rust subcommand: pass everything to Clap, no splitting
+        if RUST_SUBCOMMANDS.contains(&arg.as_str()) {
+            clap_args.extend(raw_args[i..].iter().cloned());
+            return (clap_args, vec![]);
+        }
+
+        // First non-flag positional = script file
+        clap_args.push(arg.clone());
+        file_found = true;
+        i += 1;
+    }
+
+    (clap_args, script_args)
+}
+
 /// Delegate the full invocation to the Python CLI (catnip.cli:main).
 /// Sets sys.argv and calls Click's main(), never returns.
 fn delegate_to_python_cli(args: Vec<String>) -> ! {
@@ -156,7 +226,7 @@ fn delegate_to_python_cli(args: Vec<String>) -> ! {
         sys.setattr("argv", py_args).expect("failed to set sys.argv");
 
         // Import and call catnip.cli.main()
-        match py.import("catnip.cli").and_then(|m| m.getattr("main")) {
+        match py.import(_rs::constants::PY_MOD_CLI).and_then(|m| m.getattr("main")) {
             Ok(main_fn) => {
                 match main_fn.call0() {
                     Ok(_) => 0,
@@ -194,11 +264,19 @@ fn delegate_to_python_cli(args: Vec<String>) -> ! {
 fn main() {
     // Pre-parse: delegate Python subcommands before Clap runs
     let raw_args: Vec<String> = std::env::args().collect();
+
+    // Shell completion: Click uses _CATNIP_COMPLETE env var for completion callbacks
+    if std::env::var("_CATNIP_COMPLETE").is_ok() {
+        delegate_to_python_cli(raw_args);
+    }
+
     if should_delegate_to_python(&raw_args) {
         delegate_to_python_cli(raw_args);
     }
 
-    let cli = Cli::parse();
+    // Extract script args (everything after FILE) before Clap parsing
+    let (clap_args, script_args) = extract_script_args(&raw_args);
+    let cli = Cli::parse_from(clap_args);
 
     // Handle subcommands
     match cli.command_type {
@@ -206,7 +284,18 @@ fn main() {
             print_runtime_info();
             return;
         }
-        Some(Commands::Bench { iterations, file }) => {
+        Some(Commands::Bench { args }) => {
+            let (iterations, file) = match args.as_slice() {
+                [f] => (_rs::constants::BENCH_DEFAULT_ITERATIONS, PathBuf::from(f)),
+                [n, f] => {
+                    let iters = n.parse::<usize>().unwrap_or_else(|_| {
+                        eprintln!("error: invalid iteration count '{}'", n);
+                        std::process::exit(1);
+                    });
+                    (iters, PathBuf::from(f))
+                }
+                _ => unreachable!(),
+            };
             run_benchmark(&file, iterations, !cli.no_jit, cli.jit_threshold);
             return;
         }
@@ -231,11 +320,28 @@ fn main() {
         }
     };
 
-    // Execute
-    let mut stats = ExecutionStats::default();
-    stats.jit_enabled = !cli.no_jit;
+    // Build argv: [script_path, script_args...]
+    let argv = cli.file.as_ref().map(|f| {
+        let mut v = vec![f.to_string_lossy().to_string()];
+        v.extend(script_args);
+        v
+    });
 
-    match execute(&source, &mut stats, !cli.no_jit, cli.jit_threshold, cli.quiet) {
+    // Execute
+    let mut stats = ExecutionStats {
+        jit_enabled: !cli.no_jit,
+        ..Default::default()
+    };
+
+    match execute(
+        &source,
+        &mut stats,
+        !cli.no_jit,
+        cli.jit_threshold,
+        cli.quiet,
+        argv,
+        cli.policy.as_deref(),
+    ) {
         Ok(value) => {
             // Flush Python's stdout (may be buffered in embedded mode)
             Python::attach(|py| {
@@ -286,9 +392,9 @@ fn load_source(cli: &Cli) -> Result<SourceInput, String> {
 /// Convert Value to display string using Python when needed
 fn value_to_string(value: Value) -> String {
     if value.is_nil() {
-        return String::new(); // None prints nothing
+        String::new() // None prints nothing
     } else if value.is_int() {
-        return value.as_int().unwrap().to_string();
+        value.as_int().unwrap().to_string()
     } else if value.is_float() {
         let f = value.as_float().unwrap();
         // Match Python's float repr
@@ -345,12 +451,36 @@ fn execute(
     enable_jit: bool,
     jit_threshold: u32,
     quiet: bool,
+    argv: Option<Vec<String>>,
+    policy_profile: Option<&str>,
 ) -> Result<Option<String>, String> {
     let mut pipeline = Pipeline::new()?;
     pipeline.set_jit_enabled(enable_jit);
     pipeline.set_jit_threshold(jit_threshold);
     if let Some(path) = source.filename() {
         pipeline.set_source_path(path);
+    }
+    // Set module policy from --policy flag (must happen before host creation)
+    if let Some(profile) = policy_profile {
+        Python::attach(|py| -> Result<(), String> {
+            let config_path = _rs::config::get_config_path();
+            let policy = _rs::policy::ModulePolicy::load_profile(config_path, profile)?;
+            let policy_py = Py::new(py, policy).map_err(|e| format!("failed to create policy object: {}", e))?;
+            pipeline.set_module_policy(policy_py.into_any());
+            Ok(())
+        })?;
+    }
+    // Inject argv into globals so configure_sys() picks it up
+    if let Some(ref argv) = argv {
+        Python::attach(|py| -> Result<(), String> {
+            let executor = pipeline.ensure_executor();
+            executor.ensure_host(py)?;
+            let globals = executor.globals().ok_or("host not initialized")?;
+            let py_list = pyo3::types::PyList::new(py, argv).map_err(|e| e.to_string())?;
+            let val = Value::from_pyobject(py, py_list.as_any()).map_err(|e| e.to_string())?;
+            globals.borrow_mut().insert("argv".to_string(), val);
+            Ok(())
+        })?;
     }
     let (result, timings) = pipeline.execute_timed(source.code())?;
 
@@ -512,19 +642,23 @@ fn run_benchmark(file: &PathBuf, iterations: usize, enable_jit: bool, jit_thresh
     let mut all_stats = Vec::with_capacity(iterations);
 
     // Warmup run (not counted)
-    let mut warmup_stats = ExecutionStats::default();
-    warmup_stats.jit_enabled = enable_jit;
-    if let Err(e) = execute(&source, &mut warmup_stats, enable_jit, jit_threshold, false) {
+    let mut warmup_stats = ExecutionStats {
+        jit_enabled: enable_jit,
+        ..Default::default()
+    };
+    if let Err(e) = execute(&source, &mut warmup_stats, enable_jit, jit_threshold, false, None, None) {
         eprintln!("Warmup failed: {}", e);
         process::exit(1);
     }
 
     // Benchmark runs
     for i in 0..iterations {
-        let mut stats = ExecutionStats::default();
-        stats.jit_enabled = enable_jit;
+        let mut stats = ExecutionStats {
+            jit_enabled: enable_jit,
+            ..Default::default()
+        };
 
-        match execute(&source, &mut stats, enable_jit, jit_threshold, false) {
+        match execute(&source, &mut stats, enable_jit, jit_threshold, false, None, None) {
             Ok(_) => {
                 all_times.push(stats.total_time_us);
                 all_stats.push(stats);

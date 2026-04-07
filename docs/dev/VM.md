@@ -57,23 +57,40 @@ La VM utilise le **NaN-boxing** pour représenter toutes les valeurs sur 64 bits
 [Sign:1][Exponent:11=0x7FF][Quiet:1][Tag:4][Payload:47]
 ```
 
-| Tag    | Type        | Payload                         |
-| ------ | ----------- | ------------------------------- |
-| `0000` | SmallInt    | 47-bit signed integer           |
-| `0001` | Bool        | 0 = false, 1 = true             |
-| `0010` | Nil         | (unused)                        |
-| `0011` | Symbol      | symbol id                       |
-| `0100` | PyObject    | handle ObjectTable (u32)        |
-| `0101` | Struct      | index dans le StructRegistry    |
-| `0110` | BigInt      | pointeur `Arc<GmpInt>` (47-bit) |
-| `0111` | VMFunc      | index dans la FunctionTable     |
-| `1000` | NativeStr   | pointeur `Arc<NativeString>`    |
-| `1001` | NativeList  | pointeur `Arc<NativeList>`      |
-| `1010` | NativeDict  | pointeur `Arc<NativeDict>`      |
-| `1011` | NativeTuple | pointeur `Arc<NativeTuple>`     |
-| `1100` | NativeSet   | pointeur `Arc<NativeSet>`       |
-| `1101` | NativeBytes | pointeur `Arc<NativeBytes>`     |
-| `1110` | StructType  | type_id dans PureStructRegistry |
+| Tag    | Type        | Payload                            |
+| ------ | ----------- | ---------------------------------- |
+| `0000` | SmallInt    | 47-bit signed integer              |
+| `0001` | Bool        | 0 = false, 1 = true                |
+| `0010` | Nil         | (unused)                           |
+| `0011` | Symbol      | symbol id (includes enum variants) |
+| `0100` | PyObject    | handle ObjectTable (u32)           |
+| `0101` | Struct      | index dans le StructRegistry       |
+| `0110` | BigInt      | pointeur `Arc<GmpInt>` (47-bit)    |
+| `0111` | VMFunc      | index dans la FunctionTable        |
+| `1000` | NativeStr   | pointeur `Arc<NativeString>`       |
+| `1001` | NativeList  | pointeur `Arc<NativeList>`         |
+| `1010` | NativeDict  | pointeur `Arc<NativeDict>`         |
+| `1011` | NativeTuple | pointeur `Arc<NativeTuple>`        |
+| `1100` | NativeSet   | pointeur `Arc<NativeSet>`          |
+| `1101` | NativeBytes | pointeur `Arc<NativeBytes>`        |
+| `1110` | StructType  | type_id dans PureStructRegistry    |
+| `1111` | Extended    | pointeur `Arc<ExtendedValue>`      |
+
+Tag 15 (Extended) est un tag "overflow" qui stocke un `Arc<ExtendedValue>`. Variants actuels :
+
+- `Module(ModuleNamespace)` -- namespaces d'import `.cat` en mode pur Rust
+- `EnumType(u32)` -- marqueur de type enum (type_id dans EnumRegistry)
+- `Complex(f64, f64)` -- nombre complexe natif (real, imag)
+- `Meta(NativeMeta)` -- objet META (getattr/setattr, exports programmatiques)
+
+Les futurs types s'y ajouteront sans consommer de tag supplementaire. Dispatch GetAttr/CallMethod dans `core.rs`.
+
+Dans `catnip_rs` (VM principale avec PyO3), Complex utilise un tag dedié (`TAG_COMPLEX = 8`) avec `Arc<NativeComplex>`
+au lieu de passer par Extended. Le round-trip Python se fait via `PyComplex::from_doubles` / `PyComplex.real()/.imag()`.
+
+Tag 3 (Symbol) stocke un symbol_id interné. Les enum variants utilisent ce tag : chaque variante est internée comme
+`"EnumName.variant"` dans la `SymbolTable`, et la `PureEnumRegistry` mappe symbol_id vers (type_id, variant_id) pour le
+dispatch `match` et `GetAttr`. Opcode `MakeEnum` (89) enregistre un type enum et ses variantes dans les registres.
 
 Tags 5, 8-14 sont définis dans `catnip_vm` (VM pure Rust, sans PyO3). Tag 5 (Struct) utilise un index dans
 `PureStructRegistry` avec refcount explicite (pas Arc). Tag 14 (StructType) est un type callable pour la construction.
@@ -83,17 +100,17 @@ Les types mutables (List, Dict, Set) utilisent `RefCell` pour la mutabilité sin
 Les floats sont stockés directement (pas dans un NaN pattern). Toutes les primitives tiennent dans 8 bytes sans
 allocation heap.
 
-**Garde refcount** : les tags 6-13 pointent vers des `Arc` heap-allocated. `clone_refcount()` et `decref()` dans
+**Garde refcount** : les tags 6-13 et 15 pointent vers des `Arc` heap-allocated. `clone_refcount()` et `decref()` dans
 `catnip_vm` doivent vérifier `!is_float()` avant d'inspecter le tag, car certains floats normaux (subnormals, grands
 exposants) ont des bits 50-47 qui matchent accidentellement un tag heap. Sans cette garde, un float comme `1e-100`
 déclencherait `Arc::increment_strong_count` sur un pointeur invalide. `catnip_rs` n'a pas ce problème car ses méthodes
 `is_bigint()`/`is_pyobj()` vérifient le préfixe QNAN_BASE complet.
 
-**`clone_refcount()` unifié** : dans `catnip_rs`, `Value::clone_refcount()` gère les trois types refcountés : BigInt
-(Arc increment), PyObject (ObjectTable handle), et Struct instance (thread-local `struct_registry_incref()`). Tout code
-qui duplique une Value (DupTop, StoreScope vers globals, default parameter binding) passe par cette méthode unique. La
-variante `clone_refcount_bigint()` ne gère que les BigInt (utilisée par les Load opcodes qui font l'incref struct
-explicitement via `self.struct_registry.incref()`).
+**`clone_refcount()` unifié** : dans `catnip_rs`, `Value::clone_refcount()` gère les quatre types refcountés : BigInt
+(Arc increment), Complex (Arc increment), PyObject (ObjectTable handle), et Struct instance (thread-local
+`struct_registry_incref()`). Tout code qui duplique une Value (DupTop, StoreScope vers globals, default parameter
+binding) passe par cette méthode unique. La variante `clone_refcount_bigint()` gère BigInt et Complex (utilisée par les
+Load opcodes qui font l'incref struct explicitement via `self.struct_registry.incref()`).
 
 **Avantages** :
 
@@ -146,6 +163,10 @@ exécution. `FunctionTable::get()` retourne `Option` : les accès invalides prod
   les valeurs TAG_VMFUNC dans la closure (indices dans la table du parent) provoqueraient des accès invalides.
 - **Globals** : `take_vm_globals()` récupère l'Arc globals du parent (posé par `set_vm_globals()` avant le dispatch
   broadcast) et le transmet au `VMHost` du VM enfant pour que les mutations globales se propagent.
+- **StructRegistry** : le VM enfant clone les types et instances du parent (`clone_from_parent`). Les nouvelles
+  instances créées dans le child (index > parent_count) sont transplantées vers le parent via `transplant_to_parent()`
+  avant la restauration des pointeurs thread-local. Sans ce transplant, les struct instances retournées par le broadcast
+  seraient converties en `py.None()` car leur index n'existerait pas dans le parent registry.
 
 **Références** :
 
@@ -219,6 +240,15 @@ référencées par `Value::from_vmfunc(idx)` et converties en `PyCodeObject` wra
 - `CallMethod` (opcode 74) : fuse `GetAttr` + `Call` pour les appels de méthode sur structs. Encoding :
   `(name_idx << 16) | nargs`. Evite l'allocation de `BoundCatnipMethod` intermédiaire
 
+**Slice optimizations** :
+
+- `GetItem(arg=1)` : fuse `Slice` + `GetItem` pour les expressions `obj[start:stop:step]`. Le compilateur détecte quand
+  le second argument de `getitem` est un noeud `IR::Slice` et inline start/stop/step directement sur la stack au lieu
+  d'émettre `BuildSlice(3) + GetItem(0)`. Stack : `[obj, start, stop, step] → GetItem(1) → [result]`. Les deux VMs
+  (PureVM et PyO3) implémentent ce dispatch : PureVM appelle `apply_slice()` (sémantique Python complète pour step
+  positif/négatif), PyO3 VM construit un objet `slice()` Python à la volée. Nécessaire car PureCompiler est aussi
+  utilisé via `UnifiedCompiler::compile_pure()` dans le pipeline catnip_rs
+
 ### Exécution : Bytecode → Result
 
 L'executor (`catnip_rs/src/vm/core.rs`) exécute le bytecode via une boucle de dispatch :
@@ -288,6 +318,7 @@ erreur).
 - Operand stack (valeurs NaN-boxed)
 - Local variables (slots)
 - Program counter (PC)
+- handler_stack, active_exception_stack, pending_unwind (exception handling)
 
 **Frame pooling** : `FramePool` recycle les frames libérées (`free` → `reset` → stockage). `alloc_with_code` réutilise
 un frame existant (conserve la capacité des Vec internes) ou en alloue un nouveau. Taille du pool : 64 frames.
@@ -329,7 +360,12 @@ La VM produit des messages d'erreur avec position source (fichier, ligne, colonn
 **Principe** : capture lazy - zéro overhead sur le chemin normal d'exécution.
 
 **Variantes `VMError`** : au-delà des erreurs classiques (`NameError`, `TypeError`, `RuntimeError`, `ZeroDivisionError`,
-`MemoryLimitExceeded`), deux variantes contrôlent l'arrêt du processus :
+`MemoryLimitExceeded`), trois variantes spécialisées :
+
+- `VMError::UserException(ExceptionInfo)` - exception user-defined ou type groupe (ArithmeticError, LookupError,
+  Exception) avec MRO complet pour le matching hiérarchique. Préserve l'identité à travers les rethrows et finally.
+
+Deux variantes contrôlent l'arrêt du processus :
 
 - `VMError::Exit(i32)` - arrêt explicite avec code de sortie. Produit par l'opcode `Exit` ou par conversion d'un
   `SystemExit` Python intercepté dans `pyerr_to_vmerror` (`py_interop.rs`)
@@ -376,6 +412,52 @@ Error: TypeError: 'int' object is not callable
 > La VM logge la position source de chaque instruction. En exécution normale: rien à signaler. En erreur: ciblage
 > chirurgical.
 
+### Exception Handling (try/except/finally)
+
+**Statut** : dispatch natif complet. Les 8 opcodes (90-97) sont implementes dans les deux VMs (PureVM et PyO3). Plus de
+fallback AST.
+
+**Opcodes** :
+
+| Opcode           | Valeur | Arg                   | Effet                                         |
+| ---------------- | ------ | --------------------- | --------------------------------------------- |
+| `SetupExcept`    | 90     | handler_addr          | Push Except handler sur la handler_stack      |
+| `SetupFinally`   | 91     | finally_addr          | Push Finally handler                          |
+| `PopHandler`     | 92     | --                    | Pop top handler                               |
+| `Raise`          | 93     | 0=expr, 1=re-raise    | Leve une exception                            |
+| `CheckExcMatch`  | 94     | const_idx (type name) | Push bool: type match?                        |
+| `LoadException`  | 95     | --                    | Push message de l'exception active            |
+| `ResumeUnwind`   | 96     | --                    | Reprend le pending_unwind apres finally       |
+| `ClearException` | 97     | --                    | Pop de l'active_exception_stack (fin handler) |
+
+**Structures Frame** :
+
+- `handler_stack: Vec<Handler>` -- pile de handlers actifs (Except/Finally)
+- `active_exception_stack: Vec<ExceptionInfo>` -- pile d'exceptions actives avec MRO pour matching hierarchique
+- `pending_unwind: Option<PendingUnwind>` -- signal sauvegarde pendant l'execution du finally
+
+**Dispatch refactor** : la boucle dispatch est scindee en `dispatch` (wrapper) et `dispatch_inner` (execution).
+`dispatch_inner` prend `frame: &mut Frame` (pas ownership). Quand une instruction retourne `Err`, le wrapper intercepte
+l'erreur et parcourt le `handler_stack` via `try_unwind_to_handler` :
+
+- Except handler : push exception sur `active_exception_stack`, jump au handler
+- Finally handler : set `pending_unwind`, push la valeur de retour si Return, jump au finally body
+- Signaux de controle (Return/Break/Continue) : sautent les Except handlers, s'arretent au premier Finally
+
+Pour Break/Continue a travers finally, le compilateur inline le finally body avant le jump (comme CPython). Le VM
+n'utilise pas les opcodes Break/Continue dans ce cas.
+
+**Compilation** : le `finally` est duplique (inline sur happy path, inline sur handler match path, et landing pad pour
+l'unwind VM). Chaque handler except fait un `CheckExcMatch` par type, avec `Raise 1` si aucun match (re-raise par le
+handler stack).
+
+**Peephole** : `SetupExcept`/`SetupFinally` sont traites comme des jump targets (code handler marque live).
+`Raise`/`ResumeUnwind` sont terminaux (pas de fallthrough). Les targets de `SetupExcept`/`SetupFinally` sont remappes
+lors du compactage.
+
+**Scope write** : le compilateur pre-scanne le body d'une fonction pour detecter les variables assignees qui existent
+dans le scope parent. Ces variables emettent `StoreScope` (pas `StoreLocal`) pour modifier le scope enclosant.
+
 ## Periodic Checks
 
 La VM effectue des vérifications périodiques toutes les ~65536 instructions (bitwise AND sur le compteur, coût
@@ -407,6 +489,44 @@ Disable:  catnip -o memory:0
 
 **Implémentation** : `catnip_rs/src/vm/memory.rs` (lecture RSS), champs `memory_limit_bytes` et `instruction_count` dans
 la struct `VM`, variante `MemoryLimitExceeded` dans `VMError` (convertie en `PyMemoryError`).
+
+## Higher-Order Function Builtins (PureVM)
+
+`map`, `filter`, `fold`, `reduce` sont implémentés nativement dans PureVM (`catnip_vm`). Le mécanisme utilise un
+dispatch ré-entrant car ces fonctions doivent appeler des closures utilisateur depuis un builtin -- impossible avec
+`call_builtin` (fonction libre sans accès au VM).
+
+**Signal HOF** : quand `dispatch_inner` détecte un appel à un HOF builtin (via `try_build_hof`), il retourne
+`VMError::HofBuiltin(HofCall)` au lieu de déléguer à `host.call_function`. `dispatch` intercepte ce signal et appelle
+`execute_hof`.
+
+**Dispatch ré-entrant** : `execute_hof` itère sur les éléments et appelle `call_func_sync` pour chaque invocation de
+closure. `call_func_sync` crée un frame et appelle `dispatch` récursivement. Le `base_depth` (profondeur de la
+frame_stack au début de chaque `dispatch`) garantit que le dispatch interne ne pop jamais les frames de l'appelant
+externe. `unwind_exception` respecte aussi cette limite.
+
+**Signatures** :
+
+- `map(func, iterable)` -- applique `func` à chaque élément, retourne une liste
+- `filter(func, iterable)` -- garde les éléments où `func` retourne truthy, retourne une liste
+- `fold(iterable, init, func)` -- réduction avec accumulateur initial
+- `reduce(iterable, func)` -- réduction sans init (erreur si vide)
+
+**Itérables** : l'extraction utilise `host.get_iter()`, donc tous les types itérables PureVM sont supportés (list,
+tuple, range, dict, set, str, bytes).
+
+**Divergence pipeline Python** : dans le pipeline PyO3, `map` et `filter` sont les builtins Python qui retournent des
+itérateurs lazy. En PureVM, ils retournent des listes eager. PureVM n'a pas de type Value itérateur lazy -- les valeurs
+sont NaN-boxed et il n'y a pas de tag pour un itérateur suspendu. En pratique, le code Catnip consomme quasi-toujours le
+résultat immédiatement (`for`, `len`, indexation), donc la sémantique eager est le cas commun. `fold` et `reduce` ne
+sont pas affectés (résultat scalaire dans les deux pipelines).
+
+**Refcount** : les items sont collectés via `host.get_iter()` (qui clone les refcounts). `execute_hof` décrémente chaque
+élément après usage, décrémente les `acc` intermédiaires (fold/reduce), et décrémente le callable. Le Call handler
+décrémente le nom du builtin. Les chemins d'erreur (validation, runtime, itération) nettoient de façon identique.
+
+**Fichiers** : `catnip_vm/src/error.rs` (types `HofCall`/`HofKind`), `catnip_vm/src/vm/core.rs` (dispatch, execute_hof,
+call_func_sync, try_build_hof, collect_iterable), `catnip_vm/src/host.rs` (BUILTIN_NAMES).
 
 ## String Formatting (F-strings)
 

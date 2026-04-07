@@ -57,9 +57,9 @@ print(f"  Moyenne : {avg_list(numbers)}")
 print()
 
 # Formule composée
-a      = 5
-b      = 3
-c      = 2
+a = 5
+b = 3
+c = 2
 result = a * pow(b, c) + factorial(4)
 
 print("Formule composée :")

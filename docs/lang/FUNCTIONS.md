@@ -497,7 +497,8 @@ list(42)             # [42]
 
 ### Fonctions d'ordre supérieur
 
-`map` et `filter` retournent des itérateurs, consommables avec `for...in` :
+`map` et `filter` retournent des itérateurs lazy dans le pipeline Python, ou des listes eager en PureVM (MCP server).
+Dans les deux cas, consommables avec `for...in` :
 
 ```catnip
 # Map (appliquer une fonction à chaque élément)

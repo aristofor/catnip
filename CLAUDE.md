@@ -145,9 +145,9 @@ Always use `IROpCode` enum, never hardcode opcode numbers.
 - Functions/lambdas use a **trampoline loop** for TCO (O(1) stack space)
 - `@pure` functions are tracked for broadcast optimization
 
-### MCP Server (`catnip_mcp_py/`)
+### MCP Server (`catnip_mcp/`)
 
-10 tools: `parse_catnip`, `eval_catnip`, `check_syntax`, `format_code`, `debug_start`, `debug_continue`, `debug_step`,
-`debug_inspect`, `debug_eval`, `debug_breakpoint`.
+Rust binary (rmcp + tokio). 10 tools: `parse_catnip`, `eval_catnip`, `check_syntax`, `format_code`, `debug_start`,
+`debug_continue`, `debug_step`, `debug_inspect`, `debug_eval`, `debug_breakpoint`.
 
-Resources: `catnip://examples/{topic}`, `catnip://codex/{category}/{module}`.
+Resources: `catnip://examples/{topic}`, `catnip://codex/{category}/{module}`, `catnip://docs/{section}/{topic}`.

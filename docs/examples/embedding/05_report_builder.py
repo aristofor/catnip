@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip pour génération de rapports avec templates.
 

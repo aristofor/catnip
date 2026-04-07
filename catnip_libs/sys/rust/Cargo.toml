@@ -1,7 +1,8 @@
 [package]
 name = "catnip-sys"
-version = "0.0.7"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Catnip sys stdlib plugin (native ABI v2 + optional PyO3)"
 
 [lib]
 name = "catnip_sys"
@@ -13,4 +14,6 @@ extension-module = ["pyo3/extension-module"]
 embedded = ["pyo3/auto-initialize"]
 
 [dependencies]
-pyo3 = { version = "0.28", default-features = false, features = ["macros"] }
+catnip_vm = { path = "../../../catnip_vm" }
+indexmap = "2"
+pyo3 = { version = "0.28", default-features = false, features = ["macros"], optional = true }

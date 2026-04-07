@@ -2,7 +2,7 @@
 Example host module demonstrating Catnip module loading.
 
 Usage:
-    # In the Catnip script, load with: host = import("03_host_module_example", protocol="py")
+    # In the Catnip script, load with: host = import('03_host_module_example', protocol='py')
 """
 
 

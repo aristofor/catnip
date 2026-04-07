@@ -1,0 +1,135 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target repository"
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+      skip_tests:
+        description: "Skip test suite"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-linux:
+    name: Build wheels (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.22.0
+        with:
+          output-dir: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux
+          path: dist/*.whl
+
+  build-macos:
+    name: Build wheels (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.22.0
+        with:
+          output-dir: dist/
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos
+          path: dist/*.whl
+
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist
+        run: pip install build && python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  test:
+    name: Test wheel
+    needs: build-linux
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux
+          path: dist/
+
+      - name: Install and test
+        run: |
+          pip install dist/*.whl
+          pip install pytest pytest-xdist pytest-rerunfailures pytest-timeout
+          # Remove source package to prevent it from shadowing the installed wheel.
+          # Python finds ./catnip/ before site-packages, which has no _rs.so.
+          rm -rf catnip/
+          pytest tests/language/ -q --timeout=120
+
+  publish:
+    name: Publish to ${{ inputs.target }}
+    needs: [build-linux, build-macos, build-sdist, test]
+    if: |
+      always() &&
+      needs.build-linux.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      needs.build-sdist.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target }}
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/project/catnip-lang/' || 'https://test.pypi.org/project/catnip-lang/' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        if: inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -180,6 +180,24 @@ impl PeepholeOptimizer {
                 continue;
             }
 
+            // Exception handlers: target is reachable (VM jumps there on error)
+            if matches!(instr.op, VMOpCode::SetupExcept | VMOpCode::SetupFinally) {
+                let target = instr.arg as usize;
+                if target < instrs.len() {
+                    to_visit.push(target);
+                }
+                // Also continue to next (try body)
+                if idx + 1 < instrs.len() {
+                    to_visit.push(idx + 1);
+                }
+                continue;
+            }
+
+            // Raise: terminal (propagates error, no fallthrough)
+            if instr.op == VMOpCode::Raise || instr.op == VMOpCode::ResumeUnwind {
+                continue;
+            }
+
             // Normal instruction: continue to next
             if idx + 1 < instrs.len() {
                 to_visit.push(idx + 1);
@@ -252,7 +270,10 @@ impl PeepholeOptimizer {
                     | VMOpCode::JumpIfFalseOrPop
                     | VMOpCode::JumpIfTrueOrPop
                     | VMOpCode::JumpIfNone
+                    | VMOpCode::JumpIfNotNoneOrPop
                     | VMOpCode::ForIter
+                    | VMOpCode::SetupExcept
+                    | VMOpCode::SetupFinally
             ) {
                 let old_target = instr.arg as usize;
                 if let Some(&new_target) = old_to_new.get(&old_target) {

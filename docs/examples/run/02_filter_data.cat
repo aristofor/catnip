@@ -1,7 +1,8 @@
 #!/usr/bin/env catnip
 # Filtrage et transformation de données
 
-struct User { id; name; age; active; score;
+struct User {
+    id; name; age; active; score;
 
     is_active(self) => { self.active }
     has_min_score(self, min_score) => { self.score >= min_score }

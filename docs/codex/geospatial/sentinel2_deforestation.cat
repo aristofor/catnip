@@ -87,9 +87,13 @@ pick_clearest = (items) => {
         print("    -> aucune scène disponible après filtre nuage")
         None
     } else {
-        best = fold(items, items[0], (acc, item) => {
+        best = fold(
+            items,
+            items[0],
+            (acc, item) => {
                 if cloud_cover(item) < cloud_cover(acc) { item } else { acc }
-            })
+            }
+        )
         cc = cloud_cover(best)
         print(f"    -> {best.id} (cloud: {round(cc, 1)}%)")
         best
@@ -127,41 +131,42 @@ align_to_ref_grid = (src_arr, src_transform, src_crs, ref_shape, ref_transform, 
 # Lit une bande COG via fenêtre spatiale (seuls les pixels de l'AOI sont téléchargés)
 read_band = (item, band_key, aoi_geom) => {
     href = item.assets[band_key].href
-    ds = rasterio.open(href)
+    with ds = rasterio.open(href) {
+        # Reprojection AOI (lon/lat) vers CRS raster (UTM)
+        proj = pyproj_mod.Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
+        ll = proj.transform(aoi_geom.bounds[0], aoi_geom.bounds[1])
+        ur = proj.transform(aoi_geom.bounds[2], aoi_geom.bounds[3])
 
-    # Reprojection AOI (lon/lat) vers CRS raster (UTM)
-    proj = pyproj_mod.Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
-    ll = proj.transform(aoi_geom.bounds[0], aoi_geom.bounds[1])
-    ur = proj.transform(aoi_geom.bounds[2], aoi_geom.bounds[3])
+        win = rio_windows.from_bounds(ll[0], ll[1], ur[0], ur[1], transform=ds.transform)
+        arr = ds.read(1, window=win, out_dtype=numpy.float32)
+        valid_mask = ds.read_masks(1, window=win)
 
-    win        = rio_windows.from_bounds(ll[0], ll[1], ur[0], ur[1], transform=ds.transform)
-    arr        = ds.read(1, window=win, out_dtype=numpy.float32)
-    valid_mask = ds.read_masks(1, window=win)
+        nodata = ds.nodata
+        raster_crs = ds.crs
+        win_t = rio_windows.transform(win, ds.transform)
 
-    nodata = ds.nodata
-    raster_crs = ds.crs
-    win_t = rio_windows.transform(win, ds.transform)
-    ds.close()
+        # Nodata → NaN
+        if nodata is not None {
+            arr = numpy.where(numpy.equal(arr, nodata), numpy.nan, arr)
+        }
+        # Masque interne raster (0 = invalide) → NaN
+        arr = numpy.where(numpy.equal(valid_mask, 0), numpy.nan, arr)
 
-    # Nodata → NaN
-    if nodata is not None {
-        arr = numpy.where(numpy.equal(arr, nodata), numpy.nan, arr)
+        BandData(arr, raster_crs, win_t)
     }
-    # Masque interne raster (0 = invalide) → NaN
-    arr = numpy.where(numpy.equal(valid_mask, 0), numpy.nan, arr)
-
-    BandData(arr, raster_crs, win_t)
 }
 
 # Stats compactes d'un array (NaN-safe)
 show_stats = (label, arr) => {
     print(
-        f"    {label} : [{round(float(numpy.nanmin(arr)), 3)}, {round(float(numpy.nanmax(arr)), 3)}]  mean = {round(float(numpy.nanmean(arr)), 3)}")
+        f"    {label} : [{round(float(numpy.nanmin(arr)), 3)}, {round(float(numpy.nanmax(arr)), 3)}]  mean = {round(float(numpy.nanmean(arr)), 3)}"
+    )
 }
 
 # ── Recherche STAC ──────────────────────────────────────────────────────
 
-print(f"\n⇒ Recherche STAC ({stac_url})")
+print()
+print(f"⇒ Recherche STAC ({stac_url})")
 
 catalog = stac_client.Client.open(stac_url)
 
@@ -248,8 +253,8 @@ print()
 print("⇒ Surface perdue")
 
 # Résolution en mètres (CRS UTM → px = 10m pour bandes 10m)
-pixel_w       = abs(red1.transform.a)
-pixel_h       = abs(red1.transform.e)
+pixel_w = abs(red1.transform.a)
+pixel_h = abs(red1.transform.e)
 pixel_area_ha = (pixel_w * pixel_h) / 10000
 
 print(f"  Résolution : {pixel_w} x {pixel_h} m")
@@ -269,13 +274,13 @@ severities = list(
 )
 
 severities.[(s) => {
-        mask=if s.max_thresh >= 999.0 {
-            numpy.less(delta, -s.min_thresh)
-        } else {
-            numpy.logical_and(numpy.less(delta, -s.min_thresh), numpy.greater_equal(delta, -s.max_thresh))
-        }
-        print(f"  {s.label} : {int(numpy.nansum(mask))} px")
-    }]
+    mask = if s.max_thresh >= 999.0 {
+        numpy.less(delta, -s.min_thresh)
+    } else {
+        numpy.logical_and(numpy.less(delta, -s.min_thresh), numpy.greater_equal(delta, -s.max_thresh))
+    }
+    print(f"  {s.label} : {int(numpy.nansum(mask))} px")
+}]
 
 if loss_px > 0 {
     print(f"  Drop moyen : {round(float(numpy.nanmean(delta[loss])), 3)}")
@@ -283,23 +288,23 @@ if loss_px > 0 {
 
 # ── Export ──────────────────────────────────────────────────────────────
 
-rows       = delta.shape[0]
-cols       = delta.shape[1]
+rows = delta.shape[0]
+cols = delta.shape[1]
 loss_uint8 = loss.astype(numpy.uint8)
 
 # Masque binaire
 out_mask = safe_temp_path("_loss_mask.tif", "catnip_")
-dst = rasterio.open(out_mask, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='uint8',
-    crs=red1.crs, transform=red1.transform)
-dst.write(loss_uint8, 1)
-dst.close()
+with dst = rasterio.open(out_mask, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='uint8', crs=red1.crs,
+    transform=red1.transform) {
+    dst.write(loss_uint8, 1)
+}
 
 # Delta NDVI (valeurs continues)
 out_delta = safe_temp_path("_delta_ndvi.tif", "catnip_")
-dst = rasterio.open(out_delta, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='float32',
-    crs=red1.crs, transform=red1.transform)
-dst.write(delta.astype(numpy.float32), 1)
-dst.close()
+with dst = rasterio.open(out_delta, 'w', driver='GTiff', height=rows, width=cols, count=1, dtype='float32', crs=red1.crs,
+    transform=red1.transform) {
+    dst.write(delta.astype(numpy.float32), 1)
+}
 
 print()
 print("⇒ Export GeoTIFF")

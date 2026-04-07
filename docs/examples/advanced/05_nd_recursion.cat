@@ -10,10 +10,13 @@ is_list = (x) => { b.isinstance(x, b.list) }
 # ~~ : ND-recursion
 
 # Forme combinateur : seed initial + lambda avec recur
-~~(0, (v, recur) => {
+~~(
+    0,
+    (v, recur) => {
         if v < 10 { recur(v + 1) }
         else { v }
-    })
+    }
+)
 
 # Forme déclaration : fonction ND-recursive
 countdown = ~~(n, recur) => {
@@ -28,9 +31,9 @@ data.[~~(v, _) => { v * 2 }]
 # Forme broadcast récursive (traverse les structures)
 nested = list(1, list(2, 3), 4)
 nested.[~~(v, recur) => {
-        if is_list(v) { v.[~>(x) => { recur(x) }] }
-        else { v * 2 }
-    }]
+    if is_list(v) { v.[~>(x) => { recur(x) }] }
+    else { v * 2 }
+}]
 
 # ~> : ND-map (lift)
 
@@ -60,6 +63,6 @@ pragma('nd_memoize', True)
 pragma('nd_mode', ND.process)
 pragma('nd_workers', 4)
 list(5, 6, 7, 8).[~~(n, r) => {
-        if n <= 1 { 1 }
-        else { n * r(n - 1) }
-    }]
+    if n <= 1 { 1 }
+    else { n * r(n - 1) }
+}]

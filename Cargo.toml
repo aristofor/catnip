@@ -7,12 +7,15 @@ members = [
     "catnip_tools",
     "catnip_repl",
     "catnip_grammar",
+    # @generated-stdlib-workspace-start
+    "catnip_libs/http/rust",
     "catnip_libs/io/rust",
     "catnip_libs/sys/rust",
+    # @generated-stdlib-workspace-end
 ]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
 authors = ["Catnip Contributors"]
 license = "MIT"

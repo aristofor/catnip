@@ -492,8 +492,8 @@ pragma("warning", False, name="unused")  # Désactiver un warning spécifique
 
 ```catnip
 pragma("tco", True)
-json = import("json")
-m = import("math")
+json = import('json')
+m = import('math')
 
 # Fibonacci optimisé TCO
 fib = (n, a=0, b=1) => {

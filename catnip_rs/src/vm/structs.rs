@@ -755,6 +755,37 @@ impl StructRegistry {
         self.free_list = parent.free_list.clone();
     }
 
+    /// Transplant struct instances created in this (child) registry back into
+    /// the parent registry. Copies both reused free-list slots (None in parent,
+    /// Some in child) and appended slots (index >= parent len).
+    pub fn transplant_to_parent(&self, parent: &mut StructRegistry) {
+        let parent_count = parent.instances.len();
+        // Reused free-list slots: index < parent_count, None in parent, Some in child
+        for idx in 0..parent_count.min(self.instances.len()) {
+            if parent.instances[idx].is_none() {
+                if let Some(slot) = &self.instances[idx] {
+                    parent.instances[idx] = Some(InstanceSlot {
+                        instance: slot.instance.clone(),
+                        refcount: AtomicU32::new(slot.refcount.load(Ordering::Relaxed)),
+                    });
+                    parent.free_list.retain(|&i| i != idx as u32);
+                }
+            }
+        }
+        // Appended slots: index >= parent_count
+        for idx in parent_count..self.instances.len() {
+            if let Some(slot) = &self.instances[idx] {
+                while parent.instances.len() <= idx {
+                    parent.instances.push(None);
+                }
+                parent.instances[idx] = Some(InstanceSlot {
+                    instance: slot.instance.clone(),
+                    refcount: AtomicU32::new(slot.refcount.load(Ordering::Relaxed)),
+                });
+            }
+        }
+    }
+
     /// Register a new struct type. Returns its unique id.
     pub fn register_type(
         &mut self,

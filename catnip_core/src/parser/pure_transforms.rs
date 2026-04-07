@@ -107,6 +107,13 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
         "match_expr" => transform_match_expr(node, source),
         "match_case" => transform_match_case(node, source),
 
+        // Error handling
+        "try_stmt" => transform_try_stmt(node, source),
+        "raise_stmt" => transform_raise_stmt(node, source),
+
+        // Context managers
+        "with_stmt" => transform_with_stmt(node, source),
+
         // Pattern matching
         "pattern" => transform_pattern(node, source),
         "pattern_literal" => transform_pattern_literal(node, source),
@@ -116,6 +123,7 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
         "pattern_tuple" => transform_pattern_tuple(node, source),
         "pattern_star" => transform_pattern_star(node, source),
         "pattern_struct" => transform_pattern_struct(node, source),
+        "pattern_enum" => transform_pattern_enum(node, source),
 
         // Variables
         "identifier" => transform_identifier(node, source),
@@ -129,10 +137,12 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
         "nd_map" => transform_nd_map(node, source),
 
         // Collections
-        "list_literal" => transform_list_literal(node, source),
-        "tuple_literal" => transform_tuple_literal(node, source),
+        "bracket_list" => transform_collection_ir(node, source, IROpCode::ListLiteral, "__catnip_spread_list"),
+        "bracket_dict" => transform_bracket_dict(node, source),
+        "list_literal" => transform_collection_ir(node, source, IROpCode::ListLiteral, "__catnip_spread_list"),
+        "tuple_literal" => transform_collection_ir(node, source, IROpCode::TupleLiteral, "__catnip_spread_tuple"),
         "dict_literal" => transform_dict_literal(node, source),
-        "set_literal" => transform_set_literal(node, source),
+        "set_literal" => transform_collection_ir(node, source, IROpCode::SetLiteral, "__catnip_spread_set"),
 
         // Function call & Lambda
         "call" => transform_call(node, source),
@@ -148,6 +158,9 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
         // Trait
         "trait_stmt" => transform_trait_stmt(node, source),
 
+        // Enum
+        "enum_stmt" => transform_enum_stmt(node, source),
+
         // Block
         "block" => transform_block(node, source),
 
@@ -159,6 +172,9 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
 
         // Chained operations (call_member, getattr, index, broadcast)
         "chained" => transform_chained(node, source),
+
+        // Statement (detect import statement pattern)
+        "statement" => transform_statement(node, source),
 
         // Source file
         "source_file" => transform_source_file(node, source),
@@ -966,6 +982,303 @@ fn transform_continue_stmt(_node: Node, _source: &str) -> TransformResult {
     Ok(IR::op(IROpCode::OpContinue, vec![]))
 }
 
+// -- Error handling ----------------------------------------------------------
+
+fn transform_raise_stmt(node: Node, source: &str) -> TransformResult {
+    let children = named_children(&node);
+
+    if children.is_empty() {
+        // bare raise
+        Ok(IR::op_with_pos(
+            IROpCode::OpRaise,
+            vec![],
+            node.start_byte(),
+            node.end_byte(),
+        ))
+    } else {
+        // raise <expr>
+        let value = transform(children[0], source)?;
+        Ok(IR::op_with_pos(
+            IROpCode::OpRaise,
+            vec![value],
+            node.start_byte(),
+            node.end_byte(),
+        ))
+    }
+}
+
+fn transform_try_stmt(node: Node, source: &str) -> TransformResult {
+    let children = named_children(&node);
+
+    let mut body: Option<IR> = None;
+    let mut handlers = IR::List(vec![]);
+    let mut finally_block = IR::None;
+
+    for child in &children {
+        match child.kind() {
+            "block" if body.is_none() => {
+                body = Some(transform(*child, source)?);
+            }
+            "except_block" => {
+                handlers = transform_except_block(*child, source)?;
+            }
+            "finally_clause" => {
+                finally_block = transform_finally_clause(*child, source)?;
+            }
+            _ => {}
+        }
+    }
+
+    let body_ir = body.ok_or_else(|| "try_stmt: missing body block".to_string())?;
+
+    Ok(IR::op_with_pos(
+        IROpCode::OpTry,
+        vec![body_ir, handlers, finally_block],
+        node.start_byte(),
+        node.end_byte(),
+    ))
+}
+
+fn transform_except_block(node: Node, source: &str) -> TransformResult {
+    let children = named_children(&node);
+    let mut clauses = Vec::new();
+
+    for child in &children {
+        if child.kind() == "except_clause" {
+            clauses.push(transform_except_clause(*child, source)?);
+        }
+    }
+
+    Ok(IR::List(clauses))
+}
+
+fn transform_except_clause(node: Node, source: &str) -> TransformResult {
+    // Extract binding (optional field)
+    let binding = if let Some(binding_node) = node.child_by_field_name("binding") {
+        IR::String(node_text(&binding_node, source).to_string())
+    } else {
+        IR::None
+    };
+
+    // Extract exception types from except_pattern
+    let mut types = Vec::new();
+    let children = named_children(&node);
+    for child in &children {
+        if child.kind() == "except_pattern" {
+            let pattern_children = named_children(child);
+            for pc in &pattern_children {
+                match pc.kind() {
+                    "except_types" => {
+                        let type_children = named_children(pc);
+                        for tc in &type_children {
+                            if tc.kind() == "identifier" {
+                                types.push(IR::String(node_text(tc, source).to_string()));
+                            }
+                        }
+                    }
+                    "pattern_wildcard" => {
+                        // wildcard = catch-all, types stays empty
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Extract handler block (field)
+    let handler = if let Some(handler_node) = node.child_by_field_name("handler") {
+        transform(handler_node, source)?
+    } else {
+        return Err("except_clause: missing handler block".into());
+    };
+
+    // Tuple(types_list, binding_or_nil, handler_block)
+    Ok(IR::Tuple(vec![IR::List(types), binding, handler]))
+}
+
+fn transform_finally_clause(node: Node, source: &str) -> TransformResult {
+    if let Some(body_node) = node.child_by_field_name("body") {
+        transform(body_node, source)
+    } else {
+        Err("finally_clause: missing body block".into())
+    }
+}
+
+// ============================================================================
+// Context Managers (with)
+// ============================================================================
+
+/// Desugar `with a=e1, b=e2 { body }` into nested try/except/finally IR.
+///
+/// Each binding `name = expr` produces (N = globally unique counter):
+///   __with_cm_N = expr
+///   name = __with_cm_N.__enter__()
+///   __with_exc_N = False
+///   try {
+///     try { <inner> }
+///     except { __with_e_N => {
+///       __with_exc_N = True
+///       __with_ei_N = ExcInfo()       // (type_class, instance, None)
+///       if not __with_cm_N.__exit__(__with_ei_N[0], __with_ei_N[1], None) { raise }
+///     }}
+///   } finally {
+///     if not __with_exc_N { __with_cm_N.__exit__(None, None, None) }
+///   }
+///
+/// Multiple bindings nest right-to-left so cleanup runs in reverse order.
+fn transform_with_stmt(node: Node, source: &str) -> TransformResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WITH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let mut bindings: Vec<(String, IR)> = Vec::new();
+    let mut body_ir: Option<IR> = None;
+
+    let children = named_children(&node);
+    for child in &children {
+        match child.kind() {
+            "with_binding" => {
+                let name_node = child.child_by_field_name("name").ok_or("with_binding: missing name")?;
+                let value_node = child
+                    .child_by_field_name("value")
+                    .ok_or("with_binding: missing value")?;
+                let name = node_text(&name_node, source).to_string();
+                let value = transform(value_node, source)?;
+                bindings.push((name, value));
+            }
+            "block" => {
+                body_ir = Some(transform(*child, source)?);
+            }
+            _ => {}
+        }
+    }
+
+    if bindings.is_empty() {
+        return Err("with_stmt: requires at least one binding".into());
+    }
+    let body = body_ir.ok_or("with_stmt: missing body block")?;
+    let (sb, eb) = (node.start_byte(), node.end_byte());
+
+    // Fold right: innermost binding wraps the body, outermost is the root.
+    let mut result = body;
+    for (name, cm_expr) in bindings.into_iter().rev() {
+        let uid = WITH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        result = desugar_with_single(uid, &name, cm_expr, result, sb, eb);
+    }
+
+    Ok(result)
+}
+
+/// Produce the desugared IR for a single `with` binding wrapping an inner body.
+/// `uid` is a globally unique counter to avoid name collisions in nested with blocks.
+fn desugar_with_single(uid: usize, name: &str, cm_expr: IR, inner_body: IR, sb: usize, eb: usize) -> IR {
+    let cm_var = format!("__with_cm_{uid}");
+    let exc_var = format!("__with_exc_{uid}");
+    let ei_var = format!("__with_ei_{uid}");
+
+    // Helper: make a simple ref
+    let r = |n: &str| IR::Ref(n.to_string(), -1, -1);
+    // Helper: set_locals(name, value) -- same format as transform_assignment
+    let set = |n: &str, v: IR| {
+        IR::op_with_pos(
+            IROpCode::SetLocals,
+            vec![IR::Tuple(vec![IR::Ref(n.to_string(), -1, -1)]), v, IR::Bool(false)],
+            sb,
+            eb,
+        )
+    };
+    // Helper: method call obj.method(args...)
+    let method_call = |obj: &str, method: &str, args: Vec<IR>| IR::Call {
+        func: Box::new(IR::op_with_pos(
+            IROpCode::GetAttr,
+            vec![r(obj), IR::String(method.to_string())],
+            sb,
+            eb,
+        )),
+        args,
+        kwargs: indexmap::IndexMap::new(),
+        tail: false,
+        start_byte: sb,
+        end_byte: eb,
+    };
+    // Helper: index access obj[idx]
+    let index = |obj: IR, idx: i64| IR::op_with_pos(IROpCode::GetItem, vec![obj, IR::Int(idx)], sb, eb);
+
+    // __with_cm_N = expr
+    let assign_cm = set(&cm_var, cm_expr);
+
+    // name = __with_cm_N.__enter__()
+    let assign_val = set(name, method_call(&cm_var, "__enter__", vec![]));
+
+    // __with_exc_N = False
+    let assign_exc = set(&exc_var, IR::Bool(false));
+
+    // --- except handler ---
+    // __with_exc_N = True
+    let set_exc_true = set(&exc_var, IR::Bool(true));
+    // __with_ei_N = ExcInfo()  -- pushes (exc_type_class, exc_instance, None)
+    let assign_ei = set(&ei_var, IR::op_with_pos(IROpCode::ExcInfo, vec![], sb, eb));
+    // __with_cm_N.__exit__(__with_ei_N[0], __with_ei_N[1], None)
+    let exit_with_exc = method_call(
+        &cm_var,
+        "__exit__",
+        vec![index(r(&ei_var), 0), index(r(&ei_var), 1), IR::None],
+    );
+    // not __exit__(...)
+    let not_exit = IR::op_with_pos(IROpCode::Not, vec![exit_with_exc], sb, eb);
+    // if not __exit__(...) { raise }
+    // OpIf takes args[0] = Tuple of (condition, body) branch pairs
+    let raise_block = IR::op_with_pos(
+        IROpCode::OpBlock,
+        vec![IR::op_with_pos(IROpCode::OpRaise, vec![], sb, eb)],
+        sb,
+        eb,
+    );
+    let conditional_raise = IR::op_with_pos(
+        IROpCode::OpIf,
+        vec![IR::Tuple(vec![IR::Tuple(vec![not_exit, raise_block])])],
+        sb,
+        eb,
+    );
+    // handler body: block { set_exc_true; assign_ei; conditional_raise }
+    let handler_body = IR::op_with_pos(
+        IROpCode::OpBlock,
+        vec![set_exc_true, assign_ei, conditional_raise],
+        sb,
+        eb,
+    );
+
+    // except clause: Tuple([types=[], binding=None (wildcard, no binding needed), handler_body])
+    // We use ExcInfo to get exception info, no need for the except binding.
+    let except_clause = IR::Tuple(vec![IR::List(vec![]), IR::None, handler_body]);
+    let handlers = IR::List(vec![except_clause]);
+
+    // inner try/except (no finally)
+    let inner_try = IR::op_with_pos(IROpCode::OpTry, vec![inner_body, handlers, IR::None], sb, eb);
+
+    // --- finally block ---
+    // if not __with_exc_N { __with_cm_N.__exit__(None, None, None) }
+    let not_exc = IR::op_with_pos(IROpCode::Not, vec![r(&exc_var)], sb, eb);
+    let exit_clean = method_call(&cm_var, "__exit__", vec![IR::None, IR::None, IR::None]);
+    let exit_clean_block = IR::op_with_pos(IROpCode::OpBlock, vec![exit_clean], sb, eb);
+    let finally_body = IR::op_with_pos(
+        IROpCode::OpIf,
+        vec![IR::Tuple(vec![IR::Tuple(vec![not_exc, exit_clean_block])])],
+        sb,
+        eb,
+    );
+
+    // outer try/finally (no except)
+    let outer_try = IR::op_with_pos(IROpCode::OpTry, vec![inner_try, IR::List(vec![]), finally_body], sb, eb);
+
+    // Wrap in a block (expression-valued, returns last value)
+    IR::op_with_pos(
+        IROpCode::OpBlock,
+        vec![assign_cm, assign_val, assign_exc, outer_try],
+        sb,
+        eb,
+    )
+}
+
 fn transform_block(node: Node, source: &str) -> TransformResult {
     let children = named_children(&node);
     let transformed: Result<Vec<_>, _> = children.iter().map(|c| transform(*c, source)).collect();
@@ -1108,9 +1421,9 @@ fn transform_assignment(node: Node, source: &str) -> TransformResult {
 // Collections
 // ============================================================================
 
-fn transform_list_literal(node: Node, source: &str) -> TransformResult {
-    // Extract items from collection_items node.
-    // If any spread item is present, lower to __catnip_spread_list(entries).
+/// Shared helper for list/tuple/set literals (both bracket and function-call forms).
+/// Iterates collection_items, handles spreads, emits the given opcode.
+fn transform_collection_ir(node: Node, source: &str, opcode: IROpCode, spread_fn: &str) -> TransformResult {
     let mut items = Vec::new();
     let mut spread_entries = Vec::new();
     let mut has_spread = false;
@@ -1157,7 +1470,7 @@ fn transform_list_literal(node: Node, source: &str) -> TransformResult {
 
     if has_spread {
         return Ok(IR::Call {
-            func: Box::new(IR::Ref("__catnip_spread_list".to_string(), -1, -1)),
+            func: Box::new(IR::Ref(spread_fn.to_string(), -1, -1)),
             args: vec![IR::op_with_pos(
                 IROpCode::TupleLiteral,
                 spread_entries,
@@ -1171,56 +1484,50 @@ fn transform_list_literal(node: Node, source: &str) -> TransformResult {
         });
     }
 
-    Ok(IR::op_with_pos(
-        IROpCode::ListLiteral,
-        items,
-        node.start_byte(),
-        node.end_byte(),
-    ))
+    Ok(IR::op_with_pos(opcode, items, node.start_byte(), node.end_byte()))
 }
 
-fn transform_tuple_literal(node: Node, source: &str) -> TransformResult {
-    // Extract items from collection_items node.
-    // If any spread item is present, lower to __catnip_spread_tuple(entries).
-    let mut items = Vec::new();
+fn transform_bracket_dict(node: Node, source: &str) -> TransformResult {
+    // Extract colon_pair and dict_spread entries from bracket_dict_items.
+    let mut pair_tuples = Vec::new();
     let mut spread_entries = Vec::new();
     let mut has_spread = false;
 
     for child in named_children(&node) {
-        if child.kind() == "collection_items" {
+        if child.kind() == "bracket_dict_items" {
             for item_child in named_children(&child) {
-                let mut current = item_child;
-                if current.kind() == "collection_item" {
-                    let inner = named_children(&current);
-                    if let Some(first) = inner.first() {
-                        current = *first;
-                    } else {
-                        continue;
-                    }
-                }
+                let current = item_child;
 
-                if current.kind() == "collection_spread" {
+                if current.kind() == "colon_pair" {
+                    let pair_children = named_children(&current);
+                    if pair_children.len() >= 2 {
+                        let key = transform(pair_children[0], source)?;
+                        let value = transform(pair_children[1], source)?;
+                        pair_tuples.push(IR::Tuple(vec![key, value]));
+                        spread_entries.push(IR::op_with_pos(
+                            IROpCode::TupleLiteral,
+                            vec![
+                                IR::Bool(false),
+                                transform(pair_children[0], source)?,
+                                transform(pair_children[1], source)?,
+                            ],
+                            current.start_byte(),
+                            current.end_byte(),
+                        ));
+                    }
+                } else if current.kind() == "dict_spread" {
                     let spread_children = named_children(&current);
                     if spread_children.is_empty() {
-                        return Err("collection_spread: missing value".into());
+                        return Err("dict_spread: missing value".into());
                     }
-                    let value = transform(spread_children[0], source)?;
+                    let mapping = transform(spread_children[0], source)?;
                     spread_entries.push(IR::op_with_pos(
                         IROpCode::TupleLiteral,
-                        vec![IR::Bool(true), value],
+                        vec![IR::Bool(true), mapping],
                         current.start_byte(),
                         current.end_byte(),
                     ));
                     has_spread = true;
-                } else {
-                    let value = transform(current, source)?;
-                    items.push(value.clone());
-                    spread_entries.push(IR::op_with_pos(
-                        IROpCode::TupleLiteral,
-                        vec![IR::Bool(false), value],
-                        current.start_byte(),
-                        current.end_byte(),
-                    ));
                 }
             }
         }
@@ -1228,7 +1535,7 @@ fn transform_tuple_literal(node: Node, source: &str) -> TransformResult {
 
     if has_spread {
         return Ok(IR::Call {
-            func: Box::new(IR::Ref("__catnip_spread_tuple".to_string(), -1, -1)),
+            func: Box::new(IR::Ref("__catnip_spread_dict".to_string(), -1, -1)),
             args: vec![IR::op_with_pos(
                 IROpCode::TupleLiteral,
                 spread_entries,
@@ -1242,16 +1549,133 @@ fn transform_tuple_literal(node: Node, source: &str) -> TransformResult {
         });
     }
 
-    // Create Op node like list_literal does, so it gets compiled properly
     Ok(IR::op_with_pos(
-        IROpCode::TupleLiteral,
-        items,
+        IROpCode::DictLiteral,
+        pair_tuples,
         node.start_byte(),
         node.end_byte(),
     ))
 }
 
 fn transform_dict_literal(node: Node, source: &str) -> TransformResult {
+    // dict(iterable) or dict(iterable, key=val, **spread)
+    let children = named_children(&node);
+    let has_iterable = children.iter().any(|c| c.kind() == "dict_from_iterable");
+    if has_iterable {
+        let mut iterable_ir = None;
+        let mut has_extras = false;
+
+        for child in &children {
+            if child.kind() == "dict_from_iterable" {
+                let inner = named_children(child);
+                iterable_ir = Some(if !inner.is_empty() {
+                    transform(inner[0], source)?
+                } else {
+                    transform(*child, source)?
+                });
+            } else if child.kind() == "dict_items" {
+                has_extras = true;
+            }
+        }
+
+        let iterable_expr = iterable_ir.unwrap();
+
+        if !has_extras {
+            // Simple: dict(iterable) → Call to builtin dict
+            return Ok(IR::Call {
+                func: Box::new(IR::Ref("dict".to_string(), -1, -1)),
+                args: vec![iterable_expr],
+                kwargs: IndexMap::new(),
+                tail: false,
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+            });
+        }
+
+        // dict(iterable, key=val, **spread) → __catnip_spread_dict
+        // First entry: spread the iterable-built dict
+        let dict_call = IR::Call {
+            func: Box::new(IR::Ref("dict".to_string(), -1, -1)),
+            args: vec![iterable_expr],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        };
+        let mut spread_entries = vec![IR::op_with_pos(
+            IROpCode::TupleLiteral,
+            vec![IR::Bool(true), dict_call],
+            node.start_byte(),
+            node.end_byte(),
+        )];
+
+        // Remaining entries from dict_items
+        for child in &children {
+            if child.kind() == "dict_items" {
+                for item_child in named_children(child) {
+                    let mut current = item_child;
+                    if current.kind() == "_dict_entry" {
+                        if let Some(first) = named_children(&current).first() {
+                            current = *first;
+                        } else {
+                            continue;
+                        }
+                    }
+                    if current.kind() == "dict_kwarg" {
+                        let kc = named_children(&current);
+                        if kc.len() >= 2 {
+                            let key_name = node_text(&kc[0], source);
+                            spread_entries.push(IR::op_with_pos(
+                                IROpCode::TupleLiteral,
+                                vec![
+                                    IR::Bool(false),
+                                    IR::String(key_name.to_string()),
+                                    transform(kc[1], source)?,
+                                ],
+                                current.start_byte(),
+                                current.end_byte(),
+                            ));
+                        }
+                    } else if current.kind() == "dict_spread" {
+                        let sc = named_children(&current);
+                        if !sc.is_empty() {
+                            spread_entries.push(IR::op_with_pos(
+                                IROpCode::TupleLiteral,
+                                vec![IR::Bool(true), transform(sc[0], source)?],
+                                current.start_byte(),
+                                current.end_byte(),
+                            ));
+                        }
+                    } else if current.kind() == "dict_pair" {
+                        let pc = named_children(&current);
+                        if pc.len() >= 2 {
+                            spread_entries.push(IR::op_with_pos(
+                                IROpCode::TupleLiteral,
+                                vec![IR::Bool(false), transform(pc[0], source)?, transform(pc[1], source)?],
+                                current.start_byte(),
+                                current.end_byte(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        return Ok(IR::Call {
+            func: Box::new(IR::Ref("__catnip_spread_dict".to_string(), -1, -1)),
+            args: vec![IR::op_with_pos(
+                IROpCode::TupleLiteral,
+                spread_entries,
+                node.start_byte(),
+                node.end_byte(),
+            )],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        });
+    }
+
     // Extract pairs/spreads from dict_items node.
     // If any **spread is present, lower to __catnip_spread_dict(entries).
     let mut pair_tuples = Vec::new();
@@ -1348,77 +1772,6 @@ fn transform_dict_literal(node: Node, source: &str) -> TransformResult {
     ))
 }
 
-fn transform_set_literal(node: Node, source: &str) -> TransformResult {
-    // Extract items from collection_items node.
-    // If any spread item is present, lower to __catnip_spread_set(entries).
-    let mut items = Vec::new();
-    let mut spread_entries = Vec::new();
-    let mut has_spread = false;
-
-    for child in named_children(&node) {
-        if child.kind() == "collection_items" {
-            for item_child in named_children(&child) {
-                let mut current = item_child;
-                if current.kind() == "collection_item" {
-                    let inner = named_children(&current);
-                    if let Some(first) = inner.first() {
-                        current = *first;
-                    } else {
-                        continue;
-                    }
-                }
-
-                if current.kind() == "collection_spread" {
-                    let spread_children = named_children(&current);
-                    if spread_children.is_empty() {
-                        return Err("collection_spread: missing value".into());
-                    }
-                    let value = transform(spread_children[0], source)?;
-                    spread_entries.push(IR::op_with_pos(
-                        IROpCode::TupleLiteral,
-                        vec![IR::Bool(true), value],
-                        current.start_byte(),
-                        current.end_byte(),
-                    ));
-                    has_spread = true;
-                } else {
-                    let value = transform(current, source)?;
-                    items.push(value.clone());
-                    spread_entries.push(IR::op_with_pos(
-                        IROpCode::TupleLiteral,
-                        vec![IR::Bool(false), value],
-                        current.start_byte(),
-                        current.end_byte(),
-                    ));
-                }
-            }
-        }
-    }
-
-    if has_spread {
-        return Ok(IR::Call {
-            func: Box::new(IR::Ref("__catnip_spread_set".to_string(), -1, -1)),
-            args: vec![IR::op_with_pos(
-                IROpCode::TupleLiteral,
-                spread_entries,
-                node.start_byte(),
-                node.end_byte(),
-            )],
-            kwargs: IndexMap::new(),
-            tail: false,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-        });
-    }
-
-    Ok(IR::op_with_pos(
-        IROpCode::SetLiteral,
-        items,
-        node.start_byte(),
-        node.end_byte(),
-    ))
-}
-
 fn transform_call(node: Node, source: &str) -> TransformResult {
     let mut func: Option<IR> = None;
     let mut func_name: Option<String> = None;
@@ -1497,6 +1850,120 @@ fn transform_pragma_stmt(node: Node, source: &str) -> TransformResult {
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
     })
+}
+
+// -- import statement --------------------------------------------------------
+
+/// Check if a call node is `import("string_literal")` -- the statement form.
+/// Returns true only when: function is `import`, exactly one positional arg
+/// that is a string literal (not a computed expression), no kwargs.
+fn is_import_call_string_literal(node: &Node, source: &str) -> bool {
+    if node.kind() != "call" {
+        return false;
+    }
+    let children = named_children(node);
+    let func = children.iter().find(|c| c.kind() == "identifier");
+    let args_node = children.iter().find(|c| c.kind() == "arguments");
+
+    let (Some(f), Some(a)) = (func, args_node) else {
+        return false;
+    };
+    if node_text(f, source) != "import" {
+        return false;
+    }
+
+    // Collect positional args (unwrapping the `args` wrapper node)
+    let mut positional: Vec<Node> = Vec::new();
+    let mut has_kwargs = false;
+    for child in named_children(a) {
+        match child.kind() {
+            "args" => positional.extend(named_children(&child)),
+            "kwargs" | "kwarg" | "keyword_argument" | "args_kwargs" => has_kwargs = true,
+            _ => positional.push(child),
+        }
+    }
+    if positional.len() != 1 || has_kwargs {
+        return false;
+    }
+
+    // The single arg must be a literal > string (not a call, identifier, etc.)
+    let arg = &positional[0];
+    if arg.kind() == "literal" {
+        let lit_children = named_children(arg);
+        return lit_children.len() == 1 && lit_children[0].kind() == "string";
+    }
+    false
+}
+
+fn derive_import_name(spec: &str) -> Result<String, String> {
+    let stripped = spec.trim_start_matches('.');
+    if stripped.contains('.') {
+        return Err(format!(
+            "ambiguous module name '{}', use: name = import(\"{}\")",
+            spec, spec
+        ));
+    }
+    if stripped.is_empty() {
+        return Err("import: empty module spec".to_string());
+    }
+    Ok(stripped.to_string())
+}
+
+/// Extract the string node from the single argument of an import call.
+/// Expects the CST shape: call > arguments > [args >] literal > string.
+fn extract_import_string_node<'a>(call_node: &Node<'a>) -> Option<Node<'a>> {
+    let children = named_children(call_node);
+    let args_node = children.iter().find(|c| c.kind() == "arguments")?;
+    // Unwrap the optional `args` wrapper
+    let mut positional: Vec<Node<'a>> = Vec::new();
+    for child in named_children(args_node) {
+        if child.kind() == "args" {
+            positional.extend(named_children(&child));
+        } else if !matches!(child.kind(), "kwargs" | "kwarg" | "keyword_argument" | "args_kwargs") {
+            positional.push(child);
+        }
+    }
+    let literal = positional.first().filter(|n| n.kind() == "literal")?;
+    let lit_children = named_children(literal);
+    lit_children.first().filter(|n| n.kind() == "string").copied()
+}
+
+/// Desugar `import('spec')` in statement position to `spec_name = import('spec')`.
+fn desugar_import_statement(call_node: Node, source: &str) -> TransformResult {
+    // Extract the string literal from the single argument
+    let string_node = extract_import_string_node(&call_node)
+        .ok_or_else(|| "import statement: missing string literal argument".to_string())?;
+
+    let raw = node_text(&string_node, source);
+    let spec_text = raw.trim_matches(|c: char| c == '"' || c == '\'');
+    let binding_name = derive_import_name(spec_text)?;
+
+    // Transform the call normally first
+    let call_ir = transform_call(call_node, source)?;
+
+    let start = call_node.start_byte();
+    let end = call_node.end_byte();
+
+    // Wrap in SetLocals: name = import(spec)
+    Ok(IR::op_with_pos(
+        IROpCode::SetLocals,
+        vec![IR::Tuple(vec![IR::Identifier(binding_name)]), call_ir, IR::Bool(false)],
+        start,
+        end,
+    ))
+}
+
+/// Transform a statement node. Detects import('spec') calls for auto-binding.
+/// Falls back to normal call transform if the spec can't derive a valid name.
+fn transform_statement(node: Node, source: &str) -> TransformResult {
+    let children = named_children(&node);
+    if children.len() == 1 && is_import_call_string_literal(&children[0], source) {
+        if let Ok(ir) = desugar_import_statement(children[0], source) {
+            return Ok(ir);
+        }
+    }
+    // Default: transparent, transform the child
+    transform_children(node, source)
 }
 
 /// Map operator symbol + param count to internal method name.
@@ -1861,6 +2328,50 @@ fn transform_trait_stmt(node: Node, source: &str) -> TransformResult {
     Ok(IR::op_with_pos(
         IROpCode::TraitDef,
         args,
+        node.start_byte(),
+        node.end_byte(),
+    ))
+}
+
+/// Transform enum definition: `enum Name { variant1; variant2; ... }`
+fn transform_enum_stmt(node: Node, source: &str) -> TransformResult {
+    let mut name: Option<String> = None;
+    let mut variants: Vec<IR> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for child in named_children(&node) {
+        match child.kind() {
+            "identifier" if name.is_none() => {
+                name = Some(node_text(&child, source).to_string());
+            }
+            "enum_variant" => {
+                // The variant has a single named child: the identifier
+                let vname = child
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, source).to_string())
+                    .ok_or_else(|| "enum_variant: missing name".to_string())?;
+                if !seen.insert(vname.clone()) {
+                    return Err(format!(
+                        "enum '{}': duplicate variant '{}'",
+                        name.as_deref().unwrap_or("?"),
+                        vname
+                    ));
+                }
+                variants.push(IR::String(vname));
+            }
+            _ => {}
+        }
+    }
+
+    let name_str = name.ok_or("enum_stmt: missing name")?;
+
+    if variants.is_empty() {
+        return Err(format!("enum '{}' must have at least one variant", name_str));
+    }
+
+    Ok(IR::op_with_pos(
+        IROpCode::EnumDef,
+        vec![IR::String(name_str), IR::Tuple(variants)],
         node.start_byte(),
         node.end_byte(),
     ))
@@ -2452,6 +2963,19 @@ fn transform_pattern_struct(node: Node, source: &str) -> TransformResult {
     Ok(IR::PatternStruct { name, fields })
 }
 
+fn transform_pattern_enum(node: Node, source: &str) -> TransformResult {
+    let enum_name = node
+        .child_by_field_name("enum_name")
+        .ok_or("pattern_enum: missing enum_name")?;
+    let variant_name = node
+        .child_by_field_name("variant_name")
+        .ok_or("pattern_enum: missing variant_name")?;
+    Ok(IR::PatternEnum {
+        enum_name: node_text(&enum_name, source).to_string(),
+        variant_name: node_text(&variant_name, source).to_string(),
+    })
+}
+
 // ============================================================================
 // Access & Indexing
 // ============================================================================
@@ -2746,5 +3270,90 @@ mod tests {
     fn test_transform_bool() {
         let result = parse_and_transform("True").unwrap();
         assert_eq!(result, IR::Bool(true));
+    }
+
+    #[test]
+    fn test_transform_raise_bare() {
+        let result = parse_and_transform("raise").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::OpRaise);
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_raise_expr() {
+        let result = parse_and_transform("raise ValueError(\"msg\")").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::OpRaise);
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_try_except_wildcard() {
+        let result = parse_and_transform("try { 1 } except { _ => { 2 } }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::OpTry);
+                assert_eq!(args.len(), 3);
+                // args[2] = None (no finally)
+                assert_eq!(args[2], IR::None);
+                if let IR::List(handlers) = &args[1] {
+                    assert_eq!(handlers.len(), 1);
+                    if let IR::Tuple(clause) = &handlers[0] {
+                        assert_eq!(clause[0], IR::List(vec![])); // wildcard = empty types
+                        assert_eq!(clause[1], IR::None); // no binding
+                    } else {
+                        panic!("Expected Tuple clause");
+                    }
+                } else {
+                    panic!("Expected List handlers");
+                }
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_try_except_typed_with_binding() {
+        let result = parse_and_transform("try { 1 } except { e: TypeError => { 2 } }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::OpTry);
+                if let IR::List(handlers) = &args[1] {
+                    assert_eq!(handlers.len(), 1);
+                    if let IR::Tuple(clause) = &handlers[0] {
+                        assert_eq!(clause[0], IR::List(vec![IR::String("TypeError".into())]));
+                        assert_eq!(clause[1], IR::String("e".into()));
+                    } else {
+                        panic!("Expected Tuple clause");
+                    }
+                } else {
+                    panic!("Expected List handlers");
+                }
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_try_finally() {
+        let result = parse_and_transform("try { 1 } finally { 2 }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::OpTry);
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[1], IR::List(vec![])); // no handlers
+                assert_ne!(args[2], IR::None); // finally present
+            }
+            _ => panic!("Expected Op node"),
+        }
     }
 }

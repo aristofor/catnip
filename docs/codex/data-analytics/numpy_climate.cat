@@ -9,9 +9,9 @@ import('pathlib', 'Path')
 
 # Chargement des données (3 colonnes: Source, Year, Mean)
 
-data_dir  = Path(META.file).parent / "data"
-csv_path  = str(data_dir / "global-temp_annual.csv")
-sources   = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=0, dtype="U10")
+data_dir = Path(META.file).parent / "data"
+csv_path = str(data_dir / "global-temp_annual.csv")
+sources = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=0, dtype="U10")
 years_all = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=1)
 means_all = numpy.genfromtxt(csv_path, delimiter=",", skip_header=1, usecols=2)
 
@@ -69,7 +69,8 @@ common_years = gi_years
 
 divergence = numpy.subtract(gi_common, gc_common)
 
-print(f"\n⇒ Divergence GISTEMP - GCAG ({int(common_years[0])}-{int(common_years[-1])})")
+print()
+print(f"⇒ Divergence GISTEMP - GCAG ({int(common_years[0])}-{int(common_years[-1])})")
 print(f"  Divergence moyenne:  {round(numpy.mean(divergence), 4)} °C")
 abs_div = numpy.abs(divergence)
 print(f"  Divergence max:      {round(numpy.max(abs_div), 4)} °C")
@@ -86,8 +87,8 @@ struct Period {
 }
 
 period_stats = (start, end) => {
-    gi_m   = numpy.logical_and(numpy.greater_equal(gi_years, start), numpy.less_equal(gi_years, end))
-    gc_m   = numpy.logical_and(numpy.greater_equal(gc_years, start), numpy.less_equal(gc_years, end))
+    gi_m = numpy.logical_and(numpy.greater_equal(gi_years, start), numpy.less_equal(gi_years, end))
+    gc_m = numpy.logical_and(numpy.greater_equal(gc_years, start), numpy.less_equal(gc_years, end))
     gi_val = round(numpy.mean(gi_means[gi_m]), 3)
     gc_val = round(numpy.mean(gc_means[gc_m]), 3)
     Period(start, end, gi_val, gc_val, round(gi_val - gc_val, 3))
@@ -148,8 +149,8 @@ for i in range(nc - 5, nc) {
 linear_slope = (xs, ys) => {
     x_mean = numpy.mean(xs)
     y_mean = numpy.mean(ys)
-    xc     = numpy.subtract(xs, x_mean)
-    yc     = numpy.subtract(ys, y_mean)
+    xc = numpy.subtract(xs, x_mean)
+    yc = numpy.subtract(ys, y_mean)
     numpy.sum(numpy.multiply(xc, yc)) / numpy.sum(numpy.power(xc, 2))
 }
 
@@ -169,10 +170,11 @@ print(f"  Projection GISTEMP 2100: {round(gi_slope * 2100 + gi_intercept, 2)} °
 
 window = 10
 kernel = numpy.ones(window) / window
-gi_ma  = numpy.convolve(gi_means, kernel, mode="valid")
-gc_ma  = numpy.convolve(gc_means, kernel, mode="valid")
+gi_ma = numpy.convolve(gi_means, kernel, mode="valid")
+gc_ma = numpy.convolve(gc_means, kernel, mode="valid")
 
-print(f"\n⇒ Moyenne mobile ({window} ans)")
+print()
+print(f"⇒ Moyenne mobile ({window} ans)")
 print(f"  GISTEMP dernière valeur: {round(gi_ma[-1], 3)} °C")
 print(f"  GCAG dernière valeur:    {round(gc_ma[-1], 3)} °C")
 

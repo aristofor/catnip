@@ -845,16 +845,19 @@ impl App {
 
         // Print the input above (echo) with syntax highlighting
         let prompt_style = Style::default().fg(self.config.color_prompt);
+        // Blank indent matching continuation prompt width -- keeps alignment
+        // without polluting terminal selection with ▹ characters
+        let continuation_blank = " ".repeat(self.config.prompt_continuation.width());
         let echo_lines: Vec<Line> = trimmed
             .lines()
             .enumerate()
             .map(|(i, l)| {
-                let prompt = if i == 0 {
+                let prompt: &str = if i == 0 {
                     &self.config.prompt_main
                 } else {
-                    &self.config.prompt_continuation
+                    &continuation_blank
                 };
-                let mut spans = vec![Span::styled(prompt.as_str(), prompt_style)];
+                let mut spans = vec![Span::styled(prompt, prompt_style)];
                 if let Some(ref hl) = self.highlighter {
                     spans.extend(hl.highlight_line(l));
                 } else {

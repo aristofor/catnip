@@ -73,31 +73,40 @@ class Catnip:
         self._pipeline = Pipeline()
         self._pipeline.set_context(self.context)
         self._pipeline.inject_globals(self.context.globals)
-        # Fix import wrapper: must write to RustGlobals, not PyDict
-        import types
+        # Import loader (Rust): resolves specs, loads modules, caches
+        from ._rs import ImportLoader
+        from .loader import ModuleLoader
 
         proxy = self._pipeline.globals()
-        ns = types.SimpleNamespace(globals=proxy)
-        if hasattr(self.context, 'module_policy'):
-            ns.module_policy = self.context.module_policy
-        if hasattr(self.context, '_extensions'):
-            ns._extensions = self.context._extensions
-        self._fixed_import = _ImportWrapper(ns)
+        policy = getattr(self.context, 'module_policy', None)
+
+        # .cat loading callback: delegates to Python ModuleLoader
+        loader_ctx_ns = type('_Ctx', (), {'globals': proxy})()
+        if policy is not None:
+            loader_ctx_ns.module_policy = policy
+        py_loader = ModuleLoader(loader_ctx_ns)
+        cat_loader = lambda path, name: py_loader.load_catnip_module(path, module_name=name)
+
+        self._fixed_import = ImportLoader(proxy, policy=policy, cat_loader=cat_loader, context=self.context)
         self._pipeline.set_global('import', self._fixed_import)
 
-    def parse(self, text, semantic=True):
+    def parse(self, text, semantic=True, filename=None):
         """
         Parse input text into executable code.
 
         :param text: Source code
         :param semantic: Whether to perform semantic analysis
+        :param filename: Source file path (sets META.file for relative imports)
         :return: Parsed code (list of PyIRNode)
         """
         from .compat import _map_exception
 
         source_bytes = text.encode('utf-8') if isinstance(text, str) else text
-        self.context.sourcemap = SourceMap(source_bytes, filename='<input>')
+        label = filename or '<input>'
+        self.context.sourcemap = SourceMap(source_bytes, filename=label)
         self._source_text = text
+        if filename:
+            self._pipeline.set_source_path(filename)
 
         try:
             # Apply known pragma settings before parsing (optimize=0 disables passes)
@@ -231,7 +240,17 @@ class Catnip:
 
         try:
             result = self._pipeline.execute_prepared()
-        except RuntimeError as e:
+        except (
+            RuntimeError,
+            TypeError,
+            ValueError,
+            IndexError,
+            KeyError,
+            AttributeError,
+            NameError,
+            ZeroDivisionError,
+            MemoryError,
+        ) as e:
             # Sync globals even on error (partial results must be visible)
             self._pipeline.export_globals(self.context.globals)
             exc = _map_exception(e)

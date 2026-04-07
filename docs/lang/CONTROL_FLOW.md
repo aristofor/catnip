@@ -302,3 +302,52 @@ result  # → 55
 - Utiliser `break` ou `continue` en dehors d'une boucle lève une exception
 - Dans des boucles imbriquées, ils n'affectent que la boucle la plus interne
 - Pour sortir d'une fonction, utiliser `return` (qui fonctionne même dans une boucle)
+
+## Exception Handling
+
+Voir [SYNTAX.md](SYNTAX.md#tryexceptfinally) pour la syntaxe `try`/`except`/`finally`/`raise` et les types d'exception
+disponibles.
+
+## Context Managers (`with`)
+
+Le bloc `with` garantit l'appel de `__exit__` en sortie, qu'elle soit normale ou provoquee par une erreur. La syntaxe
+est sans parentheses, coherente avec `if`, `while` et `for` :
+
+```catnip
+with f = open("data.csv") {
+    f.read()
+}
+```
+
+Le binding (`f`) recoit la valeur retournee par `__enter__()`. A la sortie du bloc, `__exit__()` est appele
+automatiquement, meme si une exception a ete levee.
+
+### Multi-binding
+
+Plusieurs context managers sont separes par des virgules. Le cleanup se fait en ordre inverse :
+
+```catnip
+with a = open("input"), b = open("output") {
+    b.write(a.read())
+}
+# b.__exit__() appele en premier, puis a.__exit__()
+```
+
+Chaque binding est visible pour les suivants : `with a = expr1, b = use(a) { ... }`.
+
+### Suppression d'exception
+
+Si `__exit__` retourne une valeur truthy, l'exception est supprimee :
+
+```catnip
+import('contextlib')
+with _ = contextlib.suppress(ValueError) {
+    raise ValueError("ignored")
+}
+# Pas d'exception : suppress a retourne True dans __exit__
+```
+
+### Semantique
+
+Le `with` est un desugaring pur vers `try`/`except`/`finally`. L'exception active est passee a `__exit__` sous forme
+`(type, value, None)` -- le traceback est toujours `None` (ecart documente avec Python).

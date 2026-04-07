@@ -4,6 +4,7 @@
 //! Executes bytecode (CodeObject compiled by PureCompiler) using VmHost
 //! for external operations. All values are native catnip_vm::Value.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,16 +17,19 @@ use indexmap::IndexMap;
 
 use crate::compiler::code_object::CodeObject;
 use crate::compiler::pattern::{VMPattern, VMPatternElement};
-use crate::error::{VMError, VMResult};
+use crate::error::{HofCall, HofKind, VMError, VMResult};
 use crate::host::VmHost;
 use crate::ops::arith;
+use crate::ops::errors;
 use crate::value::Value;
 
 use super::closure::{PureClosureParent, PureClosureScope};
 use super::debug::{DebugHook, DebugState};
+use super::enums::PureEnumRegistry;
 use super::frame::PureFramePool;
 use super::func_table::{PureFuncSlot, PureFunctionTable};
 use super::structs::{PureStructField, PureStructRegistry, PureStructType, PureTraitRegistry};
+use catnip_core::symbols::{SymbolTable, qualified_name};
 
 /// Interrupt check frequency (every ~64k instructions).
 const INTERRUPT_CHECK_INTERVAL: u64 = 1 << 16;
@@ -55,9 +59,17 @@ pub struct PureVM {
     pub(crate) struct_registry: PureStructRegistry,
     /// Trait definition registry.
     pub(crate) trait_registry: PureTraitRegistry,
+    /// Enum type registry.
+    pub(crate) enum_registry: PureEnumRegistry,
+    /// Symbol interning table (used by enums).
+    pub(crate) symbol_table: SymbolTable,
+    /// Enum type name → type_id mapping for GetAttr dispatch.
+    pub(crate) enum_type_names: HashMap<String, u32>,
     /// ND lambda stack for recursive ND operations (~~).
     /// Stores VMFunc indices of active ND lambdas.
     pub(crate) nd_lambda_stack: Vec<u32>,
+    /// Optional import loader for .cat file imports.
+    pub(crate) import_loader: Option<crate::loader::PureImportLoader>,
 }
 
 // Re-use PureFrame directly to avoid circular import
@@ -75,7 +87,11 @@ impl PureVM {
             debug: DebugState::new(),
             struct_registry: PureStructRegistry::new(),
             trait_registry: PureTraitRegistry::new(),
+            enum_registry: PureEnumRegistry::new(),
+            symbol_table: SymbolTable::new(),
+            enum_type_names: HashMap::new(),
             nd_lambda_stack: Vec::new(),
+            import_loader: None,
         }
     }
 
@@ -84,6 +100,73 @@ impl PureVM {
         let mut vm = Self::new();
         vm.interrupt_flag = interrupt;
         vm
+    }
+
+    /// Handle an import() call. Takes the loader temporarily to avoid borrow conflict.
+    /// kwargs supports `protocol` (str) and `wild` (bool).
+    fn handle_import(&mut self, args: &[Value], kwargs: &[(String, Value)], host: &dyn VmHost) -> VMResult<Value> {
+        let spec_val = args
+            .first()
+            .ok_or_else(|| VMError::TypeError("import() takes at least 1 argument (0 given)".into()))?;
+        if !spec_val.is_native_str() {
+            return Err(VMError::TypeError("import() argument must be a string".into()));
+        }
+        let spec = unsafe { spec_val.as_native_str_ref().unwrap() };
+
+        // Parse kwargs
+        let mut protocol: Option<String> = None;
+        let mut wild = false;
+        for (name, val) in kwargs {
+            match name.as_str() {
+                "protocol" => {
+                    if !val.is_native_str() {
+                        return Err(VMError::TypeError("protocol must be a string".into()));
+                    }
+                    protocol = Some(unsafe { val.as_native_str_ref().unwrap() }.to_string());
+                }
+                "wild" => {
+                    wild = val.is_truthy();
+                }
+                _ => {
+                    return Err(VMError::TypeError(format!(
+                        "import() got unexpected keyword argument '{}'",
+                        name
+                    )));
+                }
+            }
+        }
+
+        // Parse selective import names from positional args beyond the first
+        let mut names = Vec::new();
+        for arg in &args[1..] {
+            if !arg.is_native_str() {
+                return Err(VMError::TypeError("import() selective names must be strings".into()));
+            }
+            let raw = unsafe { arg.as_native_str_ref().unwrap() }.to_string();
+            names.push(crate::loader::parse_import_name(&raw)?);
+        }
+
+        let params = crate::loader::ImportParams {
+            spec,
+            names,
+            wild,
+            protocol: protocol.as_deref(),
+        };
+
+        // Take the loader out to avoid &mut self aliasing
+        let loader = self.import_loader.take().unwrap();
+        let result = loader.load_with_params(params, self);
+        self.import_loader = Some(loader);
+
+        match result? {
+            crate::loader::ImportResult::Namespace(val) => Ok(val),
+            crate::loader::ImportResult::Injected(pairs) => {
+                for (name, val) in pairs {
+                    host.store_global(&name, val);
+                }
+                Ok(Value::NIL)
+            }
+        }
     }
 
     /// Set a debug hook. The VM will call it on breakpoints and steps.
@@ -156,12 +239,71 @@ impl PureVM {
         self.execute(code, args, host)
     }
 
-    /// Main dispatch loop.
+    /// Main dispatch loop with exception unwinding.
+    ///
+    /// Records `base_depth` so that re-entrant calls (from HOF builtins)
+    /// never pop frames belonging to an outer dispatch invocation.
     pub(crate) fn dispatch(&mut self, mut frame: PureFrame, host: &dyn VmHost) -> VMResult<Value> {
-        // Iterators indexed by handle. GetIter pushes handle onto stack,
-        // ForIter peeks handle to call next_value().
+        let base_depth = self.frame_stack.len();
         let mut iterators: Vec<Option<Box<dyn crate::host::ValueIter>>> = Vec::new();
+        'outer: loop {
+            match self.dispatch_inner(&mut frame, host, &mut iterators, base_depth) {
+                Ok(val) => {
+                    self.frame_pool.free(frame);
+                    return Ok(val);
+                }
+                Err(err) => {
+                    // HOF builtin signal: execute synchronously, then continue
+                    let err = match err {
+                        VMError::HofBuiltin(hof) => match self.execute_hof(hof, host) {
+                            Ok(result) => {
+                                frame.push(result);
+                                continue 'outer;
+                            }
+                            Err(e) => e,
+                        },
+                        other => other,
+                    };
+                    // Try to unwind to an exception handler
+                    if self.unwind_exception(&mut frame, &err, base_depth) {
+                        continue 'outer;
+                    }
+                    // No handler found. Handle Return specially (frame pop).
+                    if let VMError::Return(val) = err {
+                        if self.frame_stack.len() > base_depth {
+                            let caller = self.frame_stack.pop().unwrap();
+                            let discard = frame.discard_return;
+                            let old = std::mem::replace(&mut frame, caller);
+                            self.frame_pool.free(old);
+                            if discard {
+                                val.decref();
+                            } else {
+                                frame.push(val);
+                            }
+                            continue 'outer;
+                        }
+                        self.frame_pool.free(frame);
+                        return Ok(val);
+                    }
+                    // Clean up frames above base_depth
+                    while self.frame_stack.len() > base_depth {
+                        self.frame_pool.free(self.frame_stack.pop().unwrap());
+                    }
+                    self.frame_pool.free(frame);
+                    return Err(err);
+                }
+            }
+        }
+    }
 
+    /// Inner dispatch loop. Returns Ok on clean exit, Err on any signal/exception.
+    fn dispatch_inner(
+        &mut self,
+        frame: &mut PureFrame,
+        host: &dyn VmHost,
+        iterators: &mut Vec<Option<Box<dyn crate::host::ValueIter>>>,
+        base_depth: usize,
+    ) -> VMResult<Value> {
         loop {
             let code = match &frame.code {
                 Some(c) => Arc::clone(c),
@@ -176,11 +318,12 @@ impl PureVM {
                 } else {
                     Value::NIL
                 };
-                // Pop frame from call stack
-                if let Some(caller) = self.frame_stack.pop() {
+                // Pop frame from call stack (only above base_depth)
+                if self.frame_stack.len() > base_depth {
+                    let caller = self.frame_stack.pop().unwrap();
                     let discard = frame.discard_return;
-                    self.frame_pool.free(frame);
-                    frame = caller;
+                    let old = std::mem::replace(frame, caller);
+                    self.frame_pool.free(old);
                     if discard {
                         result.decref();
                     } else {
@@ -188,7 +331,6 @@ impl PureVM {
                     }
                     continue;
                 }
-                self.frame_pool.free(frame);
                 return Ok(result);
             }
 
@@ -200,11 +342,11 @@ impl PureVM {
             if self.debug.is_active() {
                 let depth = self.frame_stack.len() + 1;
                 if self.debug.stepping {
-                    self.debug.check_step(&frame, &code, instr_idx, depth);
+                    self.debug.check_step(frame, &code, instr_idx, depth);
                 } else if self.debug.is_breakpoint(&code, instr_idx) {
                     let src_byte = code.line_table.get(instr_idx).copied().unwrap_or(u32::MAX);
                     if src_byte != self.debug.last_pause_byte {
-                        self.debug.pause(&frame, &code, instr_idx, depth, true);
+                        self.debug.pause(frame, &code, instr_idx, depth, true);
                     }
                 }
             }
@@ -214,7 +356,6 @@ impl PureVM {
             if self.instruction_count & (INTERRUPT_CHECK_INTERVAL - 1) == 0
                 && self.interrupt_flag.load(Ordering::Relaxed)
             {
-                self.frame_pool.free(frame);
                 return Err(VMError::Interrupted);
             }
 
@@ -323,10 +464,18 @@ impl PureVM {
                 // Tier 1: Control flow signals
                 // =============================================================
                 VMOpCode::Break => {
-                    return Err(VMError::Break);
+                    let err = VMError::Break;
+                    if self.try_unwind_to_handler(frame, &err) {
+                        continue;
+                    }
+                    return Err(err);
                 }
                 VMOpCode::Continue => {
-                    return Err(VMError::Continue);
+                    let err = VMError::Continue;
+                    if self.try_unwind_to_handler(frame, &err) {
+                        continue;
+                    }
+                    return Err(err);
                 }
                 VMOpCode::Return => {
                     let val = if !frame.stack.is_empty() {
@@ -335,10 +484,24 @@ impl PureVM {
                         Value::NIL
                     };
 
-                    if let Some(caller) = self.frame_stack.pop() {
+                    // If handler stack has Finally, handle inline
+                    if !frame.handler_stack.is_empty() {
+                        let err = VMError::Return(val);
+                        if self.try_unwind_to_handler(frame, &err) {
+                            continue;
+                        }
+                        // No Finally handler, recover value and fall through
+                        if let VMError::Return(v) = err {
+                            frame.push(v);
+                        }
+                    }
+
+                    // Fast path: no handlers, direct frame switching
+                    if self.frame_stack.len() > base_depth {
+                        let caller = self.frame_stack.pop().unwrap();
                         let discard = frame.discard_return;
-                        self.frame_pool.free(frame);
-                        frame = caller;
+                        let old = std::mem::replace(frame, caller);
+                        self.frame_pool.free(old);
                         if discard {
                             val.decref();
                         } else {
@@ -346,7 +509,6 @@ impl PureVM {
                         }
                         continue;
                     }
-                    self.frame_pool.free(frame);
                     return Ok(val);
                 }
                 VMOpCode::Halt => {
@@ -355,7 +517,6 @@ impl PureVM {
                     } else {
                         Value::NIL
                     };
-                    self.frame_pool.free(frame);
                     return Ok(val);
                 }
                 VMOpCode::Exit => {
@@ -364,7 +525,6 @@ impl PureVM {
                     } else {
                         0
                     };
-                    self.frame_pool.free(frame);
                     return Err(VMError::Exit(code));
                 }
                 VMOpCode::Nop => {}
@@ -425,7 +585,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_add", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Add, a, b)?;
                         frame.push(result);
@@ -435,7 +595,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_sub", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Sub, a, b)?;
                         frame.push(result);
@@ -445,7 +605,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_mul", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Mul, a, b)?;
                         frame.push(result);
@@ -487,7 +647,7 @@ impl PureVM {
                     // +x is a no-op for numeric types
                     let a = frame.peek();
                     if !a.is_int() && !a.is_float() && !a.is_bigint() {
-                        return Err(VMError::TypeError("bad operand type for unary +".into()));
+                        return Err(VMError::TypeError(errors::ERR_BAD_UNARY_POS.into()));
                     }
                 }
 
@@ -503,7 +663,7 @@ impl PureVM {
                             if let Some(v) = arith::bigint_binop(a, b, |x, y| rug::Integer::from(x & y)) {
                                 frame.push(v);
                             } else {
-                                return Err(VMError::TypeError("unsupported operand types for &".into()));
+                                return Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITAND.into()));
                             }
                         }
                     }
@@ -517,7 +677,7 @@ impl PureVM {
                             if let Some(v) = arith::bigint_binop(a, b, |x, y| rug::Integer::from(x | y)) {
                                 frame.push(v);
                             } else {
-                                return Err(VMError::TypeError("unsupported operand types for |".into()));
+                                return Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITOR.into()));
                             }
                         }
                     }
@@ -531,7 +691,7 @@ impl PureVM {
                             if let Some(v) = arith::bigint_binop(a, b, |x, y| rug::Integer::from(x ^ y)) {
                                 frame.push(v);
                             } else {
-                                return Err(VMError::TypeError("unsupported operand types for ^".into()));
+                                return Err(VMError::TypeError(errors::ERR_UNSUPPORTED_BITXOR.into()));
                             }
                         }
                     }
@@ -544,7 +704,7 @@ impl PureVM {
                         let n = unsafe { a.as_bigint_ref().unwrap() };
                         frame.push(Value::from_bigint_or_demote(rug::Integer::from(!n)));
                     } else {
-                        return Err(VMError::TypeError("bad operand type for unary ~".into()));
+                        return Err(VMError::TypeError(errors::ERR_BAD_UNARY_NOT.into()));
                     }
                 }
                 VMOpCode::LShift => {
@@ -566,7 +726,7 @@ impl PureVM {
                             }
                         }
                         _ => {
-                            return Err(VMError::TypeError("unsupported operand types for <<".into()));
+                            return Err(VMError::TypeError(errors::ERR_UNSUPPORTED_LSHIFT.into()));
                         }
                     }
                 }
@@ -581,7 +741,7 @@ impl PureVM {
                             frame.push(Value::from_int(ai >> bi.min(63)));
                         }
                         _ => {
-                            return Err(VMError::TypeError("unsupported operand types for >>".into()));
+                            return Err(VMError::TypeError(errors::ERR_UNSUPPORTED_RSHIFT.into()));
                         }
                     }
                 }
@@ -593,7 +753,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_lt", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Lt, a, b)?;
                         frame.push(result);
@@ -603,7 +763,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_le", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Le, a, b)?;
                         frame.push(result);
@@ -613,7 +773,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_gt", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Gt, a, b)?;
                         frame.push(result);
@@ -623,7 +783,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_ge", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else {
                         let result = host.binary_op(crate::host::BinaryOp::Ge, a, b)?;
                         frame.push(result);
@@ -633,7 +793,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_eq", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else if let Some(eq) = arith::eq_native(a, b) {
                         frame.push(Value::from_bool(eq));
                     } else {
@@ -644,7 +804,7 @@ impl PureVM {
                     let b = frame.pop();
                     let a = frame.pop();
                     if let Some(func_idx) = self.struct_binary_op("op_ne", a, b) {
-                        self.call_struct_op(func_idx, a, b, &mut frame)?;
+                        self.call_struct_op(func_idx, a, b, frame)?;
                     } else if let Some(eq) = arith::eq_native(a, b) {
                         frame.push(Value::from_bool(!eq));
                     } else {
@@ -658,14 +818,14 @@ impl PureVM {
                 VMOpCode::LoadScope => {
                     let name = &code.names[instr.arg as usize];
                     // Try closure scope first (stored on frame_stack context)
-                    let val = self.resolve_scope(name, &frame, host)?;
+                    let val = self.resolve_scope(name, frame, host)?;
                     val.clone_refcount();
                     frame.push(val);
                 }
                 VMOpCode::StoreScope => {
                     let val = frame.pop();
                     let name = &code.names[instr.arg as usize];
-                    if !self.store_scope(name, val, &frame) {
+                    if !self.store_scope(name, val, frame) {
                         // If not in any scope, store as global
                         host.store_global(name, val);
                     }
@@ -776,8 +936,8 @@ impl PureVM {
                             new_frame.bind_args(&init_args);
                             new_frame.closure_scope = closure;
                             new_frame.discard_return = true;
-                            self.frame_stack.push(frame);
-                            frame = new_frame;
+                            let old_frame = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old_frame);
                         } else {
                             frame.push(result);
                         }
@@ -799,8 +959,8 @@ impl PureVM {
                         new_frame.closure_scope = closure;
 
                         // Save current frame, switch to new
-                        self.frame_stack.push(frame);
-                        frame = new_frame;
+                        let old_frame = std::mem::replace(frame, new_frame);
+                        self.frame_stack.push(old_frame);
                     } else if Self::is_nd_recur_sentinel(func) {
                         // ND recursion callback: recur(value)
                         let result = self.handle_nd_recur_call(&args, host)?;
@@ -813,6 +973,27 @@ impl PureVM {
                             self.handle_nd_lift_call(inner, &args, host)?
                         };
                         frame.push(result);
+                    } else if func.is_native_str() {
+                        let name = unsafe { func.as_native_str_ref().unwrap() };
+                        if name == "isinstance" && args.len() == 2 {
+                            let result = self.check_isinstance(args[0], args[1]);
+                            func.decref();
+                            for a in &args {
+                                a.decref();
+                            }
+                            frame.push(result?);
+                        } else if name == "import" && self.import_loader.is_some() {
+                            let result = self.handle_import(&args, &[], host)?;
+                            frame.push(result);
+                        } else if let Some(hof) = Self::try_build_hof(name, &args) {
+                            // HofCall owns func, iterable, and init (fold).
+                            // Only the builtin name string is untracked.
+                            func.decref();
+                            return Err(VMError::HofBuiltin(hof));
+                        } else {
+                            let result = host.call_function(func, &args)?;
+                            frame.push(result);
+                        }
                     } else {
                         // Delegate to host
                         let result = host.call_function(func, &args)?;
@@ -857,16 +1038,41 @@ impl PureVM {
                         frame.match_bindings = None;
                         frame.closure_scope = closure;
                         frame.bind_args(&args);
-                    } else {
-                        // Non-VMFunc: can't TCO, just call normally
-                        let result = host.call_function(func, &args)?;
+                    } else if func.is_native_str() {
+                        let name = unsafe { func.as_native_str_ref().unwrap() };
+                        let result = if name == "isinstance" && args.len() == 2 {
+                            let r = self.check_isinstance(args[0], args[1]);
+                            func.decref();
+                            for a in &args {
+                                a.decref();
+                            }
+                            r?
+                        } else if name == "import" && self.import_loader.is_some() {
+                            self.handle_import(&args, &[], host)?
+                        } else if let Some(hof) = Self::try_build_hof(name, &args) {
+                            func.decref();
+                            return Err(VMError::HofBuiltin(hof));
+                        } else {
+                            host.call_function(func, &args)?
+                        };
                         // Return the result up the call stack
-                        if let Some(caller) = self.frame_stack.pop() {
-                            self.frame_pool.free(frame);
-                            frame = caller;
+                        if self.frame_stack.len() > base_depth {
+                            let caller = self.frame_stack.pop().unwrap();
+                            let old = std::mem::replace(frame, caller);
+                            self.frame_pool.free(old);
                             frame.push(result);
                         } else {
-                            self.frame_pool.free(frame);
+                            return Ok(result);
+                        }
+                    } else {
+                        // Non-VMFunc, non-builtin: delegate to host
+                        let result = host.call_function(func, &args)?;
+                        if self.frame_stack.len() > base_depth {
+                            let caller = self.frame_stack.pop().unwrap();
+                            let old = std::mem::replace(frame, caller);
+                            self.frame_pool.free(old);
+                            frame.push(result);
+                        } else {
                             return Ok(result);
                         }
                     }
@@ -911,8 +1117,8 @@ impl PureVM {
                             let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
                             new_frame.bind_args(&full_args);
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(frame);
-                            frame = new_frame;
+                            let old_frame = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old_frame);
                         } else if let Some(&func_idx) = ty.static_methods.get(method_name) {
                             let slot = self
                                 .func_table
@@ -926,8 +1132,8 @@ impl PureVM {
                             let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
                             new_frame.bind_args(&args);
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(frame);
-                            frame = new_frame;
+                            let old_frame = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old_frame);
                         } else {
                             let ty_name = ty.name.clone();
                             return Err(VMError::RuntimeError(format!(
@@ -954,14 +1160,40 @@ impl PureVM {
                             let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
                             new_frame.bind_args(&args);
                             new_frame.closure_scope = closure;
-                            self.frame_stack.push(frame);
-                            frame = new_frame;
+                            let old_frame = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old_frame);
                         } else {
                             let ty_name = ty.name.clone();
                             return Err(VMError::RuntimeError(format!(
                                 "type '{}' has no static method '{}'",
                                 ty_name, method_name
                             )));
+                        }
+                    } else if obj.is_module() {
+                        let ns = unsafe { obj.as_module_ref().unwrap() };
+                        let func_val = *ns.attrs.get(method_name).ok_or_else(|| {
+                            VMError::AttributeError(format!("module '{}' has no attribute '{}'", ns.name, method_name))
+                        })?;
+                        if func_val.is_vmfunc() && !func_val.is_invalid() {
+                            let idx = func_val.as_vmfunc_idx();
+                            let slot = self
+                                .func_table
+                                .get(idx)
+                                .ok_or_else(|| VMError::RuntimeError("invalid function index".into()))?;
+                            let callee_code = Arc::clone(&slot.code);
+                            let closure = slot.closure.clone();
+                            if self.frame_stack.len() >= MAX_FRAME_DEPTH {
+                                return Err(VMError::FrameOverflow);
+                            }
+                            let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
+                            new_frame.bind_args(&args);
+                            new_frame.closure_scope = closure;
+                            let old_frame = std::mem::replace(frame, new_frame);
+                            self.frame_stack.push(old_frame);
+                        } else {
+                            // Delegate to host for NativeStr builtins etc.
+                            let result = host.call_function(func_val, &args)?;
+                            frame.push(result);
                         }
                     } else {
                         let result = host.call_method(obj, method_name, &args)?;
@@ -1020,15 +1252,19 @@ impl PureVM {
                             }
                         }
                         new_frame.closure_scope = closure;
-                        self.frame_stack.push(frame);
-                        frame = new_frame;
+                        let old_frame = std::mem::replace(frame, new_frame);
+                        self.frame_stack.push(old_frame);
                     } else if func.is_native_str() {
                         let name = unsafe { func.as_native_str_ref().unwrap() };
                         match name {
+                            "import" if self.import_loader.is_some() => {
+                                let kw: Vec<(String, Value)> = kw_names.into_iter().zip(kw_values).collect();
+                                let result = self.handle_import(&args, &kw, host)?;
+                                frame.push(result);
+                            }
                             "dict" => {
                                 let dict = Value::from_empty_dict();
                                 let d = unsafe { dict.as_native_dict_ref().unwrap() };
-                                // Add positional args (not typical for dict, but handle gracefully)
                                 for (kname, val) in kw_names.iter().zip(kw_values.iter()) {
                                     let key = crate::collections::ValueKey::Str(Arc::new(
                                         crate::value::NativeString::new(kname.clone()),
@@ -1165,6 +1401,24 @@ impl PureVM {
                                 ty.name, name
                             )));
                         }
+                    } else if let Some(enum_type_id) = obj.as_enum_type_id() {
+                        match self.enum_registry.get_variant_value(enum_type_id, name) {
+                            Some(val) => frame.push(val),
+                            None => {
+                                let ety = self.enum_registry.get_type(enum_type_id).unwrap();
+                                return Err(VMError::RuntimeError(format!(
+                                    "enum '{}' has no variant '{}'",
+                                    ety.name, name
+                                )));
+                            }
+                        }
+                    } else if obj.is_module() {
+                        let ns = unsafe { obj.as_module_ref().unwrap() };
+                        let val = ns.attrs.get(name).ok_or_else(|| {
+                            VMError::AttributeError(format!("module '{}' has no attribute '{}'", ns.name, name))
+                        })?;
+                        val.clone_refcount();
+                        frame.push(*val);
                     } else {
                         let result = host.obj_getattr(obj, name)?;
                         frame.push(result);
@@ -1182,10 +1436,20 @@ impl PureVM {
                     }
                 }
                 VMOpCode::GetItem => {
-                    let key = frame.pop();
-                    let obj = frame.pop();
-                    let result = host.obj_getitem(obj, key)?;
-                    frame.push(result);
+                    if instr.arg == 1 {
+                        // Slice mode: stack has [obj, start, stop, step]
+                        let step = frame.pop();
+                        let stop = frame.pop();
+                        let start = frame.pop();
+                        let obj = frame.pop();
+                        let result = crate::host::apply_slice(obj, start, stop, step)?;
+                        frame.push(result);
+                    } else {
+                        let key = frame.pop();
+                        let obj = frame.pop();
+                        let result = host.obj_getitem(obj, key)?;
+                        frame.push(result);
+                    }
                 }
                 VMOpCode::SetItem => {
                     let val = frame.pop();
@@ -1283,16 +1547,18 @@ impl PureVM {
                     let value = frame.pop();
                     let pattern = code.patterns.get(pat_idx).cloned();
                     match pattern {
-                        Some(ref pat) => match vm_match_pattern(pat, value, &self.struct_registry) {
-                            Some(bindings) => {
-                                frame.match_bindings = Some(bindings);
-                                frame.push(Value::TRUE);
+                        Some(ref pat) => {
+                            match vm_match_pattern(pat, value, &self.struct_registry, &self.symbol_table) {
+                                Some(bindings) => {
+                                    frame.match_bindings = Some(bindings);
+                                    frame.push(Value::TRUE);
+                                }
+                                None => {
+                                    frame.match_bindings = None;
+                                    frame.push(Value::NIL);
+                                }
                             }
-                            None => {
-                                frame.match_bindings = None;
-                                frame.push(Value::NIL);
-                            }
-                        },
+                        }
                         None => {
                             frame.match_bindings = None;
                             frame.push(Value::NIL);
@@ -1305,7 +1571,8 @@ impl PureVM {
                     let pattern = code.patterns.get(pat_idx).cloned();
                     match pattern {
                         Some(ref pat) => {
-                            let bindings = vm_match_assign_pattern(pat, value, &self.struct_registry)?;
+                            let bindings =
+                                vm_match_assign_pattern(pat, value, &self.struct_registry, &self.symbol_table)?;
                             frame.match_bindings = Some(bindings);
                             frame.push(Value::TRUE);
                         }
@@ -1384,6 +1651,14 @@ impl PureVM {
                     if let Some(idx) = val.as_struct_instance_idx() {
                         let name = self.struct_registry.instance_type_name(idx).to_string();
                         frame.push(Value::from_string(name));
+                    } else if let Some(sym_id) = val.as_symbol() {
+                        // Enum variant: resolve to the declaring enum type name
+                        if let Some((type_id, _)) = self.enum_registry.lookup_symbol(sym_id) {
+                            let name = &self.enum_registry.get_type(type_id).unwrap().name;
+                            frame.push(Value::from_string(name.clone()));
+                        } else {
+                            frame.push(Value::from_str("symbol"));
+                        }
                     } else {
                         frame.push(Value::from_str(val.type_name()));
                     }
@@ -1395,12 +1670,12 @@ impl PureVM {
                 VMOpCode::MakeStruct => {
                     let const_idx = instr.arg as usize;
                     let info = code.constants[const_idx];
-                    self.handle_make_struct(info, &mut frame, host)?;
+                    self.handle_make_struct(info, frame, host)?;
                 }
                 VMOpCode::MakeTrait => {
                     let const_idx = instr.arg as usize;
                     let info = code.constants[const_idx];
-                    self.handle_make_trait(info, &mut frame)?;
+                    self.handle_make_trait(info, frame)?;
                 }
                 VMOpCode::Globals => {
                     let mut items = indexmap::IndexMap::new();
@@ -1513,14 +1788,468 @@ impl PureVM {
                     frame.push(Value::from_list(vec![]));
                 }
                 VMOpCode::MatchPattern => {
-                    return Err(VMError::RuntimeError("legacy MatchPattern is no longer emitted".into()));
+                    return Err(VMError::RuntimeError(errors::ERR_LEGACY_MATCH.into()));
                 }
                 VMOpCode::Breakpoint => {
                     let depth = self.frame_stack.len() + 1;
-                    self.debug.pause(&frame, &code, instr_idx, depth, true);
+                    self.debug.pause(frame, &code, instr_idx, depth, true);
+                }
+                VMOpCode::MakeEnum => {
+                    let const_idx = instr.arg as usize;
+                    let info = code.constants[const_idx];
+                    self.handle_make_enum(info, frame, host)?;
+                }
+
+                // Exception handling
+                VMOpCode::SetupExcept => {
+                    frame.handler_stack.push(catnip_core::exception::Handler {
+                        handler_type: catnip_core::exception::HandlerType::Except,
+                        target_addr: instr.arg as usize,
+                        stack_depth: frame.stack.len(),
+                        block_depth: frame.block_stack.len(),
+                    });
+                }
+                VMOpCode::SetupFinally => {
+                    frame.handler_stack.push(catnip_core::exception::Handler {
+                        handler_type: catnip_core::exception::HandlerType::Finally,
+                        target_addr: instr.arg as usize,
+                        stack_depth: frame.stack.len(),
+                        block_depth: frame.block_stack.len(),
+                    });
+                }
+                VMOpCode::PopHandler => {
+                    frame.handler_stack.pop();
+                }
+                VMOpCode::CheckExcMatch => {
+                    let const_val = code.constants[instr.arg as usize];
+                    let type_name_to_match = const_val.display_string();
+                    let matches = if let Some(exc_info) = frame.active_exception_stack.last() {
+                        exc_info.matches(&type_name_to_match)
+                    } else {
+                        false
+                    };
+                    frame.push(Value::from_bool(matches));
+                }
+                VMOpCode::LoadException => {
+                    if instr.arg == 1 {
+                        // ExcInfo mode: push (type_name, message, nil) as a tuple
+                        if let Some(exc_info) = frame.active_exception_stack.last() {
+                            let tuple = Value::from_tuple(vec![
+                                Value::from_string(exc_info.type_name.clone()),
+                                Value::from_string(exc_info.message.clone()),
+                                Value::NIL,
+                            ]);
+                            frame.push(tuple);
+                        } else {
+                            frame.push(Value::from_tuple(vec![Value::NIL, Value::NIL, Value::NIL]));
+                        }
+                    } else if let Some(exc_info) = frame.active_exception_stack.last() {
+                        frame.push(Value::from_string(exc_info.message.clone()));
+                    } else {
+                        frame.push(Value::NIL);
+                    }
+                }
+                VMOpCode::Raise => {
+                    if instr.arg == 1 {
+                        // Bare raise: re-raise preserving full MRO
+                        if let Some(exc_info) = frame.active_exception_stack.last().cloned() {
+                            return Err(VMError::UserException(exc_info));
+                        } else {
+                            return Err(VMError::RuntimeError(errors::ERR_NO_ACTIVE_EXCEPTION.into()));
+                        }
+                    } else {
+                        // raise expr: detect exception type from struct instances
+                        let val = frame.pop();
+                        let err = if let Some(inst_idx) = val.as_struct_instance_idx() {
+                            let type_name = self.struct_registry.instance_type_name(inst_idx).to_string();
+                            let inst = self.struct_registry.get_instance(inst_idx);
+                            let msg = inst
+                                .and_then(|i| i.fields.first().copied())
+                                .map(|v| v.display_string())
+                                .unwrap_or_default();
+                            // Get MRO from struct registry for hierarchical matching
+                            let mro = self
+                                .struct_registry
+                                .find_type_by_name(&type_name)
+                                .map(|ty| ty.mro.clone())
+                                .unwrap_or_else(|| vec![type_name.clone()]);
+                            VMError::UserException(catnip_core::exception::ExceptionInfo::new(type_name, msg, mro))
+                        } else {
+                            let msg = val.display_string();
+                            VMError::RuntimeError(msg)
+                        };
+                        val.decref();
+                        return Err(err);
+                    }
+                }
+                VMOpCode::ResumeUnwind => {
+                    if let Some(pending) = frame.pending_unwind.take() {
+                        match pending {
+                            catnip_core::exception::PendingUnwind::Exception(info) => {
+                                return Err(VMError::UserException(info));
+                            }
+                            catnip_core::exception::PendingUnwind::Return => {
+                                let val = frame.pop();
+                                return Err(VMError::Return(val));
+                            }
+                            catnip_core::exception::PendingUnwind::Break => {
+                                return Err(VMError::Break);
+                            }
+                            catnip_core::exception::PendingUnwind::Continue => {
+                                return Err(VMError::Continue);
+                            }
+                        }
+                    } else if let Some(exc_info) = frame.active_exception_stack.last().cloned() {
+                        // Fallback: re-raise from active exception (except no-match -> finally case)
+                        return Err(VMError::UserException(exc_info));
+                    }
+                    // No pending unwind: finally on happy path, just continue
+                }
+                VMOpCode::ClearException => {
+                    frame.active_exception_stack.pop();
                 }
             }
         }
+    }
+
+    // --- Higher-order function builtins (map, filter, fold, reduce) ---
+
+    /// Try to build a HofCall from a builtin name and arguments.
+    /// Returns None if the name is not a HOF builtin.
+    /// Stores the iterable Value directly; extraction happens in execute_hof
+    /// via host.get_iter(), supporting all iterable types (list, tuple,
+    /// range, set, dict, str, bytes).
+    fn try_build_hof(name: &str, args: &[Value]) -> Option<HofCall> {
+        match name {
+            "map" if args.len() == 2 => Some(HofCall {
+                kind: HofKind::Map,
+                func: args[0],
+                iterable: args[1],
+                init: None,
+            }),
+            "filter" if args.len() == 2 => Some(HofCall {
+                kind: HofKind::Filter,
+                func: args[0],
+                iterable: args[1],
+                init: None,
+            }),
+            "fold" if args.len() == 3 => Some(HofCall {
+                kind: HofKind::Fold,
+                func: args[2],
+                iterable: args[0],
+                init: Some(args[1]),
+            }),
+            "reduce" if args.len() == 2 => Some(HofCall {
+                kind: HofKind::Reduce,
+                func: args[1],
+                iterable: args[0],
+                init: None,
+            }),
+            _ => None,
+        }
+    }
+
+    // --- isinstance ---
+
+    /// Check if `obj` is an instance of `type_spec`.
+    /// type_spec can be a struct type, a builtin type name (NativeStr), or a
+    /// tuple of type specs (OR semantics).
+    fn check_isinstance(&self, obj: Value, type_spec: Value) -> VMResult<Value> {
+        Ok(Value::from_bool(self.isinstance_check(obj, type_spec)?))
+    }
+
+    fn isinstance_check(&self, obj: Value, type_spec: Value) -> VMResult<bool> {
+        // Tuple of types: OR semantics
+        if type_spec.is_native_tuple() {
+            let tuple = unsafe { type_spec.as_native_tuple_ref().unwrap() };
+            for i in 0..tuple.len() {
+                let t = tuple.as_slice()[i];
+                if self.isinstance_check(obj, t)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+
+        // Struct type: check instance type_id against type hierarchy (MRO)
+        if type_spec.is_struct_type() {
+            let target_id = type_spec.as_struct_type_id().unwrap();
+            if !obj.is_struct_instance() {
+                return Ok(false);
+            }
+            let inst_idx = obj.as_struct_instance_idx().unwrap();
+            let inst = self
+                .struct_registry
+                .get_instance(inst_idx)
+                .ok_or_else(|| VMError::RuntimeError("invalid struct instance".into()))?;
+            // Direct match
+            if inst.type_id == target_id {
+                return Ok(true);
+            }
+            // Check MRO by stable type id (inheritance chain)
+            if let Some(source) = self.struct_registry.get_type(inst.type_id) {
+                return Ok(source.mro_ids.contains(&target_id));
+            }
+            return Ok(false);
+        }
+
+        // Builtin type name as NativeStr: compare with obj.type_name()
+        if type_spec.is_native_str() {
+            let name = unsafe { type_spec.as_native_str_ref().unwrap() };
+            return Ok(obj.type_name() == name);
+        }
+
+        Err(VMError::TypeError(
+            "isinstance() arg 2 must be a type, a string type name, or a tuple of types".into(),
+        ))
+    }
+
+    /// Collect all items from a host iterator into a Vec.
+    /// Each item carries +1 refcount from the iterator; caller must decref.
+    fn collect_iterable(iter: &mut dyn crate::host::ValueIter) -> VMResult<Vec<Value>> {
+        let mut items = Vec::new();
+        while let Some(v) = iter.next_value()? {
+            items.push(v);
+        }
+        Ok(items)
+    }
+
+    /// Call a function value synchronously via re-entrant dispatch.
+    /// Enforces the same MAX_FRAME_DEPTH limit as the normal Call handler.
+    fn call_func_sync(&mut self, func: Value, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
+        if func.is_vmfunc() && !func.is_invalid() {
+            if self.frame_stack.len() >= MAX_FRAME_DEPTH {
+                return Err(VMError::FrameOverflow);
+            }
+            let idx = func.as_vmfunc_idx();
+            let slot = self
+                .func_table
+                .get(idx)
+                .ok_or_else(|| VMError::RuntimeError("invalid function index".into()))?;
+            let callee_code = Arc::clone(&slot.code);
+            let closure = slot.closure.clone();
+            let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
+            for a in args {
+                a.clone_refcount();
+            }
+            new_frame.bind_args(args);
+            new_frame.closure_scope = closure;
+            self.dispatch(new_frame, host)
+        } else {
+            // Builtin or host-provided function
+            host.call_function(func, args)
+        }
+    }
+
+    /// Decref all items extracted by `extract_iterable`.
+    fn decref_items(items: &[Value]) {
+        for item in items {
+            item.decref();
+        }
+    }
+
+    /// Execute a higher-order builtin (map/filter/fold/reduce).
+    ///
+    /// map/filter return eager lists (not lazy iterators) because PureVM
+    /// has no suspended-iterator Value tag. The PyO3 pipeline uses Python's
+    /// lazy builtins; see docs/dev/VM.md "Divergence pipeline Python".
+    ///
+    /// Owns refcounts for: callable (`.func`), iterable (`.iterable`),
+    /// and fold init (`.init`). Items are collected via `host.get_iter()`
+    /// which supports all PureVM iterable types. Every ref is released
+    /// exactly once before returning, on both success and error paths.
+    fn execute_hof(&mut self, hof: HofCall, host: &dyn VmHost) -> VMResult<Value> {
+        let func = hof.func;
+        // Collect items from the iterable via the host iterator protocol.
+        let items = match host.get_iter(hof.iterable) {
+            Ok(mut iter) => {
+                hof.iterable.decref();
+                match Self::collect_iterable(iter.as_mut()) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        func.decref();
+                        if let Some(init) = hof.init {
+                            init.decref();
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                hof.iterable.decref();
+                func.decref();
+                if let Some(init) = hof.init {
+                    init.decref();
+                }
+                return Err(e);
+            }
+        };
+
+        let result = match hof.kind {
+            HofKind::Map => {
+                let mut results = Vec::with_capacity(items.len());
+                let mut err = None;
+                for item in &items {
+                    match self.call_func_sync(func, &[*item], host) {
+                        Ok(r) => results.push(r),
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                Self::decref_items(&items);
+                if let Some(e) = err {
+                    for r in &results {
+                        r.decref();
+                    }
+                    Err(e)
+                } else {
+                    Ok(Value::from_list(results))
+                }
+            }
+            HofKind::Filter => {
+                let mut results = Vec::new();
+                let mut err = None;
+                for item in &items {
+                    match self.call_func_sync(func, &[*item], host) {
+                        Ok(keep) => {
+                            if keep.is_truthy() {
+                                item.clone_refcount();
+                                results.push(*item);
+                            }
+                            keep.decref();
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                Self::decref_items(&items);
+                if let Some(e) = err {
+                    for r in &results {
+                        r.decref();
+                    }
+                    Err(e)
+                } else {
+                    Ok(Value::from_list(results))
+                }
+            }
+            HofKind::Fold => {
+                let mut acc = hof.init.unwrap_or(Value::NIL);
+                let mut err = None;
+                for item in &items {
+                    match self.call_func_sync(func, &[acc, *item], host) {
+                        Ok(new_acc) => {
+                            acc.decref();
+                            acc = new_acc;
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                Self::decref_items(&items);
+                if let Some(e) = err {
+                    acc.decref();
+                    Err(e)
+                } else {
+                    Ok(acc)
+                }
+            }
+            HofKind::Reduce => {
+                if items.is_empty() {
+                    func.decref();
+                    return Err(VMError::ValueError(
+                        "reduce() of empty sequence with no initial value".into(),
+                    ));
+                }
+                // items[0]'s iterator ref becomes the initial accumulator.
+                let mut acc = items[0];
+                let mut err = None;
+                for item in &items[1..] {
+                    match self.call_func_sync(func, &[acc, *item], host) {
+                        Ok(new_acc) => {
+                            acc.decref();
+                            acc = new_acc;
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                Self::decref_items(&items[1..]);
+                if let Some(e) = err {
+                    acc.decref();
+                    Err(e)
+                } else {
+                    Ok(acc)
+                }
+            }
+        };
+        func.decref();
+        result
+    }
+
+    // --- Exception unwinding ---
+
+    /// Try to unwind to a handler in the current frame, or walk up the call stack.
+    /// Only pops frames above `base_depth` (re-entrant dispatch safety).
+    fn unwind_exception(&mut self, frame: &mut PureFrame, err: &VMError, base_depth: usize) -> bool {
+        // Try current frame
+        if self.try_unwind_to_handler(frame, err) {
+            return true;
+        }
+        // For catchable exceptions, walk up the call stack (above base_depth only)
+        if err.is_catchable() {
+            while self.frame_stack.len() > base_depth {
+                let caller = self.frame_stack.pop().unwrap();
+                let old = std::mem::replace(frame, caller);
+                self.frame_pool.free(old);
+                if self.try_unwind_to_handler(frame, err) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Try to find and activate a handler in the current frame.
+    fn try_unwind_to_handler(&mut self, frame: &mut PureFrame, err: &VMError) -> bool {
+        while let Some(handler) = frame.handler_stack.last() {
+            match handler.handler_type {
+                catnip_core::exception::HandlerType::Except => {
+                    if err.is_catchable() {
+                        let handler = frame.handler_stack.pop().unwrap();
+                        if let Some(info) = err.exception_info() {
+                            frame.active_exception_stack.push(info);
+                        }
+                        frame.stack.truncate(handler.stack_depth);
+                        frame.block_stack.truncate(handler.block_depth);
+                        frame.ip = handler.target_addr;
+                        return true;
+                    }
+                    // Control flow signal: skip Except handler
+                    frame.handler_stack.pop();
+                }
+                catnip_core::exception::HandlerType::Finally => {
+                    let handler = frame.handler_stack.pop().unwrap();
+                    frame.pending_unwind = Some(err.to_pending_unwind());
+                    frame.stack.truncate(handler.stack_depth);
+                    frame.block_stack.truncate(handler.block_depth);
+                    // For Return, save the value on the stack
+                    if let VMError::Return(val) = err {
+                        frame.push(*val);
+                    }
+                    frame.ip = handler.target_addr;
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     // --- Helpers ---
@@ -1814,6 +2543,13 @@ impl PureVM {
             }
         }
 
+        // Build mro_ids from mro names (skip self, resolve ancestors)
+        let mro_ids: Vec<u32> = mro
+            .iter()
+            .skip(1) // self not yet registered
+            .filter_map(|n| self.struct_registry.find_type_id(n))
+            .collect();
+
         let type_id = self.struct_registry.register_type(PureStructType {
             id: 0,
             name: name.clone(),
@@ -1824,6 +2560,7 @@ impl PureVM {
             init_fn,
             implements,
             mro,
+            mro_ids,
             parent_names,
             abstract_methods,
         });
@@ -1972,6 +2709,52 @@ impl PureVM {
         });
 
         // Traits aren't values; push NIL so the statement has a result to pop
+        frame.push(Value::NIL);
+        Ok(())
+    }
+
+    /// Handle MakeEnum opcode: parse metadata, register enum type.
+    fn handle_make_enum(&mut self, info: Value, frame: &mut PureFrame, host: &dyn VmHost) -> VMResult<()> {
+        let tuple = unsafe {
+            info.as_native_tuple_ref()
+                .ok_or_else(|| VMError::RuntimeError("MakeEnum: expected tuple constant".into()))?
+        };
+        let items = tuple.as_slice();
+        if items.len() < 2 {
+            return Err(VMError::RuntimeError("MakeEnum: malformed metadata".into()));
+        }
+
+        let name = unsafe {
+            items[0]
+                .as_native_str_ref()
+                .ok_or_else(|| VMError::RuntimeError("MakeEnum: expected string name".into()))?
+                .to_string()
+        };
+
+        // Extract variant names
+        let variants_tuple = unsafe {
+            items[1]
+                .as_native_tuple_ref()
+                .ok_or_else(|| VMError::RuntimeError("MakeEnum: expected variants tuple".into()))?
+        };
+        let mut variant_names = Vec::new();
+        for v in variants_tuple.as_slice() {
+            let vname = unsafe {
+                v.as_native_str_ref()
+                    .ok_or_else(|| VMError::RuntimeError("MakeEnum: expected string variant name".into()))?
+                    .to_string()
+            };
+            variant_names.push(vname);
+        }
+
+        let type_id = self
+            .enum_registry
+            .register(&name, &variant_names, &mut self.symbol_table);
+        self.enum_type_names.insert(name.clone(), type_id);
+
+        // Store the enum type as a global so `EnumName.variant` works via GetAttr
+        let marker = Value::from_enum_type(type_id);
+        host.store_global(&name, marker);
         frame.push(Value::NIL);
         Ok(())
     }
@@ -2209,7 +2992,12 @@ impl Default for PureVM {
 // ---------------------------------------------------------------------------
 
 /// Match a value against a VMPattern, returning bindings on success.
-fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRegistry) -> Option<Vec<(usize, Value)>> {
+fn vm_match_pattern(
+    pattern: &VMPattern,
+    value: Value,
+    struct_reg: &PureStructRegistry,
+    symbol_table: &SymbolTable,
+) -> Option<Vec<(usize, Value)>> {
     match pattern {
         VMPattern::Wildcard => Some(vec![]),
         VMPattern::Literal(lit) => {
@@ -2225,7 +3013,7 @@ fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRe
         }
         VMPattern::Or(pats) => {
             for pat in pats {
-                if let Some(bindings) = vm_match_pattern(pat, value, struct_reg) {
+                if let Some(bindings) = vm_match_pattern(pat, value, struct_reg, symbol_table) {
                     return Some(bindings);
                 }
             }
@@ -2265,7 +3053,7 @@ fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRe
                 // Before star
                 for i in 0..sp {
                     if let VMPatternElement::Pattern(ref pat) = elements[i] {
-                        let sub = vm_match_pattern(pat, items[i], struct_reg)?;
+                        let sub = vm_match_pattern(pat, items[i], struct_reg, symbol_table)?;
                         bindings.extend(sub);
                     }
                 }
@@ -2284,7 +3072,7 @@ fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRe
                     let elem_idx = sp + 1 + i;
                     let item_idx = sp + rest_len + i;
                     if let VMPatternElement::Pattern(ref pat) = elements[elem_idx] {
-                        let sub = vm_match_pattern(pat, items[item_idx], struct_reg)?;
+                        let sub = vm_match_pattern(pat, items[item_idx], struct_reg, symbol_table)?;
                         bindings.extend(sub);
                     }
                 }
@@ -2297,7 +3085,7 @@ fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRe
                 let mut bindings = Vec::new();
                 for (elem, item) in elements.iter().zip(items.iter()) {
                     if let VMPatternElement::Pattern(ref pat) = elem {
-                        let sub = vm_match_pattern(pat, *item, struct_reg)?;
+                        let sub = vm_match_pattern(pat, *item, struct_reg, symbol_table)?;
                         bindings.extend(sub);
                     }
                 }
@@ -2320,6 +3108,20 @@ fn vm_match_pattern(pattern: &VMPattern, value: Value, struct_reg: &PureStructRe
             }
             Some(bindings)
         }
+        VMPattern::Enum {
+            enum_name,
+            variant_name,
+        } => {
+            // Resolve the expected symbol by looking up "EnumName.variant" in the symbol table
+            let qname = qualified_name(enum_name, variant_name);
+            let expected_sym = symbol_table.lookup(&qname)?;
+            let expected = Value::from_symbol(expected_sym);
+            if value.to_raw() == expected.to_raw() {
+                Some(Vec::new())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2328,8 +3130,9 @@ fn vm_match_assign_pattern(
     pattern: &VMPattern,
     value: Value,
     struct_reg: &PureStructRegistry,
+    symbol_table: &SymbolTable,
 ) -> VMResult<Vec<(usize, Value)>> {
-    match vm_match_pattern(pattern, value, struct_reg) {
+    match vm_match_pattern(pattern, value, struct_reg, symbol_table) {
         Some(bindings) => Ok(bindings),
         None => Err(VMError::RuntimeError(format!(
             "pattern match failed for value: {}",
@@ -2703,15 +3506,15 @@ mod tests {
     fn test_vm_match_pattern_literal() {
         let reg = PureStructRegistry::new();
         let pat = VMPattern::Literal(Value::from_int(42));
-        assert!(vm_match_pattern(&pat, Value::from_int(42), &reg).is_some());
-        assert!(vm_match_pattern(&pat, Value::from_int(99), &reg).is_none());
+        assert!(vm_match_pattern(&pat, Value::from_int(42), &reg, &SymbolTable::new()).is_some());
+        assert!(vm_match_pattern(&pat, Value::from_int(99), &reg, &SymbolTable::new()).is_none());
     }
 
     #[test]
     fn test_vm_match_pattern_var() {
         let reg = PureStructRegistry::new();
         let pat = VMPattern::Var(0);
-        let result = vm_match_pattern(&pat, Value::from_int(42), &reg);
+        let result = vm_match_pattern(&pat, Value::from_int(42), &reg, &SymbolTable::new());
         assert!(result.is_some());
         let bindings = result.unwrap();
         assert_eq!(bindings.len(), 1);
@@ -2722,8 +3525,8 @@ mod tests {
     fn test_vm_match_pattern_wildcard() {
         let reg = PureStructRegistry::new();
         let pat = VMPattern::Wildcard;
-        assert!(vm_match_pattern(&pat, Value::from_int(42), &reg).is_some());
-        assert!(vm_match_pattern(&pat, Value::NIL, &reg).is_some());
+        assert!(vm_match_pattern(&pat, Value::from_int(42), &reg, &SymbolTable::new()).is_some());
+        assert!(vm_match_pattern(&pat, Value::NIL, &reg, &SymbolTable::new()).is_some());
     }
 
     #[test]
@@ -2733,9 +3536,9 @@ mod tests {
             VMPattern::Literal(Value::from_int(1)),
             VMPattern::Literal(Value::from_int(2)),
         ]);
-        assert!(vm_match_pattern(&pat, Value::from_int(1), &reg).is_some());
-        assert!(vm_match_pattern(&pat, Value::from_int(2), &reg).is_some());
-        assert!(vm_match_pattern(&pat, Value::from_int(3), &reg).is_none());
+        assert!(vm_match_pattern(&pat, Value::from_int(1), &reg, &SymbolTable::new()).is_some());
+        assert!(vm_match_pattern(&pat, Value::from_int(2), &reg, &SymbolTable::new()).is_some());
+        assert!(vm_match_pattern(&pat, Value::from_int(3), &reg, &SymbolTable::new()).is_none());
     }
 
     #[test]

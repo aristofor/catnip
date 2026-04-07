@@ -1,0 +1,6 @@
+# FILE: catnip_libs/io/tests/test_write.cat
+import('io')
+
+io.write("a", "b", "c")
+io.writeln("line1")
+io.writeln("line2", "line3")

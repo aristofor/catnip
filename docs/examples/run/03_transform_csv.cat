@@ -19,14 +19,22 @@ data = list(
 )
 
 # Filtrer : âge > 25
-filtered = fold(data, list(), (acc, person) => {
+filtered = fold(
+    data,
+    list(),
+    (acc, person) => {
         if person.age > 25 { acc + list(person) } else { acc }
-    })
+    }
+)
 
 # Transformer : ajouter status
-transformed = fold(filtered, list(), (acc, person) => {
+transformed = fold(
+    filtered,
+    list(),
+    (acc, person) => {
         acc + list(Person(person.name, person.age, person.city, "senior"))
-    })
+    }
+)
 
 # Afficher résultat
 print("Personnes > 25 ans :")

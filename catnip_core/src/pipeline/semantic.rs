@@ -4,9 +4,20 @@
 //! Port of semantic/analyzer.rs with no PyO3 dependencies.
 //! Simple validation without optimizations.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::constants::*;
 use crate::ir::{IR, IROpCode};
 use crate::semantic::PureOptimizer;
+
+use super::diagnostic::{AnalysisResult, SemanticDiagnostic, SemanticSeverity};
+
+/// Inferred type for a variable (minimal)
+#[derive(Debug, Clone, PartialEq)]
+enum InferredType {
+    Enum(String),
+    Bool,
+}
 
 /// Semantic analyzer standalone
 pub struct SemanticAnalyzer {
@@ -16,6 +27,12 @@ pub struct SemanticAnalyzer {
     optimizer: Option<PureOptimizer>,
     /// Tail-call optimization enabled
     tco_enabled: bool,
+    /// Known enum definitions: name -> variant names
+    enum_defs: HashMap<String, HashSet<String>>,
+    /// Variable type bindings
+    var_types: HashMap<String, InferredType>,
+    /// Non-fatal diagnostics collected during analysis
+    diagnostics: Vec<SemanticDiagnostic>,
 }
 
 impl SemanticAnalyzer {
@@ -25,6 +42,9 @@ impl SemanticAnalyzer {
             valid_opcodes: Self::all_opcodes(),
             optimizer: None,
             tco_enabled: true,
+            enum_defs: HashMap::new(),
+            var_types: HashMap::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -34,6 +54,9 @@ impl SemanticAnalyzer {
             valid_opcodes: Self::all_opcodes(),
             optimizer: Some(PureOptimizer::new()),
             tco_enabled: true,
+            enum_defs: HashMap::new(),
+            var_types: HashMap::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -44,6 +67,15 @@ impl SemanticAnalyzer {
 
     /// Analyze, transform, optimize and validate the IR
     pub fn analyze(&mut self, ir: &IR) -> Result<IR, String> {
+        Ok(self.analyze_full(ir)?.ir)
+    }
+
+    /// Full analysis returning IR + non-fatal diagnostics
+    pub fn analyze_full(&mut self, ir: &IR) -> Result<AnalysisResult, String> {
+        self.enum_defs.clear();
+        self.var_types.clear();
+        self.diagnostics.clear();
+
         let transformed = self.transform(ir);
         let tail_marked = if self.tco_enabled {
             Self::mark_tail_calls(&transformed)
@@ -56,7 +88,12 @@ impl SemanticAnalyzer {
             tail_marked
         };
         self.validate(&optimized)?;
-        Ok(optimized)
+        self.check_exhaustiveness(&optimized);
+
+        Ok(AnalysisResult {
+            ir: optimized,
+            diagnostics: std::mem::take(&mut self.diagnostics),
+        })
     }
 
     /// Transform the IR: intercept intrinsic calls (type, breakpoint)
@@ -527,6 +564,7 @@ impl SemanticAnalyzer {
                 Ok(())
             }
             IR::PatternStruct { .. } => Ok(()),
+            IR::PatternEnum { .. } => Ok(()),
 
             // Slice
             IR::Slice { start, stop, step } => {
@@ -685,7 +723,322 @@ impl SemanticAnalyzer {
             IROpCode::TypeOf,
             IROpCode::Globals,
             IROpCode::Locals,
+            IROpCode::EnumDef,
+            IROpCode::OpTry,
+            IROpCode::OpRaise,
+            IROpCode::ExcInfo,
         ]
+    }
+
+    // -----------------------------------------------------------------------
+    // Exhaustiveness checking (I103)
+    // -----------------------------------------------------------------------
+
+    /// Walk the IR collecting enum defs, tracking variable types,
+    /// and checking match exhaustiveness.
+    fn check_exhaustiveness(&mut self, ir: &IR) {
+        match ir {
+            IR::Program(items) => {
+                for item in items {
+                    self.check_exhaustiveness(item);
+                }
+            }
+
+            // Register enum definitions
+            IR::Op { opcode, args, .. } if *opcode == IROpCode::EnumDef => {
+                if let (Some(IR::String(name)), Some(IR::Tuple(variants))) = (args.first(), args.get(1)) {
+                    let variant_set: HashSet<String> = variants
+                        .iter()
+                        .filter_map(|v| if let IR::String(s) = v { Some(s.clone()) } else { None })
+                        .collect();
+                    self.enum_defs.insert(name.clone(), variant_set);
+                }
+            }
+
+            // Track variable types from assignments
+            IR::Op { opcode, args, .. } if *opcode == IROpCode::SetLocals => {
+                if args.len() >= 2 {
+                    if let Some(name) = Self::extract_single_assign_name(&args[0]) {
+                        // If name shadows an enum, invalidate the enum def
+                        self.enum_defs.remove(&name);
+                        if let Some(ty) = self.infer_type(&args[1]) {
+                            self.var_types.insert(name, ty);
+                        } else {
+                            self.var_types.remove(&name);
+                        }
+                    }
+                }
+                for arg in args {
+                    self.check_exhaustiveness(arg);
+                }
+            }
+
+            // Check match expressions
+            IR::Op {
+                opcode,
+                args,
+                start_byte,
+                end_byte,
+                ..
+            } if *opcode == IROpCode::OpMatch => {
+                self.check_match_node(args, *start_byte, *end_byte);
+                for arg in args {
+                    self.check_exhaustiveness(arg);
+                }
+            }
+
+            // Scope isolation for lambdas/functions: save/restore var_types + enum_defs
+            // and clear parameter names that shadow outer bindings
+            IR::Op {
+                opcode, args, kwargs, ..
+            } if *opcode == IROpCode::OpLambda || *opcode == IROpCode::FnDef => {
+                let saved_vars = self.var_types.clone();
+                let saved_enums = self.enum_defs.clone();
+                // Clear parameter names from var_types so outer bindings don't leak
+                if let Some(IR::Tuple(params) | IR::List(params)) = args.first() {
+                    for param in params {
+                        if let IR::Tuple(pair) = param {
+                            if let Some(IR::String(name)) = pair.first() {
+                                self.var_types.remove(name);
+                            }
+                        }
+                    }
+                }
+                for arg in args {
+                    self.check_exhaustiveness(arg);
+                }
+                for (_, v) in kwargs {
+                    self.check_exhaustiveness(v);
+                }
+                self.var_types = saved_vars;
+                self.enum_defs = saved_enums;
+            }
+
+            // Scope isolation for control flow: restore var_types before each
+            // branch so assignments from one branch don't leak into siblings
+            IR::Op {
+                opcode, args, kwargs, ..
+            } if *opcode == IROpCode::OpIf || *opcode == IROpCode::OpWhile || *opcode == IROpCode::OpFor => {
+                let saved_vars = self.var_types.clone();
+                let saved_enums = self.enum_defs.clone();
+                for arg in args {
+                    self.var_types = saved_vars.clone();
+                    self.enum_defs = saved_enums.clone();
+                    self.check_exhaustiveness(arg);
+                }
+                for (_, v) in kwargs {
+                    self.check_exhaustiveness(v);
+                }
+                self.var_types = saved_vars;
+                self.enum_defs = saved_enums;
+            }
+
+            // Recurse into other node types
+            IR::Op { args, kwargs, .. } => {
+                for arg in args {
+                    self.check_exhaustiveness(arg);
+                }
+                for (_, v) in kwargs {
+                    self.check_exhaustiveness(v);
+                }
+            }
+            IR::Call { func, args, kwargs, .. } => {
+                self.check_exhaustiveness(func);
+                for arg in args {
+                    self.check_exhaustiveness(arg);
+                }
+                for (_, v) in kwargs {
+                    self.check_exhaustiveness(v);
+                }
+            }
+            IR::List(items) | IR::Tuple(items) | IR::Set(items) => {
+                for item in items {
+                    self.check_exhaustiveness(item);
+                }
+            }
+            IR::Dict(pairs) => {
+                for (k, v) in pairs {
+                    self.check_exhaustiveness(k);
+                    self.check_exhaustiveness(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Infer the type of an expression (minimal: enum access, bool literal, var ref)
+    fn infer_type(&self, expr: &IR) -> Option<InferredType> {
+        match expr {
+            IR::Op { opcode, args, .. } if *opcode == IROpCode::GetAttr => {
+                if let Some(IR::Ref(name, _, _)) = args.first() {
+                    if self.enum_defs.contains_key(name) {
+                        return Some(InferredType::Enum(name.clone()));
+                    }
+                }
+                None
+            }
+            IR::Bool(_) => Some(InferredType::Bool),
+            IR::Ref(name, _, _) => self.var_types.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    fn extract_single_assign_name(target: &IR) -> Option<String> {
+        match target {
+            IR::Tuple(items) | IR::List(items) if items.len() == 1 => match &items[0] {
+                IR::Ref(name, _, _) | IR::Identifier(name) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn check_match_node(&mut self, args: &[IR], start_byte: usize, end_byte: usize) {
+        if args.len() < 2 {
+            return;
+        }
+        let scrutinee = &args[0];
+        let cases = match &args[1] {
+            IR::Tuple(cases) => cases,
+            _ => return,
+        };
+
+        if Self::has_unconditional_catchall(cases) {
+            return;
+        }
+
+        let patterns = Self::collect_unguarded_patterns(cases);
+        let scrutinee_type = self.infer_type(scrutinee);
+
+        let is_exhaustive = match &scrutinee_type {
+            Some(InferredType::Enum(enum_name)) => self.check_enum_exhaustive(&patterns, enum_name),
+            Some(InferredType::Bool) => Self::check_bool_exhaustive(&patterns),
+            None => false, // unknown type: never suppress
+        };
+
+        if !is_exhaustive {
+            let message = match &scrutinee_type {
+                Some(InferredType::Enum(name)) => {
+                    let covered = Self::collect_enum_variants(&patterns, name);
+                    if let Some(all) = self.enum_defs.get(name) {
+                        let mut missing: Vec<_> = all.iter().filter(|v| !covered.contains(*v)).cloned().collect();
+                        missing.sort();
+                        format!(
+                            "Non-exhaustive match on enum '{}'; missing: {}",
+                            name,
+                            missing.join(", ")
+                        )
+                    } else {
+                        format!("Non-exhaustive match on enum '{}'", name)
+                    }
+                }
+                Some(InferredType::Bool) => {
+                    let (has_true, has_false) = Self::bool_coverage(&patterns);
+                    let missing = match (has_true, has_false) {
+                        (false, false) => "True, False",
+                        (true, false) => "False",
+                        (false, true) => "True",
+                        _ => "",
+                    };
+                    format!("Non-exhaustive match on boolean; missing: {}", missing)
+                }
+                None => "Match has no wildcard branch; exhaustiveness depends on runtime values".to_string(),
+            };
+            self.diagnostics.push(SemanticDiagnostic {
+                code: "I103".to_string(),
+                message,
+                severity: SemanticSeverity::Hint,
+                start_byte,
+                end_byte,
+            });
+        }
+    }
+
+    fn has_unconditional_catchall(cases: &[IR]) -> bool {
+        for case in cases {
+            if let IR::Tuple(elems) = case {
+                if elems.len() >= 2 && elems[1] == IR::None && Self::is_catchall(&elems[0]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_catchall(pattern: &IR) -> bool {
+        match pattern {
+            IR::PatternWildcard | IR::PatternVar(_) => true,
+            IR::PatternOr(pats) => pats.iter().any(|p| Self::is_catchall(p)),
+            _ => false,
+        }
+    }
+
+    fn collect_unguarded_patterns(cases: &[IR]) -> Vec<IR> {
+        let mut patterns = Vec::new();
+        for case in cases {
+            if let IR::Tuple(elems) = case {
+                if elems.len() >= 2 && elems[1] == IR::None {
+                    Self::flatten_pattern(&elems[0], &mut patterns);
+                }
+            }
+        }
+        patterns
+    }
+
+    fn flatten_pattern(pattern: &IR, out: &mut Vec<IR>) {
+        match pattern {
+            IR::PatternOr(pats) => {
+                for p in pats {
+                    Self::flatten_pattern(p, out);
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+
+    fn check_enum_exhaustive(&self, patterns: &[IR], enum_name: &str) -> bool {
+        let all_variants = match self.enum_defs.get(enum_name) {
+            Some(vs) => vs,
+            None => return false,
+        };
+        let covered = Self::collect_enum_variants(patterns, enum_name);
+        covered == *all_variants
+    }
+
+    fn collect_enum_variants(patterns: &[IR], enum_name: &str) -> HashSet<String> {
+        let mut covered = HashSet::new();
+        for pat in patterns {
+            if let IR::PatternEnum {
+                enum_name: en,
+                variant_name: vn,
+            } = pat
+            {
+                if en == enum_name {
+                    covered.insert(vn.clone());
+                }
+            }
+        }
+        covered
+    }
+
+    fn check_bool_exhaustive(patterns: &[IR]) -> bool {
+        let (has_true, has_false) = Self::bool_coverage(patterns);
+        has_true && has_false
+    }
+
+    fn bool_coverage(patterns: &[IR]) -> (bool, bool) {
+        let mut has_true = false;
+        let mut has_false = false;
+        for pat in patterns {
+            if let IR::PatternLiteral(inner) = pat {
+                match inner.as_ref() {
+                    IR::Bool(true) => has_true = true,
+                    IR::Bool(false) => has_false = true,
+                    _ => {}
+                }
+            }
+        }
+        (has_true, has_false)
     }
 }
 
@@ -795,5 +1148,804 @@ mod tests {
         };
         let result = analyzer.transform(&ir);
         assert!(matches!(result, IR::Call { .. }));
+    }
+
+    #[test]
+    fn test_try_passes_semantic_analysis() {
+        let mut analyzer = SemanticAnalyzer::new();
+        // try { 1 } except { _ => { 2 } }
+        let body = IR::op(IROpCode::OpBlock, vec![IR::Int(1)]);
+        let handler = IR::Tuple(vec![
+            IR::List(vec![]), // wildcard: no types
+            IR::None,         // no binding
+            IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+        ]);
+        let ir = IR::op(
+            IROpCode::OpTry,
+            vec![
+                body,
+                IR::List(vec![handler]),
+                IR::None, // no finally
+            ],
+        );
+        assert!(analyzer.analyze(&ir).is_ok());
+    }
+
+    #[test]
+    fn test_raise_passes_semantic_analysis() {
+        let mut analyzer = SemanticAnalyzer::new();
+        // raise (bare)
+        let bare = IR::op(IROpCode::OpRaise, vec![]);
+        assert!(analyzer.analyze(&bare).is_ok());
+
+        // raise <expr>
+        let with_expr = IR::op(IROpCode::OpRaise, vec![IR::Int(42)]);
+        assert!(analyzer.analyze(&with_expr).is_ok());
+    }
+
+    // --- I103 exhaustiveness tests ---
+
+    /// Build a simple program: enum def + assignment + match
+    fn make_enum_match_program(
+        enum_name: &str,
+        variants: &[&str],
+        assign_var: &str,
+        assign_variant: &str,
+        matched_variants: &[&str],
+        has_wildcard: bool,
+    ) -> IR {
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String(enum_name.into()),
+                IR::Tuple(variants.iter().map(|v| IR::String((*v).into())).collect()),
+            ],
+        );
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref(assign_var.into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref(enum_name.into(), 0, 0), IR::String(assign_variant.into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        let mut cases: Vec<IR> = matched_variants
+            .iter()
+            .map(|v| {
+                IR::Tuple(vec![
+                    IR::PatternEnum {
+                        enum_name: enum_name.into(),
+                        variant_name: (*v).into(),
+                    },
+                    IR::None,
+                    IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                ])
+            })
+            .collect();
+        if has_wildcard {
+            cases.push(IR::Tuple(vec![
+                IR::PatternWildcard,
+                IR::None,
+                IR::op(IROpCode::OpBlock, vec![IR::Int(0)]),
+            ]));
+        }
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![IR::Ref(assign_var.into(), 0, 0), IR::Tuple(cases)],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        IR::Program(vec![enum_def, assignment, match_expr])
+    }
+
+    #[test]
+    fn test_i103_enum_exhaustive_correct_type() {
+        let mut a = SemanticAnalyzer::new();
+        let ir = make_enum_match_program(
+            "Color",
+            &["red", "green", "blue"],
+            "c",
+            "green",
+            &["red", "green", "blue"],
+            false,
+        );
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            result.diagnostics.is_empty(),
+            "exhaustive enum match with correct type should not trigger I103"
+        );
+    }
+
+    #[test]
+    fn test_i103_enum_partial_correct_type() {
+        let mut a = SemanticAnalyzer::new();
+        let ir = make_enum_match_program(
+            "Color",
+            &["red", "green", "blue"],
+            "c",
+            "green",
+            &["red", "green"],
+            false,
+        );
+        let result = a.analyze_full(&ir).unwrap();
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "I103");
+        assert!(
+            result.diagnostics[0].message.contains("blue"),
+            "should mention missing variant"
+        );
+    }
+
+    #[test]
+    fn test_i103_enum_wrong_type() {
+        let mut a = SemanticAnalyzer::new();
+        // c = Size.small, match c { Color.red => ... Color.green => ... Color.blue => ... }
+        let enum_color = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![
+                    IR::String("red".into()),
+                    IR::String("green".into()),
+                    IR::String("blue".into()),
+                ]),
+            ],
+        );
+        let enum_size = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Size".into()),
+                IR::Tuple(vec![IR::String("small".into()), IR::String("large".into())]),
+            ],
+        );
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref("Size".into(), 0, 0), IR::String("small".into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "blue".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(3)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_color, enum_size, assignment, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(!result.diagnostics.is_empty(), "wrong enum type should trigger I103");
+    }
+
+    #[test]
+    fn test_i103_enum_unknown_scrutinee() {
+        let mut a = SemanticAnalyzer::new();
+        // No assignment to c, just match c { Color.* }
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![
+                    IR::String("red".into()),
+                    IR::String("green".into()),
+                    IR::String("blue".into()),
+                ]),
+            ],
+        );
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "blue".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(3)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_def, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "unknown scrutinee type should trigger I103"
+        );
+    }
+
+    #[test]
+    fn test_i103_wildcard_suppresses() {
+        let mut a = SemanticAnalyzer::new();
+        let ir = make_enum_match_program("Color", &["red", "green", "blue"], "c", "green", &["red"], true);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(result.diagnostics.is_empty(), "wildcard should suppress I103");
+    }
+
+    #[test]
+    fn test_i103_boolean_exhaustive() {
+        let mut a = SemanticAnalyzer::new();
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("b".into(), 0, 0)]),
+                IR::Bool(true),
+                IR::Bool(false),
+            ],
+        );
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("b".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternLiteral(Box::new(IR::Bool(true))),
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternLiteral(Box::new(IR::Bool(false))),
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(0)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![assignment, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            result.diagnostics.is_empty(),
+            "exhaustive boolean match should not trigger I103"
+        );
+    }
+
+    #[test]
+    fn test_i103_boolean_partial() {
+        let mut a = SemanticAnalyzer::new();
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("b".into(), 0, 0)]),
+                IR::Bool(true),
+                IR::Bool(false),
+            ],
+        );
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("b".into(), 0, 0),
+                IR::Tuple(vec![IR::Tuple(vec![
+                    IR::PatternLiteral(Box::new(IR::Bool(true))),
+                    IR::None,
+                    IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                ])]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![assignment, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result.diagnostics[0].message.contains("False"));
+    }
+
+    #[test]
+    fn test_i103_guarded_not_counted() {
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![IR::String("red".into()), IR::String("green".into())]),
+            ],
+        );
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        // red unguarded, green guarded → not exhaustive
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::Bool(true), // guard present
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_def, assignment, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "guarded case should not count for exhaustiveness"
+        );
+    }
+
+    #[test]
+    fn test_i103_pattern_or() {
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![
+                    IR::String("red".into()),
+                    IR::String("green".into()),
+                    IR::String("blue".into()),
+                ]),
+            ],
+        );
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        // Color.red | Color.green => ..., Color.blue => ...
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternOr(vec![
+                            IR::PatternEnum {
+                                enum_name: "Color".into(),
+                                variant_name: "red".into(),
+                            },
+                            IR::PatternEnum {
+                                enum_name: "Color".into(),
+                                variant_name: "green".into(),
+                            },
+                        ]),
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "blue".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_def, assignment, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            result.diagnostics.is_empty(),
+            "pattern_or should flatten and count all variants"
+        );
+    }
+
+    #[test]
+    fn test_i103_branch_local_assignment_not_definite() {
+        // if flag { c = Color.red } else { c = 1 }
+        // match c { Color.red => ..., Color.green => ..., Color.blue => ... }
+        // → should still warn because c might not be Color
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![
+                    IR::String("red".into()),
+                    IR::String("green".into()),
+                    IR::String("blue".into()),
+                ]),
+            ],
+        );
+        let if_stmt = IR::Op {
+            opcode: IROpCode::OpIf,
+            args: vec![
+                IR::Ref("flag".into(), 0, 0),
+                IR::op(
+                    IROpCode::OpBlock,
+                    vec![IR::op(
+                        IROpCode::SetLocals,
+                        vec![IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]), IR::Int(1), IR::Bool(false)],
+                    )],
+                ),
+                IR::op(
+                    IROpCode::OpBlock,
+                    vec![IR::op(
+                        IROpCode::SetLocals,
+                        vec![
+                            IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                            IR::op(
+                                IROpCode::GetAttr,
+                                vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                            ),
+                            IR::Bool(false),
+                        ],
+                    )],
+                ),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 50,
+            end_byte: 100,
+        };
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "blue".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(3)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_def, if_stmt, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "branch-local assignment should not count as definite type"
+        );
+    }
+
+    #[test]
+    fn test_i103_lambda_param_shadows_outer() {
+        // c = Color.red
+        // f = (c) => { match c { Color.red => 1, Color.green => 2, Color.blue => 3 } }
+        // → should warn: c is a parameter, not necessarily Color
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![
+                    IR::String("red".into()),
+                    IR::String("green".into()),
+                    IR::String("blue".into()),
+                ]),
+            ],
+        );
+        let assignment = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        let match_in_lambda = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "blue".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(3)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let lambda_def = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("f".into(), 0, 0)]),
+                IR::Op {
+                    opcode: IROpCode::OpLambda,
+                    args: vec![
+                        IR::Tuple(vec![IR::Tuple(vec![IR::String("c".into()), IR::None])]),
+                        IR::op(IROpCode::OpBlock, vec![match_in_lambda]),
+                    ],
+                    kwargs: IndexMap::new(),
+                    tail: false,
+                    start_byte: 50,
+                    end_byte: 210,
+                },
+                IR::Bool(false),
+            ],
+        );
+        let ir = IR::Program(vec![enum_def, assignment, lambda_def]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "lambda param shadowing outer enum binding should trigger I103"
+        );
+    }
+
+    #[test]
+    fn test_i103_then_branch_does_not_leak_into_else() {
+        // if flag { c = Color.red } else { match c { Color.red => 1 } }
+        // The else branch should NOT see c as Color (assigned only in then)
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![IR::String("red".into()), IR::String("green".into())]),
+            ],
+        );
+        let if_stmt = IR::Op {
+            opcode: IROpCode::OpIf,
+            args: vec![
+                IR::Ref("flag".into(), 0, 0),
+                // then: c = Color.red
+                IR::op(
+                    IROpCode::OpBlock,
+                    vec![IR::op(
+                        IROpCode::SetLocals,
+                        vec![
+                            IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                            IR::op(
+                                IROpCode::GetAttr,
+                                vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                            ),
+                            IR::Bool(false),
+                        ],
+                    )],
+                ),
+                // else: match c { Color.red => 1, Color.green => 2 }
+                IR::op(
+                    IROpCode::OpBlock,
+                    vec![IR::Op {
+                        opcode: IROpCode::OpMatch,
+                        args: vec![
+                            IR::Ref("c".into(), 0, 0),
+                            IR::Tuple(vec![
+                                IR::Tuple(vec![
+                                    IR::PatternEnum {
+                                        enum_name: "Color".into(),
+                                        variant_name: "red".into(),
+                                    },
+                                    IR::None,
+                                    IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                                ]),
+                                IR::Tuple(vec![
+                                    IR::PatternEnum {
+                                        enum_name: "Color".into(),
+                                        variant_name: "green".into(),
+                                    },
+                                    IR::None,
+                                    IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                                ]),
+                            ]),
+                        ],
+                        kwargs: IndexMap::new(),
+                        tail: false,
+                        start_byte: 100,
+                        end_byte: 200,
+                    }],
+                ),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 50,
+            end_byte: 250,
+        };
+        let ir = IR::Program(vec![enum_def, if_stmt]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "then-branch assignment should not leak into else"
+        );
+    }
+
+    #[test]
+    fn test_i103_enum_name_shadowed() {
+        // enum Color { red; green }
+        // Color = something_else
+        // c = Color.red   <- this is now attribute access, not enum variant
+        // match c { Color.red => 1, Color.green => 2 } <- should warn
+        let mut a = SemanticAnalyzer::new();
+        let enum_def = IR::op(
+            IROpCode::EnumDef,
+            vec![
+                IR::String("Color".into()),
+                IR::Tuple(vec![IR::String("red".into()), IR::String("green".into())]),
+            ],
+        );
+        let shadow = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("Color".into(), 0, 0)]),
+                IR::Int(42),
+                IR::Bool(false),
+            ],
+        );
+        let assign_c = IR::op(
+            IROpCode::SetLocals,
+            vec![
+                IR::Tuple(vec![IR::Ref("c".into(), 0, 0)]),
+                IR::op(
+                    IROpCode::GetAttr,
+                    vec![IR::Ref("Color".into(), 0, 0), IR::String("red".into())],
+                ),
+                IR::Bool(false),
+            ],
+        );
+        let match_expr = IR::Op {
+            opcode: IROpCode::OpMatch,
+            args: vec![
+                IR::Ref("c".into(), 0, 0),
+                IR::Tuple(vec![
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "red".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(1)]),
+                    ]),
+                    IR::Tuple(vec![
+                        IR::PatternEnum {
+                            enum_name: "Color".into(),
+                            variant_name: "green".into(),
+                        },
+                        IR::None,
+                        IR::op(IROpCode::OpBlock, vec![IR::Int(2)]),
+                    ]),
+                ]),
+            ],
+            kwargs: IndexMap::new(),
+            tail: false,
+            start_byte: 100,
+            end_byte: 200,
+        };
+        let ir = IR::Program(vec![enum_def, shadow, assign_c, match_expr]);
+        let result = a.analyze_full(&ir).unwrap();
+        assert!(
+            !result.diagnostics.is_empty(),
+            "shadowed enum name should not be treated as enum type"
+        );
     }
 }

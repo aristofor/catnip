@@ -366,5 +366,11 @@ catnip_rs/src/
     └── *.rs               # Implémentations par catégorie
 ```
 
+## Écrire un module stdlib compilé
+
+Pour ajouter un module Rust à la stdlib (`catnip_libs/`), voir le guide complet dans
+[catnip_libs/README.md](../../catnip_libs/README.md). En bref : `catnip new-lib mylib` génère le boilerplate,
+`make gen-stdlib-registry` met à jour les registres automatiquement.
+
 > Étendre Catnip revient à ajouter une pièce à un puzzle multi-couches. Il faut qu'elle s'emboîte partout : grammaire,
 > transformation, sémantique, exécution. Si une couche refuse la pièce, tout casse.

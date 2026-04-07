@@ -579,6 +579,7 @@ def _run_default_mode(ctx):
             click.echo(f"Error: Script file not found: {script_path}", err=True)
             sys.exit(1)
         text = _strip_shebang(script_path.read_text())
+        catnip._pipeline.set_source_path(str(script_path.resolve()))
         try:
             process_input(catnip, text, parsing, verbose, vm_mode=vm_mode, output_format=output_format, quiet=quiet)
             sys.exit(0)

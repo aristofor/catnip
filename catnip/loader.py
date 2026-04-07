@@ -19,10 +19,12 @@ from .exc import CatnipRuntimeError
 _PROTOCOLS = frozenset(('py', 'rs', 'cat'))
 
 # Stdlib native modules: bare Catnip name -> (crate import name, needs post-import config)
+# @generated-stdlib-start
 _STDLIB_MODULES = {
     'io': ('catnip_io', False),
     'sys': ('catnip_sys', True),
 }
+# @generated-stdlib-end
 
 # Patterns that indicate the old file-path import style
 _PATH_INDICATORS = ('./', '../', '/', '\\')
@@ -237,8 +239,6 @@ class ModuleLoader:
             sys.modules[sys_key] = module
             spec.loader.exec_module(module)
 
-            self.loaded_modules[module_name] = module
-
             if self.verbose:
                 print_info(f"Module '{module_name}' loaded successfully")
 
@@ -315,8 +315,6 @@ class ModuleLoader:
         resolved_name = module_name or module_path.stem
         namespace = SimpleNamespace(**exports)
         namespace.__name__ = resolved_name
-
-        self.loaded_modules[resolved_name] = namespace
 
         if self.verbose:
             print_info(f"Catnip module '{resolved_name}' loaded with {len(exports)} export(s)")
@@ -495,19 +493,28 @@ class ModuleLoader:
 
     def _load_from_resolved(self, path, kind, name, protocol=None):
         """Load a module from a resolved (path, kind) pair. Returns namespace or None."""
+        if path is None or kind is None:
+            return None
+        # Cache by resolved absolute path so homonymous modules in different
+        # directories don't collide (same logic as _resolve_relative).
+        abs_key = str(Path(path).resolve())
+        if abs_key in self.loaded_modules:
+            return self.loaded_modules[abs_key]
         if kind == 'package':
-            return self._try_load_package(path, name, protocol)
+            ns = self._try_load_package(path, name, protocol)
+            if ns is not None:
+                self.loaded_modules[abs_key] = ns
+            return ns
         elif kind == 'catnip':
             ns = self.load_catnip_module(path, module_name=name)
-            self.loaded_modules[name] = ns
+            self.loaded_modules[abs_key] = ns
             return ns
-        elif kind is not None:
+        else:
             module = self.load_python_module(path, module_name=name)
             self._maybe_load_extension(module)
             ns = ModuleNamespace(module, name)
-            self.loaded_modules[name] = ns
+            self.loaded_modules[abs_key] = ns
             return ns
-        return None
 
     def _load_bare_name(self, name, caller_dir=None, protocol=None):
         """Resolve a bare name: local → stdlib → importlib.
@@ -566,8 +573,9 @@ class ModuleLoader:
             if policy is not None and bare and not policy.check(bare):
                 raise CatnipRuntimeError(f"module '{bare}' blocked by policy")
             return self._resolve_relative(name, caller_dir, protocol)
-        # Cache hit only for bare imports (no explicit protocol) to preserve
-        # .cat > .py priority; explicit protocol forces fresh resolution.
+        # Cache hit for importlib/stdlib modules (stored by name).
+        # File-based modules are cached by resolved path in _load_from_resolved,
+        # so this check only matches context-independent modules.
         if protocol is None and name in self.loaded_modules:
             return self.loaded_modules[name]
         # Policy gate on the bare name

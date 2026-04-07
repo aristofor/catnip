@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Exemples avancés
+# Exemples avancés
 
 print("⇒ Calculatrice avec pattern matching")
 

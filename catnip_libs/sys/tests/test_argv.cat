@@ -1,0 +1,4 @@
+# FILE: catnip_libs/sys/tests/test_argv.cat
+import('sys')
+
+if typeof(sys.argv) != "list" { raise ("sys.argv should be a list") }

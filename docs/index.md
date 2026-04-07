@@ -1,6 +1,6 @@
 # Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
-version <!-- catnip:version -->0.0.7<!-- /catnip:version -->
+version <!-- catnip:version -->0.0.8<!-- /catnip:version -->
 
 Né comme langage de script embarquable pour Python.
 
@@ -10,7 +10,7 @@ conception.
 <!-- doc-snapshot: index/repl-ieee754 -->
 
 ```console
-Catnip REPL v0.0.7
+Catnip REPL v0.0.8
 Type /help for help, /exit to quit
 ▸ 0.1 + 0.2
 0.30000000000000004
@@ -27,10 +27,8 @@ Type /help for help, /exit to quit
 
 Encore un brouillon, moins sale.
 
-- Type énuméré `enum`
-- Support `with` pour les context managers Python
-- Réécriture du formatter avec un AST, dans le genre Wadler-Leijen
-- Détection de patterns louches par le linter
+- Lib `http` à compléter (`start`/`stop`…)
+- Refonte du `codex` → side project
 - Un minimum de packaging
 
 ### Repos
@@ -90,9 +88,8 @@ Apprendre et utiliser Catnip.
 
 - [CLI](user/CLI.md) - Options ligne de commande (scripts et REPL)
 - [REPL](user/REPL.md) - Mode interactif pour exploration
-- [RUN](user/RUN.md) - Mode standalone avec binaire `catnip`
+- [RUN](user/RUN.md) - Mode standalone avec binaire `catnip` (shebang, argv, benchmark)
 - [CONFIG](user/CONFIG.md) - Configuration hiérarchique et overrides par mode
-- [SHEBANG_GUIDE](user/SHEBANG_GUIDE.md) - Scripts Catnip exécutables comme commandes système
 - [MODULE_LOADING](user/MODULE_LOADING.md) - Charger des modules Python
 
 ## Structure

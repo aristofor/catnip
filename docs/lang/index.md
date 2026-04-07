@@ -11,6 +11,7 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
 - [CONTROL_FLOW](CONTROL_FLOW.md) - Structures de contrôle (`if`, `while`, `for`, `break`, `continue`)
 - [FUNCTIONS](FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
 - [STRUCTURES](STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
+- [ENUMS](ENUMS.md) - Types énumérés : variantes nommées, pattern matching et sémantique d'égalité
 - [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
 
 ## Aller plus loin

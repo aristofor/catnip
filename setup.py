@@ -56,6 +56,7 @@ rust_extensions = [
         debug=False,
         args=_profile_args,
     ),
+    # @generated-stdlib-extensions-start
     RustExtension(
         "catnip.catnip_io",
         path="catnip_libs/io/rust/Cargo.toml",
@@ -70,6 +71,7 @@ rust_extensions = [
         debug=False,
         args=_profile_args,
     ),
+    # @generated-stdlib-extensions-end
 ]
 
 setup(

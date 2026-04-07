@@ -2,6 +2,8 @@
 
 Recettes d'utilisation.
 
+- [CHEATSHEET](CHEATSHEET.md) - Tout le langage sur une page
+
 - [PATTERN_MATCHING](PATTERN_MATCHING.md) - Utiliser le pattern matching pas à pas
 
 - [ND_CONCURRENCY](ND_CONCURRENCY.md) - Modes d'exécution ND (sequential, thread, process), GIL et guide de choix

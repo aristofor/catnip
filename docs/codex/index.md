@@ -4,11 +4,11 @@ Exemples d'intégration de bibliothèques Python dans Catnip. Python dans Catnip
 
 ## Principe
 
-Catnip charge des modules Python via `import("module")` ou l'option CLI `-m module`. Les objets et fonctions du module
+Catnip charge des modules Python via `import('module')` ou l'option CLI `-m module`. Les objets et fonctions du module
 deviennent accessibles directement dans le code Catnip.
 
 ```catnip
-numpy = import("numpy")
+numpy = import('numpy')
 arr = numpy.array(list(1, 2, 3))
 print(arr.mean())
 ```
@@ -47,7 +47,7 @@ Le module est accessible via son nom : `numpy.array(...)`.
 ### Alias dans le code
 
 ```catnip
-np = import("numpy")
+np = import('numpy')
 arr = np.array(list(1, 2, 3))
 ```
 

@@ -394,7 +394,20 @@ class Context(ContextBase):
                     'pure': _PureWrapper(self),
                     'META': CatnipMeta(),
                     'ND': _rs.build_nd(),
-                    'INT': _rs.build_int(),
+                    'RUNTIME': _rs.build_runtime(),
+                    # Exception types (for raise expr)
+                    'Exception': builtins.Exception,
+                    'TypeError': builtins.TypeError,
+                    'ValueError': builtins.ValueError,
+                    'NameError': builtins.NameError,
+                    'IndexError': builtins.IndexError,
+                    'KeyError': builtins.KeyError,
+                    'AttributeError': builtins.AttributeError,
+                    'ZeroDivisionError': builtins.ZeroDivisionError,
+                    'RuntimeError': builtins.RuntimeError,
+                    'MemoryError': builtins.MemoryError,
+                    'ArithmeticError': builtins.ArithmeticError,
+                    'LookupError': builtins.LookupError,
                 }
             )
         else:

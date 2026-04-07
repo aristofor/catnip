@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod compiler_core;
 pub mod compiler_input;
 pub mod core;
+pub mod enums;
 pub mod frame;
 pub mod host;
 pub mod iter;
@@ -28,11 +29,13 @@ pub use catnip_core::vm::{
 pub use catnip_core::vm::{memory, mro, opcode, peephole};
 
 // Re-export main types
+pub use catnip_core::symbols::SymbolTable;
 pub use compiler::PyCompiler;
 pub use core::{
     BigIntOpsBenchResult, VM, VMError, VMFallbackStats, bench_bigint_ops, get_vm_fallback_stats,
     reset_vm_fallback_stats,
 };
+pub use enums::{CatnipEnumVariant, EnumRegistry, EnumType};
 pub use frame::{
     ClosureParent, ClosureScope, CodeObject, Frame, FramePool, Globals, NativeClosureScope, PyCodeObject, VMFunction,
 };

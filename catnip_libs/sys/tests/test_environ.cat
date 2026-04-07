@@ -1,0 +1,5 @@
+# FILE: catnip_libs/sys/tests/test_environ.cat
+import('sys')
+
+if typeof(sys.environ) != "dict" { raise ("sys.environ should be a dict") }
+if len(sys.environ) < 1 { raise ("sys.environ is empty") }

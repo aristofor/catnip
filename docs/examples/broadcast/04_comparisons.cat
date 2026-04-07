@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Comparaisons vectorisées
+# Comparaisons vectorisées
 # Filtrage et sélection basés sur des conditions
 
 print("⇒ Comparaisons vectorisées")
@@ -54,8 +54,8 @@ print("Températures > 20°C:", chaudes)
 # Marquer les températures dans la plage [18, 25)
 min_confort = 18
 max_confort = 25
-sup_min     = temperatures.[>= min_confort]
-inf_max     = temperatures.[<= max_confort]
+sup_min = temperatures.[>= min_confort]
+inf_max = temperatures.[<= max_confort]
 print("Températures >= 18:", sup_min)
 print("Températures <= 25:", inf_max)
 

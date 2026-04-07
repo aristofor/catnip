@@ -216,6 +216,44 @@ area = (shape) => {
 > Le pattern de structure vérifie type + champs. Si le type ne correspond pas, la branche reste dans une timeline
 > parallèle.
 
+### Patterns struct dans les tuples
+
+Les patterns de structure peuvent apparaître à l'intérieur de tuple patterns. Chaque position du tuple est matchée
+récursivement, ce qui permet de destructurer simultanément un tuple et les structures qu'il contient :
+
+```catnip
+struct Point { x; y; }
+
+data = tuple(Point(1, 2), "label")
+
+match data {
+    (Point{x, y}, name) => { print(x + y, name) }   # 3 "label"
+    _ => { print("no match") }
+}
+```
+
+Plusieurs structures dans le même tuple :
+
+```catnip
+struct Point { x; y; }
+struct Color { r; g; b; }
+
+match tuple(Point(1, 2), Color(255, 0, 128)) {
+    (Point{x, y}, Color{r, g, b}) => { x + y + r + g + b }   # 386
+}
+```
+
+Les guards s'appliquent sur les bindings extraits de l'ensemble du pattern :
+
+```catnip
+struct Point { x; y; }
+
+match tuple(Point(0, 5), 10) {
+    (Point{x, y}, z) if x == 0 => { y * z }   # 50
+    (Point{x, y}, z) => { x + y + z }
+}
+```
+
 ### Propriétés du Pattern Matching
 
 Le système de pattern matching garantit plusieurs propriétés observables :

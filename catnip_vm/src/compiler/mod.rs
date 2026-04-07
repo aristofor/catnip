@@ -15,6 +15,8 @@ pub use core::CompilerCore;
 pub use error::{CompileError, CompileResult};
 pub use pattern::{VMPattern, VMPatternElement};
 
+use std::collections::HashSet;
+
 use crate::Value;
 use catnip_core::ir::opcode::IROpCode;
 use catnip_core::ir::pure::{BroadcastType, IR};
@@ -52,10 +54,23 @@ struct FunctionCompileSpec<'a> {
 }
 
 /// Pure Rust IR -> bytecode compiler (no Python dependency).
+/// Info about an active try/finally for inlining finally on break/continue/return.
+#[derive(Clone)]
+pub struct FinallyInfo {
+    /// The finally body IR to inline
+    pub body: IR,
+    /// Whether this try also has an except handler to pop
+    pub has_except: bool,
+    /// Whether to emit ClearException before the finally (inside except handler bodies)
+    pub needs_clear_exception: bool,
+}
+
 pub struct PureCompiler {
     core: CompilerCore,
     /// Sub-functions collected during compilation
     functions: Vec<CodeObject>,
+    /// Stack of active finally bodies (for inlining on break/continue/return)
+    finally_stack: Vec<FinallyInfo>,
 }
 
 impl Deref for PureCompiler {
@@ -76,6 +91,7 @@ impl PureCompiler {
         Self {
             core: CompilerCore::new(),
             functions: Vec::new(),
+            finally_stack: Vec::new(),
         }
     }
 
@@ -128,7 +144,10 @@ impl PureCompiler {
     // ========== Internal compile ==========
 
     fn compile_function_to_code(&mut self, spec: FunctionCompileSpec<'_>) -> CompileResult<CodeObject> {
+        // Save pre-seeded outer_names (from compile_function_inner) before reset
+        let pre_seeded = std::mem::take(&mut self.core.outer_names);
         self.core.reset();
+        self.core.outer_names = pre_seeded;
         self.core.name = spec.name.to_string();
         self.core.nargs = spec.params.len();
         self.core.defaults = spec.defaults;
@@ -148,9 +167,31 @@ impl PureCompiler {
     }
 
     fn compile_function_inner(&mut self, spec: FunctionCompileSpec<'_>) -> CompileResult<CodeObject> {
+        // Capture parent scope names for closure write detection
+        let parent_scope_names: HashSet<String> = self
+            .core
+            .names
+            .iter()
+            .cloned()
+            .chain(self.core.locals.iter().cloned())
+            .collect();
+
         let saved_core = std::mem::take(&mut self.core);
+        let saved_finally = std::mem::take(&mut self.finally_stack);
+
+        // Pre-seed outer_names: variables assigned in body that exist in parent scope.
+        // This ensures `x = 99` inside a function emits StoreScope (not just StoreLocal)
+        // when `x` was defined in the enclosing scope.
+        let assigned = collect_assigned_names(spec.body);
+        for name in &assigned {
+            if parent_scope_names.contains(name) {
+                self.core.outer_names.insert(name.clone());
+            }
+        }
+
         let result = self.compile_function_to_code(spec);
         self.core = saved_core;
+        self.finally_stack = saved_finally;
         result
     }
 
@@ -193,10 +234,15 @@ impl PureCompiler {
                 "Decimal literals not supported in standalone mode: {}",
                 s
             ))),
-            IR::Imaginary(s) => Err(CompileError::UnsupportedLiteral(format!(
-                "Imaginary literals not supported in standalone mode: {}",
-                s
-            ))),
+            IR::Imaginary(s) => {
+                let imag: f64 = s
+                    .parse()
+                    .map_err(|_| CompileError::SyntaxError(format!("invalid imaginary literal: {}j", s)))?;
+                let val = Value::from_complex(0.0, imag);
+                let idx = self.add_const(val);
+                self.emit(VMOpCode::LoadConst, idx as u32);
+                Ok(())
+            }
 
             // Variables
             IR::Ref(name, start_byte, _end_byte) => {
@@ -336,7 +382,8 @@ impl PureCompiler {
             | IR::PatternWildcard
             | IR::PatternOr(_)
             | IR::PatternTuple(_)
-            | IR::PatternStruct { .. } => {
+            | IR::PatternStruct { .. }
+            | IR::PatternEnum { .. } => {
                 let idx = self.core.add_const(Value::NIL);
                 self.emit(VMOpCode::LoadConst, idx as u32);
                 Ok(())
@@ -434,8 +481,8 @@ impl PureCompiler {
             IROpCode::OpFor => self.compile_for(args),
             IROpCode::OpBlock => self.compile_block(args),
             IROpCode::OpReturn => self.compile_return(args),
-            IROpCode::OpBreak => self.core.compile_break(),
-            IROpCode::OpContinue => self.core.compile_continue(),
+            IROpCode::OpBreak => self.compile_break_with_finally(),
+            IROpCode::OpContinue => self.compile_continue_with_finally(),
 
             // Functions
             IROpCode::Call => self.compile_call_op(args, kwargs, tail),
@@ -515,6 +562,17 @@ impl PureCompiler {
 
             IROpCode::OpStruct => self.compile_struct(args),
             IROpCode::TraitDef => self.compile_trait(args),
+            IROpCode::EnumDef => self.compile_enum(args),
+
+            // Error handling
+            IROpCode::OpTry => self.compile_try(args),
+            IROpCode::OpRaise => self.compile_raise(args),
+
+            // Exception info (for with desugaring)
+            IROpCode::ExcInfo => {
+                self.emit(VMOpCode::LoadException, 1);
+                Ok(())
+            }
 
             _ => Err(CompileError::NotImplemented(format!(
                 "PureCompiler: cannot compile IR opcode: {}",
@@ -752,8 +810,16 @@ impl PureCompiler {
     fn compile_getitem(&mut self, args: &[IR]) -> CompileResult<()> {
         Self::require_args(args, 2, "getitem")?;
         self.compile_node(&args[0])?;
-        self.compile_node(&args[1])?;
-        self.emit(VMOpCode::GetItem, 0);
+        // Fuse Slice + GetItem: push start/stop/step directly, emit GetItem(1)
+        if let IR::Slice { start, stop, step } = &args[1] {
+            self.compile_node(start)?;
+            self.compile_node(stop)?;
+            self.compile_node(step)?;
+            self.emit(VMOpCode::GetItem, 1);
+        } else {
+            self.compile_node(&args[1])?;
+            self.emit(VMOpCode::GetItem, 0);
+        }
         Ok(())
     }
 
@@ -1202,6 +1268,12 @@ impl PureCompiler {
         } else {
             let idx = self.core.add_const(Value::NIL);
             self.emit(VMOpCode::LoadConst, idx as u32);
+        }
+        // Inside try/finally: pop handlers, inline finally bodies, then return
+        if self.core.finally_depth > 0 {
+            let n = self.finally_stack.len();
+            self.emit_finally_unwind()?;
+            self.core.finally_depth += n;
         }
         self.emit(VMOpCode::Return, 0);
         Ok(())
@@ -1948,6 +2020,260 @@ impl PureCompiler {
         Ok(())
     }
 
+    fn compile_enum(&mut self, args: &[IR]) -> CompileResult<()> {
+        let name = ir_to_name(&args[0]).unwrap_or_default();
+
+        let variant_items = match &args[1] {
+            IR::Tuple(items) | IR::List(items) => items.as_slice(),
+            _ => &[],
+        };
+
+        let variants_tuple = Value::from_tuple(
+            variant_items
+                .iter()
+                .filter_map(ir_to_name)
+                .map(Value::from_string)
+                .collect(),
+        );
+
+        let enum_info = Value::from_tuple(vec![Value::from_string(name), variants_tuple]);
+        let idx = self.core.add_const(enum_info);
+        self.emit(VMOpCode::MakeEnum, idx as u32);
+        Ok(())
+    }
+
+    // ========== Exception handling ==========
+
+    /// Emit inline finally cleanup for each active finally level.
+    fn emit_finally_unwind(&mut self) -> CompileResult<()> {
+        let bodies: Vec<FinallyInfo> = self.finally_stack.iter().rev().cloned().collect();
+        for info in &bodies {
+            if info.needs_clear_exception {
+                self.emit(VMOpCode::ClearException, 0);
+            }
+            if info.has_except {
+                self.emit(VMOpCode::PopHandler, 0);
+            }
+            self.emit(VMOpCode::PopHandler, 0);
+            self.core.finally_depth -= 1;
+            self.compile_node(&info.body)?;
+            self.emit(VMOpCode::PopTop, 0);
+        }
+        Ok(())
+    }
+
+    /// Emit break with finally bodies inlined (if inside try/finally).
+    fn compile_break_with_finally(&mut self) -> CompileResult<()> {
+        if self.core.finally_depth == 0 {
+            return self.core.compile_break();
+        }
+        let n = self.finally_stack.len();
+        self.emit_finally_unwind()?;
+        let result = self.core.compile_break();
+        self.core.finally_depth += n;
+        result
+    }
+
+    /// Emit continue with finally bodies inlined.
+    fn compile_continue_with_finally(&mut self) -> CompileResult<()> {
+        if self.core.finally_depth == 0 {
+            return self.core.compile_continue();
+        }
+        let n = self.finally_stack.len();
+        self.emit_finally_unwind()?;
+        let result = self.core.compile_continue();
+        self.core.finally_depth += n;
+        result
+    }
+
+    fn compile_try(&mut self, args: &[IR]) -> CompileResult<()> {
+        let body = &args[0];
+        let handlers_ir = &args[1];
+        let finally_ir = &args[2];
+        let has_finally = !matches!(finally_ir, IR::None);
+
+        let handlers = match handlers_ir {
+            IR::List(items) => items.as_slice(),
+            _ => &[],
+        };
+        let has_except = !handlers.is_empty();
+
+        let mut finally_setup_addr = None;
+        let mut except_setup_addr = None;
+
+        // Install handlers (Finally first, Except on top)
+        if has_finally {
+            finally_setup_addr = Some(self.emit(VMOpCode::SetupFinally, 0));
+            self.core.finally_depth += 1;
+            self.finally_stack.push(FinallyInfo {
+                body: finally_ir.clone(),
+                has_except,
+                needs_clear_exception: false,
+            });
+        }
+        if has_except {
+            except_setup_addr = Some(self.emit(VMOpCode::SetupExcept, 0));
+        }
+
+        // Try body
+        self.compile_node(body)?;
+
+        // Happy path: pop handlers
+        if has_except {
+            self.emit(VMOpCode::PopHandler, 0);
+        }
+        if has_finally {
+            self.emit(VMOpCode::PopHandler, 0);
+            self.core.finally_depth -= 1;
+            self.finally_stack.pop();
+        }
+
+        // Inline finally on happy path
+        if has_finally {
+            self.compile_node(finally_ir)?;
+            self.emit(VMOpCode::PopTop, 0);
+        }
+        let end_jump = self.emit(VMOpCode::Jump, 0);
+        let mut handler_end_jumps: Vec<usize> = Vec::new();
+
+        // Except dispatch
+        if has_except {
+            let except_addr = self.instructions.len();
+            if let Some(addr) = except_setup_addr {
+                self.core.patch(addr, except_addr as u32);
+            }
+
+            // While compiling handler bodies, restore finally context so that
+            // break/continue/return inside a handler inline ClearException + finally.
+            if has_finally {
+                self.core.finally_depth += 1;
+                self.finally_stack.push(FinallyInfo {
+                    body: finally_ir.clone(),
+                    has_except: false,           // except handler already popped by VM
+                    needs_clear_exception: true, // inside handler: clear exception stack on exit
+                });
+            }
+
+            for handler_ir in handlers {
+                let (types, binding, handler_body) = match handler_ir {
+                    IR::Tuple(items) if items.len() >= 3 => (&items[0], &items[1], &items[2]),
+                    _ => continue,
+                };
+
+                let type_list = match types {
+                    IR::List(t) => t.as_slice(),
+                    _ => &[],
+                };
+                let is_wildcard = type_list.is_empty();
+
+                if !is_wildcard {
+                    // Typed handler: check each exception type
+                    let mut type_match_jumps = Vec::new();
+                    for type_ir in type_list {
+                        let type_name = match type_ir {
+                            IR::String(s) => s.clone(),
+                            _ => continue,
+                        };
+                        let const_idx = self.core.add_const(Value::from_string(type_name));
+                        self.emit(VMOpCode::CheckExcMatch, const_idx as u32);
+                        type_match_jumps.push(self.emit(VMOpCode::JumpIfTrue, 0));
+                    }
+                    let skip_jump = self.emit(VMOpCode::Jump, 0);
+
+                    // Handler body start
+                    let handler_start = self.instructions.len() as u32;
+                    for addr in type_match_jumps {
+                        self.core.patch(addr, handler_start);
+                    }
+
+                    // Bind exception message if binding present
+                    if !matches!(binding, IR::None) {
+                        if let IR::String(name) = binding {
+                            self.emit(VMOpCode::LoadException, 0);
+                            let slot = self.add_local(name);
+                            self.emit(VMOpCode::StoreLocal, slot as u32);
+                        }
+                    }
+
+                    self.compile_node(handler_body)?;
+
+                    // Pop exception stack + inline finally (normal exit path)
+                    self.emit(VMOpCode::ClearException, 0);
+                    if has_finally {
+                        self.emit(VMOpCode::PopHandler, 0);
+                        self.compile_node(finally_ir)?;
+                        self.emit(VMOpCode::PopTop, 0);
+                    }
+                    handler_end_jumps.push(self.emit(VMOpCode::Jump, 0));
+
+                    let next = self.instructions.len() as u32;
+                    self.core.patch(skip_jump, next);
+                } else {
+                    // Wildcard handler
+                    if !matches!(binding, IR::None) {
+                        if let IR::String(name) = binding {
+                            self.emit(VMOpCode::LoadException, 0);
+                            let slot = self.add_local(name);
+                            self.emit(VMOpCode::StoreLocal, slot as u32);
+                        }
+                    }
+
+                    self.compile_node(handler_body)?;
+
+                    // Pop exception stack + inline finally (normal exit path)
+                    self.emit(VMOpCode::ClearException, 0);
+                    if has_finally {
+                        self.emit(VMOpCode::PopHandler, 0);
+                        self.compile_node(finally_ir)?;
+                        self.emit(VMOpCode::PopTop, 0);
+                    }
+                    handler_end_jumps.push(self.emit(VMOpCode::Jump, 0));
+                    break; // Wildcard is always last
+                }
+            }
+
+            // Restore finally context after handler body compilation
+            if has_finally {
+                self.core.finally_depth -= 1;
+                self.finally_stack.pop();
+            }
+
+            // No handler matched: bare re-raise (goes through handler stack for finally)
+            self.emit(VMOpCode::Raise, 1);
+        }
+
+        // Finally landing pad (reached by VM when it pops a Finally handler)
+        if has_finally {
+            let finally_landing = self.instructions.len() as u32;
+            if let Some(addr) = finally_setup_addr {
+                self.core.patch(addr, finally_landing);
+            }
+            self.compile_node(finally_ir)?;
+            self.emit(VMOpCode::PopTop, 0);
+            self.emit(VMOpCode::ResumeUnwind, 0);
+        }
+
+        // End label: all paths (happy, handler, finally-only) converge here
+        let end_addr = self.instructions.len() as u32;
+        self.core.patch(end_jump, end_addr);
+        for addr in handler_end_jumps {
+            self.core.patch(addr, end_addr);
+        }
+        Ok(())
+    }
+
+    fn compile_raise(&mut self, args: &[IR]) -> CompileResult<()> {
+        if args.is_empty() {
+            // Bare raise
+            self.emit(VMOpCode::Raise, 1);
+        } else {
+            // raise expr
+            self.compile_node(&args[0])?;
+            self.emit(VMOpCode::Raise, 0);
+        }
+        Ok(())
+    }
+
     // ========== Helpers ==========
 
     fn body_has_calls(&self, node: &IR) -> bool {
@@ -2072,6 +2398,13 @@ impl PureCompiler {
                     field_slots,
                 }))
             }
+            IR::PatternEnum {
+                enum_name,
+                variant_name,
+            } => Ok(Some(VMPattern::Enum {
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+            })),
             _ => Ok(None),
         }
     }
@@ -2190,6 +2523,68 @@ impl PureCompiler {
     pub fn freeze_ir_body(body: &IR) -> Option<Arc<Vec<u8>>> {
         let ir_vec = vec![body.clone()];
         catnip_core::freeze::encode(&ir_vec).ok().map(Arc::new)
+    }
+}
+
+/// Collect variable names assigned in an IR tree (for scope write detection).
+fn collect_assigned_names(ir: &IR) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_assigned_names_inner(ir, &mut names);
+    names
+}
+
+fn collect_assigned_names_inner(ir: &IR, out: &mut Vec<String>) {
+    match ir {
+        IR::Op { opcode, args, .. } => {
+            if *opcode == IROpCode::SetLocals && !args.is_empty() {
+                // args[0] = names (Identifier, Ref, List of names)
+                collect_name_targets(&args[0], out);
+            }
+            // Recurse into all args (including control flow bodies)
+            for arg in args {
+                collect_assigned_names_inner(arg, out);
+            }
+        }
+        IR::Program(items) | IR::List(items) | IR::Tuple(items) => {
+            for item in items {
+                collect_assigned_names_inner(item, out);
+            }
+        }
+        IR::Broadcast {
+            target,
+            operator,
+            operand,
+            ..
+        } => {
+            if let Some(t) = target {
+                collect_assigned_names_inner(t, out);
+            }
+            collect_assigned_names_inner(operator, out);
+            if let Some(o) = operand {
+                collect_assigned_names_inner(o, out);
+            }
+        }
+        IR::Call { func, args, .. } => {
+            collect_assigned_names_inner(func, out);
+            for a in args {
+                collect_assigned_names_inner(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_name_targets(ir: &IR, out: &mut Vec<String>) {
+    match ir {
+        IR::Identifier(name) | IR::Ref(name, _, _) => {
+            out.push(name.clone());
+        }
+        IR::List(items) | IR::Tuple(items) => {
+            for item in items {
+                collect_name_targets(item, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2332,5 +2727,26 @@ mod tests {
         let program = IR::Program(vec![ir]);
         let output = compiler.compile(&program).unwrap();
         assert!(!output.code.instructions.is_empty());
+    }
+
+    #[test]
+    fn test_try_compiles() {
+        let mut compiler = PureCompiler::new();
+        let ir = IR::op(
+            IROpCode::OpTry,
+            vec![IR::op(IROpCode::OpBlock, vec![IR::Int(1)]), IR::List(vec![]), IR::None],
+        );
+        let program = IR::Program(vec![ir]);
+        let output = compiler.compile(&program);
+        assert!(output.is_ok(), "try should compile: {:?}", output.err());
+    }
+
+    #[test]
+    fn test_raise_compiles() {
+        let mut compiler = PureCompiler::new();
+        let ir = IR::op(IROpCode::OpRaise, vec![]);
+        let program = IR::Program(vec![ir]);
+        let output = compiler.compile(&program);
+        assert!(output.is_ok(), "bare raise should compile: {:?}", output.err());
     }
 }

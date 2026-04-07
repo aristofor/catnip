@@ -376,6 +376,23 @@ impl Registry {
         } else if opcode == op.op_continue {
             return Ok(Some(self.op_continue(py, args)?));
         }
+        // Error handling
+        else if opcode == op.op_try {
+            return Ok(Some(self.op_try(py, args)?));
+        } else if opcode == op.op_raise {
+            return Ok(Some(self.op_raise(py, args)?));
+        } else if opcode == op.exc_info {
+            // Return (exc_type, exc_value, None) from active exception
+            let exc_ref = self.active_exception.borrow();
+            let tuple = if let Some(exc) = exc_ref.as_ref() {
+                let exc_type = exc.get_type(py).into_any().unbind();
+                let exc_val = exc.value(py).clone().into_any().unbind();
+                pyo3::types::PyTuple::new(py, &[exc_type, exc_val, py.None()])?
+            } else {
+                pyo3::types::PyTuple::new(py, &[py.None(), py.None(), py.None()])?
+            };
+            return Ok(Some(tuple.into()));
+        }
         // Pattern matching
         else if opcode == op.op_match {
             return Ok(Some(self.op_match(py, args)?));
@@ -395,6 +412,10 @@ impl Registry {
         // Trait
         else if opcode == op.trait_def {
             return Ok(Some(self.op_trait_def(py, args)?));
+        }
+        // Enum
+        else if opcode == op.enum_def {
+            return Ok(Some(self.op_enum(py, args)?));
         }
         // Intrinsics
         else if opcode == op.type_of && args.len() >= 1 {
@@ -539,7 +560,7 @@ impl Registry {
     /// Suggest a similar name for an undefined identifier
     fn suggest_name(&self, py: Python<'_>, ident: &str) -> PyResult<Option<String>> {
         // Import suggest_name from catnip.suggest
-        let suggest_module = py.import("catnip.suggest")?;
+        let suggest_module = py.import(PY_MOD_SUGGEST)?;
         let suggest_fn = suggest_module.getattr("suggest_name")?;
 
         // Get all available names (locals + globals)

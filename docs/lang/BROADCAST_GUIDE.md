@@ -11,7 +11,7 @@ Voir aussi : [BROADCAST_SPEC](BROADCAST_SPEC.md) pour la référence normative e
 
 ```catnip
 # Charger module pandas
-# pd = import("pandas_helper", protocol="py")
+# pd = import('pandas_helper', protocol='py')
 
 # Obtenir des données (peut être scalaire, Series, ou DataFrame)
 data = pd.query(df, "age > 30")["salary"]

@@ -4,6 +4,7 @@
 //! Shared between catnip_vm (PureHost) and catnip_rs (VM dispatch).
 //! Handles SmallInt, BigInt, and Float. No Python dependency.
 
+use super::errors;
 use crate::error::{VMError, VMResult};
 use crate::value::Value;
 use rug::Integer;
@@ -41,6 +42,42 @@ pub fn to_f64(v: Value) -> Option<f64> {
     } else {
         None
     }
+}
+
+/// Promote a Value to complex (real, imag) parts.
+/// Complex → (real, imag), numeric → (value, 0.0), other → None.
+#[inline]
+pub fn to_complex(v: Value) -> Option<(f64, f64)> {
+    if v.is_complex() {
+        return unsafe { v.as_complex_parts() };
+    }
+    to_f64(v).map(|f| (f, 0.0))
+}
+
+/// Complex exponentiation via polar form (De Moivre's theorem).
+/// (ar+ai*j) ** (br+bi*j)
+pub fn complex_pow(ar: f64, ai: f64, br: f64, bi: f64) -> VMResult<Value> {
+    if br == 0.0 && bi == 0.0 {
+        return Ok(Value::from_complex(1.0, 0.0));
+    }
+    if ar == 0.0 && ai == 0.0 {
+        // 0 ** positive_real is 0, everything else is undefined
+        if bi == 0.0 && br > 0.0 {
+            return Ok(Value::from_complex(0.0, 0.0));
+        }
+        return Err(VMError::ZeroDivisionError("0.0 to a negative or complex power".into()));
+    }
+    let r = (ar * ar + ai * ai).sqrt();
+    let theta = ai.atan2(ar);
+    // ln(a) = ln|a| + i*arg(a)
+    let ln_r = r.ln();
+    // b * ln(a) = (br + bi*j) * (ln_r + theta*j)
+    //           = (br*ln_r - bi*theta) + (br*theta + bi*ln_r)*j
+    let exp_r = br * ln_r - bi * theta;
+    let exp_i = br * theta + bi * ln_r;
+    // e^(exp_r + exp_i*j) = e^exp_r * (cos(exp_i) + sin(exp_i)*j)
+    let mag = exp_r.exp();
+    Ok(Value::from_complex(mag * exp_i.cos(), mag * exp_i.sin()))
 }
 
 /// Promote a Value (SmallInt or BigInt) to owned Integer.
@@ -130,6 +167,12 @@ pub fn eq_native(a: Value, b: Value) -> Option<bool> {
     if let (Some(ab), Some(bb)) = (a.as_bool(), b.as_bool()) {
         return Some(ab == bb);
     }
+    // Complex equality before BigInt (to_complex promotes BigInt via to_f64)
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Some(ar == br && ai == bi);
+        }
+    }
     if a.is_bigint() || b.is_bigint() {
         return bigint_cmp(a, b, |x, y| x == y);
     }
@@ -153,6 +196,11 @@ pub fn eq_native(a: Value, b: Value) -> Option<bool> {
 
 #[inline]
 pub fn numeric_add(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar + br, ai + bi));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(sum) = ai.checked_add(bi) {
             if let Some(v) = Value::try_from_int(sum) {
@@ -178,11 +226,16 @@ pub fn numeric_add(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af + bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for +".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_ADD.into()))
 }
 
 #[inline]
 pub fn numeric_sub(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar - br, ai - bi));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(diff) = ai.checked_sub(bi) {
             if let Some(v) = Value::try_from_int(diff) {
@@ -208,11 +261,16 @@ pub fn numeric_sub(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af - bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for -".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_SUB.into()))
 }
 
 #[inline]
 pub fn numeric_mul(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return Ok(Value::from_complex(ar * br - ai * bi, ar * bi + ai * br));
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if let Some(prod) = ai.checked_mul(bi) {
             if let Some(v) = Value::try_from_int(prod) {
@@ -238,35 +296,47 @@ pub fn numeric_mul(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
         return Ok(Value::from_float(af * bi as f64));
     }
-    Err(VMError::TypeError("unsupported operand types for *".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MUL.into()))
 }
 
 #[inline]
 pub fn numeric_div(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            let denom = br * br + bi * bi;
+            if denom == 0.0 {
+                return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
+            }
+            return Ok(Value::from_complex(
+                (ar * br + ai * bi) / denom,
+                (ai * br - ar * bi) / denom,
+            ));
+        }
+    }
     if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("division by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
         }
         return Ok(Value::from_float(af / bf));
     }
-    Err(VMError::TypeError("unsupported operand types for /".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_DIV.into()))
 }
 
 #[inline]
 pub fn numeric_floordiv(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         return Ok(Value::from_int(i64_div_floor(ai, bi)));
     }
     if a.is_bigint() || b.is_bigint() {
         if b.is_bigint() {
             if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).div_floor(y)) {
             return Ok(v);
@@ -276,28 +346,28 @@ pub fn numeric_floordiv(a: Value, b: Value) -> VMResult<Value> {
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("float floor division by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_FLOORDIV_ZERO.into()));
         }
         return Ok(Value::from_float((af / bf).floor()));
     }
-    Err(VMError::TypeError("unsupported operand types for //".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_FLOORDIV.into()))
 }
 
 #[inline]
 pub fn numeric_mod(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi == 0 {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         return Ok(Value::from_int(i64_mod_floor(ai, bi)));
     }
     if a.is_bigint() || b.is_bigint() {
         if b.is_bigint() {
             if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
             }
         } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError("integer division or modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
         }
         if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).rem_floor(y)) {
             return Ok(v);
@@ -307,16 +377,21 @@ pub fn numeric_mod(a: Value, b: Value) -> VMResult<Value> {
     let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
     if let (Some(af), Some(bf)) = (af, bf) {
         if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError("float modulo by zero".into()));
+            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_MOD_ZERO.into()));
         }
         // Python floored modulo: af - bf * floor(af / bf)
         return Ok(Value::from_float(af - bf * (af / bf).floor()));
     }
-    Err(VMError::TypeError("unsupported operand types for %".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MOD.into()))
 }
 
 #[inline]
 pub fn numeric_pow(a: Value, b: Value) -> VMResult<Value> {
+    if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
+            return complex_pow(ar, ai, br, bi);
+        }
+    }
     if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
         if bi >= 0 {
             if bi <= 64 {
@@ -354,7 +429,7 @@ pub fn numeric_pow(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_float(af.powf(bf)));
     }
-    Err(VMError::TypeError("unsupported operand types for **".into()))
+    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_POW.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +438,10 @@ pub fn numeric_pow(a: Value, b: Value) -> VMResult<Value> {
 
 #[inline]
 pub fn numeric_neg(a: Value) -> VMResult<Value> {
+    if a.is_complex() {
+        let (r, i) = unsafe { a.as_complex_parts().unwrap() };
+        return Ok(Value::from_complex(-r, -i));
+    }
     if let Some(i) = a.as_int() {
         if let Some(v) = Value::try_from_int(-i) {
             return Ok(v);
@@ -376,7 +455,7 @@ pub fn numeric_neg(a: Value) -> VMResult<Value> {
     if let Some(f) = a.as_float() {
         return Ok(Value::from_float(-f));
     }
-    Err(VMError::TypeError("bad operand type for unary -".into()))
+    Err(VMError::TypeError(errors::ERR_BAD_UNARY_NEG.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +477,7 @@ pub fn numeric_lt(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af < bf));
     }
-    Err(VMError::TypeError("'<' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_LT.into()))
 }
 
 #[inline]
@@ -416,7 +495,7 @@ pub fn numeric_le(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af <= bf));
     }
-    Err(VMError::TypeError("'<=' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_LE.into()))
 }
 
 #[inline]
@@ -434,7 +513,7 @@ pub fn numeric_gt(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af > bf));
     }
-    Err(VMError::TypeError("'>' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_GT.into()))
 }
 
 #[inline]
@@ -452,7 +531,7 @@ pub fn numeric_ge(a: Value, b: Value) -> VMResult<Value> {
     if let (Some(af), Some(bf)) = (af, bf) {
         return Ok(Value::from_bool(af >= bf));
     }
-    Err(VMError::TypeError("'>=' not supported".into()))
+    Err(VMError::TypeError(errors::ERR_CMP_GE.into()))
 }
 
 // ---------------------------------------------------------------------------

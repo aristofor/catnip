@@ -5,7 +5,7 @@ This demonstrates how an application can expose its functionality to Catnip
 as a scripting language.
 
 Usage:
-    # In the Catnip script, load with: app = import("07_app_api", protocol="py")
+    # In the Catnip script, load with: app = import('03_app_api', protocol='py')
 """
 
 # Simulated application state

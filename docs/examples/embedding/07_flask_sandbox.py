@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip comme sandbox pour scripts utilisateur dans Flask.
 

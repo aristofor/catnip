@@ -1,0 +1,129 @@
+#!/usr/bin/env catnip
+# Types enumeres
+
+print("⇒ Declaration et acces aux variantes")
+
+enum Color { red; green; blue }
+
+print("Color.red =", Color.red)
+print("Color.green =", Color.green)
+print("Color.blue =", Color.blue)
+
+print()
+print("⇒ Egalite et inegalite")
+
+c1 = Color.red
+c2 = Color.red
+c3 = Color.blue
+
+print("c1 == c2:", c1 == c2)
+print("c1 == c3:", c1 == c3)
+print("c1 != c3:", c1 != c3)
+
+print()
+print("⇒ Pattern matching")
+
+describe_color = (c) => {
+    match c {
+        Color.red => { "rouge" }
+        Color.green => { "vert" }
+        Color.blue => { "bleu" }
+    }
+}
+
+print("Color.red =>", describe_color(Color.red))
+print("Color.green =>", describe_color(Color.green))
+print("Color.blue =>", describe_color(Color.blue))
+
+print()
+print("⇒ Pattern matching avec wildcard")
+
+is_red = (c) => {
+    match c {
+        Color.red => { True }
+        _ => { False }
+    }
+}
+
+print("is_red(Color.red):", is_red(Color.red))
+print("is_red(Color.blue):", is_red(Color.blue))
+
+print()
+print("⇒ Plusieurs types enumeres")
+
+enum Direction { north; south; east; west }
+
+print("Color.red != Direction.north:", Color.red != Direction.north)
+
+move = (d) => {
+    match d {
+        Direction.north => { "on monte" }
+        Direction.south => { "on descend" }
+        Direction.east  => { "on va a droite" }
+        Direction.west  => { "on va a gauche" }
+    }
+}
+
+print("Direction.north =>", move(Direction.north))
+print("Direction.west =>", move(Direction.west))
+
+print()
+print("⇒ Meme nom de variante, types distincts")
+
+enum A { x; y }
+enum B { x; y }
+
+print("A.x == A.x:", A.x == A.x)
+print("A.x == B.x:", A.x == B.x)
+
+print()
+print("⇒ Machine a etats")
+
+enum State { idle; loading; ready; error }
+
+transition = (state, event) => {
+    match state {
+        State.idle => {
+            if event == "start" { State.loading }
+            else { State.idle }
+        }
+        State.loading => {
+            if event == "success" { State.ready }
+            elif event == "fail" { State.error }
+            else { State.loading }
+        }
+        State.ready => {
+            if event == "reset" { State.idle }
+            else { State.ready }
+        }
+        State.error => {
+            if event == "retry" { State.loading }
+            elif event == "reset" { State.idle }
+            else { State.error }
+        }
+    }
+}
+
+s = State.idle
+print("initial:", s)
+
+s = transition(s, "start")
+print("apres start:", s)
+
+s = transition(s, "success")
+print("apres success:", s)
+
+s = transition(s, "reset")
+print("apres reset:", s)
+
+s = transition(s, "start")
+s = transition(s, "fail")
+print("apres start+fail:", s)
+
+s = transition(s, "retry")
+print("apres retry:", s)
+
+print()
+print("⇒ Truthiness")
+
+if Color.red { print("les enums sont truthy") }

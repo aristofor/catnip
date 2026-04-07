@@ -70,15 +70,15 @@ class OpCode(IntEnum):
     IS = 38
     IS_NOT = 39
     NULL_COALESCE = 40
-    LIST_LITERAL = 41
-    TUPLE_LITERAL = 42
-    SET_LITERAL = 43
-    DICT_LITERAL = 44
-    PUSH = 45
-    POP = 46
-    PUSH_PEEK = 47
-    FSTRING = 48
-    SLICE = 49
+    SLICE = 41
+    LIST_LITERAL = 42
+    TUPLE_LITERAL = 43
+    SET_LITERAL = 44
+    DICT_LITERAL = 45
+    FSTRING = 46
+    PUSH = 47
+    POP = 48
+    PUSH_PEEK = 49
     OP_IF = 50
     OP_WHILE = 51
     OP_FOR = 52
@@ -87,16 +87,20 @@ class OpCode(IntEnum):
     OP_RETURN = 55
     OP_BREAK = 56
     OP_CONTINUE = 57
-    CALL = 58
-    OP_LAMBDA = 59
-    FN_DEF = 60
-    SET_LOCALS = 61
-    OP_STRUCT = 62
-    TRAIT_DEF = 63
-    PRAGMA = 64
-    TYPE_OF = 65
-    GLOBALS = 66
-    LOCALS = 67
+    OP_TRY = 58
+    OP_RAISE = 59
+    EXC_INFO = 60
+    CALL = 61
+    OP_LAMBDA = 62
+    FN_DEF = 63
+    SET_LOCALS = 64
+    OP_STRUCT = 65
+    TRAIT_DEF = 66
+    ENUM_DEF = 67
+    PRAGMA = 68
+    TYPE_OF = 69
+    GLOBALS = 70
+    LOCALS = 71
 
 
 # Set of opcodes where arguments should not be evaluated immediately
@@ -116,6 +120,7 @@ CONTROL_FLOW_OPS = frozenset(
         OpCode.ND_MAP,  # Function received unevaluated
         OpCode.OP_STRUCT,  # Body not pre-evaluated
         OpCode.TRAIT_DEF,  # Method lambdas not pre-evaluated
+        OpCode.OP_TRY,  # Body/handlers/finally not pre-evaluated
     }
 )
 

@@ -24,6 +24,8 @@ pub enum VMPattern {
         name: String,
         field_slots: Vec<(String, usize)>,
     },
+    /// Matches an enum variant by type and variant name (resolved at match-time)
+    Enum { enum_name: String, variant_name: String },
 }
 
 /// Element of a tuple pattern (regular or star/rest).

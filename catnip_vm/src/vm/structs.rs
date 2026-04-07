@@ -10,6 +10,14 @@ use crate::value::Value;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
+/// Resolved trait data: (fields, methods, statics, abstract_methods).
+pub type ResolvedTraitData = (
+    Vec<PureTraitField>,
+    IndexMap<String, u32>,
+    IndexMap<String, u32>,
+    HashSet<String>,
+);
+
 // ---------------------------------------------------------------------------
 // Struct types and instances
 // ---------------------------------------------------------------------------
@@ -39,8 +47,10 @@ pub struct PureStructType {
     pub init_fn: Option<u32>,
     /// Trait names this struct implements.
     pub implements: Vec<String>,
-    /// Method resolution order (C3 linearization).
+    /// Method resolution order (C3 linearization) -- names for display.
     pub mro: Vec<String>,
+    /// Method resolution order by type id -- stable across redefinitions.
+    pub mro_ids: Vec<u32>,
     /// Direct parent struct names (from extends).
     pub parent_names: Vec<String>,
     /// Abstract methods that remain unimplemented.
@@ -137,6 +147,12 @@ impl PureStructRegistry {
         self.type_name_map.insert(ty.name.clone(), id);
         self.types.push(ty);
         id
+    }
+
+    /// Number of registered struct types.
+    #[inline]
+    pub fn type_count(&self) -> u32 {
+        self.types.len() as u32
     }
 
     /// Get a struct type by id.
@@ -268,6 +284,42 @@ impl Default for PureStructRegistry {
     }
 }
 
+/// Register the 12 built-in exception struct types (with hierarchy).
+/// Returns (ExceptionKind, type_id) pairs for injecting into globals.
+/// ALL is ordered parents-before-children so find_type_by_name works for MRO.
+pub fn register_builtin_exceptions(
+    registry: &mut PureStructRegistry,
+) -> Vec<(catnip_core::exception::ExceptionKind, u32)> {
+    use catnip_core::exception::ExceptionKind;
+
+    let mut mapping = Vec::with_capacity(ExceptionKind::ALL.len());
+    for kind in ExceptionKind::ALL {
+        let mro = kind.mro();
+        let mro_ids: Vec<u32> = mro.iter().skip(1).filter_map(|n| registry.find_type_id(n)).collect();
+        let ty = PureStructType {
+            id: 0,
+            name: kind.name().to_string(),
+            fields: vec![PureStructField {
+                name: "message".to_string(),
+                has_default: true,
+                default_slot: Some(0),
+            }],
+            defaults: vec![Value::from_str("")],
+            methods: IndexMap::new(),
+            static_methods: IndexMap::new(),
+            init_fn: None,
+            implements: vec![],
+            mro,
+            mro_ids,
+            parent_names: kind.parent().map(|p| vec![p.name().to_string()]).unwrap_or_default(),
+            abstract_methods: HashSet::new(),
+        };
+        let type_id = registry.register_type(ty);
+        mapping.push((kind, type_id));
+    }
+    mapping
+}
+
 // ---------------------------------------------------------------------------
 // PureTraitRegistry
 // ---------------------------------------------------------------------------
@@ -296,15 +348,7 @@ impl PureTraitRegistry {
 
     /// Resolve traits for a struct: linearize trait DAG, merge fields and methods.
     /// Returns (merged_fields, merged_methods, merged_statics, abstract_methods).
-    pub fn resolve_for_struct(
-        &self,
-        trait_names: &[String],
-    ) -> VMResult<(
-        Vec<PureTraitField>,
-        IndexMap<String, u32>,
-        IndexMap<String, u32>,
-        HashSet<String>,
-    )> {
+    pub fn resolve_for_struct(&self, trait_names: &[String]) -> VMResult<ResolvedTraitData> {
         let order = self.linearize_traits(trait_names)?;
 
         let mut fields: Vec<PureTraitField> = Vec::new();
@@ -417,6 +461,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec!["Point".to_string()],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -450,6 +495,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec!["Point".to_string()],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -485,6 +531,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec![],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -510,6 +557,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec![],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -544,6 +592,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec![],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -586,6 +635,7 @@ mod tests {
             init_fn: None,
             implements: vec![],
             mro: vec![],
+            mro_ids: vec![],
             parent_names: vec![],
             abstract_methods: HashSet::new(),
         };
@@ -640,5 +690,56 @@ mod tests {
 
         let result = reg.linearize_traits(&["A".to_string()]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_register_builtin_exceptions() {
+        let mut registry = PureStructRegistry::new();
+        let mapping = super::register_builtin_exceptions(&mut registry);
+
+        assert_eq!(mapping.len(), 12);
+        // type_ids are sequential starting from 0
+        for (i, (kind, type_id)) in mapping.iter().enumerate() {
+            assert_eq!(*type_id, i as u32);
+            let ty = registry.get_type(*type_id).unwrap();
+            assert_eq!(ty.name, kind.name());
+            // Verify MRO matches ExceptionKind::mro()
+            assert_eq!(ty.mro, kind.mro(), "MRO mismatch for {}", kind.name());
+        }
+    }
+
+    #[test]
+    fn test_exception_struct_has_message_field() {
+        let mut registry = PureStructRegistry::new();
+        let mapping = super::register_builtin_exceptions(&mut registry);
+
+        for (_kind, type_id) in &mapping {
+            let ty = registry.get_type(*type_id).unwrap();
+            assert_eq!(ty.fields.len(), 1);
+            assert_eq!(ty.fields[0].name, "message");
+            assert!(ty.fields[0].has_default);
+        }
+    }
+
+    #[test]
+    fn test_exception_type_in_globals() {
+        use crate::host::VmHost;
+
+        let mut registry = PureStructRegistry::new();
+        let mapping = super::register_builtin_exceptions(&mut registry);
+
+        let host = crate::host::PureHost::with_builtins();
+        for (kind, type_id) in &mapping {
+            host.store_global(kind.name(), Value::from_struct_type(*type_id));
+        }
+
+        // Verify globals contain the exception types
+        let globals = host.globals();
+        let g = globals.borrow();
+        for (kind, type_id) in &mapping {
+            let val = g.get(kind.name()).expect("exception type not in globals");
+            assert!(val.is_struct_type());
+            assert_eq!(val.as_struct_type_id(), Some(*type_id));
+        }
     }
 }

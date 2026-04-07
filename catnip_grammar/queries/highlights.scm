@@ -42,6 +42,12 @@
 (elif_clause) @keyword
 (else_clause) @keyword
 (match_expr) @keyword
+(try_stmt) @keyword
+(except_block) @keyword
+(except_clause) @keyword
+(finally_clause) @keyword
+(raise_stmt) @keyword
+(with_stmt) @keyword
 (pragma_stmt) @keyword
 
 ; Pattern matching

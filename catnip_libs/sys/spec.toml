@@ -2,6 +2,7 @@
 name = "sys"
 version = "0.1.0"
 description = "Runtime introspection: argv, environ, version, platform, exit"
+needs_configure = true
 
 [exports]
 symbols = ["PROTOCOL", "argv", "environ", "executable", "version", "platform", "cpu_count", "exit"]

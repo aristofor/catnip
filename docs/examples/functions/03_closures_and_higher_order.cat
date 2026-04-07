@@ -1,5 +1,5 @@
 #!/usr/bin/env catnip
-# Exemple : Lambdas et fonctions d'ordre supérieur
+# Lambdas et fonctions d'ordre supérieur
 
 print("⇒ Lambdas comme valeurs")
 
@@ -39,9 +39,13 @@ pairs = fold(range(1, 11), list(), (acc, i) => { if est_pair(i) { acc + list(i) 
 print(f"Nombres pairs de 1 à 10: {pairs}")
 
 est_multiple_de_3 = (x) => { x % 3 == 0 }
-multiples_de_3 = fold(range(1, 21), list(), (acc, i) => {
+multiples_de_3 = fold(
+    range(1, 21),
+    list(),
+    (acc, i) => {
         if est_multiple_de_3(i) { acc + list(i) } else { acc }
-    })
+    }
+)
 print(f"Multiples de 3 de 1 à 20: {multiples_de_3}")
 
 print()
@@ -73,15 +77,15 @@ print()
 print("⇒ Validation avec lambdas")
 
 # Créer des validateurs
-sup_a_10    = (x) => { x > 10 }
-inf_a_50    = (x) => { x < 50 }
+sup_a_10 = (x)    => { x > 10 }
+inf_a_50 = (x)    => { x < 50 }
 est_pair_v2 = (x) => { x % 2 == 0 }
 
 print("Validation (>10, <50, pair):")
 for val in range(5, 55, 5) {
-    valide1     = sup_a_10(val)
-    valide2     = inf_a_50(val)
-    valide3     = est_pair_v2(val)
+    valide1 = sup_a_10(val)
+    valide2 = inf_a_50(val)
+    valide3 = est_pair_v2(val)
     valide_tout = valide1 and valide2 and valide3
     print(f"  {val} : {valide_tout}")
 }
@@ -120,9 +124,13 @@ print()
 print("⇒ Pipeline de traitement")
 
 # Traiter des données avec plusieurs étapes en composant filtre + transformation
-pipeline = fold(range(1, 11), list(), (acc, i) => {
+pipeline = fold(
+    range(1, 11),
+    list(),
+    (acc, i) => {
         if i % 2 == 0 { acc + list(dict(source=i, double=i * 2, final=(i * 2) + 10)) } else { acc }
-    })
+    }
+)
 print("Pipeline: filtrer pairs → doubler → ajouter 10")
 for step in pipeline {
     print(f"  {step['source']} → {step['double']} → {step['final']}")
@@ -196,8 +204,8 @@ est_petit = (x) => { x < 100 }
 
 print("Test de prédicats combinés:")
 for val in range(-10, 120, 30) {
-    pos      = est_positif(val)
-    pet      = est_petit(val)
+    pos = est_positif(val)
+    pet = est_petit(val)
     les_deux = pos and pet
     print(f" {val} → positif: {pos}, petit: {pet}, les deux: {les_deux}")
 }

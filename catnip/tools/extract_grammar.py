@@ -81,7 +81,7 @@ class GrammarExtractor:
     # Excludes type constructors (in BUILTIN_TYPE_CONSTRUCTORS) and grammar types (in _TYPES).
     # Synced with catnip/context.py Context.__init__() globals.
     # Excludes type constructors (BUILTIN_TYPE_CONSTRUCTORS), internal wrappers
-    # (_cache, import, jit, pure, debug, cached) and namespaces (META, ND, INT).
+    # (_cache, import, jit, pure, debug, cached) and namespaces (META, ND, RUNTIME).
     BUILTIN_FUNCTIONS = (
         'abs',
         'all',

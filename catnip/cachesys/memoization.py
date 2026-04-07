@@ -50,6 +50,13 @@ class Memoization:
         entry: Optional[CacheEntry] = self.backend.get(key)
         return entry.value if entry else _CACHE_MISS
 
+    def get_entry(self, func_name: str, args: tuple, kwargs: dict) -> Optional[CacheEntry]:
+        """Retrieve CacheEntry on hit, None on miss."""
+        if not self._enabled:
+            return None
+        key = self._make_key(func_name, args, kwargs)
+        return self.backend.get(key)
+
     def set(self, func_name: str, args: tuple, kwargs: dict, result: Any) -> None:
         """
         Store result in the cache.
@@ -194,41 +201,28 @@ class CachedWrapper:
         # Generate cache key (custom or standard)
         if self.key_func is not None:
             cache_key = self.key_func(*args, **kwargs)
+            cache_args = cache_key if isinstance(cache_key, tuple) else (cache_key,)
+            cache_kwargs = {}
         else:
-            cache_key = (args, kwargs)
+            cache_args = args
+            cache_kwargs = kwargs
 
-        # Check cache
-        cached_result = self.cache.get(
-            self.func_name,
-            cache_key if isinstance(cache_key, tuple) else (cache_key,),
-            {},
-        )
-
-        # Cache miss: _CACHE_MISS (Python Memoization) or None (Rust Memoization)
-        is_miss = cached_result is _CACHE_MISS or cached_result is None
+        # Check cache - returns CacheEntry on hit, None on miss
+        entry = self.cache.get_entry(self.func_name, cache_args, cache_kwargs)
+        is_miss = entry is None
 
         # Validate cache if validator is provided
         if not is_miss and self.validator is not None:
-            if not self.validator(cached_result, *args, **kwargs):
-                # Cache invalid, delete and recalculate
-                self.cache.invalidate_key(
-                    self.func_name,
-                    cache_key if isinstance(cache_key, tuple) else (cache_key,),
-                    {},
-                )
+            if not self.validator(entry.value, *args, **kwargs):
+                self.cache.invalidate_key(self.func_name, cache_args, cache_kwargs)
                 is_miss = True
 
         if not is_miss:
-            return cached_result
+            return entry.value
 
         # Cache miss: execute and store
         result = self.func(*args, **kwargs)
-        self.cache.set(
-            self.func_name,
-            cache_key if isinstance(cache_key, tuple) else (cache_key,),
-            {},
-            result,
-        )
+        self.cache.set(self.func_name, cache_args, cache_kwargs, result)
         return result
 
     def __repr__(self):

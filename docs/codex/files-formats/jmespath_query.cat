@@ -16,32 +16,28 @@ show = (label, result) => { print(f"  {label} : {result}") }
 # Données de test (réponse API d'exemple)
 
 data = dict(
-    users=list(
-        dict(
+    users=list(dict(
             id=1,
             name="Alice",
             email="alice@example.com",
             role="admin",
             active=True,
             projects=list("alpha", "beta"),
-        ),
-        dict(
+        ), dict(
             id=2,
             name="Bob",
             email="bob@example.com",
             role="developer",
             active=True,
             projects=list("beta", "gamma"),
-        ),
-        dict(
+        ), dict(
             id=3,
             name="Charlie",
             email="charlie@example.com",
             role="developer",
             active=False,
             projects=list("alpha"),
-        )
-    ),
+        )),
     metadata=dict(
         total=3,
         page=1,
@@ -133,8 +129,9 @@ show("Users sur projet beta", beta_users)
 
 print()
 print("⇒ Dict imbriqué (retour structuré)")
-summary = Query("Résumé",
-    "{meta: metadata, admins: users[?role=='admin'].name, total_users: length(users)}").run(data)
+summary = Query("Résumé", "{meta: metadata, admins: users[?role=='admin'].name, total_users: length(users)}").run(
+    data
+)
 show("Résumé", summary)
 
 # Exemple: réponse API paginée
@@ -154,8 +151,10 @@ api_response = dict(
 
 print()
 print("⇒ Exemple API e-commerce")
-ecom_queries = list(Query("SKUs en stock", "items[?stock > `0`].sku"),
-    Query("Produits > 50 EUR", "items[?price > `50`].{sku: sku, prix: price}"))
+ecom_queries = list(
+    Query("SKUs en stock", "items[?stock > `0`].sku"),
+    Query("Produits > 50 EUR", "items[?price > `50`].{sku: sku, prix: price}")
+)
 ecom_queries.[(q) => { show(q.label, q.run(api_response)) }]
 
 # Min/Max avec sort

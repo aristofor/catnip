@@ -21,6 +21,7 @@ pub mod dispatch;
 pub mod freeze;
 pub mod ir;
 pub mod jit;
+pub mod loader;
 pub mod nd;
 pub mod parser;
 pub mod pipeline;
@@ -40,8 +41,8 @@ pub mod weird_log;
 pub use catnip_tools::get_language as get_tree_sitter_language;
 
 use crate::core::{
-    BoundCatnipMethod, CatnipMeta, CatnipMethod, Op, PatternLiteral, PatternOr, PatternStruct, PatternTuple,
-    PatternVar, PatternWildcard, Ref, Scope, TailCall,
+    BoundCatnipMethod, CatnipMeta, CatnipMethod, Op, PatternEnum, PatternLiteral, PatternOr, PatternStruct,
+    PatternTuple, PatternVar, PatternWildcard, Ref, Scope, TailCall,
 };
 #[cfg(feature = "ast-executor")]
 use crate::core::{Function, Lambda, Registry, function};
@@ -69,7 +70,11 @@ impl From<vm::core::VMError> for PyErr {
     fn from(err: vm::core::VMError) -> PyErr {
         match err {
             vm::core::VMError::NameError(s) => pyo3::exceptions::PyNameError::new_err(s),
+            vm::core::VMError::AttributeError(s) => pyo3::exceptions::PyAttributeError::new_err(s),
             vm::core::VMError::TypeError(s) => pyo3::exceptions::PyTypeError::new_err(s),
+            vm::core::VMError::ValueError(s) => pyo3::exceptions::PyValueError::new_err(s),
+            vm::core::VMError::IndexError(s) => pyo3::exceptions::PyIndexError::new_err(s),
+            vm::core::VMError::KeyError(s) => pyo3::exceptions::PyKeyError::new_err(s),
             vm::core::VMError::ZeroDivisionError(s) => pyo3::exceptions::PyZeroDivisionError::new_err(s),
             vm::core::VMError::MemoryLimitExceeded(s) => pyo3::exceptions::PyMemoryError::new_err(s),
             vm::core::VMError::Exit(code) => pyo3::exceptions::PySystemExit::new_err(code),
@@ -267,26 +272,35 @@ impl PyRustVM {
         kwargs: Option<&Bound<'_, PyDict>>,
         closure_scope: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        // Save previous registry and install ours BEFORE convert_args.
+        // Save previous thread-locals and install ours BEFORE convert_args.
         // This ensures from_pyobject checks struct ownership against THIS VM's
         // registry (not the parent's), preventing TAG_STRUCT values from leaking
         // across VM boundaries.
         let prev_registry = vm::value::save_struct_registry();
         let prev_func_table = vm::value::save_func_table();
+        let prev_sym = vm::value::save_symbol_table();
+        let prev_enum = vm::value::save_enum_registry();
         vm::value::set_struct_registry(&self.vm.struct_registry as *const _);
         vm::value::set_func_table(&self.vm.func_table as *const _);
+        vm::value::set_symbol_table(&self.vm.symbol_table as *const _ as *mut _);
+        vm::value::set_enum_registry(&self.vm.enum_registry as *const _ as *mut _);
+
+        let restore_all = |prev_r, prev_f, prev_s, prev_e| {
+            vm::value::restore_struct_registry(prev_r);
+            vm::value::restore_func_table(prev_f);
+            vm::value::restore_symbol_table(prev_s);
+            vm::value::restore_enum_registry(prev_e);
+        };
 
         // Convert Python CodeObject to Rust CodeObject
         let rust_code = convert_code_object(py, code).inspect_err(|_| {
-            vm::value::restore_struct_registry(prev_registry);
-            vm::value::restore_func_table(prev_func_table);
+            restore_all(prev_registry, prev_func_table, prev_sym, prev_enum);
         })?;
 
         // Convert args
         let rust_args = if let Some(a) = args {
             convert_args(py, a).inspect_err(|_| {
-                vm::value::restore_struct_registry(prev_registry);
-                vm::value::restore_func_table(prev_func_table);
+                restore_all(prev_registry, prev_func_table, prev_sym, prev_enum);
             })?
         } else {
             Vec::new()
@@ -301,10 +315,16 @@ impl PyRustVM {
             .vm
             .execute_with_closure(py, rust_code, &rust_args, native_closure)
             .map_err(|e| {
-                vm::value::restore_struct_registry(prev_registry);
-                vm::value::restore_func_table(prev_func_table);
+                restore_all(prev_registry, prev_func_table, prev_sym, prev_enum);
                 PyErr::from(e)
             })?;
+
+        // Re-install this VM's thread-locals for post-execute conversions
+        // (execute_with_closure restores prev, but we need ours for to_pyobject)
+        vm::value::set_struct_registry(&self.vm.struct_registry as *const _);
+        vm::value::set_func_table(&self.vm.func_table as *const _);
+        vm::value::set_symbol_table(&self.vm.symbol_table as *const _ as *mut _);
+        vm::value::set_enum_registry(&self.vm.enum_registry as *const _ as *mut _);
 
         // Sync globals back to Python context (registry still installed)
         if let Some(ref ctx) = self.context {
@@ -320,9 +340,8 @@ impl PyRustVM {
         // Convert result back to Python (registry still installed)
         let py_result = result.to_pyobject(py);
 
-        // Now safe to restore previous registries
-        vm::value::restore_struct_registry(prev_registry);
-        vm::value::restore_func_table(prev_func_table);
+        // Now safe to restore previous thread-locals
+        restore_all(prev_registry, prev_func_table, prev_sym, prev_enum);
 
         Ok(py_result)
     }
@@ -510,6 +529,10 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PatternOr>()?;
     m.add_class::<PatternTuple>()?;
     m.add_class::<PatternStruct>()?;
+    m.add_class::<PatternEnum>()?;
+
+    // Enum types
+    m.add_class::<vm::CatnipEnumVariant>()?;
 
     // Struct types and method descriptors
     m.add_class::<CatnipStructProxy>()?;
@@ -531,7 +554,7 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Builtin constant namespaces
     m.add_class::<core::builtins::FrozenNamespace>()?;
     m.add_function(wrap_pyfunction!(core::builtins::build_nd, m)?)?;
-    m.add_function(wrap_pyfunction!(core::builtins::build_int, m)?)?;
+    m.add_function(wrap_pyfunction!(core::builtins::build_runtime, m)?)?;
 
     // ND module classes
     m.add_class::<NDState>()?;
@@ -558,6 +581,10 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Standalone pipeline
     m.add_class::<pipeline::PyPipeline>()?;
+
+    // Module loader
+    m.add_class::<loader::ImportLoader>()?;
+    m.add_class::<loader::namespace::ModuleNamespace>()?;
 
     // IR inspection
     m.add_class::<ir::PyIRNode>()?;

@@ -225,3 +225,196 @@ class TestStructPatternAST:
         """
         cat.parse(code)
         assert cat.execute() == 0
+
+
+class TestStructPatternInTuple:
+    """Struct patterns nested inside tuple patterns: (Point{x, y}, z)"""
+
+    def test_basic_struct_in_tuple(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        p = Point(1, 2)
+        match tuple(p, 3) {
+            (Point{x, y}, z) => { x + y + z }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 6
+
+    def test_struct_in_tuple_type_mismatch(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        struct Color { r; g; b }
+        c = Color(10, 20, 30)
+        match tuple(c, 99) {
+            (Point{x, y}, z) => { -1 }
+            _ => { 42 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 42
+
+    def test_multiple_structs_in_tuple(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        struct Color { r; g; b }
+        p = Point(1, 2)
+        c = Color(10, 20, 30)
+        match tuple(p, c) {
+            (Point{x, y}, Color{r, g, b}) => { x + y + r + g + b }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 63
+
+    def test_struct_in_tuple_with_guard(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        match tuple(Point(0, 5), 10) {
+            (Point{x, y}, z) if x == 0 => { y * z }
+            (Point{x, y}, z) => { x + y + z }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 50
+
+    def test_struct_in_tuple_with_literal(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        match tuple(Point(1, 2), "hello") {
+            (Point{x, y}, "hello") => { x + y }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 3
+
+    def test_struct_in_tuple_with_wildcard(self):
+        cat = Catnip()
+        code = """
+        struct Point { x; y }
+        match tuple(Point(3, 4), 99) {
+            (Point{x, y}, _) => { x * y }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 12
+
+    def test_struct_in_tuple_ast_mode(self):
+        cat = Catnip(vm_mode='off')
+        code = """
+        struct Point { x; y }
+        match tuple(Point(5, 6), 7) {
+            (Point{x, y}, z) => { x + y + z }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 18
+
+    def test_struct_in_triple_tuple(self):
+        cat = Catnip()
+        code = """
+        struct Wrap { val }
+        match tuple(1, Wrap(42), "end") {
+            (a, Wrap{val}, b) => { val }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 42
+
+
+class TestStructPatternBroadcast:
+    """Struct pattern matching on broadcast results (cross-VM identity)."""
+
+    def test_broadcast_struct_match(self):
+        """Struct created in broadcast closure is matched in parent scope."""
+        cat = Catnip()
+        code = """
+        struct Wrap { val }
+        items = list(1, 2, 3)
+        results = items.[(x) => { Wrap(x) }]
+        match results[0] {
+            Wrap{val} => { val }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 1
+
+    def test_broadcast_nested_struct_match(self):
+        """Nested structs from broadcast are matched correctly."""
+        cat = Catnip()
+        code = """
+        struct Leaf { v }
+        struct Node { left; right; }
+        items = list(1, 2)
+        results = items.[(x) => { Node(Leaf(x), Leaf(x + 10)) }]
+        match results[0] {
+            Node{left, right} => {
+                match left {
+                    Leaf{v} => { v }
+                }
+            }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 1
+
+    def test_broadcast_chained_struct_match(self):
+        """Chained broadcasts preserve struct identity."""
+        cat = Catnip()
+        code = """
+        struct Num { v }
+        items = list(1, 2, 3)
+        step1 = items.[(x) => { Num(x * 10) }]
+        step2 = step1.[(n) => {
+            match n {
+                Num{v} => { v + 1 }
+                _ => { -1 }
+            }
+        }]
+        step2
+        """
+        cat.parse(code)
+        assert cat.execute() == [11, 21, 31]
+
+    def test_broadcast_struct_field_access(self):
+        """Field access works on structs returned from broadcast."""
+        cat = Catnip()
+        code = """
+        struct Pair { a; b; }
+        items = list(1, 2, 3)
+        results = items.[(x) => { Pair(x, x * 2) }]
+        results[1].b
+        """
+        cat.parse(code)
+        assert cat.execute() == 4
+
+    def test_broadcast_struct_reused_free_slot(self):
+        """Child VM reuses a free-list slot from the parent registry."""
+        cat = Catnip()
+        code = """
+        struct Tmp { x }
+        struct Wrap { val }
+
+        t = Tmp(0)
+        t = None
+
+        items = list(1, 2, 3)
+        results = items.[(x) => { Wrap(x) }]
+        match results[0] {
+            Wrap{val} => { val }
+            _ => { -1 }
+        }
+        """
+        cat.parse(code)
+        assert cat.execute() == 1

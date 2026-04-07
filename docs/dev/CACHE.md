@@ -41,6 +41,11 @@ flowchart TD
 **`catnip_rs/src/cache/memoization.rs`** - Mémoïsation :
 
 - `Memoization` : cache résultats de fonctions avec index HashMap
+- `get(func_name, args, kwargs)` : retourne la valeur cachée ou `None` (ne distingue pas miss de valeur `None`)
+- `get_entry(func_name, args, kwargs)` : retourne le `CacheEntry` complet ou `None` (distingue miss de valeur cachée
+  `None`)
+- `set`, `invalidate`, `invalidate_key` : écriture et invalidation
+- `make_key` : canonicalise les kwargs (`sorted(kwargs.items())`) pour que l'ordre n'affecte pas la clé
 
 ### Composants Python
 
@@ -51,7 +56,9 @@ flowchart TD
 
 **`catnip/cachesys/memoization.py`** - Wrapper Python :
 
-- `CachedWrapper` : utilisé par `context.py` pour le décorateur `@cached`
+- `CachedWrapper` : utilisé par `context.py` pour le décorateur `cached()`
+- Utilise `get_entry()` pour distinguer un cache miss d'une valeur cachée `None`
+- Passe `args` et `kwargs` séparément au backend pour bénéficier de la canonicalisation des kwargs
 
 **`catnip/cachesys/__init__.py`** - Réexports :
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip dans Streamlit pour dashboards interactifs.
 
@@ -295,7 +296,7 @@ if __name__ == '__main__':
     else:
         # Démonstration sans Streamlit
         print("=" * 60)
-        print("EXEMPLE : Application Streamlit avec Catnip")
+        print("Application Streamlit avec Catnip")
         print("=" * 60)
         print()
         print("Cette application démontre l'intégration de Catnip dans Streamlit.")
@@ -319,7 +320,7 @@ if __name__ == '__main__':
         from catnip import Catnip
 
         # Exemple Fibonacci
-        print("Exemple : Fibonacci(10)")
+        print("Fibonacci(10)")
         code = """
 fib = (n) => {
     if n <= 1 { n }
@@ -334,7 +335,7 @@ fib(10)
         print()
 
         # Exemple calculatrice
-        print("Exemple : Calculatrice (a=10, b=20, c=30)")
+        print("Calculatrice (a=10, b=20, c=30)")
         code = "result = (a + b + c) / 3; result"
         catnip = Catnip()
         catnip.context.globals.update({'a': 10, 'b': 20, 'c': 30})

@@ -1,6 +1,5 @@
 #!/usr/bin/env catnip
-# Exemples : Séparateurs de Statements
-# Démontre l'utilisation des newlines et semicolons
+# Séparateurs de Statements (utilisation des newlines et semicolons)
 
 # Newlines comme séparateurs (recommandé)
 x = 1
@@ -24,7 +23,7 @@ second = 200
 print("Multiple newlines:", first + second)  # → Multiple newlines: 300
 
 # Semicolon suivi de newline
-value = { 42 };
+value = { 42 }
 next = value + 1  # → 43
 print("Semicolon + newline:", next)
 
@@ -57,8 +56,7 @@ print("Block with newlines:", compute)
 # if/else multiligne
 check = if True {
     100
-}
-else {
+} else {
     0
 }  # → 100
 print("if/else multiline:", check)

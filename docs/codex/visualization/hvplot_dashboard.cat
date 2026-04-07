@@ -61,21 +61,21 @@ while i < total_hours {
 
 generate_series = (cfg) => {
     hours.[(h) => {
-            day_phase=(h % 24) / 24.0 * 2.0 * math.pi
-            expected=cfg.base + cfg.amplitude * math.sin(day_phase - math.pi / 2.0)
-            noise=random.gauss(0, cfg.noise_std)
-            spike=if random.random() < 0.03 {
-                cfg.anomaly_threshold * 1.5 * (if random.random() < 0.5 { 1 } else { -1 })
-            } else { 0.0 }
-            value=expected + noise + spike
-            Reading(
-                timestamp=h,
-                sensor=cfg.name,
-                value=value,
-                expected=expected,
-                deviation=value - expected,
-            )
-        }]
+        day_phase = (h % 24) / 24.0 * 2.0 * math.pi
+        expected = cfg.base + cfg.amplitude * math.sin(day_phase - math.pi / 2.0)
+        noise = random.gauss(0, cfg.noise_std)
+        spike = if random.random() < 0.03 {
+            cfg.anomaly_threshold * 1.5 * (if random.random() < 0.5 { 1 } else { -1 })
+        } else { 0.0 }
+        value = expected + noise + spike
+        Reading(
+            timestamp=h,
+            sensor=cfg.name,
+            value=value,
+            expected=expected,
+            deviation=value - expected,
+        )
+    }]
 }
 
 print("⇒ Dashboard monitoring capteurs bâtiment (7 jours)")
@@ -167,11 +167,13 @@ for r in all_readings {
 }
 
 make_df = (readings) => {
-    pd.DataFrame(dict(
+    pd.DataFrame(
+        dict(
             hour=readings.[(r) => { r.timestamp }],
             value=readings.[(r) => { r.value }],
             expected=readings.[(r) => { r.expected }],
-        ))
+        )
+    )
 }
 
 df_temp = make_df(temp_readings)
@@ -180,13 +182,15 @@ df_co2 = make_df(co2_readings)
 
 # DataFrame anomalies
 
-df_anomalies = pd.DataFrame(dict(
+df_anomalies = pd.DataFrame(
+    dict(
         hour=anomalies.[(a) => { a.timestamp }],
         sensor=anomalies.[(a) => { a.sensor }],
         value=anomalies.[(a) => { a.value }],
         deviation=anomalies.[(a) => { a.deviation }],
         severity=anomalies.[(a) => { a.severity }],
-    ))
+    )
+)
 
 # panneaux hvPlot
 
@@ -194,45 +198,74 @@ print()
 print("⇒ Génération des graphiques")
 
 p_temp = df_temp.hvplot.line(
-    x="hour", y="value", label="mesuré",
-    width=800, height=250, ylim=tuple(10, 30),
+    x="hour",
+    y="value",
+    label="mesuré",
+    width=800,
+    height=250,
+    ylim=tuple(10, 30),
     title="Température (°C)",
-    xlabel="Heure", ylabel="°C",
-) * df_temp.hvplot.line(
-    x="hour", y="expected", label="attendu",
-    line_dash="dashed", color="gray",
-)
+    xlabel="Heure",
+    ylabel="°C",
+) *
+    df_temp.hvplot.line(
+        x="hour",
+        y="expected",
+        label="attendu",
+        line_dash="dashed",
+        color="gray",
+    )
 p_temp = p_temp.opts(axiswise=True, shared_axes=False)
 
 p_hum = df_hum.hvplot.line(
-    x="hour", y="value", label="mesuré",
-    width=800, height=250, ylim=tuple(20, 70),
+    x="hour",
+    y="value",
+    label="mesuré",
+    width=800,
+    height=250,
+    ylim=tuple(20, 70),
     title="Humidité (%)",
-    xlabel="Heure", ylabel="%",
-) * df_hum.hvplot.line(
-    x="hour", y="expected", label="attendu",
-    line_dash="dashed", color="gray",
-)
+    xlabel="Heure",
+    ylabel="%",
+) *
+    df_hum.hvplot.line(
+        x="hour",
+        y="expected",
+        label="attendu",
+        line_dash="dashed",
+        color="gray",
+    )
 p_hum = p_hum.opts(axiswise=True, shared_axes=False)
 
 p_co2 = df_co2.hvplot.line(
-    x="hour", y="value", label="mesuré",
-    width=800, height=250,
+    x="hour",
+    y="value",
+    label="mesuré",
+    width=800,
+    height=250,
     title="CO2 (ppm)",
-    xlabel="Heure", ylabel="ppm",
-) * df_co2.hvplot.line(
-    x="hour", y="expected", label="attendu",
-    line_dash="dashed", color="gray",
-)
+    xlabel="Heure",
+    ylabel="ppm",
+) *
+    df_co2.hvplot.line(
+        x="hour",
+        y="expected",
+        label="attendu",
+        line_dash="dashed",
+        color="gray",
+    )
 p_co2 = p_co2.opts(axiswise=True, shared_axes=False)
 
 # Scatter anomalies coloré par sévérité
 p_anomalies = df_anomalies.hvplot.scatter(
-    x="hour", y="deviation",
+    x="hour",
+    y="deviation",
     by="severity",
-    width=800, height=250,
+    width=800,
+    height=250,
     title="Anomalies par sévérité",
-    xlabel="Heure", ylabel="Déviation",
+    xlabel="Heure",
+    ylabel="Déviation",
     s=40,
 )
 p_anomalies = p_anomalies.opts(axiswise=True, shared_axes=False)
@@ -254,9 +287,9 @@ for d in day_idx {
     start_h = (d - 1) * 24
     end_h = d * 24
 
-    t_sum   = 0.0
-    h_sum   = 0.0
-    c_sum   = 0.0
+    t_sum = 0.0
+    h_sum = 0.0
+    c_sum = 0.0
     t_count = 0
     h_count = 0
     c_count = 0
@@ -305,11 +338,11 @@ for d in day_idx {
 # One-shot HTTP via SimpleHTTPRequestHandler(directory=...).
 # handle_request() bloque jusqu'a ce que Chrome ait recu le contenu.
 
-http_server  = import('http.server')
-functools    = import('functools')
-webbrowser   = import('webbrowser')
+http_server = import('http.server')
+functools = import('functools')
+webbrowser = import('webbrowser')
 tempfile_mod = import('tempfile')
-shutil       = import('shutil')
+shutil = import('shutil')
 
 temp_dir = tempfile_mod.mkdtemp(prefix="catnip_dashboard_")
 hv.save(layout, temp_dir + "/index.html")
@@ -318,7 +351,8 @@ handler = functools.partial(http_server.SimpleHTTPRequestHandler, directory=temp
 server = http_server.HTTPServer(tuple("127.0.0.1", 0), handler)
 port = server.server_address[1]
 webbrowser.open(f"http://127.0.0.1:{port}")
-print(f"\n⇒ Dashboard : http://127.0.0.1:{port}")
+print()
+print(f"⇒ Dashboard : http://127.0.0.1:{port}")
 server.handle_request()
 server.server_close()
 shutil.rmtree(temp_dir)

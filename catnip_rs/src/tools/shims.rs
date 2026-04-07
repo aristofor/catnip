@@ -194,26 +194,66 @@ pub struct LintConfig {
     pub check_ir: bool,
     #[pyo3(get, set)]
     pub check_names: bool,
+    #[pyo3(get, set)]
+    pub max_nesting_depth: usize,
+    #[pyo3(get, set)]
+    pub max_cyclomatic_complexity: usize,
+    #[pyo3(get, set)]
+    pub max_function_length: usize,
+    #[pyo3(get, set)]
+    pub max_parameters: usize,
 }
 
 #[pymethods]
 impl LintConfig {
     #[new]
-    #[pyo3(signature = (check_syntax=true, check_style=true, check_semantic=true, check_ir=false, check_names=false))]
-    pub fn new(check_syntax: bool, check_style: bool, check_semantic: bool, check_ir: bool, check_names: bool) -> Self {
+    #[pyo3(signature = (
+        check_syntax=true,
+        check_style=true,
+        check_semantic=true,
+        check_ir=false,
+        check_names=false,
+        max_nesting_depth=5,
+        max_cyclomatic_complexity=10,
+        max_function_length=30,
+        max_parameters=6,
+    ))]
+    pub fn new(
+        check_syntax: bool,
+        check_style: bool,
+        check_semantic: bool,
+        check_ir: bool,
+        check_names: bool,
+        max_nesting_depth: usize,
+        max_cyclomatic_complexity: usize,
+        max_function_length: usize,
+        max_parameters: usize,
+    ) -> Self {
         Self {
             check_syntax,
             check_style,
             check_semantic,
             check_ir,
             check_names,
+            max_nesting_depth,
+            max_cyclomatic_complexity,
+            max_function_length,
+            max_parameters,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "LintConfig(syntax={}, style={}, semantic={}, ir={}, names={})",
-            self.check_syntax, self.check_style, self.check_semantic, self.check_ir, self.check_names
+            "LintConfig(syntax={}, style={}, semantic={}, ir={}, names={}, max_nesting={}, max_complexity={}, max_length={}, max_params={})",
+            self.check_syntax,
+            self.check_style,
+            self.check_semantic,
+            self.check_ir,
+            self.check_names,
+            self.max_nesting_depth,
+            self.max_cyclomatic_complexity,
+            self.max_function_length,
+            self.max_parameters,
         )
     }
 }
@@ -226,6 +266,10 @@ impl Default for LintConfig {
             check_semantic: true,
             check_ir: false,
             check_names: false,
+            max_nesting_depth: 5,
+            max_cyclomatic_complexity: 10,
+            max_function_length: 30,
+            max_parameters: 6,
         }
     }
 }
@@ -297,6 +341,37 @@ impl From<catnip_tools::linter::Diagnostic> for Diagnostic {
 
 // --- lint_code function ---
 
+/// Parse source to IR for semantic analysis. Returns None on parse/transform error.
+fn parse_and_transform(source: &str) -> Option<catnip_core::ir::IR> {
+    let language = crate::get_tree_sitter_language();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    crate::parser::transform_pure(root, source).ok()
+}
+
+/// Convert byte offset to (line, column), both 1-based.
+fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= byte {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 #[pyfunction]
 #[pyo3(signature = (source, config=None))]
 pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResult<Py<PyList>> {
@@ -307,10 +382,54 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
         check_semantic: cfg.check_semantic,
         check_ir: cfg.check_ir,
         check_names: cfg.check_names,
+        max_nesting_depth: cfg.max_nesting_depth,
+        max_cyclomatic_complexity: cfg.max_cyclomatic_complexity,
+        max_function_length: cfg.max_function_length,
+        max_parameters: cfg.max_parameters,
     };
 
-    let diagnostics =
+    let mut diagnostics =
         catnip_tools::linter::lint_code(source, &tools_cfg).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    // Semantic I103: replace CST-level I103 with type-aware check from semantic analyzer
+    if cfg.check_semantic {
+        if let Some(ir) = parse_and_transform(source) {
+            let mut analyzer = catnip_core::pipeline::SemanticAnalyzer::new();
+            if let Ok(result) = analyzer.analyze_full(&ir) {
+                // Always remove CST-level I103: semantic check is authoritative
+                diagnostics.retain(|d| d.code != "I103");
+                let source_lines: Vec<&str> = source.lines().collect();
+                // Collect noqa directives for filtering semantic diagnostics
+                let noqa = catnip_tools::linter::collect_noqa(source);
+                for sd in result.diagnostics {
+                    let (line, column) = byte_to_line_col(source, sd.start_byte);
+                    // Apply noqa suppression
+                    if let Some(codes) = noqa.get(&line) {
+                        if codes.is_empty() || codes.contains(&sd.code) {
+                            continue; // noqa: all or noqa: <matching code>
+                        }
+                    }
+                    let (end_line, end_column) = byte_to_line_col(source, sd.end_byte);
+                    diagnostics.push(catnip_tools::linter::Diagnostic {
+                        code: sd.code,
+                        message: sd.message,
+                        severity: match sd.severity {
+                            catnip_core::pipeline::SemanticSeverity::Warning => catnip_tools::linter::Severity::Warning,
+                            catnip_core::pipeline::SemanticSeverity::Hint => catnip_tools::linter::Severity::Hint,
+                        },
+                        line,
+                        column,
+                        end_line: Some(end_line),
+                        end_column: Some(end_column),
+                        source_line: source_lines.get(line.saturating_sub(1)).map(|s| s.to_string()),
+                        suggestion: None,
+                    });
+                }
+                // Re-sort after appending semantic diagnostics
+                diagnostics.sort_by(|a, b| a.line.cmp(&b.line).then(a.column.cmp(&b.column)));
+            }
+        }
+    }
 
     let list = PyList::empty(py);
     for d in diagnostics {

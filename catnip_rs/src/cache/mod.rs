@@ -176,7 +176,7 @@ impl CacheKey {
         );
 
         // Compute xxhash
-        let utils_module = py.import("catnip.utils")?;
+        let utils_module = py.import(PY_MOD_UTILS)?;
         let compute_signature = utils_module.getattr("compute_signature")?;
         let hash_value: String = compute_signature.call1((combined,))?.extract()?;
 

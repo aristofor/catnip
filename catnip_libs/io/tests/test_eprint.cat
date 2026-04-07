@@ -1,0 +1,5 @@
+# FILE: catnip_libs/io/tests/test_eprint.cat
+import('io')
+
+io.eprint("stderr message")
+io.eprint("a", "b", "c")

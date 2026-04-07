@@ -15,16 +15,16 @@
 # INTERNET: oui, pour recuperer la voirie OSM si elle n'est pas deja en cache osmnx
 
 import('pathlib', 'Path')
-sys       = import('sys')
-httpx     = import('httpx')
-numpy     = import('numpy')
-orjson    = import('orjson')
-pandas    = import('pandas')
+sys = import('sys')
+httpx = import('httpx')
+numpy = import('numpy')
+orjson = import('orjson')
+pandas = import('pandas')
 geopandas = import('geopandas')
-osmnx     = import('osmnx')
-folium    = import('folium')
+osmnx = import('osmnx')
+folium = import('folium')
 branca_cm = import('branca.colormap')
-tqdm      = import('tqdm').tqdm
+tqdm = import('tqdm').tqdm
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -94,39 +94,35 @@ download_file = (url, destination) => {
         }
     }
 
-    # TODO: refactorer avec `with` quand le statement sera implementé dans catnip
-    stream = httpx.stream("GET", url, follow_redirects=True, timeout=120, headers=headers)
-    response = stream.__enter__()
+    with response = httpx.stream("GET", url, follow_redirects=True, timeout=120, headers=headers) {
+        if response.status_code == 304 {
+            print("  Cache valide (304 Not Modified)")
+            str(dest)
+        } else {
+            response.raise_for_status()
+            total = int(response.headers.get('content-length', 0))
+            bar = tqdm(total=total, unit="B", unit_scale=True, desc=dest.name)
+            with fh = part.open("wb") {
+                for chunk in response.iter_bytes() {
+                    fh.write(chunk)
+                    bar.update(len(chunk))
+                }
+            }
+            bar.close()
 
-    if response.status_code == 304 {
-        stream.__exit__(None, None, None)
-        print("  Cache valide (304 Not Modified)")
-        str(dest)
-    } else {
-        response.raise_for_status()
-        total = int(response.headers.get('content-length', 0))
-        bar = tqdm(total=total, unit="B", unit_scale=True, desc=dest.name)
-        fh = part.open("wb")
-        for chunk in response.iter_bytes() {
-            fh.write(chunk)
-            bar.update(len(chunk))
+            # persister le header de cache pour le prochain appel
+            etag = response.headers.get('etag', "")
+            last_mod = response.headers.get('last-modified', "")
+
+            if etag {
+                meta.write_text(f"etag:{etag}")
+            } elif last_mod {
+                meta.write_text(f"modified:{last_mod}")
+            }
+
+            # rename atomique
+            part.rename(dest)
         }
-        fh.close()
-        bar.close()
-
-        # persister le header de cache pour le prochain appel
-        etag = response.headers.get('etag', "")
-        last_mod = response.headers.get('last-modified', "")
-        stream.__exit__(None, None, None)
-
-        if etag {
-            meta.write_text(f"etag:{etag}")
-        } elif last_mod {
-            meta.write_text(f"modified:{last_mod}")
-        }
-
-        # rename atomique
-        part.rename(dest)
         str(dest)
     }
 }
@@ -221,7 +217,8 @@ if len(streets) == 0 {
 # ---------------------------------------------------------------------------
 
 metric_crs = trees.estimate_utm_crs()
-print(f"\n⇒ Projection metrique : {metric_crs}")
+print()
+print(f"⇒ Projection metrique : {metric_crs}")
 
 trees_metric = trees.to_crs(metric_crs).copy()
 streets_metric = streets.to_crs(metric_crs).copy().reset_index(drop=True)
@@ -256,11 +253,11 @@ print(f"  Arbres non relies : {unmatched_count}")
 tree_counts = matched.groupby('street_id').size().reset_index(name='tree_count')
 tree_distances = matched.groupby('street_id')['tree_to_street_m'].mean().reset_index(name='avg_tree_distance_m')
 
-street_scores                        = streets_metric.merge(tree_counts, on="street_id", how="left")
-street_scores                        = street_scores.merge(tree_distances, on="street_id", how="left")
-street_scores['tree_count']          = street_scores['tree_count'].fillna(0).astype(int)
+street_scores = streets_metric.merge(tree_counts, on="street_id", how="left")
+street_scores = street_scores.merge(tree_distances, on="street_id", how="left")
+street_scores['tree_count'] = street_scores['tree_count'].fillna(0).astype(int)
 street_scores['avg_tree_distance_m'] = street_scores['avg_tree_distance_m'].fillna(-1.0)
-street_scores['trees_per_100m']      = street_scores['tree_count'] * 100.0 / street_scores['length_m'].clip(lower=1.0)
+street_scores['trees_per_100m'] = street_scores['tree_count'] * 100.0 / street_scores['length_m'].clip(lower=1.0)
 
 classify_score = (score) => {
     match True {
@@ -298,13 +295,13 @@ colormap.caption = "Arbres publics associes / 100 m de rue"
 
 stroke_color = score_values.[(value) => { colormap(min(float(value), max_score)) }]
 stroke_width = score_values.[(value) => {
-        match True {
-            _ if value == 0  => { 3 }
-            _ if value < 0.5 => { 4 }
-            _ if value < 1.5 => { 5 }
-            _                => { 6 }
-        }
-    }]
+    match True {
+        _ if value == 0  => { 3 }
+        _ if value < 0.5 => { 4 }
+        _ if value < 1.5 => { 5 }
+        _                => { 6 }
+    }
+}]
 
 street_scores['stroke'] = stroke_color
 street_scores['stroke_width'] = stroke_width
@@ -314,9 +311,19 @@ street_scores['stroke_width'] = stroke_width
 # ---------------------------------------------------------------------------
 
 # colonnes utiles uniquement
-street_scores = street_scores[list("street_id", "name", "highway_label", "length_m",
-        "tree_count", "avg_tree_distance_m", "trees_per_100m", "category",
-        "stroke", "stroke_width", "geometry")].copy()
+street_scores = street_scores[list(
+        "street_id",
+        "name",
+        "highway_label",
+        "length_m",
+        "tree_count",
+        "avg_tree_distance_m",
+        "trees_per_100m",
+        "category",
+        "stroke",
+        "stroke_width",
+        "geometry"
+    )].copy()
 
 # aplatir les ndarrays OSM (name, highway...) en types Python natifs
 # certaines colonnes OSM contiennent des numpy.ndarray quand un segment a plusieurs valeurs
@@ -336,11 +343,24 @@ geojson_path = output_dir / "rennes_street_tree_score.geojson"
 html_path = output_dir / "rennes_street_tree_score.html"
 
 # orjson gère ndarray / numpy scalars nativement (OPT_SERIALIZE_NUMPY)
-export_columns = list('name', 'highway_label', 'length_m', 'tree_count',
-    'trees_per_100m', 'avg_tree_distance_m', 'category', 'stroke', 'stroke_width', 'geometry')
+export_columns = list(
+    'name',
+    'highway_label',
+    'length_m',
+    'tree_count',
+    'trees_per_100m',
+    'avg_tree_distance_m',
+    'category',
+    'stroke',
+    'stroke_width',
+    'geometry'
+)
 json_fallback = (x) => { if isinstance(x, numpy.ndarray) { x.tolist() } else { str(x) } }
-geojson_bytes = orjson.dumps(street_scores_wgs84[export_columns].__geo_interface__,
-    json_fallback, orjson.OPT_SERIALIZE_NUMPY)
+geojson_bytes = orjson.dumps(
+    street_scores_wgs84[export_columns].__geo_interface__,
+    json_fallback,
+    orjson.OPT_SERIALIZE_NUMPY
+)
 Path(geojson_path).write_bytes(geojson_bytes)
 # reutilise pour folium (evite re-serialisation json.dumps qui crashe sur ndarray)
 geojson_str = geojson_bytes.decode('utf-8')
@@ -387,20 +407,21 @@ print("⇒ Top 10 rues a regarder")
 
 # agreger par nom de rue (un meme nom couvre plusieurs segments OSM)
 by_street = street_scores.groupby('name').agg(
-    length_m=pandas.NamedAgg(column='length_m', aggfunc='sum'),
-    tree_count=pandas.NamedAgg(column='tree_count', aggfunc='sum'),
-).reset_index()
+        length_m=pandas.NamedAgg(column='length_m', aggfunc='sum'),
+        tree_count=pandas.NamedAgg(column='tree_count', aggfunc='sum'),
+    ).reset_index()
 by_street['trees_per_100m'] = by_street['tree_count'] * 100.0 / by_street['length_m'].clip(lower=1.0)
 by_street['category'] = by_street['trees_per_100m'].tolist().[(v) => { classify_score(v) }]
 
 top_low = by_street[by_street['length_m'] >= 80].sort_values(
-    by=list("trees_per_100m", "length_m"),
-    ascending=list(True, False),
-).head(10)
+        by=list("trees_per_100m", "length_m"),
+        ascending=list(True, False),
+    ).head(10)
 
 for row in top_low.itertuples() {
     print(
-        f"  {row.name} | {round(float(row.length_m), 1)} m | {row.tree_count} arbres | {round(float(row.trees_per_100m), 3)} / 100 m | {row.category}")
+        f"  {row.name} | {round(float(row.length_m), 1)} m | {row.tree_count} arbres | {round(float(row.trees_per_100m), 3)} / 100 m | {row.category}"
+    )
 }
 
 # ---------------------------------------------------------------------------
@@ -408,14 +429,15 @@ for row in top_low.itertuples() {
 # ---------------------------------------------------------------------------
 
 http_server = import('http.server')
-functools   = import('functools')
-webbrowser  = import('webbrowser')
+functools = import('functools')
+webbrowser = import('webbrowser')
 
 handler = functools.partial(http_server.SimpleHTTPRequestHandler, directory=str(output_dir))
 server = http_server.HTTPServer(tuple("127.0.0.1", 0), handler)
 port = server.server_address[1]
 url = f"http://127.0.0.1:{port}/{html_path.name}"
 webbrowser.open(url)
-print(f"\n⇒ Dashboard : {url}")
+print()
+print(f"⇒ Dashboard : {url}")
 server.handle_request()
 server.server_close()

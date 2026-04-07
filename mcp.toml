@@ -1,6 +1,5 @@
 # Tool and resource definitions for the Catnip end-user MCP server.
-# Loaded at startup by server.py to build types.Tool and types.ResourceTemplate objects.
-# Handler functions live in server.py, matched by convention: tool "foo" -> _tool_foo().
+# Loaded at startup by server.rs (catnip_mcp crate) via load_mcp_defs().
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -81,20 +80,20 @@ action = { type = "string", enum = ["add", "remove"], default = "add" }
 
 [resource_templates.examples]
 uri_template = "catnip://examples/{topic}"
-description = "Examples by theme (advanced, basics, broadcast, cfg, control-flow, embedding, functions, module-loading, pattern-matching, performance, run, tools)."
+description = "Examples by theme (advanced, basics, broadcast, cfg, control-flow, embedding, error-handling, functions, module-loading, pattern-matching, performance, run, tools)."
 mime_type = "application/json"
 
 [resource_templates.codex]
 uri_template = "catnip://codex/{category}/{module}"
-description = "Python integration examples (data-analytics, files-formats, geometry, geospatial, images-media, symbolic-graphs, utils, visualization, web)."
+description = "Catnip integration examples (data-analytics, files-formats, geometry, geospatial, images-media, symbolic-graphs, utils, visualization, web)."
 mime_type = "text/plain"
 
 [resource_templates.docs-topic]
 uri_template = "catnip://docs/{section}/{topic}"
-description = "Language documentation. Sections: lang (syntax, functions, pattern-matching, broadcast, scopes-and-variables, control-flow, expressions, pragmas, glossary, turing-completeness), tuto (quickstart-0min, quickstart-2min, quickstart-5min), user (cli, repl, config, module-loading, embedding-guide, extending-context, host-integration, shebang-guide, run)."
+description = "Language documentation by section and topic. Use catnip://docs/{section} to list available topics. Sections: dev (architecture, vm, optimizations, jit, etc.), how-to (cheatsheet, etc.), lang (syntax, control-flow, functions, structures, enums, pattern-matching, broadcast, expressions, types, pragmas, etc.), tools (format, lint, debug, etc.), tuto (quickstarts), user (cli, repl, config, module-loading, etc.)."
 mime_type = "text/markdown"
 
 [resource_templates.docs-section]
 uri_template = "catnip://docs/{section}"
-description = "List available topics for a documentation section (lang, tuto, user)."
+description = "List available topics for a documentation section (dev, how-to, lang, tools, tuto, user)."
 mime_type = "application/json"

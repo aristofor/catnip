@@ -6,11 +6,11 @@ Exemples courts pour comprendre le chargement de modules Python.
 
 - [`01_demo.cat`](01_demo.cat) - Mode namespace par défaut
 - [`02_demo_with_as.cat`](02_demo_with_as.cat) - Namespace personnalisé
+- [`03_app_api.py`](03_app_api.py) - API d'application simulée
 - [`host_module_example.py`](host_module_example.py) - Module Python exemple
 - [`03_app_script.cat`](03_app_script.cat) - Script utilisant l'API
 - [`05_simple_extension.py`](05_simple_extension.py) - Extension simple
 - [`06_custom_functions.py`](06_custom_functions.py) - Fonctions personnalisées
-- [`07_app_api.py`](07_app_api.py) - API d'application simulée
 - [`08_aesgcm.cat`](08_aesgcm.cat) - AES-GCM via import sélectif (`cryptography`)
 - [`09_relative_import.cat`](09_relative_import.cat) - Résolution caller-dir et kwarg `protocol`
 - [`10_wild_import.cat`](10_wild_import.cat) - Import global (`wild=True`)

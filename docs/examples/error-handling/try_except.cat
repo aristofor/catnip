@@ -1,0 +1,79 @@
+#!/usr/bin/env catnip
+# try/except/finally basics
+
+# Catch a specific exception type
+try {
+    1 / 0
+} except {
+    e: ZeroDivisionError => { print("caught: " + e) }
+}
+# ⇒ caught: division by zero
+
+# Multiple handlers with type union
+try {
+    x = undefined_var
+} except {
+    e: TypeError => { print("type error") }
+    e: ValueError | KeyError => { print("value or key") }
+    _ => { print("something else") }
+}
+# ⇒ something else
+
+# Finally block: always executes
+x = 0
+try {
+    x = 42
+} finally {
+    print("cleanup: x = " + str(x))
+}
+# ⇒ cleanup: x = 42
+
+# Raise an exception
+try {
+    raise "invalid input"
+} except {
+    e: RuntimeError => { print("got: " + e) }
+}
+# ⇒ got: invalid input
+
+# Re-raise in except
+try {
+    try {
+        1 / 0
+    } except {
+        _ => {
+            print("logging error")
+            raise
+        }
+    }
+} except {
+    e: ZeroDivisionError => { print("outer caught: " + e) }
+}
+# ⇒ logging error
+# ⇒ outer caught: division by zero
+
+# Hierarchical matching: parent type catches children
+try {
+    1 / 0
+} except {
+    e: ArithmeticError => { print("arithmetic: " + e) }
+}
+# ⇒ arithmetic: division by zero
+
+# Exception catches everything
+try {
+    raise ValueError("bad input")
+} except {
+    e: Exception => { print("caught: " + e) }
+}
+# ⇒ caught: bad input
+
+# Specific before general: first match wins
+try {
+    1 / 0
+} except {
+    e: ZeroDivisionError => { print("specific") }
+    e: ArithmeticError => { print("general") }
+    e: Exception => { print("catchall") }
+}
+# ⇒ specific

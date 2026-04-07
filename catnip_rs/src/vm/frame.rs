@@ -683,6 +683,21 @@ impl NativeClosureScope {
         }
     }
 
+    /// Remap symbol Values in this scope's captured vars (for cross-VM enum transplant).
+    /// Does NOT recurse into parents -- the parent Globals Rc is remapped separately.
+    pub fn remap_symbols(&self, remap: &std::collections::HashMap<u32, u32>) {
+        let mut captured = self.inner.captured.borrow_mut();
+        for (_, value) in captured.iter_mut() {
+            if value.is_symbol() {
+                if let Some(child_sym) = value.as_symbol() {
+                    if let Some(&parent_sym) = remap.get(&child_sym) {
+                        *value = Value::from_symbol(parent_sym);
+                    }
+                }
+            }
+        }
+    }
+
     /// Build a NativeClosureScope with a native parent.
     pub fn with_native_parent(captured: IndexMap<String, Value>, parent: NativeClosureScope) -> Self {
         Self::new(captured, ClosureParent::Native(parent))
@@ -802,6 +817,13 @@ pub struct Frame {
     pub discard_return: bool,
     /// Super proxy for parent method access in extends
     pub super_proxy: Option<Py<PyAny>>,
+    /// Exception handler stack (try/except/finally)
+    pub handler_stack: Vec<catnip_core::exception::Handler>,
+    /// Active exception stack for CheckExcMatch/LoadException.
+    /// Vec (not Option) to support save/restore across nested except handlers.
+    pub active_exception_stack: Vec<catnip_core::exception::ExceptionInfo>,
+    /// Pending unwind state (saved signal during finally execution)
+    pub pending_unwind: Option<catnip_core::exception::PendingUnwind>,
 }
 
 impl Frame {
@@ -818,6 +840,9 @@ impl Frame {
             match_bindings: None,
             discard_return: false,
             super_proxy: None,
+            handler_stack: Vec::new(),
+            active_exception_stack: Vec::new(),
+            pending_unwind: None,
         }
     }
 
@@ -844,6 +869,9 @@ impl Frame {
             match_bindings: None,
             discard_return: false,
             super_proxy: None,
+            handler_stack: Vec::new(),
+            active_exception_stack: Vec::new(),
+            pending_unwind: None,
         }
     }
 
@@ -859,6 +887,9 @@ impl Frame {
         self.match_bindings = None;
         self.discard_return = false;
         self.super_proxy = None;
+        self.handler_stack.clear();
+        self.active_exception_stack.clear();
+        self.pending_unwind = None;
     }
 
     // --- Stack operations ---
@@ -1071,6 +1102,9 @@ impl FramePool {
             frame.locals.resize(nlocals, fill);
             frame.code = Some(code);
             frame.ip = 0;
+            frame.handler_stack.clear();
+            frame.active_exception_stack.clear();
+            frame.pending_unwind = None;
             frame
         } else {
             Frame::with_code(code)
@@ -1086,11 +1120,13 @@ impl FramePool {
     }
 }
 
-/// Decref all heap values (BigInt + Struct) in a frame's stack and locals.
+/// Decref all heap values (BigInt, Complex, Struct) in a frame's stack and locals.
 pub fn decref_frame_values(frame: &Frame, registry: &mut StructRegistry) {
     for &val in &frame.stack {
         if val.is_bigint() {
             val.decref_bigint();
+        } else if val.is_complex() {
+            val.decref();
         } else if val.is_struct_instance() {
             let idx = val.as_struct_instance_idx().unwrap();
             if let Some(fields) = registry.decref(idx) {
@@ -1101,6 +1137,8 @@ pub fn decref_frame_values(frame: &Frame, registry: &mut StructRegistry) {
     for &val in &frame.locals {
         if val.is_bigint() {
             val.decref_bigint();
+        } else if val.is_complex() {
+            val.decref();
         } else if val.is_struct_instance() {
             let idx = val.as_struct_instance_idx().unwrap();
             if let Some(fields) = registry.decref(idx) {
@@ -1336,6 +1374,13 @@ impl VMFunction {
                     }
                 })?;
 
+            // Transplant new struct instances from child VM to parent registry
+            // so they survive after the child is dropped.
+            if !saved_registry.is_null() {
+                let parent_registry = unsafe { &mut *(saved_registry as *mut super::structs::StructRegistry) };
+                vm.struct_registry.transplant_to_parent(parent_registry);
+            }
+
             // Restore parent pointers
             super::value::restore_struct_registry(saved_registry);
             super::value::restore_func_table(saved_func_table);
@@ -1504,6 +1549,14 @@ fn vmpattern_to_py(py: Python<'_>, pat: &VMPattern) -> PyResult<Py<PyAny>> {
             }
             dict.set_item("f", fields)?;
         }
+        VMPattern::Enum {
+            enum_name,
+            variant_name,
+        } => {
+            dict.set_item("t", "e")?;
+            dict.set_item("en", enum_name.as_str())?;
+            dict.set_item("vn", variant_name.as_str())?;
+        }
     }
     Ok(dict.into_any().unbind())
 }
@@ -1570,6 +1623,14 @@ fn vmpattern_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<VMPatte
                 field_slots.push((fname, slot));
             }
             Ok(VMPattern::Struct { name, field_slots })
+        }
+        "e" => {
+            let enum_name: String = dict.get_item("en")?.unwrap().extract()?;
+            let variant_name: String = dict.get_item("vn")?.unwrap().extract()?;
+            Ok(VMPattern::Enum {
+                enum_name,
+                variant_name,
+            })
         }
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unknown pattern tag: {}",

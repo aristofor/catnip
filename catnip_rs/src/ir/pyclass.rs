@@ -58,6 +58,7 @@ impl PyIRNode {
             IR::PatternOr(_) => "PatternOr",
             IR::PatternTuple(_) => "PatternTuple",
             IR::PatternStruct { .. } => "PatternStruct",
+            IR::PatternEnum { .. } => "PatternEnum",
             IR::Slice { .. } => "Slice",
             IR::Broadcast { .. } => "Broadcast",
         }

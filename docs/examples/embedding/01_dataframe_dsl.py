@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Exemple d'intégration de Catnip comme DSL pour manipuler des DataFrames.
 

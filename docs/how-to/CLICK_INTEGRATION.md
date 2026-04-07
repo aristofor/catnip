@@ -1,9 +1,9 @@
 # Construire une CLI avec Click
 
-Utiliser `import("click")` dans un script Catnip pour construire une vraie CLI avec arguments, options, help et
+Utiliser `import('click')` dans un script Catnip pour construire une vraie CLI avec arguments, options, help et
 validation.
 
-> Click est un framework CLI Python. Catnip peut l'utiliser directement via `import("click")`.
+> Click est un framework CLI Python. Catnip peut l'utiliser directement via `import('click')`.
 
 ______________________________________________________________________
 
@@ -13,8 +13,8 @@ ______________________________________________________________________
 
 ```catnip
 #!/usr/bin/env catnip
-click = import("click")
-sys = import("sys")
+click = import('click')
+sys = import('sys')
 
 mantra = (name) => {
     click.echo(f"BORN TO SEGFAULT, {name}!")
@@ -44,9 +44,9 @@ Click distingue les arguments positionnels (`click.Argument`) et les options nom
 
 ```catnip
 #!/usr/bin/env catnip
-click = import("click")
-sys = import("sys")
-io = import("io", wild=True)
+click = import('click')
+sys = import('sys')
+io = import('io', wild=True)
 
 transform = (input, output, scale, verbose) => {
     if (verbose) { print(f"Processing {input} -> {output} (scale={scale})") }
@@ -100,9 +100,9 @@ ______________________________________________________________________
 
 ```catnip
 #!/usr/bin/env catnip
-click = import("click")
-sys = import("sys")
-io = import("io", wild=True)
+click = import('click')
+sys = import('sys')
+io = import('io', wild=True)
 
 deploy = (env, replicas) => {
     print(f"Deploying to {env} with {replicas} replicas")

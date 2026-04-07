@@ -24,12 +24,14 @@ struct SalesReport {
 }
 
 # Données de ventes (en production, charger depuis DB/CSV)
-report = SalesReport(list(
+report = SalesReport(
+    list(
         Product('Laptop', 5, 1000d),
         Product('Mouse', 50, 20d),
         Product('Keyboard', 30, 80d),
         Product('Monitor', 10, 300d),
-    ))
+    )
+)
 
 # Générer rapport
 print("═══════════════════════════════")

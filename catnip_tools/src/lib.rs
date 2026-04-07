@@ -5,12 +5,11 @@ pub mod errors;
 pub mod ffi;
 pub mod formatter;
 pub mod indentation;
+pub mod lint_cfg;
 pub mod linter;
 pub mod multiline;
+pub mod pretty;
 pub mod sourcemap;
 pub mod suggest;
-pub mod token;
-pub mod tokenizer;
-
 pub use catnip_grammar::get_language;
 pub use catnip_grammar::symbols;

@@ -205,8 +205,11 @@ Le JIT ne compile pas tout le code :
 - Appels à fonctions Python externes (sauf builtins purs : `abs`, `bool`, `float`, `int`, `max`, `min`, `round`)
 - Opérations non supportées (I/O, réflexion)
 - Branches froides (rarement exécutées)
+- Exception handling : les opcodes `SetupExcept`, `SetupFinally`, `PopHandler`, `Raise`, `ResumeUnwind`,
+  `ClearException` abort la trace immediatement. Une boucle contenant du `try`/`except` ne sera pas JIT-compilée
 
-**Comportement** : fallback transparent vers l'interpréteur VM, aucune erreur
+**Comportement** : fallback transparent vers l'interpréteur VM, aucune erreur. L'abort sur exception reset l'état de
+tracing pour que les boucles suivantes dans la même session puissent encore être compilées
 
 **Deoptimization** : si une guard échoue (type change, condition inattendue), retour à l'interpréteur
 

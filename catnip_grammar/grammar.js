@@ -49,6 +49,7 @@ module.exports = grammar({
     [$.args, $.group],  // ~>(expr) ambiguity: args vs grouped expression
     [$.kwarg, $.lambda_param],  // ~~(x=val) ambiguity: kwarg vs lambda default
     [$.arguments, $.lambda_expr],  // ~~() ambiguity: empty args vs lambda start
+    [$.bcast_op, $.unary_op],  // .[- x] ambiguity: broadcast subtract vs negative slice start
   ],
 
   rules: {
@@ -73,9 +74,13 @@ module.exports = grammar({
       $.return_stmt,
       $.break_stmt,
       $.continue_stmt,
+      $.try_stmt,
+      $.with_stmt,
+      $.raise_stmt,
       $.pragma_stmt,
       $.struct_stmt,
       $.trait_stmt,
+      $.enum_stmt,
       $._expression,
     ),
 
@@ -164,6 +169,20 @@ module.exports = grammar({
       ')',
     ),
 
+    // Enum definition
+    enum_stmt: $ => seq(
+      'enum',
+      field('name', $.identifier),
+      '{',
+      repeat($.enum_variant),
+      '}',
+    ),
+
+    enum_variant: $ => seq(
+      field('name', $.identifier),
+      optional(';'),
+    ),
+
     // Decorator: @identifier (for @jit, @pure, etc.)
     decorator: $ => seq('@', $.identifier),
 
@@ -184,6 +203,51 @@ module.exports = grammar({
     break_stmt: $ => 'break',
 
     continue_stmt: $ => 'continue',
+
+    // Error handling
+    try_stmt: $ => seq(
+      'try',
+      field('body', $.block),
+      optional($.except_block),
+      optional($.finally_clause),
+    ),
+
+    except_block: $ => seq('except', '{', repeat1($.except_clause), '}'),
+
+    except_clause: $ => seq(
+      optional(seq(field('binding', $.identifier), ':')),
+      $.except_pattern,
+      '=>',
+      field('handler', $.block),
+    ),
+
+    except_pattern: $ => choice(
+      $.except_types,
+      $.pattern_wildcard,
+    ),
+
+    except_types: $ => seq(
+      $.identifier,
+      repeat(seq('|', $.identifier)),
+    ),
+
+    finally_clause: $ => seq('finally', field('body', $.block)),
+
+    raise_stmt: $ => prec.right(seq('raise', optional(field('value', $._expression)))),
+
+    with_stmt: $ => seq(
+      'with',
+      $.with_binding,
+      repeat(seq(',', $.with_binding)),
+      optional(','),
+      field('body', $.block),
+    ),
+
+    with_binding: $ => seq(
+      field('name', $.identifier),
+      '=',
+      field('value', $._expression),
+    ),
 
     if_expr: $ => prec.right(seq(
       'if',
@@ -225,10 +289,17 @@ module.exports = grammar({
 
     _pattern_primary: $ => choice(
       $.pattern_struct,
+      $.pattern_enum,
       $.pattern_tuple,
       $.pattern_literal,
       $.pattern_var,
       $.pattern_wildcard,
+    ),
+
+    pattern_enum: $ => seq(
+      field('enum_name', $.identifier),
+      '.',
+      field('variant_name', $.identifier),
     ),
 
     pattern_struct: $ => seq(
@@ -249,6 +320,8 @@ module.exports = grammar({
     ),
 
     _pattern_item: $ => choice(
+      $.pattern_struct,
+      $.pattern_enum,
       $.pattern_tuple,
       $.pattern_star,
       $.pattern_literal,
@@ -322,6 +395,8 @@ module.exports = grammar({
       $.nd_recursion,
       $.nd_map,
       $.chained,
+      $.bracket_list,
+      $.bracket_dict,
       $.list_literal,
       $.tuple_literal,
       $.set_literal,
@@ -344,6 +419,8 @@ module.exports = grammar({
 
     chained: $ => prec.left(PREC.MEMBER, seq(
       choice(
+        $.bracket_list,
+        $.bracket_dict,
         $.list_literal,
         $.tuple_literal,
         $.set_literal,
@@ -369,9 +446,9 @@ module.exports = grammar({
     getattr: $ => prec(1, seq('.', field('attribute', $.identifier))),
     callattr: $ => prec(2, seq('.', field('method', $.identifier), $.arguments)),
     call_member: $ => $.arguments,
-    broadcast: $ => seq('.[', $.broadcast_op, ']'),
+    broadcast: $ => prec.dynamic(-1, seq('.[', $.broadcast_op, ']')),
     index: $ => seq('[', $._slice_expr, ']'),
-    fullslice: $ => seq('.[', $.slice_range, ']'),
+    fullslice: $ => prec.dynamic(1, seq('.[', $.slice_range, ']')),
 
     _slice_expr: $ => choice($._expression, $.slice_range),
 
@@ -405,12 +482,12 @@ module.exports = grammar({
 
     broadcast_binary: $ => seq($.bcast_op, $._expression),
 
-    bcast_op: $ => prec(PREC.UNARY + 1, choice(
+    bcast_op: $ => choice(
       '+', '-', '*', '/', '//', '%', '**',
       '<', '<=', '>', '>=', '==', '!=',
       '&', '|', '^', '<<', '>>',
       'and', 'or',
-    )),
+    ),
 
     broadcast_unary: $ => $.bcast_unary_op,
     bcast_unary_op: $ => choice('abs', 'not', '-', '+', '~'),
@@ -513,6 +590,26 @@ module.exports = grammar({
 
     setattr: $ => seq($._atom, repeat1($._member)),
 
+    // Bracket collections: [1, 2, 3] and {"a": 1, "b": 2}
+    bracket_list: $ => seq('[', optional($.collection_items), ']'),
+
+    bracket_dict: $ => seq('{', $.bracket_dict_items, '}'),
+
+    bracket_dict_items: $ => seq(
+      $._bracket_dict_entry,
+      repeat(seq(',', $._bracket_dict_entry)),
+      optional(','),
+    ),
+
+    _bracket_dict_entry: $ => choice($.colon_pair, $.dict_spread),
+
+    colon_pair: $ => seq(
+      field('key', $._expression),
+      ':',
+      field('value', $._expression),
+    ),
+
+    // Function-call collections: list(...), tuple(...), set(...), dict(...)
     list_literal: $ => seq('list', '(', optional($.collection_items), ')'),
     tuple_literal: $ => seq('tuple', '(', optional($.collection_items), ')'),
     set_literal: $ => seq('set', '(', optional($.collection_items), ')'),
@@ -530,7 +627,14 @@ module.exports = grammar({
 
     collection_spread: $ => seq('*', field('value', $._expression)),
 
-    dict_literal: $ => seq('dict', '(', optional($.dict_items), ')'),
+    dict_literal: $ => seq('dict', '(', optional(choice(
+      prec(1, $.dict_items),
+      seq($.dict_from_iterable, optional(seq(',', $.dict_items))),
+    )), ')'),
+
+    // dict(iterable_of_pairs) - delegates to builtin dict()
+    // optional trailing dict_items allows dict(iterable, key=val, **spread)
+    dict_from_iterable: $ => $._expression,
 
     dict_items: $ => seq(
       $._dict_entry,

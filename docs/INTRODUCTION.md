@@ -244,8 +244,8 @@ Des directives internes permettent d'ajuster le comportement du moteur sans chan
 
 ```catnip
 pragma("tco", True)                 # activer/désactiver TCO
-pd = import("pandas")               # exposer un module Python (pur ou binaire)
-tools = import("tools")             # charger un module Catnip local
+pd = import('pandas')               # exposer un module Python (pur ou binaire)
+tools = import('tools')             # charger un module Catnip local
 ```
 
 L'API reste stable, l'exécution reste configurable.

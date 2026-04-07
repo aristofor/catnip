@@ -95,7 +95,8 @@ Le transformer convertit l'arbre de syntaxe en IR (Intermediate Representation) 
 - Operators (binary, unary, comparison, bitwise)
 - Control flow (if, while, for, match, block)
 - Functions (lambda, fn_def, call)
-- Pattern matching (literal, var, wildcard, or, tuple)
+- Pattern matching (literal, var, wildcard, or, tuple, struct, enum)
+- Structures et enums (struct, trait, enum)
 - Broadcasting et accès (chained, getattr, index, slice)
 
 ### 3. Semantic Analysis : IR → Op
@@ -309,16 +310,32 @@ File '<input>', line 1, column 1: Name 'factoral' is not defined
 
 ### Module Loading : Résolution Statique
 
-Le loader (`catnip/loader.py`) résout les imports par nom avec une liste de recherche **fixée au démarrage** :
-caller_dir -> CWD -> CATNIP_PATH. Le code ne peut pas modifier cette liste à l'exécution.
+Le loader résout les imports par nom avec une liste de recherche **fixée au démarrage** : caller_dir -> CWD ->
+CATNIP_PATH. Le code ne peut pas modifier cette liste à l'exécution.
+
+Deux implémentations partagent la même logique de résolution (`catnip_core::loader::resolve`) :
+
+- **`ImportLoader`** (`catnip_rs/src/loader/`) : mode PyO3 (Python + Rust), supporte `.cat`, `.py`, `.so`
+- **`PureImportLoader`** (`catnip_vm/src/loader.rs`) : mode pur Rust (PurePipeline/MCP), supporte `.cat` et `.so`
+  (plugins natifs). Les modules stdlib sont decouverts par scan de `CATNIP_STDLIB_PATH`, exe dir, ou `target/debug/`
+  pour `libcatnip_{name}.so`. Parite avec le loader Python : `protocol=`, `wild=True`, import selectif avec alias,
+  filtrage `__all__` et `lib.exports.include`
+
+**Plugins natifs** (`catnip_vm/src/plugin.rs`) : ABI v2 avec handles opaques. Un plugin exporte
+`extern "C" catnip_plugin_init() -> *const PluginDescriptor` avec magic ABI + version + callbacks method/getattr/drop.
+Le `PluginRegistry` (partage entre host et loader via `Rc<RefCell<>>`) valide l'ABI, enregistre les fonctions avec noms
+qualifies (`__plugin::module::fn`), et wrappe chaque appel dans `catch_unwind`. Les objets plugin (`PluginObject`) sont
+des handles u64 opaques dont les methodes et attributs sont dispatches a travers les callbacks du plugin. `Arc<Library>`
+dans les callbacks previent le dlclose tant que des objets vivent. Tous les modules stdlib (io, sys, http) sont des
+plugins natifs -- aucun code stdlib dans catnip_vm
 
 **Choix de design : pas de `sys.path`**
 
 Catnip n'a délibérément pas d'équivalent mutable de `sys.path`. Un search path mutable est un état global implicite qui
 crée des dépendances d'ordre entre modules (A modifie le path, B en dépend sans le savoir). Ça rend le résultat d'un
-`import("x")` non-déterministe par rapport à l'ordre d'exécution - exactement le genre de couplage qu'on veut éviter.
+`import('x')` non-déterministe par rapport à l'ordre d'exécution - exactement le genre de couplage qu'on veut éviter.
 
-La résolution statique garantit que `import("x")` produit toujours le même résultat pour un (fichier, environnement)
+La résolution statique garantit que `import('x')` produit toujours le même résultat pour un (fichier, environnement)
 donné, sans dépendre de l'historique d'exécution. CATNIP_PATH couvre le cas d'usage "ajouter des répertoires" sans
 mutation runtime.
 
@@ -359,7 +376,7 @@ source. Le `DebugCallback` Rust construit un `PauseEvent`, l'envoie via `event_t
 `command_rx.recv_timeout(60s)` (auto-continue après 5 min).
 
 **Composants** : logique pure dans `catnip_tools`, channels et GIL dans `catnip_rs/debug`, wrapper Python dans
-`catnip/debug`, 6 tools MCP dans `catnip_mcp/` (Rust) et `catnip_mcp_py/` (Python).
+`catnip/debug`, 6 tools MCP dans `catnip_mcp/` (Rust).
 
 ### Step modes
 
@@ -378,13 +395,13 @@ source. Le `DebugCallback` Rust construit un `PauseEvent`, l'envoie via `event_t
 Les propriétés structurelles du langage sont prouvées en [Coq](https://coq.inria.fr/). Chaque fichier modélise un
 composant Rust et prouve ses invariants.
 
-| Axe           | Couverture                                                                                                                               |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Syntaxe       | Grammaire CF, précédence (13 niveaux), monotonie fuel                                                                                    |
-| Sémantique    | Broadcasting (foncteur, confluence), ND-récursion                                                                                        |
-| Runtime       | IR opcodes, scopes, patterns, fonctions/TCO, NaN-boxing, VM stack safety, frames/IP/jumps, C3 MRO, structs/traits, desugaring opérateurs |
-| Optimisations | 10/10 passes IR (constant folding, CSE, DCE, propagation, etc.)                                                                          |
-| Analyses      | Liveness/DSE, dominance CFG, SSA complet (49 lemmes), cache                                                                              |
+| Axe           | Couverture                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Syntaxe       | Grammaire CF, précédence (13 niveaux), monotonie fuel                                                                                          |
+| Sémantique    | Broadcasting (foncteur, confluence), ND-récursion                                                                                              |
+| Runtime       | IR opcodes, scopes, patterns, fonctions/TCO, NaN-boxing, VM stack safety, frames/IP/jumps, C3 MRO, structs/traits/enums, desugaring opérateurs |
+| Optimisations | 10/10 passes IR (constant folding, CSE, DCE, propagation, etc.)                                                                                |
+| Analyses      | Liveness/DSE, dominance CFG, SSA complet (49 lemmes), cache                                                                                    |
 
 Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ_PROOFS.md).
 
@@ -392,18 +409,18 @@ Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ
 
 ## Où Trouver le Code
 
-| Dossier           | Contenu                                                                                       |
-| ----------------- | --------------------------------------------------------------------------------------------- |
-| `catnip/`         | API Python, intégration                                                                       |
-| `catnip_core/`    | Coeur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, freeze, constants)                   |
-| `catnip_vm/`      | VM pure Rust sans PyO3 (Value NaN-boxed, collections, structs/traits, PureHost, PureCompiler) |
-| `catnip_rs/`      | Bindings PyO3 + runtime (parser, semantic, VM, PyIRNode)                                      |
-| `catnip_libs/`    | Standard library (specs TOML + implémentations Rust par module)                               |
-| `catnip_grammar/` | Grammaire Tree-sitter                                                                         |
-| `catnip_tools/`   | Outils Rust (formatter, linter, debugger)                                                     |
-| `catnip_lsp/`     | Serveur LSP Rust (diagnostics, formatting, rename)                                            |
-| `catnip_mcp/`     | Serveur MCP pur Rust (rmcp, stdio, 10 tools, 4 resource templates)                            |
-| `proof/`          | Preuves Coq                                                                                   |
+| Dossier           | Contenu                                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `catnip/`         | API Python, intégration                                                                             |
+| `catnip_core/`    | Coeur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, freeze, constants, symbols)                |
+| `catnip_vm/`      | VM pure Rust sans PyO3 (Value NaN-boxed, collections, structs/traits/enums, PureHost, PureCompiler) |
+| `catnip_rs/`      | Bindings PyO3 + runtime (parser, semantic, VM, PyIRNode)                                            |
+| `catnip_libs/`    | Standard library (specs TOML + implémentations Rust par module)                                     |
+| `catnip_grammar/` | Grammaire Tree-sitter                                                                               |
+| `catnip_tools/`   | Outils Rust (formatter, linter + CFG deep analysis, debugger)                                       |
+| `catnip_lsp/`     | Serveur LSP Rust (diagnostics, formatting, rename)                                                  |
+| `catnip_mcp/`     | Serveur MCP pur Rust (rmcp, stdio, 10 tools, 4 resource templates)                                  |
+| `proof/`          | Preuves Coq                                                                                         |
 
 ## Workflow de Développement
 

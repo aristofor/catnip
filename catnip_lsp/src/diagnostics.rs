@@ -39,8 +39,8 @@ pub fn lint_to_diagnostics(source: &str) -> Vec<lsp_types::Diagnostic> {
     match catnip_tools::linter::lint_code(source, &config) {
         Ok(diags) => diags
             .iter()
-            // W200 = formatting diff, already handled by the formatter provider
-            .filter(|d| d.code != "W200")
+            // W100 = formatting diff, already handled by the formatter provider
+            .filter(|d| d.code != "W100")
             .map(to_lsp_diagnostic)
             .collect(),
         Err(_) => Vec::new(),

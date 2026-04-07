@@ -37,7 +37,7 @@ read_stats = (path) => {
     )
 }
 
-stats = paths.[~>read_stats]
+stats = paths.[~> read_stats]
 
 print("⇒ Parallel stats per region")
 for s in stats {
@@ -48,10 +48,12 @@ for s in stats {
 frames = paths.[~>(path) => { pl.read_csv(path) }]
 all_df = pl.concat(frames)
 
-print(f"\n⇒ Total rows: {all_df.height}")
+print()
+print(f"⇒ Total rows: {all_df.height}")
 
 # Variante lazy: construire le plan en parallèle, exécuter au collect
 lazy_frames = paths.[~>(path) => { pl.scan_csv(path) }]
 lazy_all = pl.concat(lazy_frames).collect()
 
-print(f"\n⇒ Lazy total rows: {lazy_all.height}")
+print()
+print(f"⇒ Lazy total rows: {lazy_all.height}")

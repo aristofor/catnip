@@ -72,9 +72,21 @@ use catnip_tools::symbols;
 // Run: python catnip_tools/gen_builtins.py
 // @generated-completer-builtins-start
 const BUILTINS: &[&str] = &[
-    "INT",
+    "ArithmeticError",
+    "AttributeError",
+    "Exception",
+    "IndexError",
+    "KeyError",
+    "LookupError",
     "META",
+    "MemoryError",
     "ND",
+    "NameError",
+    "RUNTIME",
+    "RuntimeError",
+    "TypeError",
+    "ValueError",
+    "ZeroDivisionError",
     "_cache",
     "abs",
     "all",

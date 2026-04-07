@@ -230,7 +230,7 @@ impl ContextBase {
     /// Lazy initialization of JIT subsystem.
     fn _init_jit(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.jit_detector.is_none() {
-            match py.import("catnip.jit") {
+            match py.import(PY_MOD_JIT) {
                 Ok(jit_mod) => {
                     let detector_cls = jit_mod.getattr("HotLoopDetector")?;
                     let detector = detector_cls.call1((crate::constants::JIT_THRESHOLD_DEFAULT,))?;

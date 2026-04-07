@@ -38,7 +38,7 @@ use catnip_core::nanbox::{
     TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SHIFT, TAG_SMALLINT, TAG_SYMBOL, TAG_VMFUNC,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt};
+use pyo3::types::{PyBool, PyComplex, PyFloat, PyInt};
 use rug::Integer;
 use std::cell::Cell;
 use std::fmt;
@@ -89,6 +89,8 @@ impl fmt::Display for GmpInt {
 
 thread_local! {
     static STRUCT_REGISTRY: Cell<*const StructRegistry> = const { Cell::new(std::ptr::null()) };
+    static SYMBOL_TABLE: Cell<*mut catnip_core::symbols::SymbolTable> = const { Cell::new(std::ptr::null_mut()) };
+    static ENUM_REGISTRY: Cell<*mut super::enums::EnumRegistry> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 /// Global ObjectTable shared across all threads.
@@ -127,6 +129,132 @@ pub fn save_struct_registry() -> *const StructRegistry {
 /// The caller must ensure the pointer is still valid (the owning VM is alive).
 pub fn restore_struct_registry(ptr: *const StructRegistry) {
     STRUCT_REGISTRY.with(|cell| cell.set(ptr));
+}
+
+/// Install a pointer to the active SymbolTable for the current thread.
+///
+/// # Safety
+/// Uses `*mut` to allow lazy interning of symbols from imported modules.
+/// Safe under the GIL (single-threaded access).
+pub fn set_symbol_table(ptr: *mut catnip_core::symbols::SymbolTable) {
+    SYMBOL_TABLE.with(|cell| cell.set(ptr));
+}
+
+/// Clear the thread-local symbol table pointer.
+pub fn clear_symbol_table() {
+    SYMBOL_TABLE.with(|cell| cell.set(std::ptr::null_mut()));
+}
+
+/// Save the current symbol table pointer (for reentrant VM calls).
+pub fn save_symbol_table() -> *mut catnip_core::symbols::SymbolTable {
+    SYMBOL_TABLE.with(|cell| cell.get())
+}
+
+/// Restore a previously saved symbol table pointer.
+pub fn restore_symbol_table(ptr: *mut catnip_core::symbols::SymbolTable) {
+    SYMBOL_TABLE.with(|cell| cell.set(ptr));
+}
+
+/// Resolve a symbol index to its interned string via the thread-local table.
+fn resolve_symbol(idx: u32) -> Option<String> {
+    SYMBOL_TABLE.with(|cell| {
+        let ptr = cell.get();
+        if ptr.is_null() {
+            None
+        } else {
+            let table = unsafe { &*ptr };
+            table.resolve(idx).map(|s| s.to_string())
+        }
+    })
+}
+
+/// Resolve a symbol name to its index via the thread-local table.
+pub fn resolve_symbol_by_name(name: &str) -> Option<u32> {
+    SYMBOL_TABLE.with(|cell| {
+        let ptr = cell.get();
+        if ptr.is_null() {
+            None
+        } else {
+            let table = unsafe { &*ptr };
+            table.lookup(name)
+        }
+    })
+}
+
+/// Intern a symbol name in the thread-local table, returning its index.
+/// Used for lazy registration of enum variants from imported modules.
+pub fn intern_symbol(name: &str) -> Option<u32> {
+    SYMBOL_TABLE.with(|cell| {
+        let ptr = cell.get();
+        if ptr.is_null() {
+            None
+        } else {
+            let table = unsafe { &mut *ptr };
+            Some(table.intern(name))
+        }
+    })
+}
+
+/// Install a pointer to the active EnumRegistry for the current thread.
+pub fn set_enum_registry(ptr: *mut super::enums::EnumRegistry) {
+    ENUM_REGISTRY.with(|cell| cell.set(ptr));
+}
+
+/// Clear the thread-local enum registry pointer.
+pub fn clear_enum_registry() {
+    ENUM_REGISTRY.with(|cell| cell.set(std::ptr::null_mut()));
+}
+
+/// Save the current enum registry pointer (for reentrant VM calls).
+pub fn save_enum_registry() -> *mut super::enums::EnumRegistry {
+    ENUM_REGISTRY.with(|cell| cell.get())
+}
+
+/// Restore a previously saved enum registry pointer.
+pub fn restore_enum_registry(ptr: *mut super::enums::EnumRegistry) {
+    ENUM_REGISTRY.with(|cell| cell.set(ptr));
+}
+
+/// Lazily register an enum variant from an imported module.
+/// Interns the symbol and registers the enum type if not already present.
+/// Returns the symbol_id on success.
+pub fn lazy_register_enum_variant(enum_name: &str, variant_name: &str) -> Option<u32> {
+    SYMBOL_TABLE.with(|sym_cell| {
+        ENUM_REGISTRY.with(|reg_cell| {
+            let sym_ptr = sym_cell.get();
+            let reg_ptr = reg_cell.get();
+            if sym_ptr.is_null() || reg_ptr.is_null() {
+                return None;
+            }
+            let symbols = unsafe { &mut *sym_ptr };
+            let registry = unsafe { &mut *reg_ptr };
+
+            let qname = catnip_core::symbols::qualified_name(enum_name, variant_name);
+
+            // Already registered?
+            if let Some(idx) = symbols.lookup(&qname) {
+                return Some(idx);
+            }
+
+            // Not known yet -- register the whole enum type with this single variant.
+            // If the type already exists, just add the variant.
+            if let Some(ety) = registry.find_by_name(enum_name) {
+                // Type exists, check if variant is already there
+                if let Some(sym_id) = ety.variant_symbol(variant_name) {
+                    return Some(sym_id);
+                }
+            }
+
+            // Register as a new type with just this variant (others will be added lazily)
+            // This is a best-effort approach for cross-VM imports.
+            let sym_id = symbols.intern(&qname);
+            // Register type if needed, reusing existing if present
+            if registry.find_by_name(enum_name).is_none() {
+                registry.register(enum_name, &[variant_name.to_string()], symbols);
+            }
+            Some(sym_id)
+        })
+    })
 }
 
 /// Incref a struct instance via the thread-local registry.
@@ -289,6 +417,11 @@ impl FunctionTable {
     pub fn get(&self, idx: u32) -> Option<&FuncSlot> {
         self.slots.get(idx as usize)
     }
+
+    /// Iterate mutably over all slots.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut FuncSlot> {
+        self.slots.iter_mut()
+    }
 }
 
 impl Default for FunctionTable {
@@ -324,6 +457,10 @@ pub fn restore_func_table(ptr: *const FunctionTable) {
 // PyO3-specific tags (catnip_rs only)
 const TAG_PYOBJ: u64 = 4 << TAG_SHIFT;
 const TAG_STRUCT: u64 = 5 << TAG_SHIFT;
+const TAG_COMPLEX: u64 = 8 << TAG_SHIFT;
+
+/// Native complex number for NaN-box storage.
+pub struct NativeComplex(pub f64, pub f64);
 
 /// NaN-boxed value. Fits in 8 bytes.
 #[derive(Clone, Copy)]
@@ -458,6 +595,18 @@ impl Value {
         Self::from_bigint(n)
     }
 
+    /// Create a complex number value.
+    #[inline]
+    pub fn from_complex(real: f64, imag: f64) -> Self {
+        let arc = Arc::new(NativeComplex(real, imag));
+        let ptr = Arc::into_raw(arc) as u64;
+        debug_assert!(
+            ptr & !PAYLOAD_MASK == 0,
+            "NativeComplex Arc pointer exceeds 47-bit address space"
+        );
+        Value(QNAN_BASE | TAG_COMPLEX | (ptr & PAYLOAD_MASK))
+    }
+
     /// Get raw bits (for JIT interop).
     #[inline]
     pub fn to_raw(self) -> u64 {
@@ -531,6 +680,27 @@ impl Value {
     #[inline]
     pub fn is_invalid(self) -> bool {
         self.0 == Self::INVALID.0
+    }
+
+    /// Check if this is a complex number.
+    #[inline]
+    pub fn is_complex(self) -> bool {
+        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_COMPLEX)
+    }
+
+    /// Extract (real, imag) parts from a complex value.
+    ///
+    /// # Safety
+    /// Caller must ensure the Arc is still alive.
+    #[inline]
+    pub unsafe fn as_complex_parts(&self) -> Option<(f64, f64)> {
+        if self.is_complex() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
+            let c = &*ptr;
+            Some((c.0, c.1))
+        } else {
+            None
+        }
     }
 
     /// True if this value uses a native VM tag that would lose fidelity
@@ -635,6 +805,9 @@ impl Value {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
             unsafe { Arc::increment_strong_count(ptr) };
+        } else if self.is_complex() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
+            unsafe { Arc::increment_strong_count(ptr) };
         } else if self.is_pyobj() {
             let handle = (self.0 & PAYLOAD_MASK) as u32;
             with_object_table(|table| table.clone_handle(handle));
@@ -644,12 +817,15 @@ impl Value {
         }
     }
 
-    /// Increment refcount only for BigInt values.
-    /// Used in LoadLocal to track shared references without affecting PyObject refcounting.
+    /// Increment refcount for Arc-backed values (BigInt, Complex).
+    /// Used in Load opcodes to track shared references without affecting PyObject refcounting.
     #[inline]
     pub fn clone_refcount_bigint(self) {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            unsafe { Arc::increment_strong_count(ptr) };
+        } else if self.is_complex() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
             unsafe { Arc::increment_strong_count(ptr) };
         }
     }
@@ -673,6 +849,9 @@ impl Value {
         } else if self.is_bigint() {
             // SAFETY: value is alive (we just checked the tag)
             unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
+        } else if self.is_complex() {
+            let (r, i) = unsafe { self.as_complex_parts().unwrap() };
+            r != 0.0 || i != 0.0
         } else if self.is_struct_instance() {
             true
         } else {
@@ -819,6 +998,10 @@ impl Value {
             return Ok(Value::from_float(val));
         }
 
+        if let Ok(c) = obj.cast::<PyComplex>() {
+            return Ok(Value::from_complex(c.real(), c.imag()));
+        }
+
         // Recognize VMFunction -> restore native TAG_VMFUNC for VM round-trip.
         if let Ok(vmfunc) = obj.cast::<VMFunction>() {
             if let Some(idx) = vmfunc.borrow().func_table_idx {
@@ -856,6 +1039,52 @@ impl Value {
                     return Ok(Value::from_struct_instance(idx));
                 }
             }
+            // Orphaned proxy from a child VM -- re-register in current registry.
+            // Same pattern as lazy_register_enum_variant below.
+            // Step 1: look up type_id (read-only registry access, no aliasing)
+            let p = proxy.borrow();
+            let type_name = p.type_name.clone();
+            let field_py_values: Vec<pyo3::Py<PyAny>> = p.field_values.iter().map(|v| v.clone_ref(_py)).collect();
+            drop(p);
+
+            let type_id = STRUCT_REGISTRY.with(|cell| {
+                let ptr = cell.get();
+                if ptr.is_null() {
+                    return None;
+                }
+                let registry = unsafe { &*ptr };
+                registry.find_type_by_name(&type_name).map(|ty| ty.id)
+            });
+
+            if let Some(type_id) = type_id {
+                // Step 2: convert fields recursively (may re-enter from_pyobject)
+                let mut fields = Vec::with_capacity(field_py_values.len());
+                for fv in &field_py_values {
+                    fields.push(Value::from_pyobject(_py, fv.bind(_py))?);
+                }
+                // Step 3: create instance (mutable registry access, no aliasing)
+                let new_idx = STRUCT_REGISTRY.with(|cell| {
+                    let ptr = cell.get();
+                    let registry_mut = unsafe { &mut *(ptr as *mut StructRegistry) };
+                    registry_mut.create_instance(type_id, fields)
+                });
+                proxy.borrow_mut().native_instance_idx = Some(new_idx);
+                return Ok(Value::from_struct_instance(new_idx));
+            }
+        }
+
+        // Recognize CatnipEnumVariant -> restore native TAG_SYMBOL for VM round-trip.
+        // If the symbol isn't in the current table (e.g. from an imported module),
+        // lazily register it so cross-VM enum variants resolve correctly.
+        if let Ok(variant) = obj.cast::<super::enums::CatnipEnumVariant>() {
+            let v = variant.borrow();
+            let qname = catnip_core::symbols::qualified_name(&v.enum_name, &v.variant_name);
+            if let Some(sym_id) = resolve_symbol_by_name(&qname) {
+                return Ok(Value::from_symbol(sym_id));
+            }
+            if let Some(sym_id) = lazy_register_enum_variant(&v.enum_name, &v.variant_name) {
+                return Ok(Value::from_symbol(sym_id));
+            }
         }
 
         // Store as handle in ObjectTable
@@ -889,6 +1118,9 @@ impl Value {
                 let registry = unsafe { &*ptr };
                 registry.instance_to_pyobject(py, idx).unwrap_or_else(|_| py.None())
             })
+        } else if self.is_complex() {
+            let (r, i) = unsafe { self.as_complex_parts().unwrap() };
+            PyComplex::from_doubles(py, r, i).into_any().unbind()
         } else if self.is_pyobj() {
             let handle = (self.0 & PAYLOAD_MASK) as u32;
             with_object_table_ref(|table| table.clone_ref(py, handle))
@@ -915,13 +1147,30 @@ impl Value {
                 }
             })
         } else {
-            // Symbol - for now return as int
+            // Symbol (enum variant) - resolve to opaque CatnipEnumVariant
             let idx = self.as_symbol().unwrap_or(0);
-            (idx as i64).into_pyobject(py).unwrap().unbind().into_any()
+            match resolve_symbol(idx) {
+                Some(qualified) => {
+                    // qualified = "EnumName.variant"
+                    if let Some(dot) = qualified.find('.') {
+                        let enum_name = &qualified[..dot];
+                        let variant_name = &qualified[dot + 1..];
+                        let variant = super::enums::CatnipEnumVariant::new_from_parts(
+                            enum_name.to_string(),
+                            variant_name.to_string(),
+                            qualified,
+                        );
+                        Py::new(py, variant).unwrap().into_any()
+                    } else {
+                        qualified.into_pyobject(py).unwrap().unbind().into_any()
+                    }
+                }
+                None => (idx as i64).into_pyobject(py).unwrap().unbind().into_any(),
+            }
         }
     }
 
-    /// Decrement refcount if this is a PyObject or BigInt.
+    /// Decrement refcount if this is a PyObject, BigInt, or Complex.
     /// Call when value is no longer needed.
     pub fn decref(self) {
         if self.is_pyobj() {
@@ -929,6 +1178,9 @@ impl Value {
             with_object_table(|table| table.release_handle(handle));
         } else if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            unsafe { Arc::decrement_strong_count(ptr) };
+        } else if self.is_complex() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
             unsafe { Arc::decrement_strong_count(ptr) };
         }
     }
@@ -988,6 +1240,12 @@ impl PartialEq for Value {
         } else if self.is_bigint() && other.is_bigint() {
             // Compare BigInt by value, not by pointer
             unsafe { self.as_bigint_ref().unwrap() == other.as_bigint_ref().unwrap() }
+        } else if self.is_complex() && other.is_complex() {
+            unsafe {
+                let (ar, ai) = self.as_complex_parts().unwrap();
+                let (br, bi) = other.as_complex_parts().unwrap();
+                ar == br && ai == bi
+            }
         } else {
             self.0 == other.0
         }

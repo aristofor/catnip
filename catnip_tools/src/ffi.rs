@@ -8,7 +8,7 @@ use crate::formatter;
 use crate::linter;
 
 /// ABI version string (static, caller must not free)
-const VERSION: &[u8] = b"0.0.4\0";
+const VERSION: &[u8] = b"0.0.8\0";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn catnip_tools_version() -> *const c_char {
@@ -69,6 +69,7 @@ pub unsafe extern "C" fn catnip_tools_lint(
             check_semantic,
             check_ir: false,
             check_names,
+            ..Default::default()
         };
 
         linter::lint_code(source, &config)

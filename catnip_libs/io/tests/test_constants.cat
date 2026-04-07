@@ -1,0 +1,5 @@
+# FILE: catnip_libs/io/tests/test_constants.cat
+import('io')
+
+if io.PROTOCOL != "rust" { raise ("io.PROTOCOL should be 'rust'") }
+if io.VERSION != "0.1.0" { raise ("io.VERSION should be '0.1.0'") }

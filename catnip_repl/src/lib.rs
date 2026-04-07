@@ -74,14 +74,13 @@ pub fn run_repl(py: Python, verbose: bool) -> PyResult<i32> {
         let default_hook = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
-            eprintln!("\n{}", ExitReason::Abort.message());
+            eprintln!("{}", ExitReason::Abort.message());
             default_hook(info);
         }));
 
         let reason = app.run(&mut terminal).map_err(|e| format!("REPL error: {e}"))?;
 
         disable_raw_mode().map_err(|e| format!("Failed to disable raw mode: {e}"))?;
-        println!();
 
         Ok(match reason {
             ExitReason::Ok => 0,

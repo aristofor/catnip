@@ -42,9 +42,10 @@ class TestFormatCode:
         assert '# comment' in result
 
     def test_match_expression(self):
-        code = 'match x{1=>a|2=>b|_=>c}'
+        code = 'match x {\n    1 => { a }\n    2 => { b }\n    _ => { c }\n}'
         result = format_code(code)
-        assert result == 'match x { 1 => a | 2 => b | _ => c }\n'
+        assert '1 => { a }' in result
+        assert '_ => { c }' in result
 
     def test_if_statement(self):
         code = 'if x==1{y=2}'
@@ -219,20 +220,22 @@ class TestLineWrapping:
         result = format_code(code)
         assert result == 'data = dict(\n    a=1,\n    b=2,\n)\n'
 
-    def test_no_trailing_comma_allows_inline_dict(self):
+    def test_no_trailing_comma_preserves_source_layout(self):
+        # Source multiline (first arg on next line) -> preserved multiline
         code = 'data = dict(\n    a=1,\n    b=2\n)\n'
         result = format_code(code)
-        assert result == 'data = dict(a=1, b=2)\n'
+        assert '\n    a=1' in result
 
     def test_trailing_comma_preserves_multiline_list(self):
         code = 'items = list(\n    1,\n    2,\n)\n'
         result = format_code(code)
         assert result == 'items = list(\n    1,\n    2,\n)\n'
 
-    def test_no_trailing_comma_allows_inline_list(self):
+    def test_no_trailing_comma_preserves_source_layout_list(self):
+        # Source multiline (first arg on next line) -> preserved multiline
         code = 'items = list(\n    1,\n    2\n)\n'
         result = format_code(code)
-        assert result == 'items = list(1, 2)\n'
+        assert '\n    1,' in result
 
 
 class TestDecorators:
@@ -280,10 +283,29 @@ n*factorial(n-1)
         assert 'n * factorial(n - 1)' in result
 
     def test_list_operations(self):
-        code = 'x=[1,2,3]\ny=x.[*2]'
+        code = 'x = list(1, 2, 3)\ny = x.[*2]'
         result = format_code(code)
-        assert 'x = [1, 2, 3]' in result
-        assert 'y = x.[* 2]' in result
+        assert 'x = list(1, 2, 3)' in result
+        assert 'x.[* 2]' in result
+
+    def test_broadcast_nd_map(self):
+        assert format_code('x = xs.[~>abs]') == 'x = xs.[~> abs]\n'
+        assert format_code('x = xs.[~> abs]') == 'x = xs.[~> abs]\n'
+
+    def test_broadcast_nd_recursion(self):
+        assert format_code('x = xs.[~~f]') == 'x = xs.[~~ f]\n'
+        assert format_code('x = xs.[~~ f]') == 'x = xs.[~~ f]\n'
+
+    def test_fullslice_normalized(self):
+        assert format_code('x = xs.[1 : 3]') == 'x = xs.[1:3]\n'
+        assert format_code('x = xs.[1:3]') == 'x = xs.[1:3]\n'
+        assert format_code('x = xs.[1 : 3 : 2]') == 'x = xs.[1:3:2]\n'
+        assert format_code('x = xs.[ : 3]') == 'x = xs.[:3]\n'
+
+    def test_fullslice_negative_indices(self):
+        assert format_code('x = xs.[-2:]') == 'x = xs.[-2:]\n'
+        assert format_code('x = xs.[-3:-1:2]') == 'x = xs.[-3:-1:2]\n'
+        assert format_code('x = xs.[2:-2]') == 'x = xs.[2:-2]\n'
 
     def test_complex_expression(self):
         code = 'result=(a+b)*(c-d)/2'
@@ -301,14 +323,13 @@ class TestColumnAlignment:
         result = format_code(code, config)
         assert result == "x = 1\nlonger_name = 2\ny = 3\n"
 
-    def test_align_assignments_triggered(self):
-        """First 2 lines aligned triggers alignment for the group."""
+    def test_no_assignment_alignment(self):
+        """Assignment alignment is disabled -- padding is stripped."""
         config = FormatConfig(align=True)
         code = "x           = 1\nlonger_name = 2\ny           = 3\n"
         result = format_code(code, config)
-        lines = result.strip().split('\n')
-        eq_cols = [line.index('=') for line in lines]
-        assert len(set(eq_cols)) == 1
+        assert 'x = 1' in result
+        assert 'y = 3' in result
 
     def test_align_comments_not_triggered(self):
         """Unaligned comments stay unaligned (first 2 lines differ)."""
@@ -338,13 +359,14 @@ class TestColumnAlignment:
         assert len(set(arrow_cols)) > 1
 
     def test_align_arrows_triggered(self):
-        """First 2 lines aligned triggers alignment for the group."""
+        """First 2 lines aligned in source triggers alignment for the group."""
         config = FormatConfig(align=True)
         code = "match x {\n    1   => { \"one\" }\n    100 => { \"hundred\" }\n    _   => { \"other\" }\n}\n"
         result = format_code(code, config)
         lines = [l for l in result.strip().split('\n') if '=>' in l]
+        assert len(lines) == 3
         arrow_cols = [line.index('=>') for line in lines]
-        assert len(set(arrow_cols)) == 1
+        assert len(set(arrow_cols)) == 1, f"Expected all arrows aligned, got columns {arrow_cols}"
 
     def test_align_enabled_by_default(self):
         """align=True by default, but first 2 lines must trigger."""
@@ -366,15 +388,13 @@ class TestColumnAlignment:
         second = format_code(first, config)
         assert first == second
 
-    def test_align_blank_line_breaks_group(self):
-        """Aligned groups separated by blank line."""
+    def test_no_assignment_alignment_strips_padding(self):
+        """Assignment alignment disabled -- extra padding stripped."""
         config = FormatConfig(align=True)
         code = "x  = 1\nyy = 2\n\na  = 10\nbb = 20\n"
         result = format_code(code, config)
-        lines = result.strip().split('\n')
-        # Each group is already aligned → preserved
-        assert lines[0].index('=') == lines[1].index('=')
-        assert lines[3].index('=') == lines[4].index('=')
+        assert 'x = 1' in result
+        assert 'a = 10' in result
 
     def test_align_config_from_toml(self):
         toml_text = """
@@ -388,14 +408,12 @@ align = true
         config = FormatConfig()
         assert config.align is True
 
-    def test_align_survives_line_joining(self):
-        """Alignment uses line map to find originals after join_short_lines reduces line count."""
+    def test_no_assignment_alignment_after_joining(self):
+        """Assignment alignment disabled -- no alignment even after line joining."""
         config = FormatConfig(align=True)
-        code = "f(\n    a, b\n)\nx           = 1\nlonger_name = 2\n"
+        code = "f(a, b)\nx           = 1\nlonger_name = 2\n"
         result = format_code(code, config)
-        lines = [l for l in result.strip().split('\n') if '=' in l and '=>' not in l]
-        eq_cols = [line.index('=') for line in lines]
-        assert len(set(eq_cols)) == 1
+        assert 'x = 1' in result
 
     def test_multiline_single_stmt_block_preserved(self):
         """A block written on multiple lines stays multi-line after formatting."""

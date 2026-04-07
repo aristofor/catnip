@@ -62,23 +62,35 @@ bool tree_sitter_catnip_external_scanner_scan(void *payload, TSLexer *lexer,
             return false;
         }
 
-        // Check if followed by 'else' or 'elif' (lightweight lookahead)
-        // We check first 3-4 chars to distinguish from regular identifiers starting with 'e'
-        if (lexer->lookahead == 'e') {
-            lexer->advance(lexer, false);
-            if (lexer->lookahead == 'l') {
+        // Check if followed by a continuation keyword.
+        // Must match the FULL keyword and verify the next char is not
+        // alphanumeric (otherwise "finally" would swallow "find", etc.).
+        // Since mark_end was called above, these advances are pure lookahead.
+        {
+            // Collect up to 8 chars of the next token (longest keyword: "finally" = 7)
+            char buf[9];
+            int len = 0;
+            while (len < 8 && ((lexer->lookahead >= 'a' && lexer->lookahead <= 'z') ||
+                               (lexer->lookahead >= 'A' && lexer->lookahead <= 'Z') ||
+                               (lexer->lookahead >= '0' && lexer->lookahead <= '9') ||
+                               lexer->lookahead == '_')) {
+                buf[len++] = (char)lexer->lookahead;
                 lexer->advance(lexer, false);
-                if (lexer->lookahead == 's' || lexer->lookahead == 'i') {
-                    // Looks like 'els...' or 'eli...' - probably else/elif
-                    // Don't treat newline as significant
-                    return false;
-                }
             }
-            // Just 'e' followed by something else - not else/elif
-            // Fall through to return true
+            buf[len] = '\0';
+
+            // The keyword must be an exact match (not a prefix of a longer identifier).
+            // After reading the keyword chars, lookahead is already the next char.
+            // If len matches exactly, the word boundary is guaranteed because we
+            // stopped at a non-alnum char.
+            if ((len == 4 && (memcmp(buf, "else", 4) == 0 || memcmp(buf, "elif", 4) == 0)) ||
+                (len == 6 && memcmp(buf, "except", 6) == 0) ||
+                (len == 7 && memcmp(buf, "finally", 7) == 0)) {
+                return false;
+            }
         }
 
-        // Not followed by else/elif - this is a significant newline
+        // Not a continuation keyword - this is a significant newline
         return true;
     }
 

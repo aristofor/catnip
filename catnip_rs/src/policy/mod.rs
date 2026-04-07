@@ -1,78 +1,47 @@
 // FILE: catnip_rs/src/policy/mod.rs
-//! Module policy system - mask-based, namespace-aware, deny-wins.
+//! Module policy system -- PyO3 wrapper around catnip_core::policy.
 //!
-//! Evaluates module access in order:
-//! 1. Check deny rules -> match -> block
-//! 2. Check allow rules -> match -> allow
-//! 3. Fallback -> default_action
+//! Adds TOML file loading, Python API, and profile management.
 
 use pyo3::prelude::*;
 use std::fs;
 use std::path::PathBuf;
-use xxhash_rust::xxh64;
 
-/// Default policy action when no rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyAction {
-    Allow,
-    Deny,
-}
+pub use catnip_core::policy::{ModulePolicyCore, PolicyAction, matches_rule};
 
 /// Module access policy with deny-wins semantics.
 #[pyclass(name = "ModulePolicy", module = "catnip._rs", frozen, from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ModulePolicy {
-    default_action: PolicyAction,
-    allow_rules: Vec<String>,
-    deny_rules: Vec<String>,
-    hash: String,
-}
-
-/// Check if a module name matches a rule.
-///
-/// - `"os"` matches `os`, `os.path`, `os.path.join` (boundary at `.`)
-/// - `"os.*"` matches `os.path` but NOT `os` itself
-/// - `"oslo"` does NOT match `"os"`
-fn matches_rule(module_name: &str, rule: &str) -> bool {
-    if let Some(prefix) = rule.strip_suffix(".*") {
-        // Wildcard: match sub-modules only, not the prefix itself
-        module_name.starts_with(prefix) && module_name.as_bytes().get(prefix.len()) == Some(&b'.')
-    } else {
-        // Exact: match module itself + all sub-modules
-        module_name == rule || (module_name.starts_with(rule) && module_name.as_bytes().get(rule.len()) == Some(&b'.'))
-    }
-}
-
-fn compute_hash(default_action: PolicyAction, allow: &[String], deny: &[String]) -> String {
-    let canonical = format!(
-        "default:{}|allow:{}|deny:{}",
-        match default_action {
-            PolicyAction::Allow => "allow",
-            PolicyAction::Deny => "deny",
-        },
-        allow.join(","),
-        deny.join(","),
-    );
-    format!("{:016x}", xxh64::xxh64(canonical.as_bytes(), 0))
+    pub inner: ModulePolicyCore,
 }
 
 impl ModulePolicy {
     /// Rust-side constructor for use from config parsing.
-    pub fn create(default_action: &str, mut allow: Vec<String>, mut deny: Vec<String>) -> Result<Self, String> {
-        let action = match default_action {
-            "allow" => PolicyAction::Allow,
-            "deny" => PolicyAction::Deny,
-            other => return Err(format!("invalid default_action: '{}'", other)),
-        };
-        allow.sort();
-        deny.sort();
-        let hash = compute_hash(action, &allow, &deny);
+    pub fn create(default_action: &str, allow: Vec<String>, deny: Vec<String>) -> Result<Self, String> {
         Ok(Self {
-            default_action: action,
-            allow_rules: allow,
-            deny_rules: deny,
-            hash,
+            inner: ModulePolicyCore::create(default_action, allow, deny)?,
         })
+    }
+
+    pub fn _summary(&self) -> String {
+        self.inner.summary()
+    }
+
+    /// Load a named policy profile from a TOML config file (Rust API).
+    ///
+    /// Profiles live under `[modules.policies.<name>]` in the config.
+    pub fn load_profile(path: std::path::PathBuf, profile: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let data: toml::Table =
+            toml::from_str(&content).map_err(|e| format!("invalid TOML in {}: {}", path.display(), e))?;
+        let policies =
+            policies_table(&data).ok_or_else(|| format!("no [modules.policies] section in {}", path.display()))?;
+        let section = policies.get(profile).and_then(|v| v.as_table()).ok_or_else(|| {
+            let available: Vec<&String> = policies.keys().collect();
+            format!("profile '{}' not found (available: {:?})", profile, available,)
+        })?;
+        parse_profile(section)
     }
 }
 
@@ -86,55 +55,24 @@ impl ModulePolicy {
     ///     deny: list of denied module patterns
     #[new]
     #[pyo3(signature = (default_action, allow=vec![], deny=vec![]))]
-    fn new(default_action: &str, mut allow: Vec<String>, mut deny: Vec<String>) -> PyResult<Self> {
-        let action = match default_action {
-            "allow" => PolicyAction::Allow,
-            "deny" => PolicyAction::Deny,
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid default_action: '{}' (expected 'allow' or 'deny')",
-                    other
-                )));
-            }
-        };
-        allow.sort();
-        deny.sort();
-        let hash = compute_hash(action, &allow, &deny);
-        Ok(Self {
-            default_action: action,
-            allow_rules: allow,
-            deny_rules: deny,
-            hash,
-        })
+    fn new(default_action: &str, allow: Vec<String>, deny: Vec<String>) -> PyResult<Self> {
+        Self::create(default_action, allow, deny).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     /// Check if a module is allowed by this policy.
     fn check(&self, module_name: &str) -> bool {
-        // Deny-wins: check deny first
-        for rule in &self.deny_rules {
-            if matches_rule(module_name, rule) {
-                return false;
-            }
-        }
-        // Then check allow
-        for rule in &self.allow_rules {
-            if matches_rule(module_name, rule) {
-                return true;
-            }
-        }
-        // Fallback
-        self.default_action == PolicyAction::Allow
+        self.inner.check(module_name)
     }
 
     /// Stable hash for cache invalidation.
     #[getter]
     fn policy_hash(&self) -> &str {
-        &self.hash
+        &self.inner.hash
     }
 
-    /// Load a named policy profile from a TOML file.
+    /// Load a named policy profile from a dedicated policy TOML file.
     ///
-    /// File format: each top-level table is a profile name.
+    /// Each top-level table is a profile name:
     /// ```toml
     /// [sandbox]
     /// policy = "deny"
@@ -163,7 +101,7 @@ impl ModulePolicy {
         parse_profile(section).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
-    /// List available profile names in a policy file.
+    /// List available profile names in a policy file (top-level tables).
     #[staticmethod]
     fn list_profiles(path: PathBuf) -> PyResult<Vec<String>> {
         let content = fs::read_to_string(&path)
@@ -181,29 +119,17 @@ impl ModulePolicy {
     }
 
     fn __repr__(&self) -> String {
-        format!("ModulePolicy({})", self.summary())
+        format!("ModulePolicy({})", self.inner.summary())
     }
 
     fn summary(&self) -> String {
-        ModulePolicy::_summary(self)
+        self.inner.summary()
     }
 }
 
-impl ModulePolicy {
-    pub fn _summary(&self) -> String {
-        let action = match self.default_action {
-            PolicyAction::Allow => "allow",
-            PolicyAction::Deny => "deny",
-        };
-        let mut parts = vec![format!("default={}", action)];
-        if !self.allow_rules.is_empty() {
-            parts.push(format!("allow={:?}", self.allow_rules));
-        }
-        if !self.deny_rules.is_empty() {
-            parts.push(format!("deny={:?}", self.deny_rules));
-        }
-        parts.join(", ")
-    }
+/// Navigate to [modules.policies] subtable in a config TOML.
+fn policies_table(data: &toml::Table) -> Option<&toml::Table> {
+    data.get("modules")?.as_table()?.get("policies")?.as_table()
 }
 
 /// Parse a policy profile from a TOML table (reused by config and from_file).
@@ -225,98 +151,6 @@ pub fn parse_profile(table: &toml::Table) -> Result<ModulePolicy, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_matches_exact() {
-        assert!(matches_rule("os", "os"));
-        assert!(matches_rule("os.path", "os"));
-        assert!(matches_rule("os.path.join", "os"));
-        assert!(!matches_rule("oslo", "os"));
-        assert!(!matches_rule("osm", "os"));
-    }
-
-    #[test]
-    fn test_matches_wildcard() {
-        assert!(matches_rule("os.path", "os.*"));
-        assert!(matches_rule("os.path.join", "os.*"));
-        assert!(!matches_rule("os", "os.*"));
-        assert!(!matches_rule("oslo.utils", "os.*"));
-    }
-
-    #[test]
-    fn test_matches_deep() {
-        assert!(matches_rule("numpy.linalg.solve", "numpy.*"));
-        assert!(matches_rule("numpy.linalg", "numpy.*"));
-        assert!(!matches_rule("numpy", "numpy.*"));
-    }
-
-    #[test]
-    fn test_deny_wins() {
-        let policy = ModulePolicy {
-            default_action: PolicyAction::Allow,
-            allow_rules: vec!["os".to_string()],
-            deny_rules: vec!["os".to_string()],
-            hash: String::new(),
-        };
-        assert!(!policy.check("os"));
-    }
-
-    #[test]
-    fn test_default_deny() {
-        let policy = ModulePolicy {
-            default_action: PolicyAction::Deny,
-            allow_rules: vec![],
-            deny_rules: vec![],
-            hash: String::new(),
-        };
-        assert!(!policy.check("anything"));
-    }
-
-    #[test]
-    fn test_default_allow() {
-        let policy = ModulePolicy {
-            default_action: PolicyAction::Allow,
-            allow_rules: vec![],
-            deny_rules: vec![],
-            hash: String::new(),
-        };
-        assert!(policy.check("anything"));
-    }
-
-    #[test]
-    fn test_allow_specific() {
-        let policy = ModulePolicy {
-            default_action: PolicyAction::Deny,
-            allow_rules: vec!["math".to_string(), "json".to_string()],
-            deny_rules: vec![],
-            hash: String::new(),
-        };
-        assert!(policy.check("math"));
-        assert!(policy.check("json"));
-        assert!(!policy.check("os"));
-    }
-
-    #[test]
-    fn test_deny_specific() {
-        let policy = ModulePolicy {
-            default_action: PolicyAction::Allow,
-            allow_rules: vec![],
-            deny_rules: vec!["os".to_string(), "subprocess".to_string()],
-            hash: String::new(),
-        };
-        assert!(!policy.check("os"));
-        assert!(!policy.check("os.path"));
-        assert!(!policy.check("subprocess"));
-        assert!(policy.check("math"));
-    }
-
-    #[test]
-    fn test_hash_stable() {
-        let h1 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
-        let h2 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 16);
-    }
 
     #[test]
     fn test_parse_profile() {
@@ -341,13 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_changes() {
-        let h1 = compute_hash(PolicyAction::Deny, &["math".to_string()], &["os".to_string()]);
-        let h2 = compute_hash(PolicyAction::Allow, &["math".to_string()], &["os".to_string()]);
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
     fn test_parse_profile_ignores_extra_keys() {
         let toml_str = r#"
             policy = "deny"
@@ -359,4 +186,42 @@ mod tests {
         assert!(policy.check("io"));
         assert!(!policy.check("os"));
     }
+
+    #[test]
+    fn test_load_profile_nested_toml() {
+        let dir = std::env::temp_dir().join("catnip_policy_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("catnip.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [modules.policies.sandbox]
+            policy = "deny"
+            allow = ["math", "json"]
+
+            [modules.policies.admin]
+            policy = "allow"
+            deny = ["subprocess"]
+        "#,
+        )
+        .unwrap();
+
+        let policy = ModulePolicy::load_profile(path.clone(), "sandbox").unwrap();
+        assert!(policy.check("math"));
+        assert!(!policy.check("os"));
+
+        let policy = ModulePolicy::load_profile(path.clone(), "admin").unwrap();
+        assert!(policy.check("os"));
+        assert!(!policy.check("subprocess"));
+
+        assert!(ModulePolicy::load_profile(path, "missing").is_err());
+    }
+
+    #[test]
+    fn test_policies_table_missing() {
+        let data: toml::Table = toml::from_str("[format]\nindent = 4").unwrap();
+        assert!(policies_table(&data).is_none());
+    }
+
+    // Core logic tests (matches_rule, deny_wins, etc.) are in catnip_core::policy::tests
 }

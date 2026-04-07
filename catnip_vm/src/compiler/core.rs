@@ -59,6 +59,8 @@ pub struct CompilerCore {
     pub loop_modified_vars: Vec<(String, usize)>,
     /// Names read from outer scope (closure captures)
     pub outer_names: HashSet<String>,
+    /// Nesting depth of active Finally handlers (for break/continue/return through finally)
+    pub finally_depth: usize,
 }
 
 impl CompilerCore {
@@ -81,6 +83,7 @@ impl CompilerCore {
             in_optimized_loop: false,
             loop_modified_vars: Vec::new(),
             outer_names: HashSet::new(),
+            finally_depth: 0,
         }
     }
 

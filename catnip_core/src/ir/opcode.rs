@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Layout: shared zone (1..=SHARED_MAX) has identical values to VMOpCode,
 /// followed by IR-only zone (SHARED_MAX+1..=MAX).
+///
+/// New opcodes: add at the end of the appropriate category and renumber
+/// subsequent values to keep the enum contiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 #[repr(u8)]
@@ -63,39 +66,33 @@ pub enum IROpCode {
     Nop = 30,
     Breakpoint = 31,
 
-    // === IR-only zone (32..=65) ===
+    // === IR-only zone (32..=MAX) ===
 
-    // -- Arithmetic (extends shared 1-8) --
+    // -- Operators (extends shared, 32-41) --
     Div = 32,
     TrueDiv = 33,
-
-    // -- Logic (extends shared 15: Not) --
     And = 34,
     Or = 35,
-
-    // -- Comparison (extends shared 9-14) --
     In = 36,
     NotIn = 37,
     Is = 38,
     IsNot = 39,
     NullCoalesce = 40,
+    Slice = 41,
 
-    // -- Collections (41-44) --
-    ListLiteral = 41,
-    TupleLiteral = 42,
-    SetLiteral = 43,
-    DictLiteral = 44,
+    // -- Collections (42-45) --
+    ListLiteral = 42,
+    TupleLiteral = 43,
+    SetLiteral = 44,
+    DictLiteral = 45,
 
-    // -- Stack (45-47) --
-    Push = 45,
-    Pop = 46,
-    PushPeek = 47,
+    // -- String (46) --
+    Fstring = 46,
 
-    // -- String (48) --
-    Fstring = 48,
-
-    // -- Access (extends shared 22-25) --
-    Slice = 49,
+    // -- Stack (47-49) --
+    Push = 47,
+    Pop = 48,
+    PushPeek = 49,
 
     // -- Control flow (50-57) --
     OpIf = 50,
@@ -107,25 +104,32 @@ pub enum IROpCode {
     OpBreak = 56,
     OpContinue = 57,
 
-    // -- Functions (58-60) --
-    Call = 58,
-    OpLambda = 59,
-    FnDef = 60,
+    // -- Exception handling (58-60) --
+    OpTry = 58,
+    OpRaise = 59,
+    /// Push (exc_type, exc_value, None) from active exception (for `with` desugaring).
+    ExcInfo = 60,
 
-    // -- Assignment (61) --
-    SetLocals = 61,
+    // -- Functions (61-63) --
+    Call = 61,
+    OpLambda = 62,
+    FnDef = 63,
 
-    // -- Structures (62-63) --
-    OpStruct = 62,
-    TraitDef = 63,
+    // -- Assignment (64) --
+    SetLocals = 64,
 
-    // -- Directives (64) --
-    Pragma = 64,
+    // -- Definitions (65-67) --
+    OpStruct = 65,
+    TraitDef = 66,
+    EnumDef = 67,
 
-    // -- Intrinsics (65-67) --
-    TypeOf = 65,
-    Globals = 66,
-    Locals = 67,
+    // -- Directives (68) --
+    Pragma = 68,
+
+    // -- Intrinsics (69-71) --
+    TypeOf = 69,
+    Globals = 70,
+    Locals = 71,
 }
 
 impl IROpCode {
@@ -174,27 +178,38 @@ mod tests {
         assert_eq!(IROpCode::Breakpoint as u8, 31);
         assert_eq!(IROpCode::SHARED_MAX, 31);
 
-        // IR-only zone boundaries
+        // IR-only zone: spot-check category boundaries
         assert_eq!(IROpCode::Div as u8, 32);
-        assert_eq!(IROpCode::Pragma as u8, 64);
-        assert_eq!(IROpCode::TypeOf as u8, 65);
-        assert_eq!(IROpCode::Globals as u8, 66);
-        assert_eq!(IROpCode::Locals as u8, 67);
-        assert_eq!(IROpCode::MAX, 67);
+        assert_eq!(IROpCode::Slice as u8, 41);
+        assert_eq!(IROpCode::ListLiteral as u8, 42);
+        assert_eq!(IROpCode::OpIf as u8, 50);
+        assert_eq!(IROpCode::OpTry as u8, 58);
+        assert_eq!(IROpCode::ExcInfo as u8, 60);
+        assert_eq!(IROpCode::Call as u8, 61);
+        assert_eq!(IROpCode::OpStruct as u8, 65);
+        assert_eq!(IROpCode::EnumDef as u8, 67);
+        assert_eq!(IROpCode::Pragma as u8, 68);
+        assert_eq!(IROpCode::TypeOf as u8, 69);
+        assert_eq!(IROpCode::Locals as u8, 71);
+        assert_eq!(IROpCode::MAX, 71);
+    }
+
+    #[test]
+    fn test_contiguous() {
+        for i in 1..=IROpCode::MAX {
+            assert!(IROpCode::from_u8(i).is_some(), "gap at value {i}");
+        }
     }
 
     #[test]
     fn test_from_u8() {
         assert_eq!(IROpCode::from_u8(1), Some(IROpCode::Add));
         assert_eq!(IROpCode::from_u8(31), Some(IROpCode::Breakpoint));
-        assert_eq!(IROpCode::from_u8(63), Some(IROpCode::TraitDef));
-        assert_eq!(IROpCode::from_u8(37), Some(IROpCode::NotIn));
         assert_eq!(IROpCode::from_u8(0), None);
-        assert_eq!(IROpCode::from_u8(64), Some(IROpCode::Pragma));
-        assert_eq!(IROpCode::from_u8(65), Some(IROpCode::TypeOf));
-        assert_eq!(IROpCode::from_u8(66), Some(IROpCode::Globals));
-        assert_eq!(IROpCode::from_u8(67), Some(IROpCode::Locals));
-        assert_eq!(IROpCode::from_u8(68), None);
+        assert_eq!(IROpCode::from_u8(58), Some(IROpCode::OpTry));
+        assert_eq!(IROpCode::from_u8(59), Some(IROpCode::OpRaise));
+        assert_eq!(IROpCode::from_u8(71), Some(IROpCode::Locals));
+        assert_eq!(IROpCode::from_u8(72), None);
     }
 
     #[test]

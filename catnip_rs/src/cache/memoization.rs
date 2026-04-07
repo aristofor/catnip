@@ -1,7 +1,7 @@
 // FILE: catnip_rs/src/cache/memoization.rs
 //! Memoization system for function execution results.
 
-use super::{CacheKey, CacheType, MemoryCache};
+use super::{CacheEntry, CacheKey, CacheType, MemoryCache};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::collections::HashMap;
@@ -35,7 +35,8 @@ impl Memoization {
         })
     }
 
-    /// Retrieve result from cache.
+    /// Retrieve cached value (returns None on miss - cannot distinguish
+    /// a cached None from a miss; use `get_entry` for that).
     fn get(
         &mut self,
         py: Python<'_>,
@@ -57,6 +58,26 @@ impl Memoization {
             }
             None => Ok(None),
         }
+    }
+
+    /// Retrieve the full CacheEntry on hit, None on miss.
+    /// Unlike `get`, this lets callers distinguish a cached None value
+    /// from a cache miss.
+    fn get_entry(
+        &mut self,
+        py: Python<'_>,
+        func_name: String,
+        args: Py<PyAny>,
+        kwargs: Py<PyAny>,
+    ) -> PyResult<Option<Py<CacheEntry>>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+
+        let key = self.make_key(py, &func_name, &args, &kwargs)?;
+        let mut backend = self.backend.borrow_mut(py);
+
+        backend.get(py, &key)
     }
 
     /// Store result in the cache.

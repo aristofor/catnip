@@ -11,6 +11,7 @@ pub const TAG_VAR: u8 = 2;
 pub const TAG_OR: u8 = 3;
 pub const TAG_TUPLE: u8 = 4;
 pub const TAG_STRUCT: u8 = 5;
+pub const TAG_ENUM: u8 = 6;
 
 /// Extract pattern tag via downcast (pointer comparison, no string)
 pub fn get_pattern_tag(pattern: &Bound<'_, PyAny>) -> Option<u8> {
@@ -26,6 +27,8 @@ pub fn get_pattern_tag(pattern: &Bound<'_, PyAny>) -> Option<u8> {
         Some(TAG_TUPLE)
     } else if pattern.cast::<PatternStruct>().is_ok() {
         Some(TAG_STRUCT)
+    } else if pattern.cast::<PatternEnum>().is_ok() {
+        Some(TAG_ENUM)
     } else {
         None
     }
@@ -336,5 +339,63 @@ impl PatternStruct {
 
     fn pattern_tag(&self) -> u8 {
         TAG_STRUCT
+    }
+}
+
+/// Pattern that matches an enum variant by name.
+#[pyclass(module = "catnip._rs", name = "PatternEnum")]
+pub struct PatternEnum {
+    #[pyo3(get)]
+    pub enum_name: String,
+    #[pyo3(get)]
+    pub variant_name: String,
+}
+
+#[pymethods]
+impl PatternEnum {
+    #[new]
+    #[pyo3(signature = (enum_name=String::new(), variant_name=String::new()))]
+    fn new(enum_name: String, variant_name: String) -> Self {
+        Self {
+            enum_name,
+            variant_name,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<PatternEnum {}.{}>", self.enum_name, self.variant_name)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(other_pattern) = other.extract::<PyRef<PatternEnum>>() {
+            Ok(self.enum_name == other_pattern.enum_name && self.variant_name == other_pattern.variant_name)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.enum_name.hash(&mut hasher);
+        self.variant_name.hash(&mut hasher);
+        hasher.finish() as isize
+    }
+
+    fn __getstate__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let state = PyDict::new(py);
+        state.set_item("enum_name", &self.enum_name)?;
+        state.set_item("variant_name", &self.variant_name)?;
+        Ok(state.into())
+    }
+
+    fn __setstate__(&mut self, _py: Python<'_>, state: &Bound<'_, PyDict>) -> PyResult<()> {
+        self.enum_name = state.get_item("enum_name")?.unwrap().extract()?;
+        self.variant_name = state.get_item("variant_name")?.unwrap().extract()?;
+        Ok(())
+    }
+
+    fn pattern_tag(&self) -> u8 {
+        TAG_ENUM
     }
 }

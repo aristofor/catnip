@@ -31,7 +31,7 @@ Tous les dialogs `prompt_toolkit` suivent le même cycle :
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 app = pt.yes_no_dialog(title="Confirmation", text="Lancer le déploiement ?")
 result = app.run()
@@ -68,7 +68,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 confirm = pt.yes_no_dialog(
     title="Suppression",
@@ -89,7 +89,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 name = pt.input_dialog(
     title="Identité",
@@ -111,7 +111,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 env = pt.radiolist_dialog(
     title="Environnement",
@@ -141,7 +141,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 toppings = pt.checkboxlist_dialog(
     title="Pizza",
@@ -197,7 +197,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 action = pt.button_dialog(
     title="Action",
@@ -226,7 +226,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 pt.message_dialog(
     title="Statut",
@@ -247,11 +247,11 @@ Les dialogs se chaînent naturellement. Chaque `.run()` bloque, puis le script c
 
 ```catnip
 #!/usr/bin/env catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 # Étape 1 : saisie
 name = pt.input_dialog(title="Setup", text="Nom du projet :").run()
-if (name == None) { print("cancelled"); import("sys").exit(0) }
+if (name == None) { print("cancelled"); import('sys').exit(0) }
 
 # Étape 2 : choix
 lang = pt.radiolist_dialog(
@@ -263,7 +263,7 @@ lang = pt.radiolist_dialog(
         tuple("catnip", "Catnip")
     )
 ).run()
-if (lang == None) { print("cancelled"); import("sys").exit(0) }
+if (lang == None) { print("cancelled"); import('sys').exit(0) }
 
 # Étape 3 : options
 features = pt.checkboxlist_dialog(
@@ -306,8 +306,8 @@ retournée :
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
-sys = import("sys")
+pt = import('prompt_toolkit.shortcuts')
+sys = import('sys')
 
 main_menu = () => {
     pt.radiolist_dialog(
@@ -342,7 +342,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
+pt = import('prompt_toolkit.shortcuts')
 
 token = pt.input_dialog(
     title="Auth",
@@ -362,8 +362,8 @@ Les listes de choix n'ont pas besoin d'être statiques.
 <!-- check: no-check -->
 
 ```catnip
-pt = import("prompt_toolkit.shortcuts")
-os = import("os")
+pt = import('prompt_toolkit.shortcuts')
+os = import('os')
 
 # Lister les fichiers .cat du répertoire courant
 files = os.listdir(".")
@@ -425,7 +425,7 @@ Pour une simple confirmation sans dépendance externe :
 <!-- check: no-check -->
 
 ```catnip
-io = import("io")
+io = import('io')
 
 answer = io.input("Continuer ? [y/N] ")
 if (answer == "y" or answer == "Y") {

@@ -5,7 +5,7 @@ Exemple simple et fonctionnel d'extension de Catnip.
 
 from catnip import Catnip, Context, pass_context
 
-# Exemple : Fonctions simples
+# Fonctions simples
 
 
 def example_simple_functions():
@@ -153,7 +153,7 @@ def example_python_module():
         print(f'{test:20} = {result}')
 
 
-# Exemple : État partagé
+# État partagé
 
 
 def example_shared_state():
@@ -196,7 +196,7 @@ def example_shared_state():
         print(f'{"":30} → {result}')
 
 
-# Exemple : Variables et calculs
+# Variables et calculs
 
 
 def example_variables():
@@ -223,7 +223,7 @@ def example_variables():
     print(f'\nRésultat: {result}')
 
 
-# Exemple : API personnalisée
+# API personnalisée
 
 
 def example_custom_api():

@@ -1,0 +1,6 @@
+# FILE: catnip_libs/io/tests/test_print.cat
+import('io')
+
+io.print("hello", "world")
+io.print(1, 2, 3)
+io.print()

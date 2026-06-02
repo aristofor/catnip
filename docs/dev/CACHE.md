@@ -235,7 +235,7 @@ Cache unifié pour les traces JIT et les stencils Cranelift, colocalisé avec le
 
 **Fichiers** :
 
-- `jit_v{V}_{HASH}_{OFFSET}` -- traces (bincode), clé = FNV-1a du bytecode + offset de boucle
+- `jit_v{V}_{HASH}_{OFFSET}` -- traces (postcard), clé = FNV-1a du bytecode + offset de boucle
 - `jit_nv{V}_{SHA256}` -- stencils Cranelift natifs, clé = hash du IR + triple ISA + flags CPU
 
 `V = VMOpCode::MAX + COMPILER_SALT` dans les deux cas. Les traces persistent les enregistrements JIT pour éliminer le

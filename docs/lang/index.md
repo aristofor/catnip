@@ -12,6 +12,7 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
 - [FUNCTIONS](FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
 - [STRUCTURES](STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
 - [ENUMS](ENUMS.md) - Types énumérés : variantes nommées, pattern matching et sémantique d'égalité
+- [UNIONS](UNIONS.md) - Unions taggées (ADT) : variantes avec ou sans payload, destructuration dans `match`, génériques
 - [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
 
 ## Aller plus loin

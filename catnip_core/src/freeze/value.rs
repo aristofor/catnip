@@ -26,7 +26,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_frozen_value_roundtrip_bincode() {
+    fn test_frozen_value_roundtrip_postcard() {
         let values = vec![
             FrozenValue::Int(42),
             FrozenValue::Float(3.14),
@@ -41,9 +41,8 @@ mod tests {
         ];
 
         for val in &values {
-            let encoded = bincode::serde::encode_to_vec(val, bincode::config::standard()).unwrap();
-            let (decoded, _): (FrozenValue, _) =
-                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            let encoded = postcard::to_allocvec(val).unwrap();
+            let decoded: FrozenValue = postcard::from_bytes(&encoded).unwrap();
             assert_eq!(&decoded, val);
         }
     }
@@ -58,9 +57,8 @@ mod tests {
             ]),
         )])]);
 
-        let encoded = bincode::serde::encode_to_vec(&nested, bincode::config::standard()).unwrap();
-        let (decoded, _): (FrozenValue, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        let encoded = postcard::to_allocvec(&nested).unwrap();
+        let decoded: FrozenValue = postcard::from_bytes(&encoded).unwrap();
         assert_eq!(decoded, nested);
     }
 }

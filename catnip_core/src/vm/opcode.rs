@@ -159,11 +159,17 @@ pub enum VMOpCode {
     LoadException = 95,
     ResumeUnwind = 96,
     ClearException = 97,
+
+    /// Tagged union (ADT) definition. Reads a constant tuple `(name,
+    /// type_params, variants)` from `arg` and registers the union namespace
+    /// in globals. Variants are materialized as struct types (with payload)
+    /// or enum singletons (nullary).
+    MakeUnion = 98,
 }
 
 impl VMOpCode {
     /// Highest opcode value. Used for range checks and cache invalidation.
-    pub const MAX: u8 = VMOpCode::ClearException as u8;
+    pub const MAX: u8 = VMOpCode::MakeUnion as u8;
 
     /// Highest shared opcode value (same values as IROpCode).
     pub const SHARED_MAX: u8 = VMOpCode::Breakpoint as u8;
@@ -231,6 +237,7 @@ impl VMOpCode {
                 // Structures
                 | VMOpCode::MakeStruct
                 | VMOpCode::MakeTrait
+                | VMOpCode::MakeUnion
                 // Control
                 | VMOpCode::Exit
                 // String formatting
@@ -354,6 +361,7 @@ impl VMOpCode {
             VMOpCode::MakeStruct => (0, 0),
             VMOpCode::MakeTrait => (0, 0),
             VMOpCode::MakeEnum => (0, 0),
+            VMOpCode::MakeUnion => (0, 0),
             // VM: Control
             VMOpCode::Halt => (0, 0),
             VMOpCode::Exit => (-1, 0),
@@ -420,7 +428,9 @@ mod tests {
         assert_eq!(VMOpCode::Locals as u8, 89);
         assert_eq!(VMOpCode::SetupExcept as u8, 90);
         assert_eq!(VMOpCode::ResumeUnwind as u8, 96);
-        assert_eq!(VMOpCode::MAX, VMOpCode::ClearException as u8);
+        assert_eq!(VMOpCode::ClearException as u8, 97);
+        assert_eq!(VMOpCode::MakeUnion as u8, 98);
+        assert_eq!(VMOpCode::MAX, VMOpCode::MakeUnion as u8);
     }
 
     #[test]

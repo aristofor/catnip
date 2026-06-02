@@ -1799,6 +1799,17 @@ impl PureVM {
                     let info = code.constants[const_idx];
                     self.handle_make_enum(info, frame, host)?;
                 }
+                VMOpCode::MakeUnion => {
+                    // Pure VM (no Python) does not yet implement union runtime.
+                    // The PyO3-backed VM handles this opcode separately; the
+                    // standalone catnip-run binary will reject it explicitly.
+                    return Err(VMError::RuntimeError(
+                        "MakeUnion: union runtime not implemented in PureVM \
+                         (Phase B for standalone binary). Use the Python CLI \
+                         or AST mode."
+                            .into(),
+                    ));
+                }
 
                 // Exception handling
                 VMOpCode::SetupExcept => {
@@ -3092,11 +3103,19 @@ fn vm_match_pattern(
                 Some(bindings)
             }
         }
-        VMPattern::Struct { name, field_slots } => {
+        VMPattern::Struct {
+            name,
+            variant,
+            field_slots,
+        } => {
             let inst_idx = value.as_struct_instance_idx()?;
             let inst = struct_reg.get_instance(inst_idx)?;
             let ty = struct_reg.get_type(inst.type_id)?;
-            if ty.name != *name {
+            let expected = match variant {
+                Some(v) => qualified_name(name, v),
+                None => name.clone(),
+            };
+            if ty.name != expected {
                 return None;
             }
             let mut bindings = Vec::with_capacity(field_slots.len());

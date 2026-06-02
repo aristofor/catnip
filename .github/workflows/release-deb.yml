@@ -1,0 +1,94 @@
+name: Build Debian packages
+
+# Builds the four Catnip .deb packages (python3-catnip, catnip, catnip-tools,
+# catnip-doc) and attaches them to the GitHub release. Runs inside a Debian
+# trixie container, which ships Python 3.13 natively -- matching the
+# python3 (>= 3.13) build dependency in packaging/debian/control.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the .deb to (e.g. v0.0.9)"
+        required: true
+        type: string
+
+jobs:
+  build-deb:
+    name: Build .deb (amd64)
+    runs-on: [self-hosted, linux, X64]
+    container: debian:trixie
+    permissions:
+      contents: write
+    env:
+      # Debian trixie ships a PEP 668 externally-managed marker; the wheel build
+      # in debian/rules installs with pip3, so let it write to the system env.
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+    steps:
+      # git must exist before actions/checkout, otherwise it falls back to a
+      # tarball download with no .git (dpkg-parsechangelog still works either
+      # way, but a real checkout keeps the build reproducible).
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper devscripts help2man pkg-config curl \
+            python3 python3-dev python3-pip python3-click
+
+      - name: Install Rust (rustup)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install build backend
+        run: |
+          # debian/rules calls `python3 setup.py bdist_wheel` directly (no PEP 517
+          # isolation), so the setuptools-rust backend must be present in the
+          # system interpreter. Distro python3-setuptools-rust may predate the
+          # >=1.12 pin in pyproject.toml, so install it from PyPI.
+          # apt-installed python3-wheel/python3-setuptools have no pip RECORD, so a
+          # plain `pip install -U` fails on uninstall. --ignore-installed installs the
+          # wanted versions into /usr/local (shadowing the dpkg ones) without removing them.
+          pip3 install -U --ignore-installed setuptools wheel 'setuptools-rust>=1.12'
+
+      - name: Build packages
+        run: |
+          # The make debian target lives in a dev-only section that is stripped
+          # from the public mirror, so drive dpkg-buildpackage directly.
+          ln -sf packaging/debian debian
+          dpkg-buildpackage -b -us -uc -d
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          # dpkg-buildpackage writes the .deb to the parent directory.
+          cp ../*.deb out/
+          ls -l out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-packages
+          path: out/*.deb
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: out/*.deb

@@ -1,0 +1,11 @@
+# debhelper build artifacts only -- source files (*.install, *.manpages,
+# control, rules, changelog, man/, source/) must stay tracked.
+tmp/
+.debhelper/
+debhelper-build-stamp
+files
+*.substvars
+catnip/
+catnip-doc/
+catnip-tools/
+python3-catnip/

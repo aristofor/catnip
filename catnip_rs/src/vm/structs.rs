@@ -11,7 +11,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub type StructTypeId = u32;
 
@@ -109,10 +109,16 @@ pub struct StructInstance {
 /// refcount uses AtomicU32 so incref can take &self (needed when accessing
 /// the registry through the *const thread-local while to_pyobject recurses)
 /// and satisfies Send+Sync required by PyO3 #[pyclass].
+///
+/// `frozen` is set when the instance is hashed (proxy __hash__ or any other
+/// hashing path). Once true, SetAttr in the VM and __setattr__ on the proxy
+/// must reject mutation, otherwise dict/set lookups using the prior hash
+/// would silently break.
 #[derive(Debug)]
 struct InstanceSlot {
     instance: StructInstance,
     refcount: AtomicU32,
+    frozen: AtomicBool,
 }
 
 /// Python-visible proxy for struct instances returned by to_pyobject.
@@ -130,6 +136,10 @@ pub struct CatnipStructProxy {
     /// VM struct instance index for round-trip through Python collections.
     /// Allows from_pyobject to restore TAG_STRUCT instead of falling back to TAG_PYOBJ.
     pub native_instance_idx: Option<u32>,
+    /// Set to true after the first __hash__ call. Mutating a hashed struct would
+    /// break Python's hash/eq invariants (dict/set lookup), so __setattr__ rejects
+    /// further field writes once this flag is on.
+    pub frozen: bool,
 }
 
 #[pymethods]
@@ -168,6 +178,7 @@ impl CatnipStructProxy {
                         .collect(),
                     struct_type: self.struct_type.as_ref().map(|st| st.clone_ref(py)),
                     native_instance_idx: self.native_instance_idx,
+                    frozen: false,
                 },
             )?
             .into_any();
@@ -205,6 +216,15 @@ impl CatnipStructProxy {
     }
 
     fn __setattr__(&mut self, name: &str, value: Py<PyAny>) -> PyResult<()> {
+        let registry_frozen = self
+            .native_instance_idx
+            .is_some_and(super::value::struct_registry_is_frozen);
+        if self.frozen || registry_frozen {
+            return Err(PyTypeError::new_err(format!(
+                "cannot mutate '{}' after it has been hashed (used as dict/set key)",
+                self.type_name
+            )));
+        }
         for (i, fname) in self.field_names.iter().enumerate() {
             if fname == name {
                 self.field_values[i] = value;
@@ -242,6 +262,71 @@ impl CatnipStructProxy {
             })
             .collect();
         format!("{}({})", self.type_name, fields.join(", "))
+    }
+
+    fn __hash__(slf: Bound<'_, Self>) -> PyResult<isize> {
+        let py = slf.py();
+
+        // Strategy decision (matches __richcmp__ fallback for op_eq):
+        //   - op_hash defined           -> user hash (user owns op_hash/op_eq consistency)
+        //   - op_eq without op_hash     -> unhashable (would break a == b => hash(a) == hash(b))
+        //   - neither                   -> structural hash (mirrors structural fallback eq)
+        enum Strategy {
+            Custom(Py<PyAny>),
+            Unhashable,
+            Structural,
+        }
+        let (strategy, type_name) = {
+            let r = slf.borrow();
+            let s = if let Some(f) = r.methods.get("op_hash") {
+                Strategy::Custom(f.clone_ref(py))
+            } else if r.methods.contains_key("op_eq") {
+                Strategy::Unhashable
+            } else {
+                Strategy::Structural
+            };
+            (s, r.type_name.clone())
+        };
+
+        // Hash values are signed (Py_hash_t = isize). Negative results from
+        // user-defined op_hash are valid; the structural path goes through
+        // i64 to preserve the full bit pattern.
+        let hash_value: isize = match strategy {
+            Strategy::Custom(func) => {
+                let args = PyTuple::new(py, [slf.as_any()])?;
+                let result = func.call(py, &args, None)?;
+                result.extract::<isize>(py)?
+            }
+            Strategy::Unhashable => {
+                return Err(PyTypeError::new_err(format!(
+                    "unhashable type: '{type_name}' (defines op_eq without op_hash)"
+                )));
+            }
+            Strategy::Structural => {
+                // type_name + each field's Python __hash__.
+                // Raises TypeError (via field.hash()) if any field is unhashable.
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                let r = slf.borrow();
+                r.type_name.hash(&mut hasher);
+                for field in &r.field_values {
+                    let h = field.bind(py).hash()?;
+                    h.hash(&mut hasher);
+                }
+                hasher.finish() as i64 as isize
+            }
+        };
+
+        // Hash succeeded -> instance can be a dict/set key, so further mutation
+        // would break hash stability. Lock __setattr__ on this proxy and, in VM
+        // mode, on the registry-backed instance too (so direct SetAttr through
+        // bytecode also rejects mutation).
+        let native_idx = slf.borrow().native_instance_idx;
+        if let Some(idx) = native_idx {
+            super::value::struct_registry_freeze(idx);
+        }
+        slf.borrow_mut().frozen = true;
+        Ok(hash_value)
     }
 
     fn __richcmp__(slf: Bound<'_, Self>, other: Bound<'_, PyAny>, op: pyo3::pyclass::CompareOp) -> PyResult<Py<PyAny>> {
@@ -628,6 +713,7 @@ impl CatnipStructType {
                 static_methods,
                 struct_type: Some(st_py),
                 native_instance_idx: None, // AST mode, no VM index
+                frozen: false,
             },
         )?;
 
@@ -749,6 +835,7 @@ impl StructRegistry {
                 slot.as_ref().map(|s| InstanceSlot {
                     instance: s.instance.clone(),
                     refcount: AtomicU32::new(s.refcount.load(Ordering::Relaxed)),
+                    frozen: AtomicBool::new(s.frozen.load(Ordering::Relaxed)),
                 })
             })
             .collect();
@@ -767,6 +854,7 @@ impl StructRegistry {
                     parent.instances[idx] = Some(InstanceSlot {
                         instance: slot.instance.clone(),
                         refcount: AtomicU32::new(slot.refcount.load(Ordering::Relaxed)),
+                        frozen: AtomicBool::new(slot.frozen.load(Ordering::Relaxed)),
                     });
                     parent.free_list.retain(|&i| i != idx as u32);
                 }
@@ -781,6 +869,7 @@ impl StructRegistry {
                 parent.instances[idx] = Some(InstanceSlot {
                     instance: slot.instance.clone(),
                     refcount: AtomicU32::new(slot.refcount.load(Ordering::Relaxed)),
+                    frozen: AtomicBool::new(slot.frozen.load(Ordering::Relaxed)),
                 });
             }
         }
@@ -853,6 +942,7 @@ impl StructRegistry {
                 fields: field_values,
             },
             refcount: AtomicU32::new(1),
+            frozen: AtomicBool::new(false),
         };
         if let Some(idx) = self.free_list.pop() {
             self.instances[idx as usize] = Some(slot);
@@ -872,6 +962,25 @@ impl StructRegistry {
             .as_ref()
             .expect("StructRegistry: dead handle on incref");
         slot.refcount.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mark an instance as frozen (hashed) so subsequent SetAttr must reject it.
+    /// Takes &self thanks to AtomicBool.
+    #[inline]
+    pub fn freeze(&self, idx: u32) {
+        if let Some(Some(slot)) = self.instances.get(idx as usize) {
+            slot.frozen.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// True if the instance has been hashed and must reject field mutation.
+    #[inline]
+    pub fn is_frozen(&self, idx: u32) -> bool {
+        self.instances
+            .get(idx as usize)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.frozen.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     /// Decrement the handle refcount. Returns the instance fields if freed (for cascade cleanup).
@@ -928,6 +1037,11 @@ impl StructRegistry {
         let type_name = ty.name.clone();
         // inst/ty borrows ended (NLL) -- all data cloned above
         self.incref(idx);
+        // Mirror the registry's frozen state on the proxy: if the slot was
+        // hashed (in the VM or by a previous to_pyobject), every materialized
+        // proxy must also reject __setattr__, including after the thread-local
+        // registry is torn down at the end of execution.
+        let frozen = self.is_frozen(idx);
 
         let proxy = Py::new(
             py,
@@ -939,6 +1053,7 @@ impl StructRegistry {
                 static_methods,
                 struct_type: None,
                 native_instance_idx: Some(idx),
+                frozen,
             },
         )?;
         Ok(proxy.into_any())

@@ -17,6 +17,7 @@ pub mod py_interop;
 pub mod structs;
 pub mod traits;
 pub mod unified_compiler;
+pub mod unions;
 pub mod value;
 
 // ForRange constants -- re-exported from catnip_core
@@ -48,4 +49,5 @@ pub use py_interop::{PyVMContext, convert_code_object, convert_pure_compile_outp
 pub use structs::{CatnipStructProxy, CatnipStructType, StructRegistry, SuperProxy};
 pub use traits::TraitRegistry;
 pub use unified_compiler::UnifiedCompiler;
+pub use unions::{CatnipUnionType, UnionVariantBinding};
 pub use value::Value;

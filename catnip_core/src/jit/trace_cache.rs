@@ -20,7 +20,7 @@ use std::path::PathBuf;
 /// Cache version - derived from max VM opcode + a salt for semantic changes.
 /// Bump COMPILER_SALT when compilation semantics change (e.g. tail-call marking)
 /// without adding new opcodes.
-const COMPILER_SALT: u32 = 2;
+const COMPILER_SALT: u32 = 3;
 const CACHE_VERSION: u32 = VMOpCode::MAX as u32 + COMPILER_SALT;
 
 /// Wrapper that includes version metadata for safe deserialization.
@@ -79,8 +79,7 @@ impl TraceCache {
         let path = self.file_path(&key);
 
         let data = fs::read(&path).ok()?;
-        let (cached, _): (CachedTrace, _) =
-            bincode::serde::decode_from_slice(&data, bincode::config::standard()).ok()?;
+        let cached: CachedTrace = postcard::from_bytes(&data).ok()?;
 
         // Validate version - stale entries silently ignored
         if cached.version != CACHE_VERSION || cached.catnip_version != self.catnip_version {
@@ -109,7 +108,7 @@ impl TraceCache {
             trace: trace.clone(),
         };
 
-        let data = match bincode::serde::encode_to_vec(&cached, bincode::config::standard()) {
+        let data = match postcard::to_allocvec(&cached) {
             Ok(d) => d,
             Err(_) => return,
         };

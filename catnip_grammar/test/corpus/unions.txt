@@ -1,0 +1,200 @@
+================================================================================
+Simple union with nullary variants
+================================================================================
+
+union Color { red; green; blue }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      (union_variant
+        name: (identifier))
+      (union_variant
+        name: (identifier))
+      (union_variant
+        name: (identifier)))))
+
+================================================================================
+Union with payload variants
+================================================================================
+
+union Option {
+    Some(value);
+    None;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)))
+      (union_variant
+        name: (identifier)))))
+
+================================================================================
+Union with type annotations and generics
+================================================================================
+
+union Option[T] {
+    Some(value: T);
+    None;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      type_params: (type_params
+        (identifier))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)
+          type: (type_expr
+            (identifier))))
+      (union_variant
+        name: (identifier)))))
+
+================================================================================
+Union with multiple generic parameters
+================================================================================
+
+union Result[T, E] {
+    Ok(value: T);
+    Err(error: E);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      type_params: (type_params
+        (identifier)
+        (identifier))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)
+          type: (type_expr
+            (identifier))))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)
+          type: (type_expr
+            (identifier)))))))
+
+================================================================================
+Union variant with multiple fields
+================================================================================
+
+union Event {
+    Click(x, y);
+    KeyPress(code);
+    Quit;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier))
+        (union_field
+          name: (identifier)))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)))
+      (union_variant
+        name: (identifier)))))
+
+================================================================================
+Union with nested generic type
+================================================================================
+
+union Tree[T] {
+    Leaf(value: T);
+    Node(children: list[T]);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      type_params: (type_params
+        (identifier))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)
+          type: (type_expr
+            (identifier))))
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)
+          type: (type_expr
+            (identifier)
+            (type_args
+              (type_expr
+                (identifier)))))))))
+
+================================================================================
+Pattern matching union variant with payload
+================================================================================
+
+result = match x {
+    Option.Some{value} => { value }
+    Option.None => { 0 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (match_expr
+        value: (identifier)
+        (match_case
+          (pattern
+            (pattern_or
+              (pattern_struct
+                struct_name: (identifier)
+                variant_name: (identifier)
+                fields: (identifier))))
+          (block
+            (statement
+              (identifier))))
+        (match_case
+          (pattern
+            (pattern_or
+              (pattern_enum
+                enum_name: (identifier)
+                variant_name: (identifier))))
+          (block
+            (statement
+              (literal
+                (number
+                  (integer))))))))))

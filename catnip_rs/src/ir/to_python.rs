@@ -231,10 +231,14 @@ fn ir_pure_to_python_impl(py: Python, ir: IR, cache: &PythonCache) -> PyResult<P
         }
 
         // Struct pattern
-        IR::PatternStruct { name, fields } => {
+        IR::PatternStruct { name, variant, fields } => {
             let pattern_class = cache.nodes_module.getattr("PatternStruct")?;
             let fields_list = PyList::new(py, &fields)?;
-            Ok(pattern_class.call1((name, fields_list))?.unbind())
+            let variant_py: Py<PyAny> = match variant {
+                Some(v) => v.as_str().into_pyobject(py)?.into_any().unbind(),
+                None => py.None(),
+            };
+            Ok(pattern_class.call1((name, fields_list, variant_py))?.unbind())
         }
 
         // Enum pattern

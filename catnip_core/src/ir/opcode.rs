@@ -130,11 +130,16 @@ pub enum IROpCode {
     TypeOf = 69,
     Globals = 70,
     Locals = 71,
+
+    // -- Definitions (72) --
+    /// Tagged union (ADT) definition. Reserved here to keep prior opcode
+    /// values stable; logically belongs to the 65-67 definitions block.
+    UnionDef = 72,
 }
 
 impl IROpCode {
     /// Highest opcode value. Used for range checks.
-    pub const MAX: u8 = IROpCode::Locals as u8;
+    pub const MAX: u8 = IROpCode::UnionDef as u8;
 
     /// Highest shared opcode value (same values as VMOpCode).
     pub const SHARED_MAX: u8 = IROpCode::Breakpoint as u8;
@@ -191,7 +196,8 @@ mod tests {
         assert_eq!(IROpCode::Pragma as u8, 68);
         assert_eq!(IROpCode::TypeOf as u8, 69);
         assert_eq!(IROpCode::Locals as u8, 71);
-        assert_eq!(IROpCode::MAX, 71);
+        assert_eq!(IROpCode::UnionDef as u8, 72);
+        assert_eq!(IROpCode::MAX, 72);
     }
 
     #[test]
@@ -209,7 +215,8 @@ mod tests {
         assert_eq!(IROpCode::from_u8(58), Some(IROpCode::OpTry));
         assert_eq!(IROpCode::from_u8(59), Some(IROpCode::OpRaise));
         assert_eq!(IROpCode::from_u8(71), Some(IROpCode::Locals));
-        assert_eq!(IROpCode::from_u8(72), None);
+        assert_eq!(IROpCode::from_u8(72), Some(IROpCode::UnionDef));
+        assert_eq!(IROpCode::from_u8(73), None);
     }
 
     #[test]

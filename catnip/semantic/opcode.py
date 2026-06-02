@@ -101,6 +101,7 @@ class OpCode(IntEnum):
     TYPE_OF = 69
     GLOBALS = 70
     LOCALS = 71
+    UNION_DEF = 72
 
 
 # Set of opcodes where arguments should not be evaluated immediately

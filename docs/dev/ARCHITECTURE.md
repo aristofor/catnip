@@ -95,8 +95,8 @@ Le transformer convertit l'arbre de syntaxe en IR (Intermediate Representation) 
 - Operators (binary, unary, comparison, bitwise)
 - Control flow (if, while, for, match, block)
 - Functions (lambda, fn_def, call)
-- Pattern matching (literal, var, wildcard, or, tuple, struct, enum)
-- Structures et enums (struct, trait, enum)
+- Pattern matching (literal, var, wildcard, or, tuple, struct, enum, union variant qualifié)
+- Structures, enums et unions taggées (struct, trait, enum, union)
 - Broadcasting et accès (chained, getattr, index, slice)
 
 ### 3. Semantic Analysis : IR → Op

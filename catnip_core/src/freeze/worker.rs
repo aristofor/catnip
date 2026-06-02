@@ -1,7 +1,7 @@
 // FILE: catnip_core/src/freeze/worker.rs
 //! IPC protocol for ND worker processes.
 //!
-//! Length-prefixed bincode messages over stdin/stdout pipes.
+//! Length-prefixed postcard messages over stdin/stdout pipes.
 //! Used by `catnip worker` subcommand.
 
 use super::FrozenValue;
@@ -22,6 +22,7 @@ pub enum WorkerCommand {
     /// The first param is bound to `seed`, the second (if any, `recur`) is unused
     /// in the worker (ND recursion is handled sequentially in worker processes).
     Execute {
+        /// Postcard-encoded `Vec<IR>` (no .catf header).
         encoded_ir: Vec<u8>,
         captures: Vec<(String, FrozenValue)>,
         param_names: Vec<String>,
@@ -44,19 +45,18 @@ pub enum WorkerResult {
     Pong,
 }
 
-// -- Framing: [u32 LE length][bincode payload] --
+// -- Framing: [u32 LE length][postcard payload] --
 
-/// Write a length-prefixed bincode message.
+/// Write a length-prefixed postcard message.
 pub fn write_message<W: Write, T: Serialize>(writer: &mut W, msg: &T) -> io::Result<()> {
-    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let payload = postcard::to_allocvec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let len = payload.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()
 }
 
-/// Read a length-prefixed bincode message. Returns None on EOF.
+/// Read a length-prefixed postcard message. Returns None on EOF.
 pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf) {
@@ -76,8 +76,8 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> io
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload)?;
 
-    let (msg, _): (T, _) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let msg: T =
+        postcard::from_bytes(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(Some(msg))
 }
 

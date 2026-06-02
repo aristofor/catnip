@@ -14,14 +14,14 @@ serde_json = { workspace = true }
 tree-sitter = { workspace = true }
 catnip_grammar = { path = "../catnip_grammar" }
 dirs = "6.0"
-bincode = { version = "2.0", features = ["serde"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 indexmap = { version = "2.13", features = ["serde"] }
 
 # Cranelift JIT compilation
-cranelift-codegen = { version = "0.130", features = ["incremental-cache"] }
-cranelift-frontend = "0.130"
-cranelift-jit = "0.130"
-cranelift-module = "0.130"
-cranelift-native = "0.130"
+cranelift-codegen = { version = "0.131", features = ["incremental-cache"] }
+cranelift-frontend = "0.131"
+cranelift-jit = "0.131"
+cranelift-module = "0.131"
+cranelift-native = "0.131"
 target-lexicon = "0.13"

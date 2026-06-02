@@ -284,8 +284,8 @@ Exécution directe avec trois modes configurables via `NdConfig` :
 - **Sequential** : boucle simple, `NDVmDecl`/`NDVmRecur` (memoization `RefCell<HashMap>`)
 - **Thread (rayon)** : parallélisme via `par_iter().map_with()`, `NDParallelDecl`/`NDParallelRecur` (memoization
   `Arc<Mutex<HashMap>>`, depth `AtomicUsize`)
-- **Process** : pool de workers Rust natifs (`catnip worker`) avec IPC bincode. Si la lambda et ses captures ne sont pas
-  freezables, fallback vers `ProcessPoolExecutor` Python avec `_worker_execute_simple`
+- **Process** : pool de workers Rust natifs (`catnip worker`) avec IPC postcard. Si la lambda et ses captures ne sont
+  pas freezables, fallback vers `ProcessPoolExecutor` Python avec `_worker_execute_simple`
 
 ```rust
 // vm/host.rs - VMHost
@@ -298,7 +298,7 @@ fn broadcast_nd_recursion(&self, py, target, lambda) -> Result<...> {
         NdMode::Process => {
             // 1. Tenter le chemin natif Rust
             if let Some(results) = self.try_native_nd_recursion(py, &elements, lambda)? {
-                return Ok(results);  // WorkerPool IPC bincode
+                return Ok(results);  // WorkerPool IPC postcard
             }
             // 2. Fallback Python ProcessPoolExecutor
         }

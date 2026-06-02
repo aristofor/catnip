@@ -160,7 +160,15 @@ impl Registry {
             TAG_STRUCT => {
                 let pat = pattern.cast::<PatternStruct>().unwrap();
                 let struct_name = pat.borrow().name.clone();
+                let variant = pat.borrow().variant.clone();
                 let fields = pat.borrow().fields.clone_ref(py);
+
+                // For union variants the runtime type name is the qualified
+                // form `"Name.Variant"` -- compare against that.
+                let expected = match variant {
+                    Some(v) => catnip_core::symbols::qualified_name(&struct_name, &v),
+                    None => struct_name,
+                };
 
                 // Check type name matches (CatnipStructProxy stores type_name directly)
                 let value_type_name: String = if let Ok(proxy) = value.bind(py).cast::<crate::vm::CatnipStructProxy>() {
@@ -168,7 +176,7 @@ impl Registry {
                 } else {
                     value.bind(py).get_type().name()?.extract()?
                 };
-                if value_type_name != struct_name {
+                if value_type_name != expected {
                     return Ok(None);
                 }
 
@@ -188,9 +196,14 @@ impl Registry {
                 let pat = pattern.cast::<PatternEnum>().unwrap();
                 let enum_name = pat.borrow().enum_name.clone();
                 let variant_name = pat.borrow().variant_name.clone();
-                // Resolve EnumName.variant via context lookup + getattr
-                let ctx = self.ctx.bind(py);
-                let enum_obj = ctx.call_method1("get_local", (enum_name.as_str(),))?;
+                // Resolve EnumName via the same path as Ref nodes (locals
+                // first, then globals). The context wrapper does not expose
+                // a `get_local` method, so we go through the dual lookup
+                // here instead.
+                let enum_obj = match self.resolve_ident_impl(py, &enum_name, false)? {
+                    Some(v) => v.into_bound(py),
+                    None => return Ok(None),
+                };
                 let variant_val = enum_obj.getattr(variant_name.as_str())?;
                 let is_equal = variant_val.eq(value.bind(py))?;
                 if is_equal { Ok(Some(Vec::new())) } else { Ok(None) }

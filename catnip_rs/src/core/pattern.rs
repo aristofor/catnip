@@ -286,31 +286,43 @@ impl PatternTuple {
 }
 
 /// Pattern that matches a struct instance and destructures its fields.
+///
+/// `variant` is `Some` when the pattern targets a union variant
+/// (`Option.Some{value}`), and `None` for plain struct patterns
+/// (`Point{x, y}`). The runtime matches against the qualified name
+/// `"{name}.{variant}"` when `variant` is set.
 #[pyclass(module = "catnip._rs", name = "PatternStruct")]
 pub struct PatternStruct {
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
     pub fields: Py<PyAny>,
+    #[pyo3(get)]
+    pub variant: Option<String>,
 }
 
 #[pymethods]
 impl PatternStruct {
     #[new]
-    #[pyo3(signature = (name=String::new(), fields=None))]
-    fn new(py: Python<'_>, name: String, fields: Option<Py<PyAny>>) -> Self {
+    #[pyo3(signature = (name=String::new(), fields=None, variant=None))]
+    fn new(py: Python<'_>, name: String, fields: Option<Py<PyAny>>, variant: Option<String>) -> Self {
         let fields = fields.unwrap_or_else(|| py.None());
-        Self { name, fields }
+        Self { name, fields, variant }
     }
 
     fn __repr__(&self) -> String {
-        format!("<PatternStruct {}>", self.name)
+        match &self.variant {
+            Some(v) => format!("<PatternStruct {}.{}>", self.name, v),
+            None => format!("<PatternStruct {}>", self.name),
+        }
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
         if let Ok(other_pattern) = other.extract::<PyRef<PatternStruct>>() {
             Python::attach(|py| {
-                Ok(self.name == other_pattern.name && self.fields.bind(py).eq(other_pattern.fields.bind(py))?)
+                Ok(self.name == other_pattern.name
+                    && self.variant == other_pattern.variant
+                    && self.fields.bind(py).eq(other_pattern.fields.bind(py))?)
             })
         } else {
             Ok(false)
@@ -321,6 +333,7 @@ impl PatternStruct {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         use std::hash::{Hash, Hasher};
         self.name.hash(&mut hasher);
+        self.variant.hash(&mut hasher);
         hasher.finish() as isize
     }
 
@@ -328,12 +341,22 @@ impl PatternStruct {
         let state = PyDict::new(py);
         state.set_item("name", &self.name)?;
         state.set_item("fields", self.fields.clone_ref(py))?;
+        // Serialize the union variant qualifier so pickle round-trips of a
+        // `Option.Some{value}` pattern don't collapse to `Option{value}`.
+        state.set_item("variant", &self.variant)?;
         Ok(state.into())
     }
 
     fn __setstate__(&mut self, _py: Python<'_>, state: &Bound<'_, PyDict>) -> PyResult<()> {
         self.name = state.get_item("name")?.unwrap().extract()?;
         self.fields = state.get_item("fields")?.unwrap().unbind();
+        // Older pickles produced before unions were added omit "variant";
+        // fall back to None in that case so they keep loading as plain
+        // struct patterns.
+        self.variant = match state.get_item("variant")? {
+            Some(v) if !v.is_none() => Some(v.extract()?),
+            _ => None,
+        };
         Ok(())
     }
 

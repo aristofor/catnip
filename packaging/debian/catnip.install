@@ -1,0 +1,4 @@
+usr/bin/catnip
+usr/share/bash-completion/completions/catnip
+usr/share/zsh/vendor-completions/_catnip
+usr/share/fish/vendor_completions.d/catnip.fish

@@ -15,12 +15,17 @@ Exemples plus costauds, à lire après les bases. Ici, on passe en mode expert.
   premiers)
 - [`09_turing_completeness.cat`](09_turing_completeness.cat) - démonstration Turing-complétude
 - [`10_enums.cat`](10_enums.cat) - types énumérés, pattern matching et machine à états
+- [`11_unions.cat`](11_unions.cat) - unions taggées (ADT) : variantes avec payload, génériques, machine à états
 
 ## Lancer
 
 ```bash
 catnip docs/examples/advanced/02_structs.cat
 catnip docs/examples/advanced/06_binary_search.cat
+
+# Le binaire standalone `catnip` (catnip-run) ne supporte pas encore les
+# unions ; lancer via le CLI Python qui passe par la PyO3 VM :
+python -m catnip docs/examples/advanced/11_unions.cat
 
 python docs/examples/advanced/11_pickle_example.py
 ```

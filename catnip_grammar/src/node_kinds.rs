@@ -8,6 +8,7 @@
 pub const SOURCE_FILE: &str = "source_file";
 pub const ASSIGNMENT: &str = "assignment";
 pub const STRUCT_STMT: &str = "struct_stmt";
+pub const STRUCT_METHOD: &str = "struct_method";
 pub const TRAIT_STMT: &str = "trait_stmt";
 pub const FOR_STMT: &str = "for_stmt";
 pub const WHILE_STMT: &str = "while_stmt";
@@ -60,6 +61,7 @@ pub const PATTERN_TUPLE: &str = "pattern_tuple";
 pub const PATTERN_STAR: &str = "pattern_star";
 pub const PATTERN_STRUCT: &str = "pattern_struct";
 pub const PATTERN_ENUM: &str = "pattern_enum";
+pub const PATTERN_ITEMS: &str = "pattern_items";
 
 // Literals & identifiers
 pub const IDENTIFIER: &str = "identifier";

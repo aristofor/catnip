@@ -534,6 +534,9 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Enum types
     m.add_class::<vm::CatnipEnumVariant>()?;
 
+    // Union types (tagged ADT)
+    m.add_class::<vm::CatnipUnionType>()?;
+
     // Struct types and method descriptors
     m.add_class::<CatnipStructProxy>()?;
     m.add_class::<CatnipStructType>()?;

@@ -1,0 +1,62 @@
+Source: catnip
+Section: devel
+Priority: optional
+Maintainer: Aristofor Kolomb <aristofor@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ python3 (>= 3.13),
+ python3-dev (>= 3.13),
+ python3-setuptools,
+ python3-wheel,
+ python3-pip,
+ python3-click,
+ help2man,
+Standards-Version: 4.7.0
+Homepage: https://catnip-lang.io
+Rules-Requires-Root: no
+
+Package: python3-catnip
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ python3 (>= 3.13),
+ python3-click,
+Description: Catnip language - Python library and extensions
+ Hybrid Rust/Python language with Tree-sitter parsing, pattern matching,
+ broadcasting, non-deterministic recursion, and a bytecode VM with JIT.
+ .
+ This package contains the Python library, Rust extensions (_rs.so, _repl.so),
+ MCP server, and dist-info metadata for plugin discovery.
+
+Package: catnip
+Architecture: any
+Depends:
+ ${misc:Depends},
+ python3-catnip (= ${binary:Version}),
+Description: Catnip language - CLI and standalone runner
+ Hybrid Rust/Python language with Tree-sitter parsing, pattern matching,
+ broadcasting, non-deterministic recursion, and a bytecode VM with JIT.
+ .
+ This package contains the catnip binary (Rust standalone runner),
+ shell completions for bash/zsh/fish, and man pages.
+
+Package: catnip-tools
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: Catnip language - REPL and LSP server
+ Interactive REPL (ratatui TUI) and Language Server Protocol server
+ for the Catnip language.
+ .
+ Binaries: catnip-repl (interactive), catnip-lsp (LSP server).
+
+Package: catnip-doc
+Architecture: all
+Recommends: catnip
+Depends:
+ ${misc:Depends},
+Description: Catnip language - documentation
+ User guide, language specification, tutorials, and examples
+ for the Catnip language.

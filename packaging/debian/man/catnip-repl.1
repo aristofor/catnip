@@ -1,0 +1,28 @@
+.TH CATNIP-REPL 1 "March 2026" "catnip-tools" "Catnip Language"
+.SH NAME
+catnip-repl \- interactive REPL for the Catnip language
+.SH SYNOPSIS
+.B catnip-repl
+.SH DESCRIPTION
+.B catnip-repl
+is a terminal-based interactive Read-Eval-Print Loop for the Catnip language.
+Built with ratatui, it provides syntax highlighting, fish-like autosuggestions,
+and tab completion.
+.PP
+The REPL can also be launched via
+.B catnip repl
+or simply
+.B catnip
+with no arguments.
+.SH ENVIRONMENT
+.TP
+.B CATNIP_OPTIMIZE
+Comma-separated optimization flags (e.g. \fBjit,tco:on\fR).
+.TP
+.B CATNIP_CACHE
+Cache control (\fBon\fR, \fBoff\fR).
+.SH SEE ALSO
+.BR catnip (1),
+.BR catnip-lsp (1)
+.SH AUTHOR
+Aristofor Kolomb <aristofor@gmail.com>

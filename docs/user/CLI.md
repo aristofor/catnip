@@ -496,12 +496,11 @@ Affiche la version de Catnip. `-V` donne la version courte, `--version` inclut l
 
 ```console
 $ catnip -V
-catnip 0.0.8
-
+catnip 0.0.9
 $ catnip --version
-catnip 0.0.8
-  commit  6e0fe146
-  build   2026-03-27-17:55:58
+catnip 0.0.9
+  commit  99bf8bc
+  build   2026-05-14-21:17:07
 ```
 
 #### `--help`
@@ -518,7 +517,7 @@ Usage: catnip [OPTIONS] [FILE] [COMMAND]
 
 Commands:
   info   Show runtime information
-  bench  Benchmark a script (run N times)
+  bench  Benchmark a script: bench [N] <FILE>
   help   Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -532,6 +531,7 @@ Options:
       --jit-threshold <JIT_THRESHOLD>  JIT threshold (number of iterations before compilation) [default: 100]
   -q, --quiet                          Suppress result display
   -b, --bench <N>                      Benchmark mode (run multiple times and show stats)
+      --policy <PROFILE>               Module policy profile name (from catnip.toml [modules.policies.<name>])
   -h, --help                           Print help
   -V, --version                        Print version
 

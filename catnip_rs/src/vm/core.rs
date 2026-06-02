@@ -4188,7 +4188,9 @@ impl VM {
                     for _ in 0..n {
                         let value = frame.pop().to_pyobject(py);
                         let key = frame.pop().to_pyobject(py);
-                        dict.set_item(key, value).ok();
+                        // Propagate hashing errors (unhashable keys, failing op_hash)
+                        // so dict literals do not silently drop entries.
+                        dict.set_item(key, value).to_vm(py)?;
                     }
                     frame.push(Value::from_owned_pyobject(dict.unbind().into_any()));
                 }
@@ -4326,6 +4328,16 @@ impl VM {
 
                     if let Some(idx) = obj.as_struct_instance_idx() {
                         let type_id = self.struct_registry.get_instance(idx).unwrap().type_id;
+                        // Refuse mutation once the instance has been hashed,
+                        // otherwise dict/set lookups would silently break.
+                        if self.struct_registry.is_frozen(idx) {
+                            let ty_name = self.struct_registry.get_type(type_id).unwrap().name.clone();
+                            decref_discard(&mut self.struct_registry, value);
+                            decref_discard(&mut self.struct_registry, obj);
+                            return Err(VMError::RuntimeError(format!(
+                                "cannot mutate '{ty_name}' after it has been hashed (used as dict/set key)"
+                            )));
+                        }
                         let ty = self.struct_registry.get_type(type_id).unwrap();
                         match ty.field_index(attr_name) {
                             Some(field_idx) => {
@@ -5765,6 +5777,74 @@ impl VM {
                     host.store_global(py, &name, val)?;
                     self.globals.insert(name, val);
                 }
+                OpCode::MakeUnion => {
+                    use crate::vm::unions::build_union_type;
+                    let const_idx = instr.arg as usize;
+                    let info_val = code.constants[const_idx];
+                    let info_py = info_val.to_pyobject(py);
+                    let info_tuple = info_py
+                        .bind(py)
+                        .cast::<PyTuple>()
+                        .map_err(|e| VMError::RuntimeError(format!("MakeUnion: bad constant: {e}")))?;
+                    if info_tuple.len() < 3 {
+                        return Err(VMError::RuntimeError(
+                            "MakeUnion: expected (name, type_params, variants) tuple".into(),
+                        ));
+                    }
+
+                    let name: String = tuple_extract(info_tuple, 0)?;
+
+                    // Type parameters tuple
+                    let type_params_obj = tuple_get(info_tuple, 1)?;
+                    let type_params_tuple = cast_tuple(&type_params_obj)?;
+                    let mut type_params: Vec<String> = Vec::new();
+                    for tp in type_params_tuple.iter() {
+                        type_params.push(tp.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?);
+                    }
+
+                    // Variants tuple: each entry is (variant_name, field_names_tuple)
+                    let variants_obj = tuple_get(info_tuple, 2)?;
+                    let variants_tuple = cast_tuple(&variants_obj)?;
+                    let mut variants: Vec<(String, Vec<String>)> = Vec::new();
+                    for variant in variants_tuple.iter() {
+                        let pair = variant
+                            .cast::<PyTuple>()
+                            .map_err(|e| VMError::RuntimeError(format!("MakeUnion: bad variant: {e}")))?;
+                        if pair.len() < 2 {
+                            return Err(VMError::RuntimeError("MakeUnion: variant tuple too small".into()));
+                        }
+                        let variant_name: String = pair
+                            .get_item(0)
+                            .and_then(|v| v.extract())
+                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let fields_any = pair
+                            .get_item(1)
+                            .map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?;
+                        let fields_tuple = fields_any
+                            .cast::<PyTuple>()
+                            .map_err(|e| VMError::RuntimeError(format!("MakeUnion: bad fields: {e}")))?;
+                        let mut field_names: Vec<String> = Vec::new();
+                        for f in fields_tuple.iter() {
+                            field_names.push(f.extract().map_err(|e: PyErr| VMError::RuntimeError(e.to_string()))?);
+                        }
+                        variants.push((variant_name, field_names));
+                    }
+
+                    let union_obj = build_union_type(py, &name, type_params, &variants)
+                        .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+
+                    let val = Value::from_owned_pyobject(union_obj.into_any());
+                    val.clone_refcount();
+                    host.store_global(py, &name, val)?;
+                    self.globals.insert(name, val);
+                    // Statement-list compilers emit PopTop after the
+                    // declaration, mirroring the AST executor where
+                    // op_union returns py.None(). Push NIL here so the
+                    // following PopTop has something to discard --
+                    // otherwise a `union { ... }\nexpr` program would
+                    // underflow the VM stack.
+                    frame.push(Value::NIL);
+                }
 
                 // --- Exception handling ---
                 OpCode::SetupExcept => {
@@ -7005,12 +7085,21 @@ fn vm_match_pattern(
 
             Ok(Some(bindings))
         }
-        VMPattern::Struct { name, field_slots } => {
+        VMPattern::Struct {
+            name,
+            variant,
+            field_slots,
+        } => {
+            let expected = match variant {
+                Some(v) => qualified_name(name, v),
+                None => name.clone(),
+            };
+
             // Native struct path: direct field access via registry
             if let Some(idx) = value.as_struct_instance_idx() {
                 let inst = registry.get_instance(idx).unwrap();
                 let ty = registry.get_type(inst.type_id).unwrap();
-                if ty.name != *name {
+                if ty.name != expected {
                     return Ok(None);
                 }
                 let mut bindings = Vec::new();
@@ -7032,7 +7121,7 @@ fn vm_match_pattern(
             // CatnipStructProxy: use type_name field, not Python class name
             if let Ok(proxy) = py_bound.cast::<crate::vm::structs::CatnipStructProxy>() {
                 let p = proxy.borrow();
-                if p.type_name != *name {
+                if p.type_name != expected {
                     return Ok(None);
                 }
                 let mut bindings = Vec::new();
@@ -7050,7 +7139,7 @@ fn vm_match_pattern(
 
             // Generic Python object path
             let value_type_name: String = py_bound.get_type().name()?.extract()?;
-            if value_type_name != *name {
+            if value_type_name != expected {
                 return Ok(None);
             }
 
@@ -8195,6 +8284,7 @@ mod tests {
             // slots 0=x, 1=y
             code.patterns = vec![VMPattern::Struct {
                 name: "Point".into(),
+                variant: None,
                 field_slots: vec![("x".into(), 0), ("y".into(), 1)],
             }];
             code.nlocals = 2;
@@ -8214,6 +8304,7 @@ mod tests {
             code2.constants = vec![instance];
             code2.patterns = vec![VMPattern::Struct {
                 name: "Point".into(),
+                variant: None,
                 field_slots: vec![("x".into(), 0), ("y".into(), 1)],
             }];
             code2.nlocals = 2;
@@ -8241,6 +8332,7 @@ mod tests {
             code.constants = vec![instance];
             code.patterns = vec![VMPattern::Struct {
                 name: "Vec2".into(),
+                variant: None,
                 field_slots: vec![("x".into(), 0), ("y".into(), 1)],
             }];
             code.nlocals = 2;
@@ -8266,6 +8358,7 @@ mod tests {
             code.constants = vec![instance];
             code.patterns = vec![VMPattern::Struct {
                 name: "Point".into(),
+                variant: None,
                 field_slots: vec![("x".into(), 0), ("z".into(), 1)],
             }];
             code.nlocals = 2;

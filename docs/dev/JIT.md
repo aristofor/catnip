@@ -163,7 +163,7 @@ flowchart TD
    constant pool (valeurs NaN-boxed), cachée dans un `OnceLock<u64>` pour éviter le recalcul. Le hash est mis à jour
    dans le JIT executor à chaque Call (nouveau frame) et restauré sur Return.
 
-1. **Stockage** : les traces sont sérialisées en bincode dans `~/.cache/catnip/` (fichiers plats). Clé :
+1. **Stockage** : les traces sont sérialisées en postcard dans `~/.cache/catnip/` (fichiers plats). Clé :
    `jit_v{VERSION}_{HASH:016x}_{OFFSET:06x}`.
 
 1. **Warm-start** : au premier passage d'une boucle, la VM vérifie le cache disque *avant* de compter les itérations. Si

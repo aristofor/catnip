@@ -91,6 +91,9 @@ pub enum IR {
     PatternTuple(Vec<IR>),
     PatternStruct {
         name: String,
+        /// Optional variant qualifier for union variants (`Option.Some{...}`).
+        /// `None` for plain struct patterns (`Point{...}`).
+        variant: Option<String>,
         fields: Vec<String>,
     },
     PatternEnum {
@@ -324,8 +327,8 @@ impl IR {
             IR::PatternTuple(pats) => {
                 json!({"pat_tuple": pats.iter().map(|p| p.to_compact_value()).collect::<Vec<_>>()})
             }
-            IR::PatternStruct { name, fields } => {
-                json!({"pat_struct": {"name": name, "fields": fields}})
+            IR::PatternStruct { name, variant, fields } => {
+                json!({"pat_struct": {"name": name, "variant": variant, "fields": fields}})
             }
             IR::PatternEnum {
                 enum_name,

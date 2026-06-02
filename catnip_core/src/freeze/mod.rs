@@ -1,8 +1,8 @@
 // FILE: catnip_core/src/freeze/mod.rs
 //! Binary freeze/thaw for Catnip IR and data values.
 //!
-//! Format `.catf`: fixed header + bincode v2 payload.
-//! Header is manually serialized (stable across bincode versions).
+//! Format `.catf`: fixed header + postcard payload.
+//! Header is manually serialized.
 //! Stale files (opcode mismatch) are silently rejected, not errors.
 
 pub mod value;
@@ -20,7 +20,7 @@ pub const KIND_CODE: u8 = 0;
 pub const KIND_DATA: u8 = 1;
 
 /// Bump when serialization semantics change without modifying the opcode enum.
-const FORMAT_SALT: u32 = 1;
+const FORMAT_SALT: u32 = 2;
 
 const FLAG_HAS_SOURCE_HASH: u8 = 1;
 
@@ -138,26 +138,23 @@ fn read_header(data: &[u8]) -> Result<HeaderInfo, FreezeError> {
     })
 }
 
-// -- Raw bincode (no header) --
+// -- Raw payload (no header) --
 // Used for transport (IPC workers, in-memory). No `.catf` header overhead.
 
-/// Encode any serializable value to bincode bytes.
+/// Encode any serializable value to postcard bytes.
 pub fn encode<T: serde::Serialize + ?Sized>(val: &T) -> Result<Vec<u8>, FreezeError> {
-    bincode::serde::encode_to_vec(val, bincode::config::standard())
-        .map_err(|e| FreezeError::SerializationError(e.to_string()))
+    postcard::to_allocvec(val).map_err(|e| FreezeError::SerializationError(e.to_string()))
 }
 
-/// Decode bincode bytes to a value.
+/// Decode postcard bytes to a value.
 pub fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, FreezeError> {
-    let (val, _): (T, _) = bincode::serde::decode_from_slice(data, bincode::config::standard())
-        .map_err(|e| FreezeError::SerializationError(e.to_string()))?;
-    Ok(val)
+    postcard::from_bytes(data).map_err(|e| FreezeError::SerializationError(e.to_string()))
 }
 
-// -- .catf file format (header + bincode payload) --
+// -- .catf file format (header + postcard payload) --
 // Used for disk persistence (cache, memoization). Header enables stale detection.
 
-/// Freeze IR code to `.catf` binary (header + bincode).
+/// Freeze IR code to `.catf` binary (header + postcard).
 pub fn freeze_code(ir: &[IR], source: &str, level: u8) -> Result<Vec<u8>, FreezeError> {
     let source_hash = xxhash_rust::xxh64::xxh64(source.as_bytes(), 0);
     let mut buf = Vec::new();
@@ -185,7 +182,7 @@ pub fn thaw_code(data: &[u8]) -> Result<ThawResult, FreezeError> {
     })
 }
 
-/// Freeze a value to `.catf` binary (header + bincode).
+/// Freeze a value to `.catf` binary (header + postcard).
 pub fn freeze_data(value: &FrozenValue) -> Result<Vec<u8>, FreezeError> {
     let mut buf = Vec::new();
     write_header(&mut buf, KIND_DATA, None, 0);
@@ -252,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_encode_array_vs_vec_differ() {
-        // bincode 2 encodes [T; N] without length prefix (size known at compile time)
+        // postcard encodes [T; N] without length prefix (size known at compile time)
         // but Vec<T> with a varint length prefix. Always use Vec for decode::<Vec<T>> compat.
         let ir = vec![IR::Identifier("n".into())];
         let bytes_vec = encode(&ir).unwrap();

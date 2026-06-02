@@ -176,19 +176,22 @@ supportées :
 - **Pas d'héritage** : pas de `extends` pour les enums
 - **Pas de traits** : pas de `implements` pour les enums
 
-## Enum vs Struct
+## Enum vs Struct vs Union
 
-| Propriété        | `enum`                 | `struct`                 |
-| ---------------- | ---------------------- | ------------------------ |
-| Contenu          | Variantes nommées      | Champs typés             |
-| Instanciation    | `Color.red`            | `Point(1, 2)`            |
-| Mutation         | Non (valeur fixe)      | Oui (`p.x = 5`)          |
-| Méthodes         | Non                    | Oui                      |
-| Héritage         | Non                    | Oui (`extends`)          |
-| Traits           | Non                    | Oui (`implements`)       |
-| Pattern matching | `Color.red => { ... }` | `Point{x, y} => { ... }` |
-| Egalité          | Même variante = égal   | Même champs = égal       |
-| Truthiness       | Toujours truthy        | Toujours truthy          |
+| Propriété        | `enum`                 | `struct`                 | `union`                          |
+| ---------------- | ---------------------- | ------------------------ | -------------------------------- |
+| Contenu          | Variantes nullaires    | Champs typés             | Variantes avec/sans payload      |
+| Instanciation    | `Color.red`            | `Point(1, 2)`            | `Option.Some(42)`, `Option.None` |
+| Mutation         | Non (valeur fixe)      | Oui (`p.x = 5`)          | Non (variante figée)             |
+| Méthodes         | Non                    | Oui                      | Pas encore                       |
+| Héritage         | Non                    | Oui (`extends`)          | Non                              |
+| Traits           | Non                    | Oui (`implements`)       | Non                              |
+| Pattern matching | `Color.red => { ... }` | `Point{x, y} => { ... }` | `Option.Some{value} => { ... }`  |
+| Égalité          | Même variante = égal   | Même champs = égal       | Variante + champs structurels    |
+| Truthiness       | Toujours truthy        | Toujours truthy          | Toujours truthy                  |
 
-> Les enums sont des constantes nommées avec un type. Les structs sont des conteneurs avec des champs. Les deux se
-> matchent, mais l'un bouge et l'autre pas.
+> Les enums sont des constantes nommées avec un type. Les structs sont des conteneurs avec des champs. Les unions
+> mélangent les deux : un ensemble fini de constructeurs, chacun pouvant porter sa propre charge utile.
+
+Critère pratique : `enum` pour des constantes nommées, `union` pour une forme de donnée qui peut transporter une charge
+utile. Voir [UNIONS](UNIONS.md) pour la référence complète.

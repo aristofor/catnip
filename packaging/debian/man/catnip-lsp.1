@@ -1,0 +1,24 @@
+.TH CATNIP-LSP 1 "March 2026" "catnip-tools" "Catnip Language"
+.SH NAME
+catnip-lsp \- Language Server Protocol server for Catnip
+.SH SYNOPSIS
+.B catnip-lsp
+.RB [ \-\-stdio ]
+.SH DESCRIPTION
+.B catnip-lsp
+is an LSP server for the Catnip language, built with tower-lsp in Rust.
+It provides diagnostics, formatting, and rename support to editors that
+speak the Language Server Protocol.
+.PP
+The server communicates over stdio by default and can be launched by editors
+automatically or via
+.B catnip lsp\fR.
+.SH OPTIONS
+.TP
+.B \-\-stdio
+Use stdio for communication (default).
+.SH SEE ALSO
+.BR catnip (1),
+.BR catnip-repl (1)
+.SH AUTHOR
+Aristofor Kolomb <aristofor@gmail.com>

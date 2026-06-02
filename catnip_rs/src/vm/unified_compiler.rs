@@ -764,6 +764,7 @@ impl UnifiedCompiler {
             IROpCode::OpStruct => self.compile_struct(py, args),
             IROpCode::TraitDef => self.compile_trait(py, args),
             IROpCode::EnumDef => self.compile_enum(py, args),
+            IROpCode::UnionDef => self.compile_union(py, args),
 
             IROpCode::OpTry => self.compile_try(py, args),
             IROpCode::OpRaise => self.compile_raise(py, args),
@@ -2163,6 +2164,84 @@ impl UnifiedCompiler {
         Ok(())
     }
 
+    // ========== 15c. Union definition ==========
+
+    /// Compile a `UnionDef(name, type_params, variants)` IR node.
+    ///
+    /// Builds a Python tuple `(name, type_params_tuple, variants_tuple)`
+    /// where each variant in `variants_tuple` is itself a tuple
+    /// `(variant_name, field_names_tuple)`. The tuple is stored as a
+    /// single constant, referenced by `MakeUnion`'s argument.
+    fn compile_union<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
+        if args.len() < 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "UnionDef: expected (name, type_params, variants)",
+            ));
+        }
+
+        let name = args[0].as_name(py).unwrap_or_default();
+
+        // Type parameters: list of identifier strings.
+        let type_param_nodes = args[1].children(py)?;
+        let mut type_param_strs: Vec<Bound<'py, PyAny>> = Vec::new();
+        for tp in &type_param_nodes {
+            let s = tp.as_name(py).unwrap_or_default();
+            type_param_strs.push(s.into_pyobject(py)?.into_any());
+        }
+        let type_params_tuple = PyTuple::new(py, &type_param_strs)?;
+
+        // Variants: each is (variant_name, fields_list).
+        let variant_nodes = args[2].children(py)?;
+        let mut variant_tuples: Vec<Bound<'py, PyAny>> = Vec::new();
+        for variant in &variant_nodes {
+            let variant_children = variant.children(py)?;
+            if variant_children.len() < 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "UnionDef: variant must be (name, fields)",
+                ));
+            }
+            let variant_name = variant_children[0].as_name(py).unwrap_or_default();
+
+            // Fields: each field is (field_name, type_text_or_none); we
+            // only need the field name at runtime.
+            let field_nodes = variant_children[1].children(py)?;
+            let mut field_name_strs: Vec<Bound<'py, PyAny>> = Vec::new();
+            for field in &field_nodes {
+                let field_children = field.children(py)?;
+                let fname = if field_children.is_empty() {
+                    field.as_name(py).unwrap_or_default()
+                } else {
+                    field_children[0].as_name(py).unwrap_or_default()
+                };
+                field_name_strs.push(fname.into_pyobject(py)?.into_any());
+            }
+            let fields_tuple = PyTuple::new(py, &field_name_strs)?;
+
+            let variant_tuple = PyTuple::new(
+                py,
+                &[
+                    variant_name.as_str().into_pyobject(py)?.into_any().as_any().clone(),
+                    fields_tuple.into_any(),
+                ],
+            )?;
+            variant_tuples.push(variant_tuple.into_any());
+        }
+        let variants_tuple = PyTuple::new(py, &variant_tuples)?;
+
+        let union_info = PyTuple::new(
+            py,
+            &[
+                name.as_str().into_pyobject(py)?.into_any().as_any().clone(),
+                type_params_tuple.into_any(),
+                variants_tuple.into_any(),
+            ],
+        )?;
+
+        let idx = self.add_const_pyobj(py, &union_info.into_any());
+        self.emit(VMOpCode::MakeUnion, idx as u32);
+        Ok(())
+    }
+
     // ========== 16. ND operations ==========
 
     fn compile_nd_recursion<'py>(&mut self, py: Python<'py>, args: &[CompilerNode<'py>]) -> PyResult<()> {
@@ -2712,7 +2791,7 @@ impl UnifiedCompiler {
                 }
                 Ok(Some(VMPattern::Tuple(elements)))
             }
-            IR::PatternStruct { name, fields } => {
+            IR::PatternStruct { name, variant, fields } => {
                 let mut field_slots = Vec::new();
                 for field_name in fields {
                     let slot = self.add_local(field_name);
@@ -2720,6 +2799,7 @@ impl UnifiedCompiler {
                 }
                 Ok(Some(VMPattern::Struct {
                     name: name.clone(),
+                    variant: variant.clone(),
                     field_slots,
                 }))
             }
@@ -2806,6 +2886,7 @@ impl UnifiedCompiler {
             TAG_STRUCT => {
                 let pat = pattern.cast::<PatternStruct>().unwrap();
                 let struct_name = pat.borrow().name.clone();
+                let variant = pat.borrow().variant.clone();
                 let fields_obj = pat.borrow().fields.clone_ref(py);
                 let mut field_slots = Vec::new();
                 for field_result in fields_obj.bind(py).try_iter()? {
@@ -2815,6 +2896,7 @@ impl UnifiedCompiler {
                 }
                 Ok(Some(VMPattern::Struct {
                     name: struct_name,
+                    variant,
                     field_slots,
                 }))
             }

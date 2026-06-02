@@ -92,6 +92,11 @@ Tag 3 (Symbol) stocke un symbol_id interné. Les enum variants utilisent ce tag 
 `"EnumName.variant"` dans la `SymbolTable`, et la `PureEnumRegistry` mappe symbol_id vers (type_id, variant_id) pour le
 dispatch `match` et `GetAttr`. Opcode `MakeEnum` (89) enregistre un type enum et ses variantes dans les registres.
 
+Opcode `MakeUnion` (98) matérialise un type somme : variantes nullaires en `CatnipEnumVariant` (réutilise tag 3),
+variantes avec payload en `CatnipStructType` au nom qualifié `"Union.Variant"`. Le `CatnipUnionType` est un objet Python
+qui expose les variantes via `__getattr__`. Le handler PyO3 réutilise `build_union_type` (partagé avec `op_union` côté
+AST) ; la PureVM standalone rejette explicitement (pas de support Python embarqué pour les CatnipUnionType).
+
 Tags 5, 8-14 sont définis dans `catnip_vm` (VM pure Rust, sans PyO3). Tag 5 (Struct) utilise un index dans
 `PureStructRegistry` avec refcount explicite (pas Arc). Tag 14 (StructType) est un type callable pour la construction.
 Les types mutables (List, Dict, Set) utilisent `RefCell` pour la mutabilité single-threaded. Les types immutables
@@ -153,6 +158,19 @@ aliasing avec les accès thread-local `*const`. Les pointeurs thread-local (Stru
 sauvegardés/restaurés dans `PyRustVM::execute()` et dans `VMFunction::__call__` (mode standalone) pour gérer les appels
 VM réentrants. `Executor` implémente `Drop` pour nettoyer ces pointeurs, évitant les dangling references après
 exécution. `FunctionTable::get()` retourne `Option` : les accès invalides produisent un `VMError` au lieu d'un panic.
+
+**Freeze-on-hash** : `InstanceSlot` porte aussi un `frozen: AtomicBool`. `CatnipStructProxy::__hash__` set ce bit (via
+`struct_registry_freeze()`) avant de retourner la valeur. L'opcode `SetAttr` consulte `is_frozen(idx)` avant toute
+écriture de champ et lève `cannot mutate '<type>' after it has been hashed` si vrai. Le proxy lui-même consulte le même
+bit dans `__setattr__` (cohérence avec la mutation côté Python via le proxy). Le but est de préserver l'invariant Python
+`a == b ⇒ hash(a) == hash(b)` pour les structs utilisés comme clés `dict`/`set` : sans freeze, muter un champ après
+insertion changerait le hash et casserait silencieusement les lookups. Le flag est propagé dans les deux sens de la
+frontière : `instance_to_pyobject()` initialise le proxy avec `is_frozen(idx)` (un struct hashé puis retourné à Python
+reste figé même après teardown du registry), et `Value::from_pyobject()` appelle `registry.freeze(idx)` quand un proxy
+`frozen=true` revient dans la VM (slot existant ou orphan re-registered), pour empêcher `SetAttr` de muter derrière le
+proxy. Le retour de `__hash__` est `isize` (Py_hash_t) : un `op_hash` user-defined peut retourner une valeur signée,
+incluant les négatives. `BuildDict` propage maintenant les erreurs de `dict.set_item` (avec `to_vm(py)?` au lieu de
+`.ok()`) pour que `{Box(1): "x"}` lève la même erreur que `d = dict(); d[Box(1)] = "x"` quand la clé est unhashable.
 
 **Réentrance standalone** : quand un callback Catnip (lambda capturant des variables) est appelé depuis Python (ex:
 `fold` appelle un lambda), `VMFunction::__call__` crée un VM temporaire. Deux mécanismes assurent la continuité :
@@ -301,7 +319,7 @@ trois modes via `NdMode` :
 - **Thread** (rayon) : `par_iter().map_with()`, GIL relâché (`py.detach`), chaque thread rayon re-acquiert le GIL
   (`Python::attach`), reçoit un snapshot indépendant des globals, et exécute le lambda ND avec `NDParallelDecl`
   (Send+Sync, cache `Arc<Mutex>`, depth `AtomicUsize`)
-- **Process** : pool persistant de workers Rust natifs (`catnip worker`) communicant via IPC bincode (length-prefixed
+- **Process** : pool persistant de workers Rust natifs (`catnip worker`) communicant via IPC postcard (length-prefixed
   sur stdin/stdout). Si la lambda a un `encoded_ir` et que captures + seeds sont freezables, le `WorkerPool` distribue
   en round-robin sans passer par Python. Sinon, fallback transparent vers `ProcessPoolExecutor` avec
   `_worker_execute_simple`. Le pool est lazy-init au premier appel process et persiste pour la durée de vie du `VMHost`

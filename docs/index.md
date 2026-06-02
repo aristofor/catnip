@@ -1,6 +1,6 @@
 # Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
-version <!-- catnip:version -->0.0.8<!-- /catnip:version -->
+version <!-- catnip:version -->0.0.9<!-- /catnip:version -->
 
 Né comme langage de script embarquable pour Python.
 
@@ -10,7 +10,7 @@ conception.
 <!-- doc-snapshot: index/repl-ieee754 -->
 
 ```console
-Catnip REPL v0.0.8
+Catnip REPL v0.0.9
 Type /help for help, /exit to quit
 ▸ 0.1 + 0.2
 0.30000000000000004
@@ -27,7 +27,6 @@ Type /help for help, /exit to quit
 
 Encore un brouillon, moins sale.
 
-- Lib `http` à compléter (`start`/`stop`…)
 - Refonte du `codex` → side project
 - Un minimum de packaging
 
@@ -92,6 +91,13 @@ Apprendre et utiliser Catnip.
 - [CONFIG](user/CONFIG.md) - Configuration hiérarchique et overrides par mode
 - [MODULE_LOADING](user/MODULE_LOADING.md) - Charger des modules Python
 
+## Loot
+
+Modules stdlib natifs **[libs/](libs/)**
+
+- [libs/index](libs/index.md) - Vue d'ensemble des modules livrés (`http`, `io`, `sys`)
+- [http](libs/http.md) - Client HTTP, serveur léger, streaming chunked + SSE, multipart, cookies
+
 ## Structure
 
 Spécification **[lang/](lang/)**
@@ -130,7 +136,6 @@ Exemples **[examples/](examples/)**
 - [cfg/](examples/cfg/) - Control Flow Graph (analyse et optimisations)
 - [module-loading/](examples/module-loading/) - Chargement de modules (bases)
 - [run/](examples/run/) - Exemples standalone (CLI)
-- [codex/](codex/) - Exemples thématiques (écosystème Python)
 - [advanced/](examples/advanced/) - Techniques avancées
 - [embedding/](examples/embedding/) - Embedding Catnip dans Python
 - [tools/](examples/tools/) - Utilisation des outils
@@ -138,17 +143,8 @@ Exemples **[examples/](examples/)**
 
 ## Écosystème
 
-Exemples thématiques utilisant les libs Python. **[codex/](codex/)**
-
-- [files-formats/](codex/files-formats/) - Fichiers, formats et parsing
-- [data-analytics/](codex/data-analytics/) - Data science et analytics
-- [web/](codex/web/) - HTTP et APIs
-- [images-media/](codex/images-media/) - Images et multimédia
-- [geospatial/](codex/geospatial/) - Données raster, distance et Sentinel-2
-- [geometry/](codex/geometry/) - Géométrie algorithmique 2D
-- [symbolic-graphs/](codex/symbolic-graphs/) - Calcul symbolique et graphes (SymPy, NetworkX)
-- [visualization/](codex/visualization/) - Dashboards et visualisation
-- [utils/](codex/utils/) - Utilitaires Python réutilisables
+Les exemples d'intégration de l'écosystème Python (numpy, polars, duckdb, geopandas, networkx, …) forment le **Codex**,
+désormais un side project autonome dont les sources vivent dans `codex/` à la racine du dépôt.
 
 ## Cœur
 

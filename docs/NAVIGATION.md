@@ -48,6 +48,15 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+## Loot
+
+**[libs/](libs/)**
+
+- [libs/index](libs/index.md)
+- [http](libs/http.md)
+
+______________________________________________________________________
+
 ## Structure
 
 **[lang/](lang/)**
@@ -86,7 +95,6 @@ ______________________________________________________________________
 - [cfg/](examples/cfg/)
 - [module-loading/](examples/module-loading/)
 - [run/](examples/run/)
-- [codex/](codex/)
 - [advanced/](examples/advanced/)
 - [embedding/](examples/embedding/)
 - [tools/](examples/tools/)
@@ -95,18 +103,6 @@ ______________________________________________________________________
 ______________________________________________________________________
 
 ## Écosystème
-
-**[codex/](codex/)**
-
-- [files-formats/](codex/files-formats/)
-- [data-analytics/](codex/data-analytics/)
-- [web/](codex/web/)
-- [images-media/](codex/images-media/)
-- [geospatial/](codex/geospatial/)
-- [geometry/](codex/geometry/)
-- [symbolic-graphs/](codex/symbolic-graphs/)
-- [visualization/](codex/visualization/)
-- [utils/](codex/utils/)
 
 ______________________________________________________________________
 

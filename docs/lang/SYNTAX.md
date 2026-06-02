@@ -195,6 +195,42 @@ Voir [ENUMS](ENUMS.md) pour la référence complète.
 
 ______________________________________________________________________
 
+## Unions taggées
+
+Le mot-clé `union` déclare un type somme : variantes nommées avec ou sans charge utile.
+
+```catnip
+union Option { Some(value); None; }
+
+x = Option.Some(42)
+y = Option.None
+```
+
+Les variantes avec payload portent des champs typés optionnels (génériques aussi optionnels) :
+
+```catnip
+union Result[T, E] {
+    Ok(value: T);
+    Err(error: E);
+}
+```
+
+Les annotations de type et paramètres génériques sont parsés mais non encore vérifiés au runtime. Le pattern matching
+utilise `Union.Variant{field}` pour les variantes avec payload, `Union.Variant` pour les nullaires :
+
+<!-- check: no-check -->
+
+```catnip
+match opt {
+    Option.Some{value} => { value }
+    Option.None => { 0 }
+}
+```
+
+Voir [UNIONS](UNIONS.md) pour la référence complète.
+
+______________________________________________________________________
+
 ## Gestion d'erreurs
 
 ### try/except/finally

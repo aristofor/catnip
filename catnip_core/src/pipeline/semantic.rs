@@ -16,6 +16,8 @@ use super::diagnostic::{AnalysisResult, SemanticDiagnostic, SemanticSeverity};
 #[derive(Debug, Clone, PartialEq)]
 enum InferredType {
     Enum(String),
+    /// Tagged union (ADT) -- name of the union type
+    Union(String),
     Bool,
 }
 
@@ -29,6 +31,11 @@ pub struct SemanticAnalyzer {
     tco_enabled: bool,
     /// Known enum definitions: name -> variant names
     enum_defs: HashMap<String, HashSet<String>>,
+    /// Known union (ADT) definitions: name -> { variant_name -> has_payload }.
+    /// `has_payload = false` means the variant matches as a `pattern_enum`
+    /// (`Option.None`); `true` means it requires `pattern_struct`
+    /// (`Option.Some{...}`).
+    union_defs: HashMap<String, HashMap<String, bool>>,
     /// Variable type bindings
     var_types: HashMap<String, InferredType>,
     /// Non-fatal diagnostics collected during analysis
@@ -43,6 +50,7 @@ impl SemanticAnalyzer {
             optimizer: None,
             tco_enabled: true,
             enum_defs: HashMap::new(),
+            union_defs: HashMap::new(),
             var_types: HashMap::new(),
             diagnostics: Vec::new(),
         }
@@ -55,6 +63,7 @@ impl SemanticAnalyzer {
             optimizer: Some(PureOptimizer::new()),
             tco_enabled: true,
             enum_defs: HashMap::new(),
+            union_defs: HashMap::new(),
             var_types: HashMap::new(),
             diagnostics: Vec::new(),
         }
@@ -73,6 +82,7 @@ impl SemanticAnalyzer {
     /// Full analysis returning IR + non-fatal diagnostics
     pub fn analyze_full(&mut self, ir: &IR) -> Result<AnalysisResult, String> {
         self.enum_defs.clear();
+        self.union_defs.clear();
         self.var_types.clear();
         self.diagnostics.clear();
 
@@ -724,6 +734,7 @@ impl SemanticAnalyzer {
             IROpCode::Globals,
             IROpCode::Locals,
             IROpCode::EnumDef,
+            IROpCode::UnionDef,
             IROpCode::OpTry,
             IROpCode::OpRaise,
             IROpCode::ExcInfo,
@@ -755,12 +766,40 @@ impl SemanticAnalyzer {
                 }
             }
 
+            // Register union definitions
+            // IR layout: UnionDef(name, type_params_list, variants_list)
+            // where each variant is Tuple([variant_name, fields_list]).
+            // A variant has a payload iff its fields_list is non-empty.
+            IR::Op { opcode, args, .. } if *opcode == IROpCode::UnionDef => {
+                if let (Some(IR::String(name)), Some(IR::List(variants))) = (args.first(), args.get(2)) {
+                    let variants_map: HashMap<String, bool> = variants
+                        .iter()
+                        .filter_map(|v| match v {
+                            IR::Tuple(parts) if parts.len() >= 2 => {
+                                let vname = match parts.first() {
+                                    Some(IR::String(s)) => s.clone(),
+                                    _ => return None,
+                                };
+                                let has_payload = match &parts[1] {
+                                    IR::List(fields) => !fields.is_empty(),
+                                    _ => false,
+                                };
+                                Some((vname, has_payload))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    self.union_defs.insert(name.clone(), variants_map);
+                }
+            }
+
             // Track variable types from assignments
             IR::Op { opcode, args, .. } if *opcode == IROpCode::SetLocals => {
                 if args.len() >= 2 {
                     if let Some(name) = Self::extract_single_assign_name(&args[0]) {
-                        // If name shadows an enum, invalidate the enum def
+                        // Shadow: invalidate any enum/union def with the same name
                         self.enum_defs.remove(&name);
+                        self.union_defs.remove(&name);
                         if let Some(ty) = self.infer_type(&args[1]) {
                             self.var_types.insert(name, ty);
                         } else {
@@ -787,19 +826,26 @@ impl SemanticAnalyzer {
                 }
             }
 
-            // Scope isolation for lambdas/functions: save/restore var_types + enum_defs
+            // Scope isolation for lambdas/functions: save/restore var_types + enum/union defs
             // and clear parameter names that shadow outer bindings
             IR::Op {
                 opcode, args, kwargs, ..
             } if *opcode == IROpCode::OpLambda || *opcode == IROpCode::FnDef => {
                 let saved_vars = self.var_types.clone();
                 let saved_enums = self.enum_defs.clone();
-                // Clear parameter names from var_types so outer bindings don't leak
+                let saved_unions = self.union_defs.clone();
+                // Clear parameter names from var_types so outer bindings don't leak.
+                // Parameters also shadow any enum/union namespace of the same name,
+                // so we drop those defs while analyzing the body -- otherwise
+                // `infer_type` would still treat e.g. `(Option) => match Option.None`
+                // as a union scrutinee.
                 if let Some(IR::Tuple(params) | IR::List(params)) = args.first() {
                     for param in params {
                         if let IR::Tuple(pair) = param {
                             if let Some(IR::String(name)) = pair.first() {
                                 self.var_types.remove(name);
+                                self.enum_defs.remove(name);
+                                self.union_defs.remove(name);
                             }
                         }
                     }
@@ -812,6 +858,7 @@ impl SemanticAnalyzer {
                 }
                 self.var_types = saved_vars;
                 self.enum_defs = saved_enums;
+                self.union_defs = saved_unions;
             }
 
             // Scope isolation for control flow: restore var_types before each
@@ -821,9 +868,11 @@ impl SemanticAnalyzer {
             } if *opcode == IROpCode::OpIf || *opcode == IROpCode::OpWhile || *opcode == IROpCode::OpFor => {
                 let saved_vars = self.var_types.clone();
                 let saved_enums = self.enum_defs.clone();
+                let saved_unions = self.union_defs.clone();
                 for arg in args {
                     self.var_types = saved_vars.clone();
                     self.enum_defs = saved_enums.clone();
+                    self.union_defs = saved_unions.clone();
                     self.check_exhaustiveness(arg);
                 }
                 for (_, v) in kwargs {
@@ -831,6 +880,7 @@ impl SemanticAnalyzer {
                 }
                 self.var_types = saved_vars;
                 self.enum_defs = saved_enums;
+                self.union_defs = saved_unions;
             }
 
             // Recurse into other node types
@@ -866,13 +916,31 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Infer the type of an expression (minimal: enum access, bool literal, var ref)
+    /// Infer the type of an expression (minimal: enum/union access, bool
+    /// literal, var ref, call on union variant).
     fn infer_type(&self, expr: &IR) -> Option<InferredType> {
         match expr {
+            // `Color.red`, `Option.None` -- attribute access on a known type
             IR::Op { opcode, args, .. } if *opcode == IROpCode::GetAttr => {
                 if let Some(IR::Ref(name, _, _)) = args.first() {
                     if self.enum_defs.contains_key(name) {
                         return Some(InferredType::Enum(name.clone()));
+                    }
+                    if self.union_defs.contains_key(name) {
+                        return Some(InferredType::Union(name.clone()));
+                    }
+                }
+                None
+            }
+            // `Option.Some(42)` -- call on a union variant constructor
+            IR::Call { func, .. } => {
+                if let IR::Op { opcode, args, .. } = func.as_ref() {
+                    if *opcode == IROpCode::GetAttr {
+                        if let Some(IR::Ref(name, _, _)) = args.first() {
+                            if self.union_defs.contains_key(name) {
+                                return Some(InferredType::Union(name.clone()));
+                            }
+                        }
                     }
                 }
                 None
@@ -912,6 +980,7 @@ impl SemanticAnalyzer {
 
         let is_exhaustive = match &scrutinee_type {
             Some(InferredType::Enum(enum_name)) => self.check_enum_exhaustive(&patterns, enum_name),
+            Some(InferredType::Union(union_name)) => self.check_union_exhaustive(&patterns, union_name),
             Some(InferredType::Bool) => Self::check_bool_exhaustive(&patterns),
             None => false, // unknown type: never suppress
         };
@@ -930,6 +999,20 @@ impl SemanticAnalyzer {
                         )
                     } else {
                         format!("Non-exhaustive match on enum '{}'", name)
+                    }
+                }
+                Some(InferredType::Union(name)) => {
+                    let covered = self.collect_union_variants(&patterns, name);
+                    if let Some(all) = self.union_defs.get(name) {
+                        let mut missing: Vec<String> = all.keys().filter(|v| !covered.contains(*v)).cloned().collect();
+                        missing.sort();
+                        format!(
+                            "Non-exhaustive match on union '{}'; missing: {}",
+                            name,
+                            missing.join(", ")
+                        )
+                    } else {
+                        format!("Non-exhaustive match on union '{}'", name)
                     }
                 }
                 Some(InferredType::Bool) => {
@@ -1016,6 +1099,62 @@ impl SemanticAnalyzer {
                 if en == enum_name {
                     covered.insert(vn.clone());
                 }
+            }
+        }
+        covered
+    }
+
+    fn check_union_exhaustive(&self, patterns: &[IR], union_name: &str) -> bool {
+        let all_variants = match self.union_defs.get(union_name) {
+            Some(vs) => vs,
+            None => return false,
+        };
+        let covered = self.collect_union_variants(patterns, union_name);
+        all_variants.keys().all(|v| covered.contains(v))
+    }
+
+    /// Collect variant names covered by a set of patterns on a union scrutinee.
+    ///
+    /// Two pattern shapes can target a union variant:
+    /// - Nullary variants use `pattern_enum` (`Option.None`). A `pattern_enum`
+    ///   pointing at a payload-bearing variant never matches at runtime, so we
+    ///   refuse to count it as coverage -- otherwise `Option.Some` (no braces)
+    ///   would suppress exhaustiveness warnings for `Option.Some(1)`.
+    /// - Payload-bearing variants use the qualified `pattern_struct`
+    ///   (`Option.Some{value}`), distinguished by its `variant` field.
+    fn collect_union_variants(&self, patterns: &[IR], union_name: &str) -> HashSet<String> {
+        let variants = self.union_defs.get(union_name);
+        let mut covered = HashSet::new();
+        for pat in patterns {
+            match pat {
+                IR::PatternEnum {
+                    enum_name: en,
+                    variant_name: vn,
+                } if en == union_name => {
+                    // Only count if the variant is actually nullary; a
+                    // bare `Option.Some` against a payload variant is dead.
+                    if let Some(v) = variants {
+                        if v.get(vn) == Some(&false) {
+                            covered.insert(vn.clone());
+                        }
+                    }
+                }
+                IR::PatternStruct {
+                    name,
+                    variant: Some(vn),
+                    ..
+                } if name == union_name => {
+                    // PatternStruct with payload-fields covers any variant
+                    // that exists on the union (nullary or not). The
+                    // matcher uses the qualified name lookup so even a
+                    // zero-field `Option.None{}` resolves cleanly.
+                    if let Some(v) = variants {
+                        if v.contains_key(vn) {
+                            covered.insert(vn.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         covered

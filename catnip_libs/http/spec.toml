@@ -1,10 +1,10 @@
 [module]
 name = "http"
-version = "0.1.0"
-description = "Micro HTTP server built on tiny_http"
+version = "0.2.0"
+description = "Micro HTTP server (tiny_http) and client (ureq)"
 
 [exports]
-symbols = ["PROTOCOL", "VERSION", "Server", "Request", "serve"]
+symbols = ["PROTOCOL", "VERSION", "Server", "Request", "Response", "Chunked", "serve", "get", "post", "put", "delete", "request", "basic_auth", "bearer"]
 
 [exports.Server]
 signature = "(addr: str) -> Server"
@@ -24,7 +24,15 @@ description = "Block up to `seconds` for a request (GIL released)"
 
 [exports.Server.close]
 signature = "() -> nil"
-description = "Stop accepting connections, unblock pending recv()"
+description = "Stop accepting connections, unblock pending recv(), and join the async accept thread if started"
+
+[exports.Server.start]
+signature = "() -> nil"
+description = "Spawn a background thread that drains incoming requests into an internal channel. Idempotent. Pair with recv_async()"
+
+[exports.Server.recv_async]
+signature = "() -> Request | nil"
+description = "Pop the next request from the async channel without blocking. Returns nil if the queue is empty. Requires start() to have been called"
 
 [exports.Request.url]
 signature = "str"
@@ -38,6 +46,14 @@ description = "HTTP method (GET, POST, ...)"
 signature = "dict[str, str]"
 description = "Request headers as a dictionary"
 
+[exports.Request.cookies]
+signature = "dict[str, str]"
+description = "Cookies sent by the client, parsed from the Cookie header"
+
+[exports.Request.multipart]
+signature = "() -> list[dict]"
+description = "Parse the body as multipart/form-data. Each part is { name, filename?, content_type?, data: bytes }. Consumes the body"
+
 [exports.Request.body]
 signature = "() -> str"
 description = "Read request body as string"
@@ -46,13 +62,77 @@ description = "Read request body as string"
 signature = "(body: str, status: int = 200, content_type: str = 'text/plain') -> nil"
 description = "Send response (consumes the request)"
 
+[exports.Request.start_chunked]
+signature = "(status: int = 200, content_type: str = 'text/plain') -> Chunked"
+description = "Begin a chunked-encoding response. Consumes the request and returns a Chunked writer"
+
+[exports.Request.start_sse]
+signature = "() -> Chunked"
+description = "Begin a Server-Sent Events response (status 200, content-type 'text/event-stream'). Consumes the request"
+
+[exports.Chunked.send_chunk]
+signature = "(data: str) -> nil"
+description = "Send a chunk of arbitrary bytes. Empty chunks are skipped (would terminate the stream)"
+
+[exports.Chunked.send_event]
+signature = "(data: str, event_type: str | nil = nil) -> nil"
+description = "Send an SSE event. Multi-line data is split into one 'data:' line per newline. With event_type, prefixes 'event: <type>'"
+
+[exports.Chunked.end]
+signature = "() -> nil"
+description = "Flush the terminating chunk and close the stream. Idempotent. Also called automatically on drop"
+
 [exports.serve]
 signature = "(body: str, port: int = 0, content_type: str | nil = nil, open_browser: bool = true) -> nil"
 description = "Serve static content: bind, open browser, wait for one request, respond, return"
+
+[exports.get]
+signature = "(url: str) -> Response"
+description = "HTTP GET request. Returns Response with .status, .headers, .body"
+
+[exports.post]
+signature = "(url: str, body: str = '') -> Response"
+description = "HTTP POST request with optional body. Returns Response"
+
+[exports.put]
+signature = "(url: str, body: str = '') -> Response"
+description = "HTTP PUT request with optional body. Returns Response"
+
+[exports.delete]
+signature = "(url: str) -> Response"
+description = "HTTP DELETE request. Returns Response"
+
+[exports.request]
+signature = "(method: str, url: str, opts: dict | nil = nil) -> Response"
+description = "Generic HTTP request. opts may contain 'headers' (dict), 'body' (str), 'timeout' (float, seconds), 'max_body' (int, bytes; default 32MB)"
+
+[exports.basic_auth]
+signature = "(user: str, password: str) -> str"
+description = "Build a Basic Authorization header value ('Basic <base64(user:password)>')"
+
+[exports.bearer]
+signature = "(token: str) -> str"
+description = "Build a Bearer Authorization header value ('Bearer <token>')"
+
+[exports.Response.status]
+signature = "int"
+description = "HTTP status code (e.g. 200, 404)"
+
+[exports.Response.headers]
+signature = "dict[str, str]"
+description = "Response headers as a dictionary"
+
+[exports.Response.body]
+signature = "str"
+description = "Response body as string"
+
+[exports.Response.json]
+signature = "() -> any"
+description = "Parse body as JSON. Raises on invalid JSON. Returns dict/list/str/int/float/bool/nil"
 
 [backends]
 rust = "rust/"
 pyo3 = false
 
 [compat]
-notes = "Synchronous, blocking server. One request at a time. Uses tiny_http crate. PureVM only (no PyO3 backend)."
+notes = "Synchronous, blocking. Server: tiny_http, one request at a time. Client: ureq with rustls, TLS by default. PureVM only (no PyO3 backend)."

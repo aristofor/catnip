@@ -687,8 +687,13 @@ fn convert_vm_pattern(
                 .collect();
             Ok(RsVMPattern::Tuple(converted?))
         }
-        catnip_vm::compiler::VMPattern::Struct { name, field_slots } => Ok(RsVMPattern::Struct {
+        catnip_vm::compiler::VMPattern::Struct {
+            name,
+            variant,
+            field_slots,
+        } => Ok(RsVMPattern::Struct {
             name: name.clone(),
+            variant: variant.clone(),
             field_slots: field_slots.clone(),
         }),
         catnip_vm::compiler::VMPattern::Enum {

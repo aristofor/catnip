@@ -6,7 +6,7 @@ authors = [{name = "Aristofor Kolomb", email = "aristofor@gmail.com"}]
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -14,8 +14,8 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Software Development :: Interpreters",
 ]
@@ -141,6 +141,7 @@ packages = [
     "catnip.cli",
     "catnip.cli.commands",
     "catnip.cachesys",
+    "catnip.debug",
     "catnip.repl",
     "catnip.tools",
     "catnip.semantic",
@@ -207,7 +208,7 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 extend-exclude = ["tools", "benchmarks", "docs"]
 
 [tool.ruff.lint]
@@ -228,10 +229,10 @@ ignore = ["E501"]  # Line too long (handled by formatter)
 [tool.black]
 line-length = 120
 skip-string-normalization = true
-target-version = ["py312"]
+target-version = ["py313"]
 
 [tool.cibuildwheel]
-build = "cp313-*"
+build = "cp313-* cp314-*"
 skip = "*-musllinux_* *-manylinux_aarch64 *-manylinux_i686"
 build-verbosity = 0
 before-all = [

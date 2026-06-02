@@ -139,7 +139,7 @@ Contrôle le mode d'exécution pour la ND-récursion. Trois modes sont disponibl
 | `thread`     | rayon (par_iter)           | Partagée      | I/O bound, mémoire partagée  |
 | `process`    | WorkerPool Rust (IPC) [^1] | Par processus | CPU bound, vrai parallélisme |
 
-\[^1\]: Pool de workers `catnip worker` avec IPC bincode sur pipes. Si la lambda ou ses captures ne sont pas freezables
+\[^1\]: Pool de workers `catnip worker` avec IPC postcard sur pipes. Si la lambda ou ses captures ne sont pas freezables
 (struct instance, callback Python), fallback automatique vers `ProcessPoolExecutor` Python.
 
 **Syntaxe :**

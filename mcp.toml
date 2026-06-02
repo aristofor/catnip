@@ -90,7 +90,7 @@ mime_type = "text/plain"
 
 [resource_templates.docs-topic]
 uri_template = "catnip://docs/{section}/{topic}"
-description = "Language documentation by section and topic. Use catnip://docs/{section} to list available topics. Sections: dev (architecture, vm, optimizations, jit, etc.), how-to (cheatsheet, etc.), lang (syntax, control-flow, functions, structures, enums, pattern-matching, broadcast, expressions, types, pragmas, etc.), tools (format, lint, debug, etc.), tuto (quickstarts), user (cli, repl, config, module-loading, etc.)."
+description = "Language documentation by section and topic. Use catnip://docs/{section} to list available topics. Sections: dev (architecture, vm, optimizations, jit, etc.), how-to (cheatsheet, etc.), lang (syntax, control-flow, functions, structures, enums, unions, pattern-matching, broadcast, expressions, types, pragmas, etc.), tools (format, lint, debug, etc.), tuto (quickstarts), user (cli, repl, config, module-loading, etc.)."
 mime_type = "text/markdown"
 
 [resource_templates.docs-section]

@@ -1484,6 +1484,70 @@ impl Registry {
         Ok(py.None())
     }
 
+    /// Union definition: build a CatnipUnionType namespace whose variants are
+    /// either CatnipStructType constructors (payload-bearing) or
+    /// CatnipEnumVariant singletons (nullary). Stores the namespace in the
+    /// scope under the union name.
+    ///
+    /// Args: [name, type_params_list, variants_list]
+    ///   variants_list: each variant is `(variant_name, fields_list)`
+    ///   fields_list: each field is `(field_name, type_text_or_none)`
+    pub(crate) fn op_union(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        use crate::vm::unions::build_union_type;
+
+        if args.len() < 3 {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "union: expected (name, type_params, variants)",
+            ));
+        }
+
+        let name: String = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?.extract(py)?;
+
+        // Type parameters (`[T, E]`). Parsed for diagnostics, unused at runtime.
+        let type_params_obj = self.exec_stmt_impl(py, args.get_item(1)?.unbind())?;
+        let mut type_params: Vec<String> = Vec::new();
+        for tp in type_params_obj.bind(py).try_iter()? {
+            type_params.push(tp?.extract()?);
+        }
+
+        let variants_obj = self.exec_stmt_impl(py, args.get_item(2)?.unbind())?;
+
+        let mut variants: Vec<(String, Vec<String>)> = Vec::new();
+        for variant_item in variants_obj.bind(py).try_iter()? {
+            let variant_item = variant_item?;
+            let variant_tuple = variant_item.cast::<PyTuple>()?;
+            if variant_tuple.len() < 2 {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "union: variant must be (name, fields)",
+                ));
+            }
+            let variant_name: String = variant_tuple.get_item(0)?.extract()?;
+            let fields_obj = variant_tuple.get_item(1)?;
+
+            let mut field_names: Vec<String> = Vec::new();
+            for field_item in fields_obj.try_iter()? {
+                let field_item = field_item?;
+                // Each field is (name, type_text_or_none). Type text is
+                // captured but unused at runtime.
+                let pair = field_item.cast::<PyTuple>()?;
+                let fname: String = pair.get_item(0)?.extract()?;
+                field_names.push(fname);
+            }
+            variants.push((variant_name, field_names));
+        }
+
+        let union_obj = build_union_type(py, &name, type_params, &variants)?;
+
+        // Store in global scope (same path used by op_struct / op_trait_def).
+        // `ctx.globals` is a dict; `set_local` would be wrong here -- it does
+        // not exist on the Python Context wrapper.
+        let ctx = self.ctx.bind(py);
+        let globals = ctx.getattr("globals")?;
+        globals.call_method1("__setitem__", (name.as_str(), &union_obj))?;
+
+        Ok(py.None())
+    }
+
     // ========================================================================
     // Error handling: try/except/finally, raise
     // ========================================================================

@@ -343,6 +343,47 @@ S(10) - 3    # S(val=7)  - forward: S(10).val - 3
 Priorité : le forward (opérande gauche) gagne toujours. Le reverse ne se déclenche que si l'opérande gauche ne gère pas
 l'opération.
 
+## Hashabilité
+
+Les instances de struct sont utilisables comme clés de `dict` ou membres de `set`. Trois règles encadrent le contrat
+`a == b ⇒ hash(a) == hash(b)` :
+
+1. **Hash structural par défaut** : sans `op_hash` ni `op ==`, le hash combine le nom du type et le hash de chaque
+   champ. Cohérent avec l'égalité structurelle (même type + mêmes champs).
+
+1. **`op ==` sans `op_hash` → unhashable** : définir une égalité personnalisée sans définir aussi le hash provoque
+   `TypeError: unhashable` au moment du `hash()`. Sinon deux instances égales pourraient avoir des hash différents et
+   casser silencieusement `dict`/`set`.
+
+1. **Freeze-on-hash** : dès qu'une instance est hashée (insérée dans un `dict` ou `set`, ou passée à `hash()`), ses
+   champs deviennent immuables. Toute affectation ultérieure (`p.x = ...`) lève `TypeError`. Cela garantit la stabilité
+   du hash pendant la vie de la clé.
+
+```catnip
+struct Point { x; y; }
+
+p = Point(1, 2)
+d = dict()
+d[p] = "first"          # p est hashé puis figé
+d[Point(1, 2)]          # "first" (hash structural)
+# p.x = 99              # TypeError: cannot mutate 'Point' after it has been hashed
+
+struct Box {
+    v
+    op ==(self, rhs) => { self.v == rhs.v }
+    op_hash(self) => { self.v }
+}
+
+d = dict()
+d[Box(42)] = "answer"   # op_hash retourne 42
+```
+
+> Si tu définis `op_hash`, tu es responsable de la cohérence avec `op ==` : `a == b` doit impliquer
+> `hash(a) == hash(b)`. Le runtime ne le vérifie pas.
+
+La règle s'applique à toutes les variantes payload des `union` (qui sont des structs derrière) : `Status.Ok(200)` est
+hashable, et figé une fois hashé.
+
 ## Méthodes statiques
 
 Le décorateur `@static` déclare une méthode sans `self`, appelable directement sur le type :

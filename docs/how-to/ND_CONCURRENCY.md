@@ -107,17 +107,17 @@ Chaque worker est un processus séparé avec son propre interpréteur Python. Le
 
 ## Compromis résumés
 
-| Critère              | `sequential` | `thread`  | `process`                 |
-| -------------------- | ------------ | --------- | ------------------------- |
-| Overhead             | Aucun        | Faible    | Faible (IPC bincode) [^1] |
-| Parallélisme CPU     | Non          | Non (GIL) | Oui                       |
-| Parallélisme I/O     | Non          | Oui       | Oui                       |
-| Memoization partagée | N/A          | Oui       | Non                       |
-| Sérialisation        | Aucune       | Aucune    | Freeze bincode [^1]       |
-| Debug                | Trivial      | Correct   | Difficile                 |
+| Critère              | `sequential` | `thread`  | `process`                  |
+| -------------------- | ------------ | --------- | -------------------------- |
+| Overhead             | Aucun        | Faible    | Faible (IPC postcard) [^1] |
+| Parallélisme CPU     | Non          | Non (GIL) | Oui                        |
+| Parallélisme I/O     | Non          | Oui       | Oui                        |
+| Memoization partagée | N/A          | Oui       | Non                        |
+| Sérialisation        | Aucune       | Aucune    | Freeze postcard [^1]       |
+| Debug                | Trivial      | Correct   | Difficile                  |
 
 \[^1\]: Quand la lambda et ses captures sont des types natifs (int, float, bool, string, list, tuple, dict), le mode
-process utilise un pool persistant de workers Rust (`catnip worker`) avec IPC bincode -- pas de pickle, pas de startup
+process utilise un pool persistant de workers Rust (`catnip worker`) avec IPC postcard -- pas de pickle, pas de startup
 Python par worker. Si les captures contiennent des types non-freezables (struct instance, callback Python), fallback
 automatique vers `ProcessPoolExecutor` avec pickle.
 
@@ -129,7 +129,7 @@ En mode `process`, deux chemins sont possibles :
 dicts, tuples, strings) :
 
 - La lambda est compilée avec son IR source encodé (`encoded_ir` dans le CodeObject)
-- Les captures et seeds sont converties en `FrozenValue` (bincode, pas pickle)
+- Les captures et seeds sont converties en `FrozenValue` (postcard, pas pickle)
 - Un pool persistant de workers `catnip worker` traite les tâches via IPC stdin/stdout
 - Pas de startup Python par worker, pas de pickle, pas de GIL sur l'orchestration
 

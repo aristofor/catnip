@@ -1,0 +1,129 @@
+#!/usr/bin/env catnip
+# Unions taggees (ADT)
+#
+# Lancer via le CLI Python (mode VM par defaut ou -x ast) :
+#     python -m catnip docs/examples/advanced/11_unions.cat
+# Le binaire standalone catnip-run ne supporte pas encore les unions.
+
+print("=> Declaration et construction")
+
+union Option {
+    Some(value);
+    None;
+}
+
+x = Option.Some(42)
+y = Option.None
+
+print("Option.Some(42).value =", x.value)
+print("Option.None =", y)
+
+print()
+print("=> Pattern matching avec payload")
+
+describe = (opt) => {
+    match opt {
+        Option.Some{value} => { f"got {value}" }
+        Option.None => { "nothing" }
+    }
+}
+
+print(describe(Option.Some(7)))
+print(describe(Option.None))
+
+print()
+print("=> Variantes nullaires + payload melangees")
+
+union Event {
+    Click(x, y);
+    KeyPress(code);
+    Quit;
+}
+
+handle = (event) => {
+    match event {
+        Event.Click{x, y} => { f"click at {x},{y}" }
+        Event.KeyPress{code} => { f"key {code}" }
+        Event.Quit => { "bye" }
+    }
+}
+
+print(handle(Event.Click(10, 20)))
+print(handle(Event.KeyPress(65)))
+print(handle(Event.Quit))
+
+print()
+print("=> Egalite structurelle")
+
+print("Option.Some(1) == Option.Some(1):", Option.Some(1) == Option.Some(1))
+print("Option.Some(1) == Option.Some(2):", Option.Some(1) == Option.Some(2))
+
+union Box { A(v); B(v) }
+print("Box.A(1) == Box.B(1):", Box.A(1) == Box.B(1))
+
+print()
+print("=> Generiques (parses, non verifies)")
+
+union Result[T, E] {
+    Ok(value: T);
+    Err(error: E);
+}
+
+divide = (a, b) => {
+    if b == 0 { Result.Err("division by zero") }
+    else { Result.Ok(a / b) }
+}
+
+unwrap = (r, default) => {
+    match r {
+        Result.Ok{value} => { value }
+        Result.Err{error} => { default }
+    }
+}
+
+print("divide(10, 2):", unwrap(divide(10, 2), 0))
+print("divide(10, 0):", unwrap(divide(10, 0), -1))
+
+print()
+print("=> Machine a etats avec donnees")
+
+union State {
+    Idle;
+    Loading(progress);
+    Ready(data);
+    Failed(reason);
+}
+
+step = (state, event) => {
+    match state {
+        State.Idle => {
+            if event == "start" { State.Loading(0) }
+            else { State.Idle }
+        }
+        State.Loading{progress} => {
+            if event == "tick" { State.Loading(progress + 10) }
+            elif event == "done" { State.Ready("payload") }
+            elif event == "error" { State.Failed("network") }
+            else { State.Loading(progress) }
+        }
+        State.Ready{data} => { State.Ready(data) }
+        State.Failed{reason} => { State.Failed(reason) }
+    }
+}
+
+s = State.Idle
+s = step(s, "start")
+s = step(s, "tick")
+s = step(s, "tick")
+print("apres start+tick+tick:")
+match s {
+    State.Loading{progress} => { print("  loading", progress, "%") }
+    _ => { print("  autre") }
+}
+
+s = step(s, "done")
+print("apres done:")
+match s {
+    State.Ready{data} => { print("  ready:", data) }
+    _ => { print("  autre") }
+}

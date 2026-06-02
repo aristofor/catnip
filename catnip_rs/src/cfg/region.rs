@@ -358,10 +358,20 @@ impl<'py> RegionReconstructor<'py> {
     }
 
     /// Create a placeholder condition (True).
+    ///
+    /// Defensive fallback for when CFG reconstruction can't recover the original
+    /// branch condition. The F29 fix (preserve `BasicBlock.condition` during build)
+    /// removed every known trigger; full pytest suite at `optimize_level=3` reports
+    /// zero firings. A trigger would silently rewrite `if cond { ... } else { ... }`
+    /// into `if True { ... }`, dropping side-effects and the else branch, so it is
+    /// treated as an internal invariant violation in debug builds.
     fn create_placeholder_condition(&self) -> PyResult<Op> {
-        // Create a simple Op that represents True
-        // We'll use a dummy opcode and let the semantic analyzer handle it
-        // For now, create an Op with Nop and True as an arg
+        debug_assert!(
+            false,
+            "CFG: branch condition missing during reconstruction in '{}'; \
+             builder_ir.rs is expected to call set_condition() for every if/while header",
+            self.cfg.name
+        );
         let builtins = self.py.import("builtins")?;
         let true_val = builtins.getattr("True")?;
 

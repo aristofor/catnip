@@ -417,6 +417,10 @@ impl Registry {
         else if opcode == op.enum_def {
             return Ok(Some(self.op_enum(py, args)?));
         }
+        // Union (tagged ADT)
+        else if opcode == op.union_def {
+            return Ok(Some(self.op_union(py, args)?));
+        }
         // Intrinsics
         else if opcode == op.type_of && args.len() >= 1 {
             let val = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?;

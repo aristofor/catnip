@@ -19,9 +19,12 @@ pub enum VMPattern {
     Or(Vec<VMPattern>),
     /// Matches and destructures iterables
     Tuple(Vec<VMPatternElement>),
-    /// Matches a struct instance by type name and extracts fields into slots
+    /// Matches a struct instance by type name and extracts fields into slots.
+    /// `variant` is `Some` for union variants (`Option.Some{...}`), `None` for
+    /// plain struct patterns (`Point{...}`).
     Struct {
         name: String,
+        variant: Option<String>,
         field_slots: Vec<(String, usize)>,
     },
     /// Matches an enum variant by type and variant name (resolved at match-time)

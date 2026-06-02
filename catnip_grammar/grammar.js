@@ -81,6 +81,7 @@ module.exports = grammar({
       $.struct_stmt,
       $.trait_stmt,
       $.enum_stmt,
+      $.union_stmt,
       $._expression,
     ),
 
@@ -181,6 +182,54 @@ module.exports = grammar({
     enum_variant: $ => seq(
       field('name', $.identifier),
       optional(';'),
+    ),
+
+    // Union definition (tagged union / ADT)
+    union_stmt: $ => seq(
+      'union',
+      field('name', $.identifier),
+      optional(field('type_params', $.type_params)),
+      '{',
+      repeat($.union_variant),
+      '}',
+    ),
+
+    type_params: $ => seq(
+      '[',
+      $.identifier,
+      repeat(seq(',', $.identifier)),
+      optional(','),
+      ']',
+    ),
+
+    union_variant: $ => seq(
+      field('name', $.identifier),
+      optional(seq(
+        '(',
+        $.union_field,
+        repeat(seq(',', $.union_field)),
+        optional(','),
+        ')',
+      )),
+      optional(';'),
+    ),
+
+    union_field: $ => seq(
+      field('name', $.identifier),
+      optional(seq(':', field('type', $.type_expr))),
+    ),
+
+    type_expr: $ => seq(
+      $.identifier,
+      optional($.type_args),
+    ),
+
+    type_args: $ => seq(
+      '[',
+      $.type_expr,
+      repeat(seq(',', $.type_expr)),
+      optional(','),
+      ']',
     ),
 
     // Decorator: @identifier (for @jit, @pure, etc.)
@@ -304,6 +353,7 @@ module.exports = grammar({
 
     pattern_struct: $ => seq(
       field('struct_name', $.identifier),
+      optional(seq('.', field('variant_name', $.identifier))),
       '{',
       field('fields', $.identifier),
       repeat(seq(',', field('fields', $.identifier))),

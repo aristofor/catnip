@@ -89,7 +89,7 @@ Le commentaire n'affecte que la ligne où il apparaît.
 ### Analyse deep (CFG)
 
 ```bash
-# Activer l'analyse inter-branches (W310, W311)
+# Activer l'analyse inter-branches (W310, W311, W312, W313)
 catnip lint --deep script.cat
 
 # Combinable avec les autres options
@@ -97,7 +97,8 @@ catnip lint --deep --max-depth 8 script.cat
 ```
 
 L'option `--deep` construit un CFG (Control Flow Graph) léger depuis le CST pour détecter des problèmes impossibles à
-trouver en analyse linéaire : variables définies dans certaines branches seulement, code mort inter-branches.
+trouver en analyse linéaire : variables définies dans certaines branches seulement, code mort inter-branches, dead
+stores via liveness backward, branches `else` redondantes après un `return`/`raise`.
 
 Cette analyse est opt-in car plus coûteuse que les phases CST-only.
 
@@ -188,6 +189,8 @@ par `_`. W202 avertit qu'assigner le retour d'un `import('...', wild=True)` est 
 | W302 | Warning  | `while True` without break (infinite loop détectable)  |
 | W310 | Warning  | Variable possibly uninitialized (`--deep` requis)      |
 | W311 | Warning  | Unreachable code after terminating branches (`--deep`) |
+| W312 | Warning  | Dead store: variable écrasée avant lecture (`--deep`)  |
+| W313 | Hint     | Branche `else`/`elif` redondante après un exit         |
 
 W300 détecte le code mort après un `return` dans le même bloc. W302 signale les boucles `while True` dont le corps ne
 contient pas de `break` (les `break` dans des boucles ou lambdas imbriquées ne comptent pas). W201 signale les
@@ -205,6 +208,15 @@ W311 détecte le code inatteignable après des branches qui terminent toutes : s
 contient un `return` ou `raise`, le code qui suit le bloc ne sera jamais exécuté. Complémente W300 (code mort intra-bloc
 après un `return` isolé) en couvrant le cas inter-branches.
 
+W312 détecte les dead stores : une variable assignée puis écrasée sans lecture intermédiaire. L'analyse est une liveness
+backward sur le CFG, étendue à chaque corps de lambda (chaque scope reçoit son propre CFG). Une variable jamais lue
+nulle part est ignorée (c'est W200, pas W312). Les bindings implicites (variable de boucle `for`, pattern de `match`,
+binding d'`except`) ne déclenchent pas W312.
+
+W313 signale les `elif`/`else` rendus redondants par une branche précédente qui termine toujours (return / raise / break
+/ continue). Severity `hint` car la réécriture est typiquement une refactorisation en guard clause. Les cas où toutes
+les branches terminent (`if X { return } else { return }`) ne sont pas signalés -- la simplification ne gagne rien.
+
 ```bash
 ⇒ echo 'f = () => { return 1; x = 2 }' | catnip lint --
 <stdin>:1:23: warning [W300]: Unreachable code after return
@@ -218,6 +230,16 @@ après un `return` isolé) en couvrant le cas inter-branches.
 ```bash
 ⇒ printf 'if cond { x = 1 }\nprint(x)' | catnip lint --deep --
 <stdin>:2:7: warning [W310]: Variable 'x' may be uninitialized (defined in some branches only)
+```
+
+```bash
+⇒ printf 'x = 1\nx = 2\nprint(x)' | catnip lint --deep --stdin
+<stdin>:1:1: warning [W312]: dead store: 'x' is overwritten before being read
+```
+
+```bash
+⇒ printf 'f = () => { if cond { return 1 } else { do(x) } }' | catnip lint --deep --stdin
+<stdin>:1:34: hint [W313]: redundant else: previous branch always exits; flatten this block to the enclosing scope
 ```
 
 ### Hints (Ixxx)
@@ -483,18 +505,49 @@ Passes globales sur le CST, indépendantes de l'analyse sémantique :
 
 ```mermaid
 flowchart LR
-    A["Parse Tree (CST)"] --> B["CFG Builder"]
+    A["Parse Tree (CST)"] --> B["CFG Builder (par scope)"]
     B --> C["LintCFG (blocs + edges)"]
-    C --> D["Forward Dataflow"]
-    D --> E["Diagnostics W310, W311"]
+    C --> D["Forward Dataflow<br/>(definite-assignment)"]
+    C --> F["Backward Dataflow<br/>(liveness)"]
+    C --> G["Structural walk"]
+    D --> E1["W310, W311"]
+    F --> E2["W312"]
+    G --> E3["W313"]
 ```
 
 Activée par `--deep` / `check_ir=True`. Construit un CFG léger directement depuis le CST tree-sitter (pas depuis l'IR du
-semantic analyzer). Chaque bloc trace les variables définies (`defs` avec byte offset pour l'ordre intra-bloc) et lues
-(`reads`), les edges discriminent `CondTrue`/`CondFalse`/`LoopBack`/`LoopExit`/`Exception`.
+semantic analyzer), un par scope : top-level + chaque corps de lambda + chaque corps de méthode (les paramètres, `self`
+inclus, sont seedés comme defs implicites dans le block entry du sous-scope). Chaque bloc trace les variables définies
+(`defs` avec byte offset pour l'ordre intra-bloc), lues (`reads`) et écrites en ordre source (`writes`, séparé pour la
+liveness) ; les edges discriminent `CondTrue`/`CondFalse`/`LoopBack`/`LoopExit`/`Exception`.
 
-L'analyse de dataflow calcule un point fixe : pour chaque bloc, l'ensemble des variables **définitivement définies** sur
-tous les chemins entrants. Une lecture hors de cet ensemble déclenche W310.
+L'analyse forward calcule un point fixe de definite-assignment : pour chaque bloc, l'ensemble des variables définies sur
+tous les chemins entrants. Une lecture hors de cet ensemble déclenche W310. L'analyse backward calcule la liveness
+`live_in = use ∪ (live_out \ def)`, puis pour chaque write explicit dont la variable n'est pas live après, émet W312.
+W313 est un check structurel pur sur le CST (sans dataflow) : il regarde si une branche `then`/`elif` termine toujours
+(return/raise/break/continue, récursif dans if/match) et signale les branches suivantes qui ne terminent pas.
+
+**Captures dans les sous-scopes** : un corps de lambda peut référencer une variable du scope parent. Pour éviter des
+faux positifs W310 sur `inc = () => { count = count + 1 }`, chaque sub-CFG identifie les captures via une **triple
+condition** :
+
+1. la première occurrence du nom en ordre source dans le sub-CFG est une **lecture** ;
+1. le nom est **effectivement défini** dans un scope englobant (`parent_visible`) ;
+1. SOIT le sous-scope n'écrit jamais ce nom (capture pure read-only), SOIT au moins une écriture de ce nom dans le
+   sous-scope est **self-référentielle** (sa RHS lit le même nom, pattern `x = x + 1`).
+
+Les conditions (2) et (3) éliminent deux pièges. (2) évite la suppression silencieuse des read-before-def quand rien
+n'existe dans le parent : `f = () => { print(x); x = 1 }` → `x` absent du parent → pas classé capture → W310 fire. (3)
+aligne le linter sur la sémantique de scoping Python-like : `b = () => { print(x); x = 2 }` où `x = 2` n'a pas `x` dans
+la RHS est un shadow local pour tout le scope ; le `print(x)` est alors un vrai read-before-local-def, W310 fire. À
+l'inverse `inc = () => { count = count + 1 }` a une écriture self-référentielle → capture mutation confirmée → seedé.
+`parent_visible` se calcule en remontant depuis le body via `Node::parent()` : à chaque ancêtre on cumule les params
+(lambda ou méthode) ou les bindings (assignment LHS, for-var, pattern, except, struct/trait) en excluant les sous-arbres
+déjà traversés et les corps des **autres** fonctions (leurs défs internes ne sont pas visibles). Les captures retenues
+sont seedées comme defs implicites du block entry (W310 silencieux) et exclues des candidats W312 (la mutation propage
+vers le parent). Le critère ne s'applique pas au root : `print(x); x = 1` au module reste un W310. Les bindings de
+pattern et de paramètre sont sequencés à la fin du node de leur déclaration, pas à la fin du case clause ou de la
+lambda, pour qu'une lecture en aval ne les fasse pas passer pour captures.
 
 > Ce CFG est distinct du CFG/SSA utilisé par l'optimiseur (`catnip_core/src/cfg/`). L'optimiseur travaille sur l'IR
 > après semantic analysis. Le linter travaille sur le CST avant toute transformation.
@@ -507,6 +560,8 @@ tous les chemins entrants. Une lecture hors de cet ensemble déclenche W310.
 | **Variables non utilisées** | Warning W200/W201 (local scope) | Ignoré                          |
 | **Code mort**               | W300, W301, W311 (--deep)       | Ignoré                          |
 | **Init partielle**          | W310 (--deep, inter-branches)   | `NameError` à l'exécution       |
+| **Dead store**              | W312 (--deep, liveness)         | Ignoré                          |
+| **Guard clause**            | W313 (--deep, hint)             | Ignoré                          |
 | **Complexité**              | Hints I200/I201/I202            | Pas de limite                   |
 | **Tail position**           | Hint I100                       | TCO appliqué silencieusement    |
 | **Performance**             | Rapide (pas d'exécution)        | Dépend du code                  |

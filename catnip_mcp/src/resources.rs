@@ -98,11 +98,7 @@ fn read_examples(base_path: &Path, topic: &str, uri: &str) -> Result<ReadResourc
 }
 
 fn read_codex(base_path: &Path, category: &str, module: &str, uri: &str) -> Result<ReadResourceResult, ErrorData> {
-    let path = base_path
-        .join("docs")
-        .join("codex")
-        .join(category)
-        .join(format!("{module}.cat"));
+    let path = base_path.join("codex").join(category).join(format!("{module}.cat"));
 
     match std::fs::read_to_string(&path) {
         Ok(content) => text_resource(uri, content, TEXT_MIME),

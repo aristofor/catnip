@@ -284,6 +284,32 @@ pub fn struct_registry_release(idx: u32) {
     });
 }
 
+/// Mark a struct instance as frozen (called from the proxy's __hash__ in VM mode).
+/// No-op if registry is not installed.
+pub fn struct_registry_freeze(idx: u32) {
+    STRUCT_REGISTRY.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let registry = unsafe { &*ptr };
+            registry.freeze(idx);
+        }
+    });
+}
+
+/// True if a struct instance is frozen in the thread-local registry.
+/// Returns false if the registry is not installed.
+pub fn struct_registry_is_frozen(idx: u32) -> bool {
+    STRUCT_REGISTRY.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            let registry = unsafe { &*ptr };
+            registry.is_frozen(idx)
+        } else {
+            false
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ObjectTable -- indirection layer for TAG_PYOBJ handles
 // ---------------------------------------------------------------------------
@@ -1021,6 +1047,7 @@ impl Value {
 
         // Recognize CatnipStructProxy -> restore native TAG_STRUCT for VM round-trip.
         if let Ok(proxy) = obj.cast::<CatnipStructProxy>() {
+            let proxy_frozen = proxy.borrow().frozen;
             if let Some(idx) = proxy.borrow().native_instance_idx {
                 let restored = STRUCT_REGISTRY.with(|cell| {
                     let ptr = cell.get();
@@ -1030,6 +1057,12 @@ impl Value {
                     let registry = unsafe { &*ptr };
                     if registry.get_instance(idx).is_some() {
                         registry.incref(idx);
+                        // If the proxy was hashed (possibly outside the VM), the
+                        // native slot must also become frozen so VM SetAttr can't
+                        // mutate behind the proxy's back.
+                        if proxy_frozen {
+                            registry.freeze(idx);
+                        }
                         true
                     } else {
                         false
@@ -1066,7 +1099,11 @@ impl Value {
                 let new_idx = STRUCT_REGISTRY.with(|cell| {
                     let ptr = cell.get();
                     let registry_mut = unsafe { &mut *(ptr as *mut StructRegistry) };
-                    registry_mut.create_instance(type_id, fields)
+                    let idx = registry_mut.create_instance(type_id, fields);
+                    if proxy_frozen {
+                        registry_mut.freeze(idx);
+                    }
+                    idx
                 });
                 proxy.borrow_mut().native_instance_idx = Some(new_idx);
                 return Ok(Value::from_struct_instance(new_idx));

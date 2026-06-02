@@ -498,9 +498,9 @@ Extension de fichier pour le format binaire **frozen** : IR compilé ou données
 
 **Persistance binaire** de code IR ou de données Catnip au format `.catf`.
 
-- `encode` / `decode` : bincode brut pour transport (IPC workers, in-memory)
+- `encode` / `decode` : postcard brut pour transport (IPC workers, in-memory)
 - `freeze` / `thaw` : builtins Catnip (`freeze(value) -> bytes`, `thaw(bytes) -> value`)
-- Format `.catf` : header (magic, opcode_hash, source_hash) + bincode, pour le cache disque avec auto-invalidation
+- Format `.catf` : header (magic, opcode_hash, source_hash) + postcard, pour le cache disque avec auto-invalidation
 
 **Module** : `catnip_core/src/freeze/`, `catnip_rs/src/freeze.rs`
 

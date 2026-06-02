@@ -216,6 +216,26 @@ area = (shape) => {
 > Le pattern de structure vérifie type + champs. Si le type ne correspond pas, la branche reste dans une timeline
 > parallèle.
 
+### Pattern de variante d'union
+
+Le même pattern struct sert à destructurer les variantes d'union avec payload. La forme qualifiée `Union.Variant{field}`
+matche les instances construites par `Union.Variant(...)` :
+
+```catnip
+union Option { Some(value); None; }
+
+opt = Option.Some(42)
+
+match opt {
+    Option.Some{value} => { value }
+    Option.None => { 0 }
+}
+# → 42
+```
+
+Les variantes nullaires se matchent comme des variantes d'enum (`Union.Variant` sans accolades). Voir
+[UNIONS](UNIONS.md) pour la sémantique complète.
+
 ### Patterns struct dans les tuples
 
 Les patterns de structure peuvent apparaître à l'intérieur de tuple patterns. Chaque position du tuple est matchée

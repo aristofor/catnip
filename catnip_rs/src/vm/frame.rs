@@ -1537,9 +1537,17 @@ fn vmpattern_to_py(py: Python<'_>, pat: &VMPattern) -> PyResult<Py<PyAny>> {
             }
             dict.set_item("e", list)?;
         }
-        VMPattern::Struct { name, field_slots } => {
+        VMPattern::Struct {
+            name,
+            variant,
+            field_slots,
+        } => {
             dict.set_item("t", "s")?;
             dict.set_item("n", name.as_str())?;
+            match variant {
+                Some(v) => dict.set_item("vt", v.as_str())?,
+                None => dict.set_item("vt", py.None())?,
+            }
             let fields = PyList::empty(py);
             for (fname, slot) in field_slots {
                 fields.append(PyTuple::new(
@@ -1614,6 +1622,10 @@ fn vmpattern_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<VMPatte
         }
         "s" => {
             let name: String = dict.get_item("n")?.unwrap().extract()?;
+            let variant: Option<String> = match dict.get_item("vt")? {
+                Some(v) if !v.is_none() => Some(v.extract()?),
+                _ => None,
+            };
             let fields_list = dict.get_item("f")?.unwrap().cast::<PyList>()?.clone();
             let mut field_slots = Vec::new();
             for item in fields_list.iter() {
@@ -1622,7 +1634,11 @@ fn vmpattern_from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<VMPatte
                 let slot: usize = pair.get_item(1)?.extract()?;
                 field_slots.push((fname, slot));
             }
-            Ok(VMPattern::Struct { name, field_slots })
+            Ok(VMPattern::Struct {
+                name,
+                variant,
+                field_slots,
+            })
         }
         "e" => {
             let enum_name: String = dict.get_item("en")?.unwrap().extract()?;

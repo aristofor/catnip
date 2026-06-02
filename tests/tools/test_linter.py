@@ -422,6 +422,78 @@ class TestMetrics:
         result = lint_code(code, check_syntax=False, check_style=False)
         assert any(d.code == 'I103' for d in result.diagnostics)
 
+    def test_match_exhaustive_union_no_warning(self):
+        code = (
+            "union Option { Some(value); None; }\n"
+            "x = Option.Some(1)\n"
+            "match x {\n"
+            "    Option.Some{value} => { value }\n"
+            "    Option.None => { 0 }\n"
+            "}"
+        )
+        result = lint_code(code, check_syntax=False, check_style=False)
+        assert not any(d.code == 'I103' for d in result.diagnostics)
+
+    def test_match_partial_union_warns(self):
+        # Missing Option.None -- linter should flag it
+        code = (
+            "union Option { Some(value); None; }\n"
+            "x = Option.Some(1)\n"
+            "match x {\n"
+            "    Option.Some{value} => { value }\n"
+            "}"
+        )
+        result = lint_code(code, check_syntax=False, check_style=False)
+        warnings = [d for d in result.diagnostics if d.code == 'I103']
+        assert warnings, "expected I103 for missing Option.None"
+        assert "None" in warnings[0].message
+
+    def test_match_exhaustive_union_with_or(self):
+        # OR pattern between two union variants still counts as covering both
+        code = (
+            "union Event { Click(x, y); Quit; Reset; }\n"
+            "e = Event.Quit\n"
+            "match e {\n"
+            "    Event.Click{x, y} => { 1 }\n"
+            "    Event.Quit | Event.Reset => { 0 }\n"
+            "}"
+        )
+        result = lint_code(code, check_syntax=False, check_style=False)
+        assert not any(d.code == 'I103' for d in result.diagnostics)
+
+    def test_match_union_via_getattr(self):
+        # Scrutinee is `Option.None` directly -- linter must infer the union
+        # type from GetAttr too.
+        code = (
+            "union Option { Some(value); None; }\n" "match Option.None {\n" "    Option.Some{value} => { value }\n" "}"
+        )
+        result = lint_code(code, check_syntax=False, check_style=False)
+        assert any(d.code == 'I103' for d in result.diagnostics)
+
+    def test_bare_payload_variant_does_not_cover(self):
+        # `Option.Some` (pattern_enum, no braces) cannot match a payload
+        # variant at runtime, so it must not count as coverage.
+        code = (
+            "union Option { Some(value); None; }\n"
+            "x = Option.Some(1)\n"
+            "match x {\n"
+            "    Option.Some => { 1 }\n"
+            "    Option.None => { 0 }\n"
+            "}"
+        )
+        result = lint_code(code, check_syntax=False, check_style=False)
+        warnings = [d for d in result.diagnostics if d.code == 'I103']
+        assert warnings, "expected I103: bare Option.Some doesn't cover payload variant"
+        assert "Some" in warnings[0].message
+
+    def test_param_shadows_union_namespace(self):
+        # Inside `(Option) => { ... }`, `Option` refers to the parameter,
+        # not the outer union. infer_type must drop the union def so no
+        # bogus exhaustiveness diagnostic is emitted.
+        code = "union Option { Some(value); None; }\n" "f = (Option) => { match Option { _ => { 0 } } }\n" "f(42)"
+        result = lint_code(code, check_syntax=False, check_style=False)
+        assert not any(d.code == 'I103' for d in result.diagnostics)
+
     def test_function_too_long(self):
         body = "\n".join(f"  {i}" for i in range(31))
         code = f"f = () => {{\n{body}\n}}"
@@ -586,3 +658,54 @@ class TestDeepAnalysis:
         result = lint_code(code, check_ir=True, check_style=True, check_names=True)
         codes = {d.code for d in result.diagnostics}
         assert 'W310' in codes
+
+    # --- W312: dead store ---
+
+    def test_w312_overwrite_before_read(self):
+        code = "x = 1\nx = 2\nprint(x)"
+        result = self._lint(code)
+        w312 = [d for d in result.diagnostics if d.code == 'W312']
+        assert len(w312) == 1
+        assert w312[0].line == 1
+
+    def test_w312_inter_branches_then_overwrite(self):
+        code = "if cond {\n    y = 1\n} else {\n    y = 2\n}\ny = 3\nprint(y)"
+        result = self._lint(code)
+        lines = sorted(d.line for d in result.diagnostics if d.code == 'W312')
+        assert 2 in lines and 4 in lines
+
+    def test_w312_never_read_not_flagged(self):
+        # Pure-unused variable is W200's job, not W312.
+        code = "x = 1"
+        result = self._lint(code)
+        assert not any(d.code == 'W312' for d in result.diagnostics)
+
+    def test_w312_noqa_suppression(self):
+        code = "x = 1  # noqa: W312\nx = 2\nprint(x)"
+        result = self._lint(code)
+        assert not any(d.code == 'W312' for d in result.diagnostics)
+
+    def test_w312_inside_lambda(self):
+        code = "f = (z) => {\n    x = 1\n    x = z + 1\n    return x\n}"
+        result = self._lint(code)
+        w312 = [d for d in result.diagnostics if d.code == 'W312']
+        assert any(d.line == 2 for d in w312)
+
+    # --- W313: redundant else after terminating branch ---
+
+    def test_w313_else_after_return(self):
+        code = "f = () => {\n    if cond {\n        return 1\n    } else {\n        do(x)\n    }\n}"
+        result = self._lint(code)
+        w313 = [d for d in result.diagnostics if d.code == 'W313']
+        assert len(w313) == 1
+        assert str(w313[0].severity).endswith('HINT')
+
+    def test_w313_both_branches_return_no_hint(self):
+        code = "f = () => {\n    if cond {\n        return 1\n    } else {\n        return 2\n    }\n}"
+        result = self._lint(code)
+        assert not any(d.code == 'W313' for d in result.diagnostics)
+
+    def test_w313_noqa_suppression(self):
+        code = "f = () => {\n    if cond {\n        return 1\n    } else {  # noqa: W313\n        do(x)\n    }\n}"
+        result = self._lint(code)
+        assert not any(d.code == 'W313' for d in result.diagnostics)

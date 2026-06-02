@@ -439,3 +439,118 @@ n2.sum_all()
 """
     cat.parse(code)
     assert cat.execute() == 21
+
+
+# --- Hashability contract: hash + eq must agree, and hashed instances are frozen ---
+
+
+def test_struct_structural_hash_as_dict_key(cat):
+    """Without custom op_eq/op_hash, structs hash structurally (eq is structural too)."""
+    code = """struct Point { x; y; }
+d = dict()
+d[Point(1, 2)] = "first"
+d[Point(3, 4)] = "second"
+d[Point(1, 2)]"""
+    cat.parse(code)
+    assert cat.execute() == "first"
+
+
+def test_struct_op_eq_without_op_hash_is_unhashable(cat):
+    """Custom op_eq without op_hash must refuse hashing (would violate eq <-> hash)."""
+    code = """struct Box {
+    v
+    op ==(self, rhs) => { self.v == rhs.v }
+}
+d = dict()
+d[Box(1)] = "x"
+"""
+    cat.parse(code)
+    with pytest.raises(Exception) as exc_info:
+        cat.execute()
+    msg = str(exc_info.value).lower()
+    assert "unhashable" in msg or "op_hash" in msg
+
+
+def test_struct_custom_op_hash_used(cat):
+    """When op_hash is defined, it overrides the structural hash."""
+    code = """struct Box {
+    v
+    op ==(self, rhs) => { self.v == rhs.v }
+    op_hash(self) => { self.v }
+}
+d = dict()
+d[Box(42)] = "answer"
+d[Box(42)]"""
+    cat.parse(code)
+    assert cat.execute() == "answer"
+
+
+def test_struct_frozen_after_hash(cat):
+    """A struct that has been hashed cannot be mutated (preserves dict/set invariants)."""
+    code = """struct Point { x; y; }
+p = Point(1, 2)
+s = set()
+s.add(p)
+p.x = 99
+"""
+    cat.parse(code)
+    with pytest.raises(Exception) as exc_info:
+        cat.execute()
+    msg = str(exc_info.value).lower()
+    assert "mutate" in msg or "hashed" in msg
+
+
+def test_struct_mutation_before_hash_still_works(cat):
+    """Freeze only kicks in after the first __hash__ call; pre-hash mutation stays free."""
+    code = """struct Point { x; y; }
+p = Point(1, 2)
+p.x = 10
+p.y = 20
+d = dict()
+d[p] = "frozen here"
+d[p]"""
+    cat.parse(code)
+    assert cat.execute() == "frozen here"
+
+
+def test_struct_op_hash_negative_value(cat):
+    """op_hash returning a negative isize must be accepted (Py_hash_t is signed)."""
+    code = """struct Box {
+    v
+    op_hash(self) => { -self.v }
+}
+d = dict()
+d[Box(5)] = "neg"
+d[Box(5)]"""
+    cat.parse(code)
+    assert cat.execute() == "neg"
+
+
+def test_struct_dict_literal_propagates_unhashable_error(cat):
+    """Dict literal with an unhashable struct key must raise, not silently drop the entry."""
+    code = """struct Box {
+    v
+    op ==(self, rhs) => { self.v == rhs.v }
+}
+{Box(1): "x"}"""
+    cat.parse(code)
+    with pytest.raises(Exception) as exc_info:
+        cat.execute()
+    msg = str(exc_info.value).lower()
+    assert "unhashable" in msg or "op_hash" in msg
+
+
+def test_struct_frozen_state_survives_python_round_trip(cat):
+    """A struct hashed in Catnip remains frozen when exposed back to Python."""
+    code = """struct Point { x; y; }
+p = Point(1, 2)
+s = set()
+s.add(p)
+p"""
+    cat.parse(code)
+    cat.execute()
+    p = cat.context.globals["p"]
+    with pytest.raises(Exception) as exc_info:
+        p.x = 99
+    msg = str(exc_info.value).lower()
+    assert "mutate" in msg or "hashed" in msg

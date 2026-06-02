@@ -68,6 +68,7 @@ class CatnipLexer(RegexLexer):
                         'struct',
                         'trait',
                         'try',
+                        'union',
                         'while',
                         'with',
                         'pragma',
@@ -180,7 +181,7 @@ class CatnipLexer(RegexLexer):
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers (excluding keywords)
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|while|with)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|union|while|with)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),
@@ -220,6 +221,7 @@ class CatnipLexer(RegexLexer):
                         'struct',
                         'trait',
                         'try',
+                        'union',
                         'while',
                         'with',
                         'pragma',
@@ -328,7 +330,7 @@ class CatnipLexer(RegexLexer):
             (r'[{}()\[\],:;.]', Punctuation),
             # Identifiers
             (
-                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|while|with)\b)'
+                r'(?!(?:False|None|True|abs|and|break|continue|dict|elif|else|enum|except|extends|finally|for|if|implements|in|is|list|match|not|op|or|pragma|raise|return|set|struct|trait|try|tuple|union|while|with)\b)'
                 r'[a-zA-Z_]\w*',
                 Name,
             ),

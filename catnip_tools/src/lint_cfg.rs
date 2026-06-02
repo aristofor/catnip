@@ -33,6 +33,19 @@ struct LintEdge {
     kind: EdgeKind,
 }
 
+#[derive(Debug, Clone)]
+struct WriteRec {
+    name: String,
+    line: usize,
+    column: usize,
+    offset: usize,
+    /// True when the write comes from an explicit assignment statement
+    /// (e.g. `x = ...`, `(a, b) = ...`). False for implicit bindings
+    /// (for-var, match-pattern var, except-binding, lambda/struct/trait
+    /// name). Only explicit writes are W312 candidates.
+    explicit: bool,
+}
+
 #[derive(Debug)]
 struct LintBlock {
     id: usize,
@@ -41,6 +54,14 @@ struct LintBlock {
     defs: HashMap<String, usize>,
     /// Variables read in this block.
     reads: Vec<(String, usize, usize, usize)>, // (name, line, col, byte_offset)
+    /// All writes in source order. May contain multiple writes to the same
+    /// variable. Used by liveness analysis (W312).
+    writes: Vec<WriteRec>,
+    /// Names that appear as both LHS and (somewhere in) RHS of the same
+    /// assignment in this block (`x = ... x ...`). Used by capture detection
+    /// to distinguish capture mutation (self-referential) from a local
+    /// shadow (`x = 2` with no read of x on the RHS).
+    self_ref_writes: HashSet<String>,
     /// Outgoing edges.
     successors: Vec<LintEdge>,
     /// Incoming block ids (filled after build).
@@ -58,6 +79,8 @@ impl LintBlock {
             id,
             defs: HashMap::new(),
             reads: Vec::new(),
+            writes: Vec::new(),
+            self_ref_writes: HashSet::new(),
             successors: Vec::new(),
             predecessors: Vec::new(),
             terminates: false,
@@ -136,12 +159,35 @@ impl<'a> CfgBuilder<'a> {
         node.utf8_text(self.source.as_bytes()).unwrap_or("").to_string()
     }
 
-    /// Build CFG from a source_file or block node.
-    /// Returns the completed CFG.
-    fn build(mut self, root: Node) -> LintCFG {
-        let current = self.cfg.entry;
-        let after = self.walk_children(root, current);
-        // Connect final block to exit if not terminated.
+    /// Record a write to `name` in `block`. `position_node` carries the
+    /// diagnostic location (line/column); `order_offset` carries the
+    /// dataflow ordering anchor -- for assignments this should be the END
+    /// byte of the assignment so the write is sequenced after the RHS reads
+    /// (e.g. `x = x + 1`).
+    fn add_write(&mut self, block: usize, name: String, position_node: Node, order_offset: usize, explicit: bool) {
+        let line = position_node.start_position().row + 1;
+        let column = position_node.start_position().column + 1;
+        self.cfg.blocks[block].defs.entry(name.clone()).or_insert(order_offset);
+        self.cfg.blocks[block].writes.push(WriteRec {
+            name,
+            line,
+            column,
+            offset: order_offset,
+            explicit,
+        });
+    }
+
+    /// Build CFG with a list of parameter bindings seeded as implicit defs
+    /// in the entry block. Used for lambda bodies so reads of parameters
+    /// don't fire W310 and live-out analysis sees them as defined on every
+    /// path reaching exit (a function can't enter without its arguments
+    /// bound). Pass an empty slice for the top-level scope.
+    fn build_with_params(mut self, root: Node, params: &[(String, Node)]) -> LintCFG {
+        let entry = self.cfg.entry;
+        for (name, node) in params {
+            self.add_write(entry, name.clone(), *node, node.end_byte(), false);
+        }
+        let after = self.walk_children(root, entry);
         if !self.cfg.blocks[after].terminates {
             self.cfg.add_edge(after, self.cfg.exit, EdgeKind::Unconditional);
         }
@@ -349,6 +395,13 @@ impl<'a> CfgBuilder<'a> {
         // for_stmt: 'for' unpack_target 'in' expression block  (positional)
         let mut cursor = node.walk();
         let children: Vec<Node> = node.children(&mut cursor).collect();
+        // Order the for-var bind after the iterable expression so reads
+        // inside it precede the bind (e.g. shadowing via `for x in [x]`).
+        let bind_order = children
+            .iter()
+            .find(|c| c.kind() == NK::BLOCK)
+            .map(|b| b.start_byte())
+            .unwrap_or_else(|| node.end_byte());
 
         // Collect iterable reads (the expression after 'in') and loop var defs.
         let mut found_in = false;
@@ -358,7 +411,7 @@ impl<'a> CfgBuilder<'a> {
             }
             if child.is_named() && !found_in {
                 if child.kind() == NK::UNPACK_TARGET {
-                    self.collect_lvalue_defs(child, header);
+                    self.collect_lvalue_defs(child, header, false, bind_order);
                 }
             }
             if !child.is_named() && self.node_text(child) == "in" {
@@ -420,7 +473,13 @@ impl<'a> CfgBuilder<'a> {
                     | NK::PATTERN_TUPLE
                     | NK::PATTERN_STRUCT
                     | NK::PATTERN_STAR => {
-                        self.collect_pattern_defs(case_child, case_block);
+                        // Pattern bindings sequence at the END of the pattern
+                        // node (semantic order: pattern matches first, binds,
+                        // then guard runs, then body). End-of-pattern keeps
+                        // body reads ordered AFTER the binding, which matters
+                        // for capture detection so pattern-bound vars are not
+                        // misclassified as captures in nested scopes.
+                        self.collect_pattern_defs(case_child, case_block, case_child.end_byte());
                         if !case_has_guard && self.is_wildcard_pattern(case_child) {
                             has_wildcard = true;
                         }
@@ -488,10 +547,8 @@ impl<'a> CfgBuilder<'a> {
                         if let Some(binding) = ec.child_by_field_name("binding") {
                             if binding.kind() == NK::IDENTIFIER {
                                 let name = self.node_text(binding);
-                                self.cfg.blocks[except_block]
-                                    .defs
-                                    .entry(name)
-                                    .or_insert(binding.start_byte());
+                                let order = binding.end_byte();
+                                self.add_write(except_block, name, binding, order, false);
                             }
                         }
                         // except_clause has field "handler" for the body block.
@@ -538,10 +595,35 @@ impl<'a> CfgBuilder<'a> {
 
     // --- Variable collection helpers ---
 
-    /// Collect all identifier reads in a subtree, skipping nested lambdas.
+    /// Collect all identifier reads in a subtree, skipping nested scopes.
+    /// Inside `getattr` / `callattr` the inner identifier is an attribute
+    /// or method **name**, not a variable read -- skip it. The host of the
+    /// attribute access lives as a sibling in the surrounding expression
+    /// and is still picked up by the normal recurse.
     fn collect_reads(&mut self, node: Node, block: usize) {
-        if node.kind() == NK::LAMBDA_EXPR || node.kind() == NK::STRUCT_STMT || node.kind() == NK::TRAIT_STMT {
+        if node.kind() == NK::LAMBDA_EXPR
+            || node.kind() == NK::STRUCT_STMT
+            || node.kind() == NK::TRAIT_STMT
+            || node.kind() == NK::STRUCT_METHOD
+        {
             return; // Don't descend into nested scopes.
+        }
+        if node.kind() == NK::GETATTR {
+            // Pure attribute name lookup -- no variable reads inside.
+            return;
+        }
+        if node.kind() == NK::CALLATTR {
+            // `.method(args)` -- skip the method identifier, but the
+            // arguments may contain variable reads.
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            for child in children {
+                if child.kind() == NK::IDENTIFIER {
+                    continue;
+                }
+                self.collect_reads(child, block);
+            }
+            return;
         }
         if node.kind() == NK::IDENTIFIER {
             let name = self.node_text(node);
@@ -552,22 +634,28 @@ impl<'a> CfgBuilder<'a> {
             return;
         }
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        for child in children {
             self.collect_reads(child, block);
         }
     }
 
-    /// Collect defs from assignment LHS.
-    fn collect_lvalue_defs(&mut self, node: Node, block: usize) {
+    /// Collect defs from assignment LHS. `explicit` is true for source-level
+    /// `x = ...` (W312 candidate), false for loop-var / pattern bindings.
+    /// `order_offset` is the byte position used to sequence this write
+    /// relative to reads in the same block (use the END byte of the
+    /// enclosing assignment for `x = x + 1`-style cases).
+    fn collect_lvalue_defs(&mut self, node: Node, block: usize, explicit: bool, order_offset: usize) {
         match node.kind() {
             NK::IDENTIFIER => {
                 let name = self.node_text(node);
-                self.cfg.blocks[block].defs.entry(name).or_insert(node.start_byte());
+                self.add_write(block, name, node, order_offset, explicit);
             }
             NK::LVALUE | NK::UNPACK_TARGET | NK::UNPACK_TUPLE | NK::UNPACK_SEQUENCE | NK::UNPACK_ITEMS => {
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    self.collect_lvalue_defs(child, block);
+                let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+                for child in children {
+                    self.collect_lvalue_defs(child, block, explicit, order_offset);
                 }
             }
             NK::SETATTR | NK::INDEX => {} // attribute/index assignment, not a local def
@@ -602,9 +690,31 @@ impl<'a> CfgBuilder<'a> {
         if let Some(rhs_node) = rhs {
             self.collect_reads(rhs_node, block);
         }
-        // LHS defs.
+        // Self-referential check: for each LHS name, record whether the RHS
+        // syntactically reads that same name. Used by capture detection to
+        // separate `x = x + 1` (capture mutation) from `x = 1` (local shadow).
+        let bytes = self.source.as_bytes();
+        let mut rhs_names: HashSet<String> = HashSet::new();
+        if let Some(rhs_node) = rhs {
+            gather_read_idents(rhs_node, bytes, &mut rhs_names);
+        }
+        if !rhs_names.is_empty() {
+            let mut lhs_names: HashSet<String> = HashSet::new();
+            for lv in &lvalues {
+                gather_lhs_idents_set(*lv, bytes, &mut lhs_names);
+            }
+            for name in lhs_names {
+                if rhs_names.contains(&name) {
+                    self.cfg.blocks[block].self_ref_writes.insert(name);
+                }
+            }
+        }
+        // LHS defs (explicit user assignment -- W312 candidates). The order
+        // anchor is the END of the assignment so RHS reads come before the
+        // LHS write (matters for `x = x + 1`).
+        let order = node.end_byte();
         for lv in &lvalues {
-            self.collect_lvalue_defs(*lv, block);
+            self.collect_lvalue_defs(*lv, block, true, order);
         }
     }
 
@@ -613,22 +723,25 @@ impl<'a> CfgBuilder<'a> {
         if let Some(name_node) = node.child_by_field_name("name") {
             if name_node.kind() == NK::IDENTIFIER {
                 let name = self.node_text(name_node);
-                self.cfg.blocks[block]
-                    .defs
-                    .entry(name)
-                    .or_insert(name_node.start_byte());
+                // Named lambda/struct/trait: implicit so we don't surface
+                // W312 when a function/type is reassigned without being
+                // called (W200 covers the unused case). Order anchor is the
+                // end of the whole definition node.
+                self.add_write(block, name, name_node, node.end_byte(), false);
             }
         }
     }
 
-    /// Collect variable bindings from match patterns.
-    fn collect_pattern_defs(&mut self, node: Node, block: usize) {
+    /// Collect variable bindings from match patterns. All pattern bindings
+    /// are implicit (not W312 candidates). `order_offset` should be set so
+    /// the binding sequences after any reads in this case.
+    fn collect_pattern_defs(&mut self, node: Node, block: usize, order_offset: usize) {
         match node.kind() {
             NK::PATTERN_VAR => {
                 if let Some(id) = node.child(0) {
                     if id.kind() == NK::IDENTIFIER {
                         let name = self.node_text(id);
-                        self.cfg.blocks[block].defs.entry(name).or_insert(id.start_byte());
+                        self.add_write(block, name, id, order_offset, false);
                     }
                 }
             }
@@ -638,25 +751,25 @@ impl<'a> CfgBuilder<'a> {
                 // Skip the struct type name (first identifier in pattern_struct).
                 // Type names start with uppercase by convention.
                 if !name.chars().next().is_some_and(|c| c.is_uppercase()) && name != "_" {
-                    self.cfg.blocks[block].defs.entry(name).or_insert(node.start_byte());
+                    self.add_write(block, name, node, order_offset, false);
                 }
             }
-            // All container pattern types: descend recursively.
-            NK::PATTERN | NK::PATTERN_OR | NK::PATTERN_TUPLE | NK::PATTERN_STRUCT => {
+            // Container pattern kinds: descend recursively. PATTERN_LITERAL
+            // and PATTERN_WILDCARD have no bindings (no-op).
+            NK::PATTERN
+            | NK::PATTERN_OR
+            | NK::PATTERN_TUPLE
+            | NK::PATTERN_ITEMS
+            | NK::PATTERN_STRUCT
+            | NK::PATTERN_ENUM
+            | NK::PATTERN_STAR => {
                 let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    self.collect_pattern_defs(child, block);
+                let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+                for child in children {
+                    self.collect_pattern_defs(child, block, order_offset);
                 }
             }
-            _ => {
-                // Catch pattern_items and other wrappers.
-                if node.is_named() && node.kind().starts_with("pattern") {
-                    let mut cursor = node.walk();
-                    for child in node.children(&mut cursor) {
-                        self.collect_pattern_defs(child, block);
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
@@ -904,17 +1017,746 @@ fn check_possibly_uninitialized(cfg: &LintCFG, source_lines: &[&str]) -> Vec<Dia
 }
 
 // ---------------------------------------------------------------------------
+// W312 -- dead store (backward liveness)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum EventKind {
+    Read,
+    Write,
+}
+
+/// Build the ordered list of (read, write) events for a block, sorted by
+/// source byte offset. Each entry carries the variable name plus, for writes,
+/// a pointer back into `block.writes` so we can recover position metadata.
+fn block_events(block: &LintBlock) -> Vec<(usize, EventKind, String, Option<usize>)> {
+    let mut events: Vec<(usize, EventKind, String, Option<usize>)> = Vec::new();
+    for (name, _line, _col, offset) in &block.reads {
+        events.push((*offset, EventKind::Read, name.clone(), None));
+    }
+    for (idx, w) in block.writes.iter().enumerate() {
+        events.push((w.offset, EventKind::Write, w.name.clone(), Some(idx)));
+    }
+    events.sort_by_key(|e| e.0);
+    events
+}
+
+/// Compute per-block `use` (upward exposed reads) and `def` (any write).
+fn compute_use_def(cfg: &LintCFG) -> (Vec<HashSet<String>>, Vec<HashSet<String>>) {
+    let n = cfg.blocks.len();
+    let mut use_b: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    let mut def_b: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    for (bi, block) in cfg.blocks.iter().enumerate() {
+        let events = block_events(block);
+        let mut killed: HashSet<String> = HashSet::new();
+        for (_, kind, name, _) in &events {
+            match kind {
+                EventKind::Read => {
+                    if !killed.contains(name) {
+                        use_b[bi].insert(name.clone());
+                    }
+                }
+                EventKind::Write => {
+                    def_b[bi].insert(name.clone());
+                    killed.insert(name.clone());
+                }
+            }
+        }
+    }
+    (use_b, def_b)
+}
+
+/// Backward dataflow: compute `live_out` for each block.
+/// `live_out[B] = ⋃ live_in[S]` over successors,
+/// `live_in[B] = use[B] ∪ (live_out[B] \ def[B])`.
+fn compute_live_out(cfg: &LintCFG) -> Vec<HashSet<String>> {
+    let n = cfg.blocks.len();
+    let (use_b, def_b) = compute_use_def(cfg);
+    let mut live_in: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    let mut live_out: Vec<HashSet<String>> = vec![HashSet::new(); n];
+
+    let max_iterations = n * 4 + 10;
+    let mut iterations = 0;
+    let mut changed = true;
+    while changed {
+        iterations += 1;
+        assert!(
+            iterations <= max_iterations,
+            "liveness fixpoint did not converge after {} iterations ({} blocks)",
+            iterations,
+            n,
+        );
+        changed = false;
+        for bi in (0..n).rev() {
+            let mut new_out: HashSet<String> = HashSet::new();
+            for edge in &cfg.blocks[bi].successors {
+                for v in &live_in[edge.target] {
+                    new_out.insert(v.clone());
+                }
+            }
+            if new_out != live_out[bi] {
+                live_out[bi] = new_out;
+                changed = true;
+            }
+            let mut new_in = use_b[bi].clone();
+            for v in &live_out[bi] {
+                if !def_b[bi].contains(v) {
+                    new_in.insert(v.clone());
+                }
+            }
+            if new_in != live_in[bi] {
+                live_in[bi] = new_in;
+                changed = true;
+            }
+        }
+    }
+    live_out
+}
+
+/// Report W312 (dead store) for every explicit write whose target is not
+/// live afterwards. Walks each block's events in reverse to track the live
+/// set at each program point.
+/// Heuristic: in a sub-scope (lambda or method body), classify a variable
+/// as captured from an enclosing scope when ALL of:
+///   1. Its earliest event in source-byte order is a **read**.
+///   2. The name is actually defined somewhere in a parent scope
+///      (`parent_visible`).
+///   3. EITHER the sub-scope never writes the name (pure read-only
+///      capture), OR at least one write to that name is self-referential
+///      (its RHS reads the same name -- the `x = x + 1` mutation pattern).
+///
+/// Condition (3) keeps shadowing patterns like `b = () => { print(x); x = 2 }`
+/// out of the capture set: the write to `x` does not read `x`, so under
+/// Python-style lexical scoping it locally shadows the outer `x`, and the
+/// `print(x)` read is genuinely uninitialised -- W310 must fire.
+fn detect_captures(cfg: &LintCFG, parent_visible: &HashSet<String>) -> HashSet<String> {
+    let mut earliest: HashMap<String, (usize, bool)> = HashMap::new();
+    for block in &cfg.blocks {
+        for (name, _, _, offset) in &block.reads {
+            let entry = earliest.entry(name.clone()).or_insert((*offset, true));
+            if *offset < entry.0 {
+                *entry = (*offset, true);
+            }
+        }
+        for w in &block.writes {
+            let entry = earliest.entry(w.name.clone()).or_insert((w.offset, false));
+            if w.offset < entry.0 {
+                *entry = (w.offset, false);
+            }
+        }
+    }
+
+    let any_explicit_write = |name: &str| -> bool {
+        cfg.blocks
+            .iter()
+            .flat_map(|b| b.writes.iter())
+            .any(|w| w.explicit && w.name == name)
+    };
+    let any_self_ref = |name: &str| -> bool { cfg.blocks.iter().any(|b| b.self_ref_writes.contains(name)) };
+
+    earliest
+        .into_iter()
+        .filter_map(|(name, (_, is_read))| {
+            if !is_read || !parent_visible.contains(&name) {
+                return None;
+            }
+            if any_explicit_write(&name) && !any_self_ref(&name) {
+                // Local shadow pattern (`x = 2` without RHS read of x) --
+                // x is locally bound; don't suppress W310 on the prior read.
+                return None;
+            }
+            Some(name)
+        })
+        .collect()
+}
+
+/// Walk up from `body` to the source root, accumulating the set of names
+/// reachable from this lambda body through lexical scope: parameters of
+/// every enclosing lambda + every binding (assignment LHS, for-var,
+/// pattern, except, struct/trait name) found in sibling subtrees of any
+/// enclosing scope. We never descend into other lambda bodies -- their
+/// inner defs are not visible from us.
+fn collect_parent_visible(body: Node, source: &str) -> HashSet<String> {
+    let mut visible: HashSet<String> = HashSet::new();
+    let bytes = source.as_bytes();
+    let mut excluded = body;
+    while let Some(parent) = excluded.parent() {
+        if parent.kind() == NK::LAMBDA_EXPR || parent.kind() == NK::STRUCT_METHOD {
+            // Crossing a function-scope boundary: add the function's params
+            // (lambda lambda_params, method (self, ...)) to what's visible
+            // from this body and from any deeper nested scope.
+            for (name, _) in collect_lambda_param_names(parent, source) {
+                visible.insert(name);
+            }
+        } else {
+            collect_defs_in_scope(parent, excluded, bytes, &mut visible);
+        }
+        excluded = parent;
+    }
+    visible
+}
+
+fn collect_defs_in_scope(node: Node, exclude: Node, bytes: &[u8], visible: &mut HashSet<String>) {
+    if node.id() == exclude.id() {
+        return;
+    }
+    if node.kind() == NK::LAMBDA_EXPR || node.kind() == NK::STRUCT_METHOD {
+        // Other function-scope body -- its inner bindings (locals, params)
+        // aren't visible from outside.
+        return;
+    }
+    match node.kind() {
+        NK::ASSIGNMENT => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            let mut last_eq: Option<usize> = None;
+            for (i, child) in children.iter().enumerate().rev() {
+                if !child.is_named() && child.utf8_text(bytes).unwrap_or("") == "=" {
+                    last_eq = Some(i);
+                    break;
+                }
+            }
+            if let Some(eq) = last_eq {
+                for child in &children[..eq] {
+                    collect_lhs_idents(*child, bytes, visible);
+                }
+            }
+        }
+        NK::FOR_STMT => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == NK::UNPACK_TARGET {
+                    collect_lhs_idents(child, bytes, visible);
+                    break;
+                }
+            }
+        }
+        NK::MATCH_CASE => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if matches!(
+                    child.kind(),
+                    NK::PATTERN
+                        | NK::PATTERN_OR
+                        | NK::PATTERN_VAR
+                        | NK::PATTERN_WILDCARD
+                        | NK::PATTERN_LITERAL
+                        | NK::PATTERN_TUPLE
+                        | NK::PATTERN_STRUCT
+                        | NK::PATTERN_STAR
+                ) {
+                    collect_pattern_idents(child, bytes, visible);
+                    break;
+                }
+            }
+        }
+        NK::EXCEPT_CLAUSE => {
+            if let Some(binding) = node.child_by_field_name("binding") {
+                if binding.kind() == NK::IDENTIFIER {
+                    visible.insert(binding.utf8_text(bytes).unwrap_or("").to_string());
+                }
+            }
+        }
+        NK::STRUCT_STMT | NK::TRAIT_STMT => {
+            if let Some(name) = node.child_by_field_name("name") {
+                if name.kind() == NK::IDENTIFIER {
+                    visible.insert(name.utf8_text(bytes).unwrap_or("").to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    for child in children {
+        collect_defs_in_scope(child, exclude, bytes, visible);
+    }
+}
+
+/// Walk a subtree and add every identifier **read** into `out`. Skip
+/// nested function scopes (their reads belong to a different scope) and
+/// attribute-name identifiers inside `getattr` / `callattr` (those are
+/// attribute names, not variable references).
+fn gather_read_idents(node: Node, bytes: &[u8], out: &mut HashSet<String>) {
+    if node.kind() == NK::LAMBDA_EXPR
+        || node.kind() == NK::STRUCT_STMT
+        || node.kind() == NK::TRAIT_STMT
+        || node.kind() == NK::STRUCT_METHOD
+    {
+        return;
+    }
+    if node.kind() == NK::GETATTR {
+        return; // `.attribute` -- no variable reads inside.
+    }
+    if node.kind() == NK::CALLATTR {
+        // `.method(args)` -- skip the method identifier, recurse into args.
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        for child in children {
+            if child.kind() == NK::IDENTIFIER {
+                continue;
+            }
+            gather_read_idents(child, bytes, out);
+        }
+        return;
+    }
+    if node.kind() == NK::IDENTIFIER {
+        out.insert(node.utf8_text(bytes).unwrap_or("").to_string());
+        return;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    for child in children {
+        gather_read_idents(child, bytes, out);
+    }
+}
+
+/// Walk an LHS subtree and add LHS identifier names into `out`. Mirrors
+/// `collect_lvalue_defs` but produces a `HashSet<String>` instead of CFG
+/// writes -- used for self-referential write detection.
+fn gather_lhs_idents_set(node: Node, bytes: &[u8], out: &mut HashSet<String>) {
+    match node.kind() {
+        NK::IDENTIFIER => {
+            out.insert(node.utf8_text(bytes).unwrap_or("").to_string());
+        }
+        NK::LVALUE | NK::UNPACK_TARGET | NK::UNPACK_TUPLE | NK::UNPACK_SEQUENCE | NK::UNPACK_ITEMS => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            for child in children {
+                gather_lhs_idents_set(child, bytes, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_lhs_idents(node: Node, bytes: &[u8], visible: &mut HashSet<String>) {
+    match node.kind() {
+        NK::IDENTIFIER => {
+            visible.insert(node.utf8_text(bytes).unwrap_or("").to_string());
+        }
+        NK::LVALUE | NK::UNPACK_TARGET | NK::UNPACK_TUPLE | NK::UNPACK_SEQUENCE | NK::UNPACK_ITEMS => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            for child in children {
+                collect_lhs_idents(child, bytes, visible);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_pattern_idents(node: Node, bytes: &[u8], visible: &mut HashSet<String>) {
+    match node.kind() {
+        NK::PATTERN_VAR => {
+            if let Some(id) = node.child(0) {
+                if id.kind() == NK::IDENTIFIER {
+                    visible.insert(id.utf8_text(bytes).unwrap_or("").to_string());
+                }
+            }
+        }
+        NK::IDENTIFIER => {
+            let name = node.utf8_text(bytes).unwrap_or("");
+            if !name.chars().next().is_some_and(|c| c.is_uppercase()) && name != "_" {
+                visible.insert(name.to_string());
+            }
+        }
+        NK::PATTERN
+        | NK::PATTERN_OR
+        | NK::PATTERN_TUPLE
+        | NK::PATTERN_ITEMS
+        | NK::PATTERN_STRUCT
+        | NK::PATTERN_ENUM
+        | NK::PATTERN_STAR => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            for child in children {
+                collect_pattern_idents(child, bytes, visible);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Inject `captures` as implicit defs at the entry block of `cfg`. Used for
+/// nested scopes so a read of a captured variable doesn't trip W310 and the
+/// liveness analysis sees the value as defined on every path reaching exit.
+/// We `insert()` with offset 0 (rather than `entry().or_insert()`) because
+/// captures generally co-exist with a later self-mutating write in the same
+/// block (`count = count + 1`), and the intra-block W310 ordering check
+/// (`def_pos < read_byte_offset`) must see the capture as defined BEFORE
+/// the RHS read.
+fn seed_captures(cfg: &mut LintCFG, captures: &HashSet<String>) {
+    let entry = cfg.entry;
+    for name in captures {
+        cfg.blocks[entry].defs.insert(name.clone(), 0);
+    }
+}
+
+fn check_dead_stores(cfg: &LintCFG, source_lines: &[&str], skip: &HashSet<String>) -> Vec<Diagnostic> {
+    let live_out_all = compute_live_out(cfg);
+    // Variables that are read somewhere in the CFG. Writes to never-read
+    // variables are W200 territory, not W312 -- skip them here to avoid
+    // double-reporting.
+    let read_anywhere: HashSet<&str> = cfg
+        .blocks
+        .iter()
+        .flat_map(|b| b.reads.iter().map(|(name, _, _, _)| name.as_str()))
+        .collect();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut reported: HashSet<(usize, usize)> = HashSet::new();
+
+    for block in &cfg.blocks {
+        if block.id == cfg.exit {
+            continue;
+        }
+        if block.writes.is_empty() {
+            continue;
+        }
+        let events = block_events(block);
+        let mut live = live_out_all[block.id].clone();
+
+        // Walk events in reverse to compute, at each write, the liveness
+        // state immediately after that write.
+        for (_, kind, name, idx) in events.iter().rev() {
+            match kind {
+                EventKind::Read => {
+                    live.insert(name.clone());
+                }
+                EventKind::Write => {
+                    let w = &block.writes[idx.expect("write events carry an index")];
+                    if w.explicit
+                        && !live.contains(&w.name)
+                        && read_anywhere.contains(w.name.as_str())
+                        && !skip.contains(&w.name)
+                    {
+                        let key = (w.line, w.column);
+                        if reported.insert(key) {
+                            let source_line = source_lines.get(w.line.saturating_sub(1)).map(|s| s.to_string());
+                            diagnostics.push(Diagnostic {
+                                code: "W312".to_string(),
+                                message: format!("dead store: '{}' is overwritten before being read", w.name),
+                                severity: Severity::Warning,
+                                line: w.line,
+                                column: w.column,
+                                end_line: None,
+                                end_column: None,
+                                source_line,
+                                suggestion: None,
+                            });
+                        }
+                    }
+                    live.remove(&w.name);
+                }
+            }
+        }
+    }
+    diagnostics
+}
+
+// ---------------------------------------------------------------------------
+// W313 -- redundant else after terminating branch (guard clause hint)
+// ---------------------------------------------------------------------------
+
+/// True if a block always exits its enclosing scope (return/raise) or its
+/// enclosing loop (break/continue), through every path. Structural check on
+/// the CST: looks at the last significant child, recursing into nested
+/// if/match/try.
+fn block_always_terminates(node: Node, source: &str) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).filter(|c| c.is_named()).collect();
+    let Some(stmt) = children.last() else { return false };
+    stmt_always_terminates(*stmt, source)
+}
+
+fn stmt_always_terminates(node: Node, source: &str) -> bool {
+    match node.kind() {
+        NK::RETURN_STMT | NK::RAISE_STMT | NK::BREAK_STMT | NK::CONTINUE_STMT => true,
+        NK::STATEMENT => {
+            // Wrapper -- check the inner child.
+            let mut cursor = node.walk();
+            let first_named: Option<Node<'_>> = node.children(&mut cursor).find(|c| c.is_named());
+            first_named.is_some_and(|c| stmt_always_terminates(c, source))
+        }
+        NK::BLOCK => block_always_terminates(node, source),
+        NK::IF_EXPR => {
+            // All branches (then, elif*, else) must terminate AND an else
+            // must exist (no fallthrough on missing else).
+            let Some(cons) = node.child_by_field_name("consequence") else {
+                return false;
+            };
+            if !block_always_terminates(cons, source) {
+                return false;
+            }
+            let mut has_else = false;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                match child.kind() {
+                    NK::ELIF_CLAUSE => {
+                        let Some(body) = child.child_by_field_name("consequence") else {
+                            return false;
+                        };
+                        if !block_always_terminates(body, source) {
+                            return false;
+                        }
+                    }
+                    NK::ELSE_CLAUSE => {
+                        has_else = true;
+                        let Some(body) = child.child_by_field_name("body") else {
+                            return false;
+                        };
+                        if !block_always_terminates(body, source) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            has_else
+        }
+        NK::MATCH_EXPR => {
+            // All match_case blocks must terminate AND a wildcard must exist.
+            let mut has_wildcard = false;
+            let mut all_terminate = true;
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() != NK::MATCH_CASE {
+                    continue;
+                }
+                let has_guard = child.child_by_field_name("guard").is_some();
+                let mut case_cursor = child.walk();
+                let mut case_block: Option<Node> = None;
+                for case_child in child.children(&mut case_cursor) {
+                    match case_child.kind() {
+                        NK::BLOCK => case_block = Some(case_child),
+                        k if !has_guard && is_wildcard_pattern_kind(k, case_child, source) => {
+                            has_wildcard = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(b) = case_block {
+                    if !block_always_terminates(b, source) {
+                        all_terminate = false;
+                    }
+                } else {
+                    all_terminate = false;
+                }
+            }
+            has_wildcard && all_terminate
+        }
+        _ => false,
+    }
+}
+
+fn is_wildcard_pattern_kind(kind: &str, node: Node, source: &str) -> bool {
+    match kind {
+        NK::PATTERN_WILDCARD => true,
+        NK::PATTERN_VAR => node
+            .child(0)
+            .map(|id| id.kind() == NK::IDENTIFIER && id.utf8_text(source.as_bytes()).unwrap_or("") == "_")
+            .unwrap_or(false),
+        NK::PATTERN | NK::PATTERN_OR => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+            children.iter().any(|c| is_wildcard_pattern_kind(c.kind(), *c, source))
+        }
+        _ => false,
+    }
+}
+
+/// Walk the CST and report W313 hints: an `if` branch that always terminates
+/// makes the following elif/else branches redundant -- they can be flattened
+/// out as guard clauses.
+fn check_redundant_else(root: Node, source: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let source_lines: Vec<&str> = source.lines().collect();
+    walk_for_w313(root, source, &source_lines, diagnostics);
+}
+
+fn walk_for_w313(node: Node, source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    if node.kind() == NK::IF_EXPR {
+        report_if_w313(node, source, source_lines, diagnostics);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_w313(child, source, source_lines, diagnostics);
+    }
+}
+
+fn report_if_w313(node: Node, source: &str, source_lines: &[&str], diagnostics: &mut Vec<Diagnostic>) {
+    // Collect branches in order: (label, body_block, position_node).
+    // The position_node is where the diagnostic anchors (the `elif`/`else`
+    // keyword or clause for follow-ups, the `if` keyword for the consequence).
+    struct Branch<'a> {
+        body: Node<'a>,
+        head: Node<'a>,
+        is_else: bool,
+    }
+    let mut branches: Vec<Branch<'_>> = Vec::new();
+    if let Some(cons) = node.child_by_field_name("consequence") {
+        branches.push(Branch {
+            body: cons,
+            head: node,
+            is_else: false,
+        });
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            NK::ELIF_CLAUSE => {
+                if let Some(body) = child.child_by_field_name("consequence") {
+                    branches.push(Branch {
+                        body,
+                        head: child,
+                        is_else: false,
+                    });
+                }
+            }
+            NK::ELSE_CLAUSE => {
+                if let Some(body) = child.child_by_field_name("body") {
+                    branches.push(Branch {
+                        body,
+                        head: child,
+                        is_else: true,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if branches.len() < 2 {
+        return;
+    }
+    let terminates: Vec<bool> = branches
+        .iter()
+        .map(|b| block_always_terminates(b.body, source))
+        .collect();
+
+    let mut prior_terminates = false;
+    let mut reported_once = false;
+    for (i, branch) in branches.iter().enumerate() {
+        if prior_terminates && !terminates[i] && !reported_once {
+            // Report this branch as redundant.
+            let pos = branch.head.start_position();
+            let line = pos.row + 1;
+            let col = pos.column + 1;
+            let source_line = source_lines.get(line.saturating_sub(1)).map(|s| s.to_string());
+            let message = if branch.is_else {
+                "redundant else: previous branch always exits; flatten this block to the enclosing scope".to_string()
+            } else {
+                "redundant elif: previous branch always exits; this can be a top-level if".to_string()
+            };
+            diagnostics.push(Diagnostic {
+                code: "W313".to_string(),
+                message,
+                severity: Severity::Hint,
+                line,
+                column: col,
+                end_line: None,
+                end_column: None,
+                source_line,
+                suggestion: None,
+            });
+            reported_once = true;
+        }
+        if terminates[i] {
+            prior_terminates = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Walk the tree and yield each function-scope body (with its parameter
+/// names) so every function gets its own CFG. A function scope here means
+/// either a `lambda_expr` or a `struct_method` -- both introduce a fresh
+/// lexical scope with parameters that the body references. The root scope
+/// is handled separately by the caller (root cannot capture; sub-scopes
+/// can). For `struct_method`, abstract declarations without a `=> { body }`
+/// have nothing to analyse and are skipped.
+fn collect_lambda_scopes<'a>(node: Node<'a>, source: &str, scopes: &mut Vec<(Node<'a>, Vec<(String, Node<'a>)>)>) {
+    if node.kind() == NK::LAMBDA_EXPR || node.kind() == NK::STRUCT_METHOD {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        if let Some(body) = children.iter().find(|c| c.kind() == NK::BLOCK) {
+            let params = collect_lambda_param_names(node, source);
+            scopes.push((*body, params));
+        }
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    for child in children {
+        collect_lambda_scopes(child, source, scopes);
+    }
+}
+
+/// Extract parameter names + name nodes from a `lambda_expr` or
+/// `struct_method`. Returns `(name, identifier_node)` pairs in source order.
+/// In Catnip, methods declare `self` explicitly in their parameter list, so
+/// the same `lambda_params` walk works for both node kinds.
+fn collect_lambda_param_names<'a>(func: Node<'a>, source: &str) -> Vec<(String, Node<'a>)> {
+    let mut names = Vec::new();
+    let mut cursor = func.walk();
+    let children: Vec<Node<'_>> = func.children(&mut cursor).collect();
+    let Some(params_node) = children.iter().find(|c| c.kind() == NK::LAMBDA_PARAMS) else {
+        return names;
+    };
+    let mut pcursor = params_node.walk();
+    for child in params_node.children(&mut pcursor) {
+        if matches!(child.kind(), NK::LAMBDA_PARAM | NK::VARIADIC_PARAM) {
+            if let Some(name_node) = child.child_by_field_name("name") {
+                if name_node.kind() == NK::IDENTIFIER {
+                    let text = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                    names.push((text, name_node));
+                }
+            }
+        }
+    }
+    names
+}
 
 /// Run deep CFG-based analysis on parsed source.
 pub fn check_deep(root: Node, source: &str, _config: &LintConfig) -> Vec<Diagnostic> {
     let source_lines: Vec<&str> = source.lines().collect();
-    let builder = CfgBuilder::new(source);
-    let cfg = builder.build(root);
-    let mut diagnostics = check_possibly_uninitialized(&cfg, &source_lines);
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
-    // W311: unreachable code after terminating branches.
+    // Root scope: no captures (top level can't capture from anywhere).
+    {
+        let builder = CfgBuilder::new(source);
+        let cfg = builder.build_with_params(root, &[]);
+        run_scope_checks(&cfg, &source_lines, &HashSet::new(), &mut diagnostics);
+    }
+
+    // Each lambda body is its own CFG. Parameters are seeded as implicit
+    // defs in the entry block; captures (variables whose first event is a
+    // read) are seeded too and excluded from W312.
+    let mut lambda_scopes: Vec<(Node<'_>, Vec<(String, Node<'_>)>)> = Vec::new();
+    collect_lambda_scopes(root, source, &mut lambda_scopes);
+    for (body, params) in lambda_scopes {
+        let parent_visible = collect_parent_visible(body, source);
+        let builder = CfgBuilder::new(source);
+        let mut cfg = builder.build_with_params(body, &params);
+        let captures = detect_captures(&cfg, &parent_visible);
+        seed_captures(&mut cfg, &captures);
+        run_scope_checks(&cfg, &source_lines, &captures, &mut diagnostics);
+    }
+
+    // W313: structural check, walks the entire tree once.
+    check_redundant_else(root, source, &mut diagnostics);
+
+    diagnostics
+}
+
+fn run_scope_checks(
+    cfg: &LintCFG,
+    source_lines: &[&str],
+    skip_w312: &HashSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    diagnostics.extend(check_possibly_uninitialized(cfg, source_lines));
     for &(line, col) in &cfg.dead_code {
         let source_line = source_lines.get(line.saturating_sub(1)).map(|s| s.to_string());
         diagnostics.push(Diagnostic {
@@ -929,8 +1771,7 @@ pub fn check_deep(root: Node, source: &str, _config: &LintConfig) -> Vec<Diagnos
             suggestion: None,
         });
     }
-
-    diagnostics
+    diagnostics.extend(check_dead_stores(cfg, source_lines, skip_w312));
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,5 +2198,503 @@ mod tests {
             "code after try/finally with return should be dead: {:?}",
             w311
         );
+    }
+
+    // -- G5.3: W313 redundant else after terminating branch --
+
+    fn w313(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+        diags.iter().filter(|d| d.code == "W313").collect()
+    }
+
+    #[test]
+    fn test_w313_else_after_return() {
+        let diags = lint_deep(
+            "f = () => {\n    if cond {\n        return 1\n    } else {\n        x = 2\n        do(x)\n    }\n}",
+        );
+        let hits = w313(&diags);
+        assert_eq!(hits.len(), 1, "expected one W313, got: {:?}", hits);
+        assert_eq!(hits[0].severity, Severity::Hint);
+    }
+
+    #[test]
+    fn test_w313_else_after_raise() {
+        let diags = lint_deep("if cond {\n    raise Error()\n} else {\n    do_stuff()\n}");
+        let hits = w313(&diags);
+        assert_eq!(hits.len(), 1, "raise should trigger W313 on else: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_both_branches_return_no_hint() {
+        // Both branches terminate -- no W313 (symmetric, can't simplify by extraction).
+        let diags = lint_deep("f = () => {\n    if cond {\n        return 1\n    } else {\n        return 2\n    }\n}");
+        let hits = w313(&diags);
+        assert!(hits.is_empty(), "both-return should not trigger W313: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_elif_after_return() {
+        // if X returns, elif Y has follow-up code -> redundant elif.
+        let diags = lint_deep("f = () => {\n    if a {\n        return 1\n    } elif b {\n        x = 2\n    }\n}");
+        let hits = w313(&diags);
+        assert_eq!(hits.len(), 1, "elif after return should trigger W313: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_no_else_no_hint() {
+        // No else branch -- nothing redundant.
+        let diags = lint_deep("f = () => {\n    if cond {\n        return 1\n    }\n    x = 2\n}");
+        let hits = w313(&diags);
+        assert!(hits.is_empty(), "if without else shouldn't trigger W313: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_then_does_not_terminate() {
+        // Then doesn't terminate -- else is not redundant.
+        let diags = lint_deep("if cond {\n    x = 1\n} else {\n    x = 2\n}");
+        let hits = w313(&diags);
+        assert!(hits.is_empty(), "no terminating branch -> no W313: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_break_in_loop_triggers() {
+        // break also terminates the branch w.r.t. the enclosing loop body.
+        let diags = lint_deep("while cond {\n    if stop {\n        break\n    } else {\n        step()\n    }\n}");
+        let hits = w313(&diags);
+        assert_eq!(hits.len(), 1, "break should trigger W313 on else: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w313_nested_if_all_branches_terminate() {
+        // Inner if where all branches return -> outer then terminates.
+        let diags = lint_deep(
+            "f = () => {\n    if a {\n        if b {\n            return 1\n        } else {\n            return 2\n        }\n    } else {\n        x = 1\n    }\n}",
+        );
+        let hits = w313(&diags);
+        assert_eq!(
+            hits.len(),
+            1,
+            "nested if all-return should propagate termination: {:?}",
+            hits
+        );
+    }
+
+    #[test]
+    fn test_w313_only_else_terminates_no_hint() {
+        // Only else terminates -- we don't propose flipping the condition (V1
+        // restriction). No W313.
+        let diags = lint_deep("if cond {\n    x = 1\n} else {\n    return 2\n}");
+        let hits = w313(&diags);
+        assert!(
+            hits.is_empty(),
+            "only-else terminates should not trigger W313: {:?}",
+            hits
+        );
+    }
+
+    // -- G5.2: W312 dead store (backward liveness) --
+
+    fn w312(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+        diags.iter().filter(|d| d.code == "W312").collect()
+    }
+
+    #[test]
+    fn test_w312_overwrite_before_read() {
+        // x = 1 is killed by x = 2 before being read.
+        let diags = lint_deep("x = 1\nx = 2\nprint(x)");
+        let hits = w312(&diags);
+        assert_eq!(hits.len(), 1, "expected one W312 on first write: {:?}", hits);
+        assert_eq!(hits[0].line, 1);
+    }
+
+    #[test]
+    fn test_w312_no_alert_when_read_between() {
+        let diags = lint_deep("x = 1\nprint(x)\nx = 2\nprint(x)");
+        let hits = w312(&diags);
+        assert!(hits.is_empty(), "intermediate read keeps store live: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w312_inter_branches_killed_after_merge() {
+        // Both branches assign y, then y is unconditionally overwritten -- the
+        // branch writes are dead stores.
+        let diags = lint_deep("if cond {\n    y = 1\n} else {\n    y = 2\n}\ny = 3\nprint(y)");
+        let hits = w312(&diags);
+        let lines: Vec<usize> = hits.iter().map(|d| d.line).collect();
+        assert!(
+            lines.contains(&2) && lines.contains(&4),
+            "expected W312 on both branch writes, got lines: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_w312_no_alert_when_branch_used_after_merge() {
+        // Reading y after the if keeps both branch writes live.
+        let diags = lint_deep("if cond {\n    y = 1\n} else {\n    y = 2\n}\nprint(y)");
+        let hits = w312(&diags);
+        assert!(hits.is_empty(), "merged branches are live: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w312_no_alert_when_variable_never_read() {
+        // x is never read anywhere -- W200 territory, not W312.
+        let diags = lint_deep("x = 1");
+        let hits = w312(&diags);
+        assert!(hits.is_empty(), "never-read variable is W200, not W312: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w312_for_var_binding_not_flagged() {
+        // Loop variables are implicit bindings -- don't trigger W312 even if
+        // the body reassigns them.
+        let diags = lint_deep("for x in items {\n    x = transform(x)\n    print(x)\n}");
+        let hits = w312(&diags);
+        // x is read inside the body, the binding rewrites are user-driven on
+        // a captured value; we don't want to chase that here.
+        assert!(hits.is_empty(), "for-var binding shouldn't trigger W312: {:?}", hits);
+    }
+
+    #[test]
+    fn test_w312_dest_before_overwrite() {
+        // Destructuring then immediate overwrite of one component.
+        let diags = lint_deep("(a, b) = pair\na = 99\nprint(a)\nprint(b)");
+        let hits = w312(&diags);
+        let lines: Vec<usize> = hits.iter().map(|d| d.line).collect();
+        assert!(
+            lines.contains(&1),
+            "destructured 'a' is killed by line-2 overwrite, got lines: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_w312_inside_function_body() {
+        // W312 fires inside a lambda body.
+        let diags = lint_deep("f = (z) => {\n    x = 1\n    x = z + 1\n    return x\n}");
+        let hits = w312(&diags);
+        let lines: Vec<usize> = hits.iter().map(|d| d.line).collect();
+        assert!(
+            lines.contains(&2),
+            "first write inside lambda should be flagged: {:?}",
+            lines
+        );
+    }
+
+    // -- Lambda parameter seeding (regression: bodies must see their params) --
+
+    #[test]
+    fn test_lambda_param_read_no_w310() {
+        // `z` is a parameter -- reading it inside the body must not trigger
+        // W310 even though the body has no def for `z`.
+        let diags = lint_deep("f = (z) => {\n    print(z)\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(w310.is_empty(), "param read shouldn't trigger W310: {:?}", w310);
+    }
+
+    #[test]
+    fn test_lambda_param_partial_reassign_no_w310() {
+        // `z` is reassigned in one branch of an if but still has the param
+        // value on the other path. No W310.
+        let diags = lint_deep("f = (z) => {\n    if cond {\n        z = 1\n    }\n    print(z)\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "param partially reassigned should not trigger W310: {:?}",
+            w310
+        );
+    }
+
+    // -- Captured-variable mutation (regression: must not regress W310 nor W312) --
+
+    #[test]
+    fn test_capture_mutation_no_w310() {
+        // `count` is bound in the parent scope; mutating it inside the lambda
+        // must not trigger W310 even though the body has no def before the
+        // RHS read.
+        let diags = lint_deep("count = 0\ninc = () => {\n    count = count + 1\n}\nprint(count)");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(w310.is_empty(), "capture mutation shouldn't trigger W310: {:?}", w310);
+    }
+
+    #[test]
+    fn test_capture_mutation_no_w312() {
+        // The write to `count` is observable from the parent scope -- not a
+        // dead store from the linter's POV.
+        let diags = lint_deep("count = 0\ninc = () => {\n    count = count + 1\n}\nprint(count)");
+        let w312: Vec<_> = diags.iter().filter(|d| d.code == "W312").collect();
+        assert!(w312.is_empty(), "capture write isn't a dead store: {:?}", w312);
+    }
+
+    #[test]
+    fn test_capture_pure_read_no_w310() {
+        // Reading a captured variable inside a lambda (no write) is the most
+        // common closure pattern.
+        let diags = lint_deep("x = 10\nf = () => {\n    return x + 1\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(w310.is_empty(), "capture read shouldn't trigger W310: {:?}", w310);
+    }
+
+    #[test]
+    fn test_nested_w310_still_fires_for_local() {
+        // A truly partial def of a LOCAL var inside a lambda must still
+        // trigger W310 -- capture detection is keyed on read-first events.
+        let diags = lint_deep("f = () => {\n    if cond {\n        x = 1\n    }\n    print(x)\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "partial def of a local should still fire W310: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_nested_read_before_def_fires_w310() {
+        // Regression: a read-before-def inside a lambda whose name does NOT
+        // exist in any enclosing scope must fire W310. The earlier heuristic
+        // (read-first event = capture) silently suppressed this -- capture
+        // classification must require an actual parent-scope binding.
+        let diags = lint_deep("f = () => {\n    print(x)\n    x = 1\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "read-before-local-def inside a lambda must fire W310: {:?}",
+            w310
+        );
+        assert_eq!(w310[0].line, 2);
+    }
+
+    #[test]
+    fn test_nested_capture_visible_in_sibling_lambda_not_seeded() {
+        // `x` is defined inside one lambda's body, NOT visible from a sibling
+        // lambda's enclosing scope. The sibling reads `x` then writes it --
+        // x is in defined_anywhere of the sibling's sub-CFG, so the
+        // read-before-def must surface as W310 (not get swallowed by the
+        // capture heuristic).
+        let diags = lint_deep("a = () => { x = 1 }\nb = () => {\n    print(x)\n    x = 5\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "x defined in sibling lambda must still trip W310 in `b`: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_nested_capture_from_outer_lambda_local() {
+        // `local_x` is bound in the outer lambda's body; the inner lambda
+        // legitimately captures it.
+        let diags =
+            lint_deep("outer = () => {\n    local_x = 1\n    inner = () => {\n        print(local_x)\n    }\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "inner lambda reading outer's local should not trip W310: {:?}",
+            w310
+        );
+    }
+
+    // -- struct_method scope (regression: methods get their own CFG and params) --
+
+    #[test]
+    fn test_method_body_param_seeded() {
+        // A method's `self` parameter must not trigger W310 inside the body.
+        let diags =
+            lint_deep("struct Point {\n    x; y;\n\n    sum(self) => {\n        return self.x + self.y\n    }\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(w310.is_empty(), "method param `self` should be seeded: {:?}", w310);
+    }
+
+    #[test]
+    fn test_method_local_read_before_def_w310() {
+        // A real read-before-local-def inside a method must still fire W310.
+        let diags = lint_deep("struct S {\n    f(self) => {\n        print(x)\n        x = 1\n    }\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "read-before-local-def inside a method must fire W310: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_nested_lambda_in_method_sees_self() {
+        // A lambda nested inside a method body should see the method's params
+        // (`self`, plus declared params) as captures, not as undefined reads.
+        let diags = lint_deep(
+            "struct S {\n    f(self, k) => {\n        g = () => {\n            return self.x + k\n        }\n    }\n}",
+        );
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "lambda inside method should capture self and k from parent method scope: {:?}",
+            w310
+        );
+    }
+
+    // -- Attribute-name handling (regression: getattr/callattr identifiers
+    //    are not variable reads) --
+
+    #[test]
+    fn test_attribute_name_not_variable_read() {
+        // `obj.x` reads `obj`, not a variable named `x`. With `x` defined
+        // only after, an attribute access mustn't fabricate a W310 on `x`.
+        let diags = lint_deep("obj = make()\nobj.x = 1\nx = 2\nprint(x)");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "attribute name `x` mustn't be tracked as a read of variable x: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_method_call_attribute_name_not_variable_read() {
+        // `obj.x(arg)` -- `x` is a method name, not a variable read.
+        let diags = lint_deep("obj = make()\nobj.x(arg)\nx = 2\nprint(x)");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        // arg is undefined → E200's job, not W310. x is defined-after but
+        // not read before its def (the attribute access doesn't count).
+        let names: Vec<&str> = w310
+            .iter()
+            .map(|d| d.message.split('\'').nth(1).unwrap_or(""))
+            .collect();
+        assert!(
+            !names.contains(&"x"),
+            "method name shouldn't be tracked as read of variable x: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_self_ref_detection_ignores_attribute_names() {
+        // The shadow heuristic must NOT treat `self.x` in the RHS as a read
+        // of `x`. In this method, the LHS `result` is locally bound; the
+        // RHS `self.x + self.y` has no read of `result`. Therefore
+        // `result = self.x + self.y` is NOT a self-referential write of
+        // `result`. The prior read `print(result)` IS a real W310 (shadow
+        // pattern).
+        let diags = lint_deep(
+            "result = 0\nstruct P {\n    x; y;\n    m(self) => {\n        print(result)\n        result = self.x + self.y\n    }\n}",
+        );
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "shadow-style local write inside method must keep prior read flagged: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_local_shadow_with_prior_read_fires_w310() {
+        // `x` is a module-level binding, but the lambda writes `x = 2`
+        // without reading `x` in the RHS -- Python-style scoping makes `x`
+        // a local for the entire lambda, so the prior `print(x)` is a real
+        // read-before-local-def. Must fire W310 (the capture filter must
+        // NOT swallow this).
+        let diags = lint_deep("x = 0\nb = () => {\n    print(x)\n    x = 2\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert_eq!(
+            w310.len(),
+            1,
+            "shadow-style local write must keep prior read flagged: {:?}",
+            w310
+        );
+        assert_eq!(w310[0].line, 3);
+    }
+
+    #[test]
+    fn test_capture_mutation_with_explicit_read_in_rhs_no_w310() {
+        // `x = x + 1` IS self-referential -- the W310 capture filter must
+        // still suppress the read warning here even though there's an
+        // explicit write to x.
+        let diags = lint_deep("x = 0\nb = () => {\n    x = x + 1\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "self-referential write should keep capture classification: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_method_capture_mutation_no_w310_no_w312() {
+        // `count` is bound at module level; a method that mutates the capture
+        // must not trigger W310 (RHS read) or W312 (LHS write).
+        let diags = lint_deep("count = 0\nstruct Counter {\n    bump(self) => {\n        count = count + 1\n    }\n}");
+        let codes: Vec<&str> = diags
+            .iter()
+            .filter(|d| d.code == "W310" || d.code == "W312")
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.is_empty(),
+            "method capturing module-level var shouldn't fire W310/W312: {:?}",
+            codes
+        );
+    }
+
+    #[test]
+    fn test_match_pattern_binding_not_capture() {
+        // `x` is a pattern binding inside a lambda. The binding is sequenced
+        // at the end of the PATTERN (not the case clause), so body reads
+        // happen AFTER the binding -- so x is not misclassified as capture.
+        // W310 isn't expected; W312 isn't expected either.
+        let diags = lint_deep("f = (val) => {\n    match val {\n        x => { return x + 1 }\n    }\n}");
+        let names: Vec<_> = diags.iter().filter(|d| d.code == "W310" || d.code == "W312").collect();
+        assert!(
+            names.is_empty(),
+            "pattern binding should not surface W310/W312: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_lambda_param_variadic_seeded() {
+        let diags = lint_deep("f = (*args) => {\n    print(args)\n}");
+        let w310: Vec<_> = diags.iter().filter(|d| d.code == "W310").collect();
+        assert!(
+            w310.is_empty(),
+            "variadic param read shouldn't trigger W310: {:?}",
+            w310
+        );
+    }
+
+    #[test]
+    fn test_w312_self_overwrite_uses_rhs() {
+        // x = x + 1 reads x in the RHS -- the previous write is live.
+        let diags = lint_deep("x = 1\nx = x + 1\nprint(x)");
+        let hits = w312(&diags);
+        assert!(
+            hits.is_empty(),
+            "RHS-using overwrite keeps prior write live: {:?}",
+            hits
+        );
+    }
+
+    #[test]
+    fn test_w312_match_all_cases_overwritten() {
+        let diags = lint_deep("match v {\n    1 => { y = 1 }\n    _ => { y = 2 }\n}\ny = 9\nprint(y)");
+        let hits = w312(&diags);
+        let lines: Vec<usize> = hits.iter().map(|d| d.line).collect();
+        assert!(
+            lines.contains(&2) && lines.contains(&3),
+            "both match arms write y but it's overwritten -- expected W312 on both, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_w313_match_all_cases_terminate_in_branch() {
+        // Then branch contains a match where all cases return + wildcard.
+        let diags = lint_deep(
+            "f = () => {\n    if cond {\n        match x {\n            1 => { return 1 }\n            _ => { return 2 }\n        }\n    } else {\n        y = 1\n    }\n}",
+        );
+        let hits = w313(&diags);
+        assert_eq!(hits.len(), 1, "match-all-return should propagate: {:?}", hits);
     }
 }

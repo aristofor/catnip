@@ -563,6 +563,7 @@ impl PureCompiler {
             IROpCode::OpStruct => self.compile_struct(args),
             IROpCode::TraitDef => self.compile_trait(args),
             IROpCode::EnumDef => self.compile_enum(args),
+            IROpCode::UnionDef => self.compile_union(args),
 
             // Error handling
             IROpCode::OpTry => self.compile_try(args),
@@ -2042,6 +2043,71 @@ impl PureCompiler {
         Ok(())
     }
 
+    /// Compile a union (ADT) definition.
+    ///
+    /// IR layout: `UnionDef(name, type_params, variants)` where each variant
+    /// is `(variant_name, fields_list)` and each field is `(field_name,
+    /// type_text_or_none)`.
+    ///
+    /// Emitted bytecode: one constant tuple `(name, type_params_tuple,
+    /// variants_tuple)` referenced by a single `MakeUnion` opcode. The PyO3
+    /// VM handler decodes it back; the PureVM (standalone catnip-run) raises
+    /// at runtime since it does not yet implement the union runtime.
+    fn compile_union(&mut self, args: &[IR]) -> CompileResult<()> {
+        let name = ir_to_name(&args[0]).unwrap_or_default();
+
+        // Type parameters: list/tuple of identifier strings.
+        let type_param_items = match args.get(1) {
+            Some(IR::List(items) | IR::Tuple(items)) => items.as_slice(),
+            _ => &[],
+        };
+        let type_params_tuple = Value::from_tuple(
+            type_param_items
+                .iter()
+                .filter_map(ir_to_name)
+                .map(Value::from_string)
+                .collect(),
+        );
+
+        // Variants: each is (variant_name, fields_list). Only the field
+        // names are emitted; the parsed type text is dropped (no runtime
+        // type checker yet).
+        let variant_items = match args.get(2) {
+            Some(IR::List(items) | IR::Tuple(items)) => items.as_slice(),
+            _ => &[],
+        };
+        let mut variant_tuples = Vec::with_capacity(variant_items.len());
+        for variant in variant_items {
+            let parts = match variant {
+                IR::Tuple(parts) | IR::List(parts) if parts.len() >= 2 => parts,
+                _ => continue,
+            };
+            let variant_name = ir_to_name(&parts[0]).unwrap_or_default();
+            let fields_slice = match &parts[1] {
+                IR::List(items) | IR::Tuple(items) => items.as_slice(),
+                _ => &[],
+            };
+            let field_names: Vec<Value> = fields_slice
+                .iter()
+                .filter_map(|field| match field {
+                    IR::Tuple(pair) | IR::List(pair) if !pair.is_empty() => ir_to_name(&pair[0]),
+                    other => ir_to_name(other),
+                })
+                .map(Value::from_string)
+                .collect();
+            variant_tuples.push(Value::from_tuple(vec![
+                Value::from_string(variant_name),
+                Value::from_tuple(field_names),
+            ]));
+        }
+        let variants_tuple = Value::from_tuple(variant_tuples);
+
+        let union_info = Value::from_tuple(vec![Value::from_string(name), type_params_tuple, variants_tuple]);
+        let idx = self.core.add_const(union_info);
+        self.emit(VMOpCode::MakeUnion, idx as u32);
+        Ok(())
+    }
+
     // ========== Exception handling ==========
 
     /// Emit inline finally cleanup for each active finally level.
@@ -2387,7 +2453,7 @@ impl PureCompiler {
                 }
                 Ok(Some(VMPattern::Tuple(elements)))
             }
-            IR::PatternStruct { name, fields } => {
+            IR::PatternStruct { name, variant, fields } => {
                 let mut field_slots = Vec::new();
                 for field_name in fields {
                     let slot = self.add_local(field_name);
@@ -2395,6 +2461,7 @@ impl PureCompiler {
                 }
                 Ok(Some(VMPattern::Struct {
                     name: name.clone(),
+                    variant: variant.clone(),
                     field_slots,
                 }))
             }

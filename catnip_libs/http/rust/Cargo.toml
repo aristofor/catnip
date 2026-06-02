@@ -2,7 +2,7 @@
 name = "catnip-http"
 version.workspace = true
 edition.workspace = true
-description = "Catnip http stdlib plugin (native ABI v2, tiny_http)"
+description = "Catnip http stdlib plugin (native ABI v2, tiny_http server + ureq client)"
 
 [lib]
 name = "catnip_http"
@@ -11,5 +11,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 catnip_vm = { path = "../../../catnip_vm" }
 tiny_http = "0.12"
+ureq = "3"
+serde_json = "1"
+rug = { version = "1", default-features = false, features = ["integer", "std"] }
+base64 = "0.22"
 open = "5"
 indexmap = "2"

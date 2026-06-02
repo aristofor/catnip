@@ -1,0 +1,114 @@
+#!/usr/bin/make -f
+
+STAGING = debian/tmp
+PYLIB   = usr/lib/python3/dist-packages
+
+# --- Caching ---
+# sccache: cache de compilation Rust persistant (~/.cache/sccache)
+ifneq (,$(shell command -v sccache 2>/dev/null))
+export RUSTC_WRAPPER = sccache
+endif
+# ccache: cache de compilation C (tree-sitter grammar)
+ifneq (,$(shell command -v ccache 2>/dev/null))
+export CC = ccache cc
+endif
+# Cargo: incremental compilation pour les rebuilds release
+export CARGO_INCREMENTAL = 1
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+
+override_dh_auto_configure:
+	@# Vérification des outils requis (indépendant de dpkg)
+	@for cmd in python3 cargo rustc pip3 help2man; do \
+		command -v $$cmd >/dev/null 2>&1 || \
+			{ echo "ERROR: $$cmd not found in PATH"; exit 1; }; \
+	done
+	@echo "rustc $$(rustc --version), cargo $$(cargo --version)"
+
+override_dh_auto_build:
+	# --- Python wheel ---
+	rm -f dist/*.whl
+	python3 setup.py bdist_wheel
+
+	# --- Rust binaries (target/ partagé, deps compilées une seule fois) ---
+	cargo build --release --manifest-path catnip_rs/Cargo.toml \
+		--no-default-features --features embedded \
+		--bin catnip
+	cargo build --release --manifest-path catnip_repl/Cargo.toml \
+		--no-default-features --features "embedded repl-standalone" \
+		--bin catnip-repl
+	cargo build --release --manifest-path catnip_lsp/Cargo.toml
+
+override_dh_auto_install:
+	# --- Install wheel into staging ---
+	pip3 install --root=$(STAGING) --prefix=/usr --no-index --no-deps --no-compile dist/*.whl
+
+	# --- Relocate pip output to Debian paths ---
+	# Python 3.12+ installs to usr/local/ despite --prefix=/usr
+	# and may use site-packages or dist-packages depending on distro
+	if [ -d $(STAGING)/usr/local/bin ]; then \
+		install -d $(STAGING)/usr/bin && \
+		mv $(STAGING)/usr/local/bin/* $(STAGING)/usr/bin/; \
+	fi
+	# Move libs from any versioned python dir to dist-packages
+	for d in $(STAGING)/usr/local/lib/python3.* $(STAGING)/usr/lib/python3.*; do \
+		[ -d "$$d" ] || continue; \
+		src=$$(find "$$d" -maxdepth 1 -type d \( -name site-packages -o -name dist-packages \) -print -quit); \
+		[ -n "$$src" ] || continue; \
+		install -d $(STAGING)/$(PYLIB) && \
+		cp -a "$$src"/* $(STAGING)/$(PYLIB)/; \
+	done
+	rm -rf $(STAGING)/usr/local $(STAGING)/usr/lib/python3.*
+
+	# --- Remove pip-generated wrappers for Rust binaries ---
+	rm -f $(STAGING)/usr/bin/catnip
+	rm -f $(STAGING)/usr/bin/catnip-repl
+
+	# --- Install Rust binaries ---
+	install -Dm755 target/release/catnip      $(STAGING)/usr/bin/catnip
+	install -Dm755 target/release/catnip-repl $(STAGING)/usr/bin/catnip-repl
+	install -Dm755 target/release/catnip-lsp  $(STAGING)/usr/bin/catnip-lsp
+
+	# --- Shell completions (Click) ---
+	install -d $(STAGING)/usr/share/bash-completion/completions
+	install -d $(STAGING)/usr/share/zsh/vendor-completions
+	install -d $(STAGING)/usr/share/fish/vendor_completions.d
+	PYTHONPATH=$(STAGING)/$(PYLIB) python3 -P -c "\
+from click.shell_completion import get_completion_class; \
+from catnip.cli.main import main; \
+comp = get_completion_class('bash')(main, {}, 'catnip', '_CATNIP_COMPLETE'); \
+print(comp.source())" \
+		> $(STAGING)/usr/share/bash-completion/completions/catnip
+	PYTHONPATH=$(STAGING)/$(PYLIB) python3 -P -c "\
+from click.shell_completion import get_completion_class; \
+from catnip.cli.main import main; \
+comp = get_completion_class('zsh')(main, {}, 'catnip', '_CATNIP_COMPLETE'); \
+print(comp.source())" \
+		> $(STAGING)/usr/share/zsh/vendor-completions/_catnip
+	PYTHONPATH=$(STAGING)/$(PYLIB) python3 -P -c "\
+from click.shell_completion import get_completion_class; \
+from catnip.cli.main import main; \
+comp = get_completion_class('fish')(main, {}, 'catnip', '_CATNIP_COMPLETE'); \
+print(comp.source())" \
+		> $(STAGING)/usr/share/fish/vendor_completions.d/catnip.fish
+
+	# --- Man pages (help2man for CLI binaries) ---
+	install -d $(STAGING)/usr/share/man/man1
+	help2man \
+		--name="Catnip language interpreter" \
+		--no-info --no-discard-stderr \
+		$(STAGING)/usr/bin/catnip \
+		> $(STAGING)/usr/share/man/man1/catnip.1
+
+	# --- Man pages (manual, for binaries without --help) ---
+	install -m644 debian/man/catnip-repl.1 $(STAGING)/usr/share/man/man1/catnip-repl.1
+	install -m644 debian/man/catnip-lsp.1  $(STAGING)/usr/share/man/man1/catnip-lsp.1
+
+	# --- Documentation ---
+	install -d $(STAGING)/usr/share/doc/catnip
+	cp -a docs/* $(STAGING)/usr/share/doc/catnip/
+
+override_dh_auto_test:

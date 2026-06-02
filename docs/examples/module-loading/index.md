@@ -20,4 +20,5 @@ Exemples courts pour comprendre le chargement de modules Python.
 
 ## Aller plus loin
 
-Les exemples thématiques utilisant l'écosystème Python sont dans `docs/codex/`.
+Les exemples thématiques utilisant l'écosystème Python forment le Codex (side project autonome), dans `codex/` à la
+racine du dépôt.

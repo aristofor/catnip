@@ -161,6 +161,9 @@ pub fn transform(node: Node, source: &str) -> TransformResult {
         // Enum
         "enum_stmt" => transform_enum_stmt(node, source),
 
+        // Union (tagged union / ADT)
+        "union_stmt" => transform_union_stmt(node, source),
+
         // Block
         "block" => transform_block(node, source),
 
@@ -2377,6 +2380,102 @@ fn transform_enum_stmt(node: Node, source: &str) -> TransformResult {
     ))
 }
 
+/// Transform union definition: `union Name[T, ...] { Variant(field: T); ... }`
+///
+/// Produced IR: `UnionDef(name, type_params, variants)`
+///
+/// - `name` : `IR::String`
+/// - `type_params` : `IR::List([IR::String])` -- empty if no generics
+/// - `variants` : `IR::List([(variant_name, fields)])`
+///   where each variant field is `(field_name, type_text_or_none)`
+///
+/// Type annotations are kept as raw source text for the MVP. They are
+/// stored but not yet used by the semantic analyzer.
+fn transform_union_stmt(node: Node, source: &str) -> TransformResult {
+    let mut name: Option<String> = None;
+    let mut type_params: Vec<IR> = Vec::new();
+    let mut variants: Vec<IR> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for child in named_children(&node) {
+        match child.kind() {
+            "identifier" if name.is_none() => {
+                name = Some(node_text(&child, source).to_string());
+            }
+            "type_params" => {
+                for grandchild in named_children(&child) {
+                    if grandchild.kind() == "identifier" {
+                        type_params.push(IR::String(node_text(&grandchild, source).to_string()));
+                    }
+                }
+            }
+            "union_variant" => {
+                let mut vname: Option<String> = None;
+                let mut fields: Vec<IR> = Vec::new();
+                let mut seen_fields = std::collections::HashSet::new();
+
+                for grandchild in named_children(&child) {
+                    match grandchild.kind() {
+                        "identifier" if vname.is_none() => {
+                            vname = Some(node_text(&grandchild, source).to_string());
+                        }
+                        "union_field" => {
+                            let mut fname: Option<String> = None;
+                            let mut ftype: IR = IR::None;
+                            for ff in named_children(&grandchild) {
+                                match ff.kind() {
+                                    "identifier" if fname.is_none() => {
+                                        fname = Some(node_text(&ff, source).to_string());
+                                    }
+                                    "type_expr" => {
+                                        ftype = IR::String(node_text(&ff, source).to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let fname_str = fname.ok_or("union_field: missing name")?;
+                            if !seen_fields.insert(fname_str.clone()) {
+                                return Err(format!(
+                                    "union '{}' variant '{}': duplicate field '{}'",
+                                    name.as_deref().unwrap_or("?"),
+                                    vname.as_deref().unwrap_or("?"),
+                                    fname_str
+                                ));
+                            }
+                            fields.push(IR::Tuple(vec![IR::String(fname_str), ftype]));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let vname_str = vname.ok_or("union_variant: missing name")?;
+                if !seen.insert(vname_str.clone()) {
+                    return Err(format!(
+                        "union '{}': duplicate variant '{}'",
+                        name.as_deref().unwrap_or("?"),
+                        vname_str
+                    ));
+                }
+                variants.push(IR::Tuple(vec![IR::String(vname_str), IR::List(fields)]));
+            }
+            _ => {}
+        }
+    }
+
+    let name_str = name.ok_or("union_stmt: missing name")?;
+
+    if variants.is_empty() {
+        return Err(format!("union '{}' must have at least one variant", name_str));
+    }
+
+    Ok(IR::op_with_pos(
+        IROpCode::UnionDef,
+        vec![IR::String(name_str), IR::List(type_params), IR::List(variants)],
+        node.start_byte(),
+        node.end_byte(),
+    ))
+}
+
 /// Parse lambda_params node into a Vec of IR param tuples.
 fn parse_lambda_params(node: &Node, source: &str) -> Result<Vec<IR>, String> {
     let mut params = Vec::new();
@@ -2945,22 +3044,24 @@ fn transform_pattern_tuple(node: Node, source: &str) -> TransformResult {
 }
 
 fn transform_pattern_struct(node: Node, source: &str) -> TransformResult {
-    let children = named_children(&node);
-    let mut struct_name: Option<String> = None;
-    let mut fields = Vec::new();
+    let name = node
+        .child_by_field_name("struct_name")
+        .map(|n| node_text(&n, source).to_string())
+        .ok_or("pattern_struct: missing struct name")?;
 
-    for child in &children {
-        if child.kind() == "identifier" {
-            if struct_name.is_none() {
-                struct_name = Some(node_text(child, source).to_string());
-            } else {
-                fields.push(node_text(child, source).to_string());
-            }
-        }
-    }
+    let variant = node
+        .child_by_field_name("variant_name")
+        .map(|n| node_text(&n, source).to_string());
 
-    let name = struct_name.ok_or("pattern_struct: missing struct name")?;
-    Ok(IR::PatternStruct { name, fields })
+    // Field nodes are tagged with the `fields` field name. Multiple
+    // identifiers may share that tag for `Point{x, y}` style patterns.
+    let mut cursor = node.walk();
+    let fields: Vec<String> = node
+        .children_by_field_name("fields", &mut cursor)
+        .map(|n| node_text(&n, source).to_string())
+        .collect();
+
+    Ok(IR::PatternStruct { name, variant, fields })
 }
 
 fn transform_pattern_enum(node: Node, source: &str) -> TransformResult {
@@ -3354,6 +3455,161 @@ mod tests {
                 assert_ne!(args[2], IR::None); // finally present
             }
             _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_union_nullary() {
+        let result = parse_and_transform("union Color { red; green; blue }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::UnionDef);
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], IR::String("Color".into()));
+                assert_eq!(args[1], IR::List(vec![])); // no type params
+                if let IR::List(variants) = &args[2] {
+                    assert_eq!(variants.len(), 3);
+                    assert_eq!(variants[0], IR::Tuple(vec![IR::String("red".into()), IR::List(vec![])]));
+                } else {
+                    panic!("Expected variants list");
+                }
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_union_with_payload() {
+        let result = parse_and_transform("union Option { Some(value); None; }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::UnionDef);
+                assert_eq!(args[0], IR::String("Option".into()));
+                if let IR::List(variants) = &args[2] {
+                    assert_eq!(variants.len(), 2);
+                    // Some(value) -- one field, no type
+                    if let IR::Tuple(some_tuple) = &variants[0] {
+                        assert_eq!(some_tuple[0], IR::String("Some".into()));
+                        if let IR::List(fields) = &some_tuple[1] {
+                            assert_eq!(fields.len(), 1);
+                            assert_eq!(fields[0], IR::Tuple(vec![IR::String("value".into()), IR::None]));
+                        } else {
+                            panic!("Expected fields list");
+                        }
+                    } else {
+                        panic!("Expected variant tuple");
+                    }
+                    // None -- nullary
+                    assert_eq!(
+                        variants[1],
+                        IR::Tuple(vec![IR::String("None".into()), IR::List(vec![])])
+                    );
+                } else {
+                    panic!("Expected variants list");
+                }
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_union_generics_and_types() {
+        let result = parse_and_transform("union Result[T, E] { Ok(value: T); Err(error: E); }").unwrap();
+        match result {
+            IR::Op { opcode, args, .. } => {
+                assert_eq!(opcode, IROpCode::UnionDef);
+                assert_eq!(args[0], IR::String("Result".into()));
+                assert_eq!(args[1], IR::List(vec![IR::String("T".into()), IR::String("E".into())]));
+                if let IR::List(variants) = &args[2] {
+                    assert_eq!(variants.len(), 2);
+                    if let IR::Tuple(ok_tuple) = &variants[0] {
+                        if let IR::List(fields) = &ok_tuple[1] {
+                            assert_eq!(
+                                fields[0],
+                                IR::Tuple(vec![IR::String("value".into()), IR::String("T".into())])
+                            );
+                        } else {
+                            panic!("Expected fields list");
+                        }
+                    }
+                } else {
+                    panic!("Expected variants list");
+                }
+            }
+            _ => panic!("Expected Op node"),
+        }
+    }
+
+    #[test]
+    fn test_transform_union_duplicate_variant() {
+        let result = parse_and_transform("union Bad { a; a; }");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("duplicate variant"), "got: {err}");
+    }
+
+    #[test]
+    fn test_transform_union_duplicate_field() {
+        let result = parse_and_transform("union Bad { Variant(x, x); }");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("duplicate field"), "got: {err}");
+    }
+
+    #[test]
+    fn test_transform_union_empty() {
+        let result = parse_and_transform("union Empty { }");
+        // empty union is rejected by the parser layer
+        assert!(result.is_err());
+    }
+
+    /// Extract the first match-case pattern from a parsed `match` expression.
+    ///
+    /// OpMatch args layout: `[scrutinee, Tuple([case_1, case_2, ...])]`
+    /// where each case is `Tuple([pattern, guard, block])`.
+    fn match_first_pattern(result: &IR) -> &IR {
+        let match_args = match result {
+            IR::Op { args, .. } => args,
+            _ => panic!("Expected OpMatch"),
+        };
+        let cases_tuple = match &match_args[1] {
+            IR::Tuple(c) => c,
+            other => panic!("Expected cases Tuple, got {:?}", other),
+        };
+        match &cases_tuple[0] {
+            IR::Tuple(case) => &case[0],
+            other => panic!("Expected case tuple, got {:?}", other),
+        }
+    }
+
+    /// Plain struct pattern: `Point{x, y}` -- no variant, two fields.
+    #[test]
+    fn test_transform_pattern_struct_plain() {
+        let result = parse_and_transform("match p { Point{x, y} => { x } }").unwrap();
+        match match_first_pattern(&result) {
+            IR::PatternStruct { name, variant, fields } => {
+                assert_eq!(name, "Point");
+                assert_eq!(*variant, None);
+                assert_eq!(fields, &vec!["x".to_string(), "y".to_string()]);
+            }
+            other => panic!("Expected PatternStruct, got {:?}", other),
+        }
+    }
+
+    /// Union variant pattern: `Option.Some{value}` -- variant=Some, fields=[value].
+    /// Prior to this fix, `Some` was being read as a field name, producing
+    /// `fields=["Some", "value"]` which would silently bind a variable named
+    /// `Some`. The fix uses `child_by_field_name`.
+    #[test]
+    fn test_transform_pattern_struct_union_variant() {
+        let result = parse_and_transform("match opt { Option.Some{value} => { value } }").unwrap();
+        match match_first_pattern(&result) {
+            IR::PatternStruct { name, variant, fields } => {
+                assert_eq!(name, "Option");
+                assert_eq!(variant.as_deref(), Some("Some"));
+                assert_eq!(fields, &vec!["value".to_string()]);
+            }
+            other => panic!("Expected PatternStruct, got {:?}", other),
         }
     }
 }

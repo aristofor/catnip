@@ -115,6 +115,9 @@ pub(crate) struct OpCodeCache {
     // Enum
     pub enum_def: i32,
 
+    // Union (tagged ADT)
+    pub union_def: i32,
+
     // Nil-coalescing
     pub null_coalesce: i32,
 
@@ -209,6 +212,7 @@ impl OpCodeCache {
             trait_def: get("TRAIT_DEF")?,
 
             enum_def: get("ENUM_DEF")?,
+            union_def: get("UNION_DEF")?,
 
             null_coalesce: get("NULL_COALESCE")?,
 
@@ -1020,6 +1024,10 @@ impl Registry {
 
         // Enum
         self.register_op(py, "enum_def", get_opcode("ENUM_DEF")?)?;
+
+        // Union (tagged ADT) -- registered as valid; runtime dispatch falls
+        // back to Python until the VM compile path is wired.
+        self.register_op(py, "union_def", get_opcode("UNION_DEF")?)?;
 
         // Membership
         self.register_op(py, "in", get_opcode("IN")?)?;

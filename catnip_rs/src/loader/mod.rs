@@ -1,6 +1,7 @@
 // FILE: catnip_rs/src/loader/mod.rs
 pub mod cache;
 pub mod namespace;
+pub mod native_plugin;
 pub use catnip_core::loader::resolve;
 
 use cache::ModuleCache;
@@ -30,6 +31,10 @@ pub struct ImportLoader {
     #[allow(dead_code)]
     verbose: bool,
     native_suffix: String,
+    /// Registry of loaded native catnip_vm plugins (PureVM-only stdlib like
+    /// `http`). Kept alive so the raw call pointers held by `NativePluginFn`
+    /// stay valid for as long as the loader lives.
+    plugin_registry: catnip_vm::plugin::SharedPluginRegistry,
 }
 
 #[pymethods]
@@ -62,6 +67,7 @@ impl ImportLoader {
             cache: ModuleCache::new(),
             verbose,
             native_suffix: suffix,
+            plugin_registry: Rc::new(std::cell::RefCell::new(catnip_vm::plugin::PluginRegistry::new())),
         })
     }
 
@@ -174,6 +180,7 @@ impl ImportLoader {
                 cache: ModuleCache::new(),
                 verbose: false,
                 native_suffix: suffix,
+                plugin_registry: Rc::new(std::cell::RefCell::new(catnip_vm::plugin::PluginRegistry::new())),
             },
         )
     }
@@ -260,7 +267,13 @@ impl ImportLoader {
         // Cache hit for importlib/stdlib modules (stored by name).
         // File-based modules are cached by resolved path below,
         // so this only matches context-independent modules.
-        if protocol.is_none() {
+        //
+        // Rust stdlib modules (PyO3 C-extensions like `io`/`sys` and native
+        // `.so` plugins like `http`) are excluded: they are cached under a
+        // protocol-qualified `rs::<name>` key in steps 2/2b, so that a prior
+        // `import('io', protocol='py')` (which caches Python's `io` under the
+        // bare name) cannot shadow the Rust module here.
+        if protocol.is_none() && !resolve::is_rust_stdlib(name) {
             if let Some(cached) = self.cache.get(name) {
                 return Ok(cached.clone_ref(py));
             }
@@ -305,13 +318,38 @@ impl ImportLoader {
             return Ok(ns);
         }
 
-        // 2. Stdlib native modules
+        // 2. Stdlib modules with a PyO3 backend (loaded as `catnip.catnip_<name>`
+        // C-extensions). Cached under `rs::<name>` for the same reason as 2b:
+        // keep them isolated from the bare-name slot used by `protocol='py'`.
         if matches!(protocol, None | Some("rs")) {
             if let Some((import_name, needs_configure)) = resolve::lookup_stdlib(name) {
+                let cache_key = format!("rs::{name}");
+                if let Some(cached) = self.cache.get(&cache_key) {
+                    return Ok(cached.clone_ref(py));
+                }
                 let ns = self.load_stdlib(py, name, import_name, needs_configure)?;
-                self.cache.insert(name.to_string(), ns.clone_ref(py));
+                self.cache.insert(cache_key, ns.clone_ref(py));
                 return Ok(ns);
             }
+        }
+
+        // 2b. PureVM-only native stdlib plugins (catnip_vm `.so` via libloading).
+        // These have no PyO3 backend, so they are bridged through native_plugin
+        // rather than imported as Python modules.
+        //
+        // Cache under a protocol-qualified key (`rs::<name>`): these modules are
+        // context-independent, but must not share the bare-name cache slot with
+        // Python's same-named module (loaded via `protocol='py'`). The registry
+        // rejects a second `load()` of the same `.so`, so serving repeats from
+        // the cache is also what keeps the import idempotent.
+        if matches!(protocol, None | Some("rs")) && resolve::is_native_stdlib(name) {
+            let cache_key = format!("rs::{name}");
+            if let Some(cached) = self.cache.get(&cache_key) {
+                return Ok(cached.clone_ref(py));
+            }
+            let ns = native_plugin::load_native_module(py, &self.plugin_registry, name)?;
+            self.cache.insert(cache_key, ns.clone_ref(py));
+            return Ok(ns);
         }
 
         // 3. cat protocol blocks importlib fallback

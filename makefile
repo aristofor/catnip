@@ -61,7 +61,22 @@ $(RS_EXT): $(RS_SOURCES) catnip_rs/Cargo.toml catnip_rs/Cargo.lock catnip_gramma
 build-libs:
 	$(MAKE) -C catnip_libs all
 
-compile: $(RS_EXT)
+# Native (PyO3-less) stdlib plugins are catnip_vm cdylib plugins, discovered at
+# runtime next to the extension. setup.py builds them for wheels/installs; this
+# target does the same for the dev build (make compile). Source of truth for the
+# list: catnip_libs/*/spec.toml with backends.pyo3 = false.
+NATIVE_STDLIB_LIBS := http
+# .so on Linux, .dylib on macOS (matches catnip_vm::plugin::native_suffix).
+NATIVE_LIB_EXT := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
+
+.PHONY: build-native-libs
+build-native-libs:
+	@for lib in $(NATIVE_STDLIB_LIBS); do \
+		cargo build --release -p catnip-$$lib && \
+		cp target/release/libcatnip_$$lib.$(NATIVE_LIB_EXT) catnip/libcatnip_$$lib.$(NATIVE_LIB_EXT); \
+	done
+
+compile: $(RS_EXT) build-native-libs
 
 # Helper: register an MCP server in a JSON config file
 # Usage: echo "$$_MCP_REGISTER" | $(VENV_PYTHON) - <file> <name> <command> [module] [cwd]
@@ -139,7 +154,7 @@ test: $(RS_EXT)
 
 clean-examples:
 	find docs/examples -type d \( -name cache -o -name output \) -exec rm -rf {} +
-	find docs/codex -type d \( -name cache -o -name output \) -exec rm -rf {} +
+	find codex -type d \( -name cache -o -name output \) -exec rm -rf {} +
 
 #══════════════════════════════════════════════════════════════════════════════
 # Quality & Tools
@@ -150,7 +165,7 @@ format-rs:
 	cd catnip_rs && cargo fmt --all
 
 format-py:
-	uvx --python 3.13 black $(PY_SOURCES) catnip_mcp/ tests/
+	uvx --python 3.14 black $(PY_SOURCES) catnip_mcp/ tests/
 
 format: format-rs format-py
 

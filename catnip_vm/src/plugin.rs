@@ -269,6 +269,12 @@ impl PluginRegistry {
         self.object_callbacks.get(module_name).cloned()
     }
 
+    /// Look up the raw call pointer for a qualified function name
+    /// (`__plugin::module::fn`). Used by the PyO3 bridge.
+    pub fn call_fn(&self, qualified_name: &str) -> Option<PluginCallFn> {
+        self.calls.get(qualified_name).copied()
+    }
+
     fn do_call(&self, call_fn: PluginCallFn, name: &str, args: &[Value]) -> VMResult<Value> {
         // Extract module name and short function name from "__plugin::module::fn"
         let short_name = name.rsplit("::").next().unwrap_or(name);
@@ -399,6 +405,108 @@ impl PluginRegistry {
         } else {
             Ok(Value::from_raw(pr.value))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone invocation helpers
+// ---------------------------------------------------------------------------
+//
+// These mirror the `PluginRegistry` methods but take raw fn pointers and
+// callbacks directly, so callers that hold those (the PyO3 bridge in
+// catnip_rs) can invoke plugins without borrowing a registry.
+
+impl PluginObjectCallbacks {
+    /// Callbacks for a plugin that exposes no objects (ABI v1).
+    pub fn empty() -> Self {
+        Self {
+            method: None,
+            getattr: None,
+            drop: None,
+            _library: None,
+        }
+    }
+}
+
+/// Interpret a `PluginResult`, wrapping object handles with `obj_callbacks`.
+pub fn interpret_plugin_result(pr: PluginResult, obj_callbacks: &PluginObjectCallbacks) -> VMResult<Value> {
+    if pr.error_code != 0 {
+        if pr.error_code == 0x45584954 {
+            return Err(VMError::Exit(pr.value as i32));
+        }
+        let msg = if pr.error_message.is_null() {
+            format!("plugin error (code {})", pr.error_code)
+        } else {
+            unsafe { CStr::from_ptr(pr.error_message) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        return Err(VMError::RuntimeError(msg));
+    }
+    if pr.flags & PLUGIN_RESULT_OBJECT != 0 {
+        Ok(Value::from_plugin_object(pr.value, obj_callbacks.clone()))
+    } else {
+        Ok(Value::from_raw(pr.value))
+    }
+}
+
+/// Invoke a module-level plugin function by its call pointer.
+pub fn call_plugin_fn(
+    call_fn: PluginCallFn,
+    short_name: &str,
+    args: &[Value],
+    obj_callbacks: &PluginObjectCallbacks,
+) -> VMResult<Value> {
+    let c_name = std::ffi::CString::new(short_name)
+        .map_err(|_| VMError::RuntimeError("plugin function name contains null byte".into()))?;
+    let raw_args: Vec<u64> = args.iter().map(|v| v.bits()).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        call_fn(c_name.as_ptr(), raw_args.as_ptr(), raw_args.len())
+    }));
+    match result {
+        Ok(pr) => interpret_plugin_result(pr, obj_callbacks),
+        Err(_) => Err(VMError::RuntimeError(format!(
+            "plugin function '{}' panicked",
+            short_name
+        ))),
+    }
+}
+
+/// Invoke a method on a plugin object handle.
+pub fn call_plugin_method(
+    handle: u64,
+    method_fn: PluginMethodFn,
+    method: &str,
+    args: &[Value],
+    callbacks: &PluginObjectCallbacks,
+) -> VMResult<Value> {
+    let c_method =
+        std::ffi::CString::new(method).map_err(|_| VMError::RuntimeError("method name contains null byte".into()))?;
+    let raw_args: Vec<u64> = args.iter().map(|v| v.bits()).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        method_fn(handle, c_method.as_ptr(), raw_args.as_ptr(), raw_args.len())
+    }));
+    match result {
+        Ok(pr) => interpret_plugin_result(pr, callbacks),
+        Err(_) => Err(VMError::RuntimeError(format!("plugin method '{}' panicked", method))),
+    }
+}
+
+/// Invoke getattr on a plugin object handle.
+pub fn call_plugin_getattr(
+    handle: u64,
+    getattr_fn: PluginGetAttrFn,
+    attr: &str,
+    callbacks: &PluginObjectCallbacks,
+) -> VMResult<Value> {
+    let c_attr =
+        std::ffi::CString::new(attr).map_err(|_| VMError::RuntimeError("attribute name contains null byte".into()))?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        getattr_fn(handle, c_attr.as_ptr())
+    }));
+    match result {
+        Ok(pr) => interpret_plugin_result(pr, callbacks),
+        Err(_) => Err(VMError::RuntimeError(format!("plugin getattr '{}' panicked", attr))),
     }
 }
 

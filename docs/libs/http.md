@@ -5,6 +5,7 @@ Client HTTP et serveur léger.
 - **Client** : `ureq 3` (sync, blocking, TLS via rustls)
 - **Serveur** : `tiny_http` (sync, single-request ou async via thread + channel)
 
+<!-- check: no-check -->
 ```catnip
 import('http')
 
@@ -28,6 +29,7 @@ print(response.status)  # 200
 
 ### Verbes basiques
 
+<!-- check: no-check -->
 ```catnip
 http.get(url)             # → Response
 http.post(url, body)      # → Response ; body est optionnel
@@ -37,6 +39,7 @@ http.delete(url)          # → Response
 
 Exemples :
 
+<!-- check: no-check -->
 ```catnip
 # ⇒ GET simple
 r = http.get("https://httpbin.org/get")
@@ -53,6 +56,7 @@ lèvent une exception Catnip.
 
 ### `request()` avec options
 
+<!-- check: no-check -->
 ```catnip
 http.request(method, url, opts)
 ```
@@ -66,12 +70,13 @@ http.request(method, url, opts)
 | `timeout`  | `float`          | aucun      | Timeout global en secondes                           |
 | `max_body` | `int`            | `33554432` | Limite de lecture du body de réponse (bytes ; 32 MB) |
 
+<!-- check: no-check -->
 ```catnip
-r = http.request("POST", "https://api.example.com/items", {
-    headers: { Content-Type: "application/json" },
-    body: '{"name": "cat"}',
-    timeout: 5.0,
-})
+r = http.request("POST", "https://api.example.com/items", dict(
+    headers=dict(("Content-Type", "application/json")),
+    body='{"name": "cat"}',
+    timeout=5.0,
+))
 ```
 
 > Un body de réponse > `max_body` produit une erreur de lecture explicite, pas un body tronqué silencieux. Avant la
@@ -89,6 +94,7 @@ r = http.request("POST", "https://api.example.com/items", {
 | --------- | ------ | ----------------------------------------------------- |
 | `.json()` | `any`  | Parse `body` comme JSON. Lève en cas de JSON invalide |
 
+<!-- check: no-check -->
 ```catnip
 r = http.get("https://api.github.com/repos/anthropics/claude-code")
 data = r.json()
@@ -102,6 +108,7 @@ floats, `null` devient `nil`.
 
 ### Mode synchrone (single-thread)
 
+<!-- check: no-check -->
 ```catnip
 server = http.Server("127.0.0.1:8080")
 
@@ -129,6 +136,7 @@ Méthodes du `Server` :
 
 `start()` lance un thread accept qui drain les requêtes dans un channel mpsc. `recv_async()` pop sans bloquer.
 
+<!-- check: no-check -->
 ```catnip
 server = http.Server("127.0.0.1:0")  # port 0 = OS choisit
 server.start()
@@ -183,6 +191,7 @@ Méthodes :
 
 Pour parser un upload `multipart/form-data` côté serveur :
 
+<!-- check: no-check -->
 ```catnip
 req = server.recv()
 parts = req.multipart()
@@ -214,6 +223,7 @@ noms d'headers et paramètres case-insensitive.
 `req.cookies` est un dict `{ name: value }` parsé depuis le header `Cookie:`. Plusieurs headers `Cookie:` sont
 fusionnés.
 
+<!-- check: no-check -->
 ```catnip
 req = server.recv()
 session_id = req.cookies['session']
@@ -228,6 +238,7 @@ Pas de gestion des attributs (path, domain, expires) côté lecture : c'est just
 `start_chunked()` et `start_sse()` retournent un `Chunked` writer pour les réponses streamées (chunked transfer encoding
 HTTP/1.1).
 
+<!-- check: no-check -->
 ```catnip
 req = server.recv()
 stream = req.start_chunked(200, "text/plain")
@@ -244,6 +255,7 @@ stream.end()
 
 ### Server-Sent Events
 
+<!-- check: no-check -->
 ```catnip
 req = server.recv()
 stream = req.start_sse()
@@ -272,6 +284,7 @@ Le code applicatif peut alors retomber sur `respond()` pour ces cas particuliers
 
 ## Auth helpers
 
+<!-- check: no-check -->
 ```catnip
 http.basic_auth(user, password)   # → "Basic <base64(user:password)>"
 http.bearer(token)                # → "Bearer <token>"
@@ -279,16 +292,18 @@ http.bearer(token)                # → "Bearer <token>"
 
 À utiliser dans `opts.headers.Authorization` :
 
+<!-- check: no-check -->
 ```catnip
-r = http.request("GET", "https://api.example.com/me", {
-    headers: { Authorization: http.bearer("abc123") },
-})
+r = http.request("GET", "https://api.example.com/me", dict(
+    headers=dict(("Authorization", http.bearer("abc123"))),
+))
 ```
 
 ## `serve()` : helper one-shot
 
 Sert un contenu statique, ouvre le navigateur, attend une requête, répond, retourne.
 
+<!-- check: no-check -->
 ```catnip
 http.serve("<h1>Hello</h1>", 0, nil, true)
 # port 0 → OS choisit

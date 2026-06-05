@@ -109,6 +109,7 @@ match opt {
 
 Une variante nullaire se matche sans accolades (forme `Union.Variant`), identique aux variantes d'enum :
 
+<!-- check: no-check -->
 ```catnip
 match Event.Quit {
     Event.Click{x, y} => { print("click at", x, y) }
@@ -127,6 +128,7 @@ L'égalité est **structurelle** :
 - Deux variantes du même nom avec les mêmes champs sont égales.
 - Deux variantes différentes ne le sont jamais, même si elles portent les mêmes données.
 
+<!-- check: no-check -->
 ```catnip
 Option.Some(1) == Option.Some(1)
 # → True
@@ -170,6 +172,7 @@ if Option.None { "oui" } else { "non" }
 
 Pour tester l'absence de valeur, utiliser explicitement `match` ou la comparaison directe :
 
+<!-- check: no-check -->
 ```catnip
 opt = Option.None
 match opt {

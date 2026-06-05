@@ -3850,6 +3850,38 @@ impl VM {
                         let py_obj = obj.to_pyobject(py);
                         let py_bound = py_obj.bind(py);
 
+                        // Native plugin object: route method calls to the plugin's
+                        // method callback (mirrors catnip_vm::host), GIL released.
+                        if let Ok(po) = py_bound.cast::<crate::loader::native_plugin::NativePluginObject>() {
+                            let (handle, cbs) = po
+                                .borrow()
+                                .handle_and_callbacks()
+                                .ok_or_else(|| VMError::RuntimeError("invalid plugin object".into()))?;
+                            let method_fn = cbs.method.ok_or_else(|| {
+                                VMError::RuntimeError(format!("plugin object has no method '{method_name}'"))
+                            })?;
+                            let mut vm_args: Vec<catnip_vm::Value> = Vec::with_capacity(args.len());
+                            for a in &args {
+                                let pa = a.to_pyobject(py);
+                                vm_args.push(crate::vm::py_interop::convert_py_to_vm_value(py, pa.bind(py)).to_vm(py)?);
+                            }
+                            let method_owned = method_name.clone();
+                            let bits = py.detach(|| {
+                                catnip_vm::plugin::call_plugin_method(handle, method_fn, &method_owned, &vm_args, &cbs)
+                                    .map(|v| v.bits())
+                                    .map_err(|e| e.to_string())
+                            });
+                            for a in &vm_args {
+                                a.decref();
+                            }
+                            let bits = bits.map_err(VMError::RuntimeError)?;
+                            let pyres = crate::vm::py_interop::vm_value_to_py(py, catnip_vm::Value::from_raw(bits))
+                                .to_vm(py)?;
+                            let value = Value::from_pyobject(py, pyres.bind(py)).to_vm(py)?;
+                            frame.push(value);
+                            continue;
+                        }
+
                         // Check struct marker type (static methods)
                         let ptr = py_bound.as_ptr() as usize;
                         if let Some(&type_id) = self.struct_type_map.get(&ptr) {

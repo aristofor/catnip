@@ -1,0 +1,217 @@
+// FILE: catnip_rs/src/loader/native_plugin.rs
+//! Bridge exposing native catnip_vm plugins (`.so` loaded via libloading) to
+//! the PyO3 VM.
+//!
+//! Native stdlib plugins (e.g. `http`) are compiled against `catnip_vm` and are
+//! PureVM-only: the PyO3 loader normally loads stdlib as Python modules and
+//! cannot host them. This module wraps a plugin's module functions and objects
+//! as Python callables/objects and marshals values across the
+//! `catnip_vm::Value` <-> PyObject boundary (`crate::vm::py_interop`).
+//!
+//! Object attribute/method fidelity is preserved by the VM opcodes, not by
+//! Python duck-typing: `OpCode::GetAttr` routes to the plugin's getattr
+//! callback and `OpCode::CallMethod` to its method callback (mirroring
+//! `catnip_vm::host`). See `crate::vm::host` and `crate::vm::core`.
+
+use std::path::{Path, PathBuf};
+
+use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError};
+use pyo3::prelude::*;
+use pyo3::types::PyTuple;
+
+use catnip_vm::Value as VmValue;
+use catnip_vm::plugin::{self, PluginCallFn, PluginObjectCallbacks, SharedPluginRegistry};
+
+use crate::loader::namespace::ModuleNamespace;
+use crate::vm::py_interop::{convert_py_to_vm_value, vm_value_to_py, vm_value_to_py_borrowed};
+
+const PLUGIN_PREFIX: &str = "__plugin::";
+
+/// Map a `catnip_vm::VMError` to a Python exception.
+pub(crate) fn vmerr_to_py(msg: String) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(msg)
+}
+
+/// A bound module-level plugin function (e.g. `http.get`). Holds the raw call
+/// pointer; the `.so` stays loaded for as long as the owning loader keeps the
+/// plugin registry alive.
+#[pyclass(name = "NativePluginFn", module = "catnip._rs")]
+pub struct NativePluginFn {
+    call_fn: PluginCallFn,
+    short_name: String,
+    /// Module object callbacks, used to wrap object handles returned by the call.
+    obj_callbacks: PluginObjectCallbacks,
+}
+
+impl NativePluginFn {
+    pub fn new(call_fn: PluginCallFn, short_name: String, obj_callbacks: PluginObjectCallbacks) -> Self {
+        Self {
+            call_fn,
+            short_name,
+            obj_callbacks,
+        }
+    }
+}
+
+#[pymethods]
+impl NativePluginFn {
+    #[pyo3(signature = (*args))]
+    fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let mut vm_args: Vec<VmValue> = Vec::with_capacity(args.len());
+        for a in args.iter() {
+            vm_args.push(convert_py_to_vm_value(py, &a)?);
+        }
+
+        let call_fn = self.call_fn;
+        let short = self.short_name.clone();
+        let cbs = self.obj_callbacks.clone();
+        // Release the GIL: some plugin functions block (network, etc.).
+        let result: Result<u64, String> = py.detach(|| {
+            plugin::call_plugin_fn(call_fn, &short, &vm_args, &cbs)
+                .map(|v| v.bits())
+                .map_err(|e| e.to_string())
+        });
+
+        for a in &vm_args {
+            a.decref();
+        }
+
+        let bits = result.map_err(vmerr_to_py)?;
+        vm_value_to_py(py, VmValue::from_raw(bits))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<native plugin fn '{}'>", self.short_name)
+    }
+}
+
+/// A handle to a plugin object (e.g. `Response`, `Request`, `Server`).
+///
+/// Owns exactly one reference to the underlying `catnip_vm` PluginObject value;
+/// `Drop` releases it, which calls the plugin's drop callback. Method and
+/// attribute dispatch is performed in the host (`crate::vm::host::obj_getattr`
+/// and `OpCode::CallMethod`), not here.
+/// # Thread-safety
+///
+/// `catnip_vm::Value` is a `u64` newtype (`Send`), and the only reference-count
+/// mutations the bridge performs (`clone_refcount` when passed as an argument,
+/// `decref` on `Drop`) happen while the GIL is held, so sharing across Python
+/// threads is sound. Plugin objects such as `http.Server` are deliberately used
+/// from worker threads (`Server.recv` blocks with the GIL released).
+#[pyclass(name = "NativePluginObject", module = "catnip._rs")]
+pub struct NativePluginObject {
+    vm_value: VmValue,
+}
+
+impl NativePluginObject {
+    /// Take ownership of a `catnip_vm` PluginObject value.
+    pub fn from_vm(vm_value: VmValue) -> Self {
+        Self { vm_value }
+    }
+
+    /// The underlying value (still owned by this object; do not decref).
+    pub fn vm_value(&self) -> VmValue {
+        self.vm_value
+    }
+
+    /// Extract the object handle and its callbacks.
+    pub fn handle_and_callbacks(&self) -> Option<(u64, PluginObjectCallbacks)> {
+        unsafe { self.vm_value.as_plugin_object_ref() }
+    }
+}
+
+impl Drop for NativePluginObject {
+    fn drop(&mut self) {
+        self.vm_value.decref();
+    }
+}
+
+#[pymethods]
+impl NativePluginObject {
+    fn __repr__(&self) -> String {
+        "<native plugin object>".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery + loading
+// ---------------------------------------------------------------------------
+
+/// Directories searched for `libcatnip_<name>.so` plugins.
+///
+/// Order: `$CATNIP_STDLIB_PATH` (colon-separated) then the installed `catnip`
+/// package directory (where `_rs` and the bundled plugins live).
+fn discover_plugin_paths(py: Python<'_>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(val) = std::env::var("CATNIP_STDLIB_PATH") {
+        for p in val.split(':') {
+            let pb = PathBuf::from(p);
+            if pb.is_dir() {
+                paths.push(pb);
+            }
+        }
+    }
+
+    if let Ok(catnip) = py.import("catnip") {
+        if let Ok(file) = catnip.getattr("__file__") {
+            if let Ok(s) = file.extract::<String>() {
+                if let Some(dir) = Path::new(&s).parent() {
+                    paths.push(dir.to_path_buf());
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+/// Load a PureVM-only native stdlib module (e.g. `http`) and wrap it as a
+/// `ModuleNamespace` of Python-callable functions and converted attributes.
+///
+/// The `.so` is loaded once into the shared registry, which the owning loader
+/// keeps alive (so the raw call pointers held by `NativePluginFn` stay valid).
+pub fn load_native_module(py: Python<'_>, registry: &SharedPluginRegistry, name: &str) -> PyResult<Py<PyAny>> {
+    let lib_name = format!("libcatnip_{name}{}", plugin::native_suffix());
+    let path = discover_plugin_paths(py)
+        .iter()
+        .map(|dir| dir.join(&lib_name))
+        .find(|cand| cand.is_file())
+        .ok_or_else(|| {
+            PyFileNotFoundError::new_err(format!(
+                "native plugin '{lib_name}' not found (looked in $CATNIP_STDLIB_PATH and the catnip package directory)"
+            ))
+        })?;
+
+    // Load the plugin and read its callbacks while borrowing the registry.
+    let (module_ns, obj_cbs) = {
+        let mut reg = registry.borrow_mut();
+        let ns = reg
+            .load(&path, name)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let cbs = reg.object_callbacks(name).unwrap_or_else(PluginObjectCallbacks::empty);
+        (ns, cbs)
+    };
+
+    let mut rs_ns = ModuleNamespace::new(name.to_string());
+    for (attr_name, val) in module_ns.attrs.iter() {
+        let py_val: Py<PyAny> = if val.is_native_str() {
+            let s = unsafe { val.as_native_str_ref() }.unwrap();
+            if let Some(_short) = s.strip_prefix(PLUGIN_PREFIX) {
+                let qualified = s.to_string();
+                let short_name = qualified.rsplit("::").next().unwrap_or(&qualified).to_string();
+                let call_fn = registry.borrow().call_fn(&qualified).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!("plugin '{name}': missing call pointer for '{qualified}'"))
+                })?;
+                Py::new(py, NativePluginFn::new(call_fn, short_name, obj_cbs.clone()))?.into_any()
+            } else {
+                vm_value_to_py_borrowed(py, *val)?
+            }
+        } else {
+            vm_value_to_py_borrowed(py, *val)?
+        };
+        rs_ns.set_attr(attr_name.clone(), py_val);
+    }
+
+    Ok(Py::new(py, rs_ns)?.into_any())
+}

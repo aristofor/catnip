@@ -1,6 +1,6 @@
 # Catnip language
 
-Version <!-- catnip:version -->0.0.9<!-- /catnip:version -->
+Version <!-- catnip:version -->0.1.0<!-- /catnip:version -->
 
 Documentation: [https://docs.catnip-lang.io](https://docs.catnip-lang.io)
 

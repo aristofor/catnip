@@ -4,7 +4,7 @@
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "0.0.9"
+__version__ = "0.1.0"
 __lang_id__ = "catnip"
 
 try:

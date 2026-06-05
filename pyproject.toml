@@ -105,7 +105,8 @@ examples-all = [
     "catnip-lang[examples-geometry]",
     "catnip-lang[examples-geospatial]",
     "catnip-lang[examples-symbolic]",
-    "tqdm>=4.67,<5"
+    "tqdm>=4.67,<5",
+    "cryptography>=43,<49"
 ]
 
 [dependency-groups]
@@ -154,10 +155,13 @@ version = {attr = "catnip._version.__version__"}
 
 # Données de paquet
 [tool.setuptools.package-data]
-catnip = ["*.pyx", "*.pxd", "bin/*"]
+# libcatnip_*.so: native (PyO3-less) stdlib plugins (e.g. http), discovered at
+# runtime next to the extension. The cpython-tagged extensions are added by
+# setuptools-rust as ext_modules, so they stay excluded below.
+catnip = ["*.pyx", "*.pxd", "bin/*", "libcatnip_*.so"]
 
 [tool.setuptools.exclude-package-data]
-"catnip" = ["*.c", "*.cpp", "*.so", "*.pyd"]
+"catnip" = ["*.c", "*.cpp", "*.cpython-*.so", "*.pyd"]
 
 #--- DEV-ONLY-START ---
 # sdist: inclure les C générés
@@ -232,7 +236,7 @@ skip-string-normalization = true
 target-version = ["py313"]
 
 [tool.cibuildwheel]
-build = "cp313-* cp314-*"
+build = "cp314-*"
 skip = "*-musllinux_* *-manylinux_aarch64 *-manylinux_i686"
 build-verbosity = 0
 before-all = [

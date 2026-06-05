@@ -73,12 +73,21 @@ def gen_python_loader(modules: list[dict]) -> list[str]:
 
 
 def gen_rust_resolve(modules: list[dict]) -> list[str]:
-    """Generate STDLIB_MODULES const for catnip_core/src/loader/resolve.rs (only modules with PyO3 backend)."""
+    """Generate STDLIB_MODULES + NATIVE_STDLIB_MODULES consts for resolve.rs.
+
+    STDLIB_MODULES: modules with a PyO3 backend (loaded as Python C-extensions).
+    NATIVE_STDLIB_MODULES: PureVM-only modules (has_rust && !has_pyo3), loaded as
+    native catnip_vm plugins (`.so`) through the PyO3 bridge.
+    """
     entries = ", ".join(
         f'("{m["name"]}", "{m["import_name"]}", {str(m["needs_configure"]).lower()})'
         for m in modules if m['has_pyo3']
     )
-    return [f"pub const STDLIB_MODULES: &[(&str, &str, bool)] = &[{entries}];"]
+    native = ", ".join(f'"{m["name"]}"' for m in modules if m['has_rust'] and not m['has_pyo3'])
+    return [
+        f"pub const STDLIB_MODULES: &[(&str, &str, bool)] = &[{entries}];",
+        f"pub const NATIVE_STDLIB_MODULES: &[&str] = &[{native}];",
+    ]
 
 
 def gen_setup_extensions(modules: list[dict]) -> list[str]:

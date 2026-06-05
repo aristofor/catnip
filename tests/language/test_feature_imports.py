@@ -819,5 +819,101 @@ class TestImportStatementNoDesugar(unittest.TestCase):
         self.assertNotIn('math', catnip.context.globals)
 
 
+class TestNativeStdlibPlugin(unittest.TestCase):
+    """The PureVM-only `http` plugin loaded through the PyO3 native bridge.
+
+    Verifies that `import('http')` resolves to the Catnip lib (not Python's
+    `http` module) and that the value/object marshalling works in both
+    directions, including the attribute-vs-method distinction on plugin objects.
+    """
+
+    @staticmethod
+    def _eval(code):
+        c = Catnip()
+        c.parse(code)
+        return c.execute()
+
+    def test_resolves_catnip_lib_not_python(self):
+        self.assertEqual(self._eval("import('http')\nhttp.PROTOCOL"), "rust")
+        self.assertTrue(self._eval("import('http')\nhttp.VERSION"))
+
+    def test_module_function_marshalling(self):
+        # Args (str) and return (str) cross the catnip_vm <-> PyObject boundary.
+        self.assertEqual(self._eval("import('http')\nhttp.basic_auth('u', 'p')"), "Basic dTpw")
+        self.assertEqual(self._eval("import('http')\nhttp.bearer('tok')"), "Bearer tok")
+
+    def test_import_is_idempotent(self):
+        """Re-importing a native plugin must not retry the (one-shot) .so load.
+
+        The plugin registry rejects a second `load()` of the same library, so the
+        loader must serve repeats from its cache -- including for `protocol='rs'`,
+        which bypasses the protocol=None cache fast-path.
+        """
+        self.assertEqual(
+            self._eval("import('http')\nimport('http', protocol='rs')\nhttp.PROTOCOL"),
+            "rust",
+        )
+        self.assertEqual(
+            self._eval("a = import('http', protocol='rs')\nb = import('http', protocol='rs')\nb.PROTOCOL"),
+            "rust",
+        )
+
+    def test_python_protocol_does_not_shadow_native(self):
+        """`protocol='py'` forces Python's `http`; it must not poison the cache
+        slot used by the native `rs`/default resolution of the same name."""
+        # Python's http module has no PROTOCOL attribute; the native one is "rust".
+        self.assertEqual(
+            self._eval("py = import('http', protocol='py')\nrs = import('http', protocol='rs')\nrs.PROTOCOL"),
+            "rust",
+        )
+        self.assertEqual(
+            self._eval("py = import('http', protocol='py')\nimport('http')\nhttp.PROTOCOL"),
+            "rust",
+        )
+
+    def test_pyo3_stdlib_protocol_isolation(self):
+        """Same cache split for PyO3 Rust stdlib (`io`): a `protocol='py'` import
+        of Python's `io` must not shadow the Catnip `io` extension."""
+        self.assertEqual(
+            self._eval("py = import('io', protocol='py')\nrs = import('io', protocol='rs')\nrs.PROTOCOL"),
+            "rust",
+        )
+        self.assertEqual(
+            self._eval("py = import('io', protocol='py')\nimport('io')\nio.PROTOCOL"),
+            "rust",
+        )
+
+    def test_client_object_attr_vs_method(self):
+        """Response: `.status`/`.body` are attributes, `.json()` is a method."""
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            result = self._eval(
+                f"import('http')\n" f"r = http.get('http://127.0.0.1:{port}/')\n" f"[r.status, r.json()['ok']]"
+            )
+            self.assertEqual(result, [200, True])
+        finally:
+            server.shutdown()
+            t.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

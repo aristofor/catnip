@@ -1,6 +1,6 @@
 # Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
-version <!-- catnip:version -->0.0.9<!-- /catnip:version -->
+version <!-- catnip:version -->0.1.0<!-- /catnip:version -->
 
 Né comme langage de script embarquable pour Python.
 
@@ -10,7 +10,7 @@ conception.
 <!-- doc-snapshot: index/repl-ieee754 -->
 
 ```console
-Catnip REPL v0.0.9
+Catnip REPL v0.0.10
 Type /help for help, /exit to quit
 ▸ 0.1 + 0.2
 0.30000000000000004
@@ -25,10 +25,9 @@ Type /help for help, /exit to quit
 
 ### Turfu
 
-Encore un brouillon, moins sale.
-
-- Refonte du `codex` → side project
-- Un minimum de packaging
+- Blinder le side-project `codex`
+- Un dataflow delta
+- Un QNN
 
 ### Repos
 

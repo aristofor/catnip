@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.9 (unreleased)
+## 0.0.10 (unreleased)
 
 ### Langage
 
@@ -14,6 +14,9 @@
   préserver le contrat `a == b ⇒ hash(a) == hash(b)`. Une instance est figée dès qu'elle est hashée : toute mutation
   ultérieure d'un champ lève `TypeError`, garantissant la stabilité du hash pendant la vie de la clé. Voir
   [STRUCTURES § Hashabilité](lang/STRUCTURES.md#hashabilit%C3%A9).
+- **Types d'exception comme valeurs** : `ValueError`, `TypeError`, `RuntimeError`, etc. sont désormais résolus comme
+  valeurs dans le VM standalone (CLI, `-c`, Pipeline), pas seulement en position `raise`/`except`. Permet de les passer
+  en argument, ex. `contextlib.suppress(ValueError)`.
 
 ### Tooling
 
@@ -49,6 +52,10 @@
   intérieurs), headers et paramètres case-insensitive (RFC 7578).
 - **Cookies côté serveur** : `Request.cookies` parse le header `Cookie:` en `dict[str, str]`. Plusieurs headers
   `Cookie:` sont fusionnés.
+- **`http` chargeable partout** : `import('http')` donne désormais la lib Catnip native dans tous les exécuteurs (CLI,
+  REPL, VM, AST), pas seulement le PureVM/MCP. Les attributs (`Response.status`) et méthodes (`Response.json()`) des
+  objets sont distingués correctement. `import('http', protocol='py')` force toujours le module `http` de Python ; les
+  deux coexistent sans se masquer (idem `io`/`sys`).
 
 ## 0.0.8 (2026-04-11)
 

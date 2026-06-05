@@ -86,7 +86,7 @@ flowchart TD
     D --> E{"Trouvé ?"}
     E -->|Oui| F["Cache par chemin absolu,<br/>puis charger si miss"]
     E -->|Non| B2{"Module stdlib Rust ?"}
-    B2 -->|Oui| B3["Charger extension native (cdylib PyO3)"]
+    B2 -->|Oui| B3["Charger module Rust<br/>(cdylib PyO3 ou plugin .so natif)"]
     B2 -->|Non| IL["Essayer importlib (stdlib/pip)"]
     IL --> IL2{"Trouvé ?"}
     IL2 -->|Oui| IL3["Charger module Python (importlib)"]
@@ -95,12 +95,16 @@ flowchart TD
 
 1. **Cache** - si déjà chargé, retour immédiat
 1. **Fichiers** (caller_dir → CWD → CATNIP_PATH) - `.cat`, `.py`, extensions natives, packages `lib.toml`
-1. **Stdlib Rust** - modules natifs (`io`, `sys`) chargés dynamiquement (cdylib PyO3)
+1. **Stdlib Rust** - modules natifs (`io`, `sys`, `http`) chargés dynamiquement
 1. **`importlib`** - modules Python installés (stdlib, pip)
 
 Les fichiers locaux et `CATNIP_PATH` sont résolus avant stdlib et `importlib`. Un fichier local peut donc masquer
 n'importe quel module, y compris stdlib. Pour forcer l'accès à un module Python masqué, utiliser `protocol="py"` :
 `import('http', protocol='py')`.
+
+> Un module stdlib Rust et son homonyme Python coexistent sans se masquer : `import('http')` (ou `protocol="rs"`)
+> donne toujours la lib Catnip, `import('http', protocol="py")` toujours le module Python. Le cache les garde dans
+> des cases séparées.
 
 <!-- check: no-check -->
 
@@ -111,15 +115,22 @@ utils = import('utils')   # pas dans importlib → cherche utils.cat, puis utils
 
 ### Modules stdlib (Rust natif)
 
-Les modules stdlib sont des extensions PyO3 standalone (cdylib), chargées dynamiquement depuis le package installé ou
-via `CATNIP_PATH`. Ils ont priorité sur la recherche fichier (sauf si `protocol="py"` ou `protocol="cat"` force un autre
-backend).
+Les modules stdlib sont chargés dynamiquement depuis le package installé ou via `CATNIP_PATH`. Ils ont priorité sur la
+recherche fichier (sauf si `protocol="py"` ou `protocol="cat"` force un autre backend). Deux backends coexistent, choisis
+dans `spec.toml` :
 
-| Module | Exports                                                                     | PROTOCOL |
-| ------ | --------------------------------------------------------------------------- | -------- |
-| `io`   | `print`, `write`, `writeln`, `eprint`, `input`, `open`                      | `"rust"` |
-| `sys`  | `argv`, `environ`, `executable`, `version`, `platform`, `cpu_count`, `exit` | `"rust"` |
+- **cdylib PyO3** (`io`, `sys`) : extensions C-Python standalone.
+- **plugin natif catnip_vm** (`http`) : `.so` chargé via `libloading`, sans backend PyO3 (`pyo3 = false`). Exposé au VM
+  PyO3 via un pont qui marshale les valeurs et préserve la distinction attribut/méthode des objets (`Response.status`
+  vs `Response.json()`). Auparavant réservé au PureVM/MCP, il est désormais chargeable depuis tous les exécuteurs.
 
+| Module | Backend     | Exports                                                                     | PROTOCOL |
+| ------ | ----------- | --------------------------------------------------------------------------- | -------- |
+| `io`   | cdylib PyO3 | `print`, `write`, `writeln`, `eprint`, `input`, `open`                      | `"rust"` |
+| `sys`  | cdylib PyO3 | `argv`, `environ`, `executable`, `version`, `platform`, `cpu_count`, `exit` | `"rust"` |
+| `http` | plugin natif | `get`, `post`, `put`, `delete`, `request`, `Server`, `basic_auth`, `bearer` | `"rust"` |
+
+<!-- check: no-check -->
 ```catnip
 io = import('io')
 io.print("BORN TO SEGFAULT", "world", sep=", ")
@@ -132,8 +143,8 @@ io.eprint("stderr message")
 name = io.input("Name: ")
 ```
 
-Les modules stdlib sont des extensions PyO3 standalone (cdylib) chargées à la demande. `io.PROTOCOL` retourne `"rust"`
-pour identifier le backend. Un module dans `CATNIP_PATH` peut overrider un module stdlib du même nom.
+`io.PROTOCOL` (comme `sys.PROTOCOL`, `http.PROTOCOL`) retourne `"rust"` pour identifier le backend natif, quel que soit
+le flavour (cdylib PyO3 ou plugin catnip_vm). Un module dans `CATNIP_PATH` peut overrider un module stdlib du même nom.
 
 > Si `utils.cat` et `utils.py` coexistent dans le même répertoire et qu'aucun module `utils` n'existe dans `importlib`,
 > le `.cat` gagne. Pour forcer le `.py`, utiliser le kwarg `protocol` : `import('utils', protocol='py')`.

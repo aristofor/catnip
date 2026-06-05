@@ -658,6 +658,105 @@ fn convert_vm_value(
     ))
 }
 
+// ========== Native plugin bridge marshalling ==========
+//
+// Converts between PyObject and `catnip_vm::Value` so the PyO3 VM can call into
+// native catnip_vm plugins (loaded via libloading). Reuses `convert_vm_value`
+// for the catnip_vm -> Python direction.
+
+/// Convert an owned `catnip_vm::Value` result into a PyObject, releasing the
+/// owned reference. Plugin object handles are wrapped in `NativePluginObject`
+/// (which takes ownership of the reference and drops it via the plugin's drop
+/// callback on GC).
+pub(crate) fn vm_value_to_py(py: Python<'_>, vm_val: catnip_vm::Value) -> PyResult<Py<PyAny>> {
+    use crate::loader::native_plugin::NativePluginObject;
+
+    if vm_val.is_plugin_object() {
+        let obj = NativePluginObject::from_vm(vm_val);
+        return Ok(Py::new(py, obj)?.into_any());
+    }
+    let rs_val = convert_vm_value(py, vm_val, &[])?;
+    let py_obj = rs_val.to_pyobject(py);
+    vm_val.decref();
+    Ok(py_obj)
+}
+
+/// Convert a *borrowed* `catnip_vm::Value` into a PyObject without releasing
+/// any reference. Used for plugin module static attributes, whose values stay
+/// owned by the plugin's namespace.
+pub(crate) fn vm_value_to_py_borrowed(py: Python<'_>, vm_val: catnip_vm::Value) -> PyResult<Py<PyAny>> {
+    let rs_val = convert_vm_value(py, vm_val, &[])?;
+    Ok(rs_val.to_pyobject(py))
+}
+
+/// Convert a PyObject into a fresh, owned `catnip_vm::Value` (an argument for a
+/// plugin call). Callers must `decref` the returned value once the call
+/// completes. A `NativePluginObject` is passed through by incrementing its
+/// refcount so the post-call decref balances out.
+pub(crate) fn convert_py_to_vm_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<catnip_vm::Value> {
+    use catnip_vm::Value as VmValue;
+    use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyList};
+
+    if obj.is_none() {
+        return Ok(VmValue::NIL);
+    }
+    if let Ok(b) = obj.cast::<PyBool>() {
+        return Ok(VmValue::from_bool(b.is_true()));
+    }
+    if let Ok(po) = obj.cast::<crate::loader::native_plugin::NativePluginObject>() {
+        let v = po.borrow().vm_value();
+        v.clone_refcount();
+        return Ok(v);
+    }
+    if obj.cast::<PyInt>().is_ok() {
+        if let Ok(i) = obj.extract::<i64>() {
+            return Ok(VmValue::from_int(i));
+        }
+        return Err(pyo3::exceptions::PyOverflowError::new_err(
+            "integer too large for native plugin argument",
+        ));
+    }
+    if let Ok(f) = obj.cast::<PyFloat>() {
+        return Ok(VmValue::from_float(f.extract()?));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(VmValue::from_string(s));
+    }
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        return Ok(VmValue::from_bytes(b.as_bytes().to_vec()));
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for it in list.iter() {
+            items.push(convert_py_to_vm_value(py, &it)?);
+        }
+        return Ok(VmValue::from_list(items));
+    }
+    if let Ok(tuple) = obj.cast::<PyTuple>() {
+        let mut items = Vec::with_capacity(tuple.len());
+        for it in tuple.iter() {
+            items.push(convert_py_to_vm_value(py, &it)?);
+        }
+        return Ok(VmValue::from_tuple(items));
+    }
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        let mut map: IndexMap<catnip_vm::collections::ValueKey, VmValue> = IndexMap::new();
+        for (k, v) in dict.iter() {
+            let kv = convert_py_to_vm_value(py, &k)?;
+            let key = kv
+                .to_key()
+                .map_err(|e| pyo3::exceptions::PyTypeError::new_err(e.to_string()))?;
+            kv.decref();
+            map.insert(key, convert_py_to_vm_value(py, &v)?);
+        }
+        return Ok(VmValue::from_dict(map));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "cannot pass value of type '{}' to a native plugin",
+        obj.get_type().name()?
+    )))
+}
+
 /// Convert a catnip_vm VMPattern to a catnip_rs VMPattern.
 fn convert_vm_pattern(
     py: Python<'_>,

@@ -337,6 +337,39 @@ impl ContextHost {
     }
 }
 
+/// If `py_bound` is a native plugin object, route attribute access to the
+/// plugin's getattr callback (GIL released during the FFI call) and return the
+/// converted value. Returns `Ok(None)` for any other object so the caller can
+/// fall back to the normal Python attribute protocol.
+///
+/// Shared by both `VmHost` implementations to mirror `catnip_vm::host`.
+pub(crate) fn native_plugin_getattr(
+    py: Python<'_>,
+    py_bound: &Bound<'_, PyAny>,
+    name: &str,
+) -> Result<Option<Value>, super::core::VMError> {
+    let Ok(po) = py_bound.cast::<crate::loader::native_plugin::NativePluginObject>() else {
+        return Ok(None);
+    };
+    let (handle, cbs) = po
+        .borrow()
+        .handle_and_callbacks()
+        .ok_or_else(|| super::core::VMError::RuntimeError("invalid plugin object".into()))?;
+    let getattr_fn = cbs
+        .getattr
+        .ok_or_else(|| super::core::VMError::RuntimeError(format!("plugin object has no attribute '{name}'")))?;
+    let name_owned = name.to_string();
+    let bits = py
+        .detach(move || {
+            catnip_vm::plugin::call_plugin_getattr(handle, getattr_fn, &name_owned, &cbs)
+                .map(|v| v.bits())
+                .map_err(|e| e.to_string())
+        })
+        .map_err(super::core::VMError::RuntimeError)?;
+    let pyres = crate::vm::py_interop::vm_value_to_py(py, catnip_vm::Value::from_raw(bits)).to_vm(py)?;
+    Ok(Some(Value::from_pyobject(py, pyres.bind(py)).to_vm(py)?))
+}
+
 impl VmHost for ContextHost {
     #[inline]
     fn lookup_global(&self, py: Python<'_>, name: &str) -> Result<Option<Value>, super::core::VMError> {
@@ -409,6 +442,9 @@ impl VmHost for ContextHost {
     fn obj_getattr(&self, py: Python<'_>, obj: Value, name: &str) -> Result<Value, super::core::VMError> {
         let py_obj = obj.to_pyobject(py);
         let py_bound = py_obj.bind(py);
+        if let Some(v) = native_plugin_getattr(py, py_bound, name)? {
+            return Ok(v);
+        }
         let result = py_bound.getattr(name).map_err(|e| {
             let msg = e.to_string();
             super::core::VMError::RuntimeError(super::core::py_attr_error_msg(py_bound, name, &msg))
@@ -822,6 +858,21 @@ impl VMHost {
             "property",
             "vars",
             "dir",
+            // Builtin exception types -- resolvable as values (e.g.
+            // `contextlib.suppress(ValueError)`), not just in `raise`/`except`
+            // positions. Mirrors `catnip_core::exception::ExceptionKind`.
+            "Exception",
+            "TypeError",
+            "ValueError",
+            "NameError",
+            "IndexError",
+            "KeyError",
+            "AttributeError",
+            "ZeroDivisionError",
+            "RuntimeError",
+            "MemoryError",
+            "ArithmeticError",
+            "LookupError",
         ];
         {
             let mut g = globals.borrow_mut();
@@ -1272,6 +1323,9 @@ impl VmHost for VMHost {
     fn obj_getattr(&self, py: Python<'_>, obj: Value, name: &str) -> Result<Value, super::core::VMError> {
         let py_obj = obj.to_pyobject(py);
         let py_bound = py_obj.bind(py);
+        if let Some(v) = native_plugin_getattr(py, py_bound, name)? {
+            return Ok(v);
+        }
         let result = py_bound.getattr(name).map_err(|e| {
             let msg = e.to_string();
             super::core::VMError::RuntimeError(super::core::py_attr_error_msg(py_bound, name, &msg))

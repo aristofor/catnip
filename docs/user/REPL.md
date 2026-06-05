@@ -76,7 +76,7 @@ terminer un programme depuis le code, utiliser `sys = import('sys'); sys.exit(co
 
 ```console
 ▸ /version
-Catnip REPL v0.0.9
+Catnip REPL v0.0.10
 Build: release mode
 Features: JIT (Cranelift), NaN-boxing VM, Rust builtins
 ```

@@ -588,6 +588,8 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Module loader
     m.add_class::<loader::ImportLoader>()?;
     m.add_class::<loader::namespace::ModuleNamespace>()?;
+    m.add_class::<loader::native_plugin::NativePluginFn>()?;
+    m.add_class::<loader::native_plugin::NativePluginObject>()?;
 
     // IR inspection
     m.add_class::<ir::PyIRNode>()?;

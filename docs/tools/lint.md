@@ -78,6 +78,7 @@ catnip lint --max-depth 0 --max-complexity 0 --max-length 0 --max-params 0 scrip
 
 Ajouter `# noqa` en fin de ligne pour supprimer les diagnostics sur cette ligne :
 
+<!-- check: no-check -->
 ```catnip
 x = compute()  # noqa           -- supprime tout sur cette ligne
 y = value       # noqa: W200    -- supprime W200 seulement

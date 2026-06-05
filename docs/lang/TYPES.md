@@ -333,6 +333,7 @@ f"{x:.2f}"
 
 Les chaînes de bytes utilisent le préfixe `b` et produisent un objet `bytes` Python :
 
+<!-- check: no-check -->
 ```catnip
 # Bytes simples
 data = b"hello world"
@@ -553,9 +554,9 @@ unique = set(1, 2, 2, 3, 3, 3)  # → {1, 2, 3}
 # Opérations sur les sets (via Python)
 a = set(1, 2, 3, 4)
 b = set(3, 4, 5, 6)
-union = a.union(b)                # → {1, 2, 3, 4, 5, 6}
-intersection = a.intersection(b)  # → {3, 4}
-difference = a.difference(b)      # → {1, 2}
+u = a.union(b)                    # → {1, 2, 3, 4, 5, 6}
+inter = a.intersection(b)         # → {3, 4}
+diff = a.difference(b)            # → {1, 2}
 ```
 
 ## Dictionnaires

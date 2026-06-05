@@ -496,9 +496,9 @@ Affiche la version de Catnip. `-V` donne la version courte, `--version` inclut l
 
 ```console
 $ catnip -V
-catnip 0.0.9
+catnip 0.0.10
 $ catnip --version
-catnip 0.0.9
+catnip 0.0.10
   commit  99bf8bc
   build   2026-05-14-21:17:07
 ```

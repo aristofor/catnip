@@ -253,3 +253,51 @@ class TestCatnipWeirdError:
         with pytest.raises(CatnipWeirdError) as exc_info:
             catnip.context.pop_scope()
         assert "global scope" in str(exc_info.value).lower()
+
+
+class TestBuiltinExceptionTypesAsValues:
+    """Builtin exception types are resolvable as values in the standalone VM
+    host (`catnip._rs.Pipeline`), not only in `raise`/`except` positions.
+
+    Guards the `VMHost` builtins injection -- the `Catnip` class uses the
+    context host (which already exposes Python builtins), so these go through
+    the bare pipeline to exercise the standalone path.
+    """
+
+    def test_exception_type_is_a_value(self):
+        from catnip._rs import Pipeline
+
+        assert Pipeline().execute_quiet("x = ValueError\nx == ValueError") is True
+
+    def test_contextlib_suppress(self):
+        from catnip._rs import Pipeline
+
+        # `contextlib.suppress(ValueError)` needs ValueError as an argument value;
+        # the result (42) is reached only if the raise is suppressed.
+        result = Pipeline().execute_quiet(
+            "import('contextlib')\n" "with _ = contextlib.suppress(ValueError) { raise ValueError('x') }\n" "42"
+        )
+        assert result == 42
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Exception",
+            "TypeError",
+            "ValueError",
+            "NameError",
+            "IndexError",
+            "KeyError",
+            "AttributeError",
+            "ZeroDivisionError",
+            "RuntimeError",
+            "MemoryError",
+            "ArithmeticError",
+            "LookupError",
+        ],
+    )
+    def test_all_documented_exception_types_bound(self, name):
+        from catnip._rs import Pipeline
+
+        # Resolving the bare name must not raise NameError.
+        assert Pipeline().execute_quiet(name) is not None

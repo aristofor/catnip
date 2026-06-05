@@ -18,6 +18,7 @@ pub const PROTOCOLS: &[&str] = &["py", "rs", "cat"];
 /// Stdlib modules: (catnip_name, rust_import_name, needs_configure).
 // @generated-stdlib-start
 pub const STDLIB_MODULES: &[(&str, &str, bool)] = &[("io", "catnip_io", false), ("sys", "catnip_sys", true)];
+pub const NATIVE_STDLIB_MODULES: &[&str] = &["http"];
 // @generated-stdlib-end
 
 /// File extensions that are rejected in import specs.
@@ -245,6 +246,20 @@ pub fn lookup_stdlib(name: &str) -> Option<(&'static str, bool)> {
         .iter()
         .find(|(n, _, _)| *n == name)
         .map(|(_, import_name, needs_configure)| (*import_name, *needs_configure))
+}
+
+/// Whether `name` is a PureVM-only native stdlib module (loaded as a catnip_vm
+/// `.so` plugin rather than a Python C-extension).
+pub fn is_native_stdlib(name: &str) -> bool {
+    NATIVE_STDLIB_MODULES.contains(&name)
+}
+
+/// Whether `name` is a Rust stdlib module of any flavour (PyO3 C-extension or
+/// native `.so` plugin). The Rust implementation is what `protocol=None`/`'rs'`
+/// resolve to; these names are cached under a protocol-qualified key so a
+/// `protocol='py'` import of the same name cannot shadow them.
+pub fn is_rust_stdlib(name: &str) -> bool {
+    lookup_stdlib(name).is_some() || is_native_stdlib(name)
 }
 
 #[cfg(test)]

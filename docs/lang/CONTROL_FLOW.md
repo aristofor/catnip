@@ -313,6 +313,7 @@ disponibles.
 Le bloc `with` garantit l'appel de `__exit__` en sortie, qu'elle soit normale ou provoquee par une erreur. La syntaxe
 est sans parentheses, coherente avec `if`, `while` et `for` :
 
+<!-- check: no-check -->
 ```catnip
 with f = open("data.csv") {
     f.read()
@@ -326,6 +327,7 @@ automatiquement, meme si une exception a ete levee.
 
 Plusieurs context managers sont separes par des virgules. Le cleanup se fait en ordre inverse :
 
+<!-- check: no-check -->
 ```catnip
 with a = open("input"), b = open("output") {
     b.write(a.read())
@@ -339,6 +341,7 @@ Chaque binding est visible pour les suivants : `with a = expr1, b = use(a) { ...
 
 Si `__exit__` retourne une valeur truthy, l'exception est supprimee :
 
+<!-- check: no-check -->
 ```catnip
 import('contextlib')
 with _ = contextlib.suppress(ValueError) {

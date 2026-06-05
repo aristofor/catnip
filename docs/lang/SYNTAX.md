@@ -237,6 +237,7 @@ ______________________________________________________________________
 
 Le bloc `except` utilise une syntaxe match-like avec `=>` :
 
+<!-- check: no-check -->
 ```catnip
 try {
     resultat = operation_risquee()
@@ -261,6 +262,7 @@ Regles :
 
 ### raise
 
+<!-- check: expect-error -->
 ```catnip
 raise ValueError("message")    # lever une exception typee
 raise "message"                 # lever un RuntimeError
@@ -291,6 +293,7 @@ Le matching `except` suit la hierarchie : `except { e: ArithmeticError => { ... 
 
 ### with (context managers)
 
+<!-- check: no-check -->
 ```catnip
 with f = open("data.csv") {
     f.read()

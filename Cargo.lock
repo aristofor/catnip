@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "catnip-http"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "base64",
  "catnip_vm",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "catnip-io"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_vm",
  "pyo3",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "catnip-sys"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_vm",
  "indexmap",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_core"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_grammar",
  "cranelift-codegen",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_grammar"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "cc",
  "serde_json",
@@ -277,14 +277,14 @@ dependencies = [
 
 [[package]]
 name = "catnip_hello"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_vm",
 ]
 
 [[package]]
 name = "catnip_lsp"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_grammar",
  "catnip_tools",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_mcp"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "catnip_core",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_repl"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_rs",
  "catnip_tools",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_rs"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_core",
  "catnip_grammar",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_tools"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_grammar",
  "serde",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "catnip_vm"
-version = "0.0.9"
+version = "0.1.0"
 dependencies = [
  "catnip_core",
  "catnip_grammar",

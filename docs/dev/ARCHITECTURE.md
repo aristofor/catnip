@@ -315,7 +315,8 @@ CATNIP_PATH. Le code ne peut pas modifier cette liste à l'exécution.
 
 Deux implémentations partagent la même logique de résolution (`catnip_core::loader::resolve`) :
 
-- **`ImportLoader`** (`catnip_rs/src/loader/`) : mode PyO3 (Python + Rust), supporte `.cat`, `.py`, `.so`
+- **`ImportLoader`** (`catnip_rs/src/loader/`) : mode PyO3 (Python + Rust), supporte `.cat`, `.py`, extensions C-Python,
+  et les plugins natifs catnip_vm (`libcatnip_{name}.so`, ex. `http`) via le pont `native_plugin.rs`
 - **`PureImportLoader`** (`catnip_vm/src/loader.rs`) : mode pur Rust (PurePipeline/MCP), supporte `.cat` et `.so`
   (plugins natifs). Les modules stdlib sont decouverts par scan de `CATNIP_STDLIB_PATH`, exe dir, ou `target/debug/`
   pour `libcatnip_{name}.so`. Parite avec le loader Python : `protocol=`, `wild=True`, import selectif avec alias,
@@ -328,6 +329,12 @@ qualifies (`__plugin::module::fn`), et wrappe chaque appel dans `catch_unwind`. 
 des handles u64 opaques dont les methodes et attributs sont dispatches a travers les callbacks du plugin. `Arc<Library>`
 dans les callbacks previent le dlclose tant que des objets vivent. Tous les modules stdlib (io, sys, http) sont des
 plugins natifs -- aucun code stdlib dans catnip_vm
+
+Le même `PluginRegistry` est désormais aussi monté sur l'`ImportLoader` PyO3. Le pont `native_plugin.rs` (`catnip_rs`)
+marshale `catnip_vm::Value` <-> PyObject et route getattr/method via les opcodes (`OpCode::GetAttr` / `OpCode::CallMethod`),
+si bien qu'un plugin PureVM-only comme `http` (`pyo3 = false`) se charge depuis n'importe quel exécuteur, plus seulement
+le PurePipeline/MCP. Les stdlib Rust sont cachées sous une clé `rs::<name>` pour ne pas entrer en collision avec leur
+homonyme Python (`protocol="py"`).
 
 **Choix de design : pas de `sys.path`**
 

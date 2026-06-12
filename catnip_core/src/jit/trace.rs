@@ -140,6 +140,10 @@ pub struct Trace {
     pub op_offsets: Vec<usize>,
     /// Local slots used (for register allocation)
     pub locals_used: Vec<usize>,
+    /// Number of local slots in the source frame (= frame.locals.len()).
+    /// Inlined callee locals are remapped to scratch slots above this so they
+    /// never alias a host local nor get written back.
+    pub num_locals: usize,
     /// Whether trace contains only integer operations
     pub is_int_only: bool,
     /// Number of iterations recorded (for Loop traces)
@@ -159,6 +163,7 @@ impl Trace {
             ops: Vec::new(),
             op_offsets: Vec::new(),
             locals_used: Vec::new(),
+            num_locals: 0,
             is_int_only: true,
             iterations: 0,
             name_guards: Vec::new(),
@@ -175,6 +180,7 @@ impl Trace {
             ops: Vec::new(),
             op_offsets: Vec::new(),
             locals_used: Vec::new(),
+            num_locals: 0,
             is_int_only: true,
             iterations: 1, // Functions = single execution
             name_guards: Vec::new(),
@@ -264,7 +270,9 @@ impl TraceRecorder {
 
     /// Start recording a trace for a loop.
     pub fn start(&mut self, loop_offset: usize, num_locals: usize) {
-        self.trace = Some(Trace::new(loop_offset));
+        let mut trace = Trace::new(loop_offset);
+        trace.num_locals = num_locals;
+        self.trace = Some(trace);
         self.recording = true;
         self.int_slots = vec![false; num_locals];
         self.name_to_slot.clear();
@@ -275,7 +283,9 @@ impl TraceRecorder {
 
     /// Start recording a trace for a function.
     pub fn start_function(&mut self, func_id: String, num_locals: usize, num_params: usize) {
-        self.trace = Some(Trace::new_function(func_id, num_params));
+        let mut trace = Trace::new_function(func_id, num_params);
+        trace.num_locals = num_locals;
+        self.trace = Some(trace);
         self.recording = true;
         self.int_slots = vec![false; num_locals];
         self.name_to_slot.clear();

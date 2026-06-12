@@ -146,14 +146,13 @@ fn eliminate_match(ir: IR) -> IR {
         }
     };
 
-    let original_len = cases.len();
     let mut live_cases = Vec::new();
 
-    for case in cases {
-        let parts = match &case {
+    for case in &cases {
+        let parts = match case {
             IR::Tuple(p) if p.len() >= 3 => p,
             _ => {
-                live_cases.push(case);
+                live_cases.push(case.clone());
                 continue;
             }
         };
@@ -175,7 +174,7 @@ fn eliminate_match(ir: IR) -> IR {
             true
         } else {
             let no_guard = matches!(guard, IR::None);
-            live_cases.push(case);
+            live_cases.push(case.clone());
             no_guard
         };
 
@@ -190,20 +189,17 @@ fn eliminate_match(ir: IR) -> IR {
     if live_cases.len() == 1 {
         if let IR::Tuple(parts) = &live_cases[0] {
             if parts.len() >= 3 && matches!(&parts[1], IR::None) && is_eliminable_catchall(&parts[0]) {
-                return parts[2].clone();
+                return keep_scrutinee(value_expr, parts[2].clone());
             }
         }
     }
 
     if live_cases.is_empty() {
-        return IR::None;
-    }
-
-    if live_cases.len() == original_len {
-        // No change, rebuild with original structure
+        // Every case was eliminated: at runtime this match raises (no case
+        // matched). Keep it unchanged so the error is preserved.
         return IR::Op {
             opcode,
-            args: vec![value_expr, IR::Tuple(live_cases)],
+            args: vec![value_expr, IR::Tuple(cases)],
             kwargs,
             tail,
             start_byte,
@@ -218,6 +214,17 @@ fn eliminate_match(ir: IR) -> IR {
         tail,
         start_byte,
         end_byte,
+    }
+}
+
+/// Replace a match with `result` without dropping the scrutinee: a non-literal
+/// scrutinee may carry side effects (calls) or raise (unbound Ref), so its
+/// evaluation must be preserved.
+fn keep_scrutinee(value_expr: IR, result: IR) -> IR {
+    if value_expr.is_literal() {
+        result
+    } else {
+        IR::op(IROpCode::OpBlock, vec![value_expr, result])
     }
 }
 
@@ -283,10 +290,33 @@ mod tests {
     }
 
     #[test]
-    fn test_match_single_catchall() {
-        // match x { _ => 42 }
+    fn test_match_single_catchall_literal_scrutinee() {
+        // match 1 { _ => 42 } → 42 (literal scrutinee can be dropped)
         let cases = IR::Tuple(vec![IR::Tuple(vec![IR::PatternWildcard, IR::None, IR::Int(42)])]);
-        let ir = IR::op(IROpCode::OpMatch, vec![IR::Ref("x".into(), 0, 1), cases]);
+        let ir = IR::op(IROpCode::OpMatch, vec![IR::Int(1), cases]);
         assert_eq!(opt(ir), IR::Int(42));
+    }
+
+    #[test]
+    fn test_match_all_cases_dead_preserved() {
+        // match x { _ if False => 1 }: no case can match, the runtime raises.
+        // The match must stay so the error is not replaced by None.
+        let cases = IR::Tuple(vec![IR::Tuple(vec![IR::PatternWildcard, IR::Bool(false), IR::Int(1)])]);
+        let ir = IR::op(IROpCode::OpMatch, vec![IR::Ref("x".into(), 0, 1), cases]);
+        let result = opt(ir.clone());
+        assert_eq!(result.opcode(), Some(IROpCode::OpMatch));
+        assert_eq!(result.args().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_match_single_catchall_keeps_scrutinee() {
+        // match x { _ => 42 } → block(x, 42): evaluating x may raise or
+        // have effects (calls), so it must be preserved
+        let cases = IR::Tuple(vec![IR::Tuple(vec![IR::PatternWildcard, IR::None, IR::Int(42)])]);
+        let scrutinee = IR::Ref("x".into(), 0, 1);
+        let ir = IR::op(IROpCode::OpMatch, vec![scrutinee.clone(), cases]);
+        let result = opt(ir);
+        assert_eq!(result.opcode(), Some(IROpCode::OpBlock));
+        assert_eq!(result.args().unwrap(), &[scrutinee, IR::Int(42)]);
     }
 }

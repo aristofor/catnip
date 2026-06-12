@@ -234,67 +234,54 @@ ctx.globals._set('inspect_scope', inspect_scope)
 
 ## Créer des passes d'optimisation
 
-Créer une nouvelle passe d'optimisation en Rust :
+Les passes vivent dans `catnip_core/src/semantic/passes/` (pur Rust, sans PyO3) et opèrent directement sur l'enum `IR`.
+Elles servent tous les pipelines (CLI Python, standalone, MCP, LSP).
 
 ### 1. Créer le module
 
-Dans `catnip_rs/src/semantic/my_pass.rs` :
+Dans `catnip_core/src/semantic/passes/my_pass.rs` :
 
 ```rust
-use pyo3::prelude::*;
-use super::OptimizationPass;
+use super::PurePass;
+use crate::ir::{IR, IROpCode};
 
-pub struct MyOptimizationPass;
+pub struct MyPass;
 
-impl OptimizationPass for MyOptimizationPass {
-    fn name(&self) -> &'static str {
+impl PurePass for MyPass {
+    fn name(&self) -> &str {
         "my_pass"
     }
 
-    fn visit_ir(&self, py: Python, node: &Bound<PyAny>) -> PyResult<PyObject> {
-        // Visiter d'abord les enfants
-        let node = self.visit_children(py, node)?;
-
-        // Appliquer l'optimisation
-        let opcode = node.getattr("ident")?.extract::<i32>()?;
-
-        if opcode == OpCode::MyTargetOp as i32 {
-            // Transformer le nœud
-            return Ok(optimized_node.into_py(py));
+    fn optimize(&mut self, ir: IR) -> IR {
+        match ir {
+            IR::Op { opcode: IROpCode::MyTargetOp, args, .. } => {
+                // Transformer le nœud (récurser sur les args d'abord)
+                todo!()
+            }
+            other => other,
         }
-
-        Ok(node.into_py(py))
     }
 }
 ```
 
+Contrainte de correction : une passe ne doit réécrire que ce qu'elle peut prouver sans information de type. Dans un
+langage dynamique, la plupart des identités arithmétiques changent des valeurs observables (voir
+[OPTIMIZATIONS](OPTIMIZATIONS.md), « Identités absentes par construction »). En cas de doute, laisser le nœud intact et
+écrire le test différentiel optimisé/non optimisé.
+
 ### 2. Enregistrer la passe
 
-Dans `catnip_rs/src/semantic/mod.rs` :
+Dans `catnip_core/src/semantic/passes/mod.rs`, déclarer le module et ajouter la passe à `PureOptimizer::new()` :
 
 ```rust
-pub fn create_default_passes() -> Vec<Box<dyn OptimizationPass>> {
-    vec![
-        // ... existing passes
-        Box::new(MyOptimizationPass),
-    ]
-}
+passes: vec![
+    // ... passes existantes
+    Box::new(MyPass),
+],
 ```
 
-### Utilisation Python
-
-```python
-from catnip.semantic import Optimizer, ConstantFoldingPass
-
-# Optimiseur personnalisé avec passes spécifiques
-optimizer = Optimizer(passes=[
-    ConstantFoldingPass(),
-    # autres passes...
-])
-
-semantic = Semantic(registry, context)
-semantic.optimizer = optimizer
-```
+Le `PureOptimizer` applique les passes en séquence jusqu'au point fixe (max 10 itérations). Les tests unitaires de la
+passe vont dans le module lui-même (`#[cfg(test)]`), les tests end-to-end dans `tests/optimization/` côté Python.
 
 ## Ajouter une commande CLI
 

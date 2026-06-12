@@ -41,11 +41,11 @@ rayon = "1.10"
 gmp-mpfr-sys = { version = "1", default-features = false, features = ["use-system-libs"] }
 
 # Cranelift JIT compilation
-cranelift-codegen = { version = "0.131", features = ["incremental-cache"] }
-cranelift-frontend = "0.131"
-cranelift-jit = "0.131"
-cranelift-module = "0.131"
-cranelift-native = "0.131"
+cranelift-codegen = { version = "0.132", features = ["incremental-cache"] }
+cranelift-frontend = "0.132"
+cranelift-jit = "0.132"
+cranelift-module = "0.132"
+cranelift-native = "0.132"
 target-lexicon = "0.13"
 
 [build-dependencies]

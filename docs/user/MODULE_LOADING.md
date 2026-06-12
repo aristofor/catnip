@@ -1,4 +1,4 @@
-# Module Loading
+# Module loading
 
 Catnip peut charger des modules Catnip et Python, avec des **namespaces propres**.
 
@@ -81,7 +81,7 @@ puis tombe en fallback sur `importlib` (stdlib, pip) :
 ```mermaid
 flowchart TD
     A["import('name')"] --> B{"En cache par nom ?<br/>(importlib/stdlib)"}
-    B -->|Oui| C["Retour immédiat du namespace caché"]
+    B -->|Oui| C["Retour immédiat du namespace cached"]
     B -->|Non| D["Chercher dans caller_dir → CWD → CATNIP_PATH"]
     D --> E{"Trouvé ?"}
     E -->|Oui| F["Cache par chemin absolu,<br/>puis charger si miss"]
@@ -102,9 +102,9 @@ Les fichiers locaux et `CATNIP_PATH` sont résolus avant stdlib et `importlib`. 
 n'importe quel module, y compris stdlib. Pour forcer l'accès à un module Python masqué, utiliser `protocol="py"` :
 `import('http', protocol='py')`.
 
-> Un module stdlib Rust et son homonyme Python coexistent sans se masquer : `import('http')` (ou `protocol="rs"`)
-> donne toujours la lib Catnip, `import('http', protocol="py")` toujours le module Python. Le cache les garde dans
-> des cases séparées.
+> Un module stdlib Rust et son homonyme Python coexistent sans se masquer : `import('http')` (ou `protocol="rs"`) donne
+> toujours la lib Catnip, `import('http', protocol="py")` toujours le module Python. Le cache les garde dans des cases
+> séparées.
 
 <!-- check: no-check -->
 
@@ -116,21 +116,22 @@ utils = import('utils')   # pas dans importlib → cherche utils.cat, puis utils
 ### Modules stdlib (Rust natif)
 
 Les modules stdlib sont chargés dynamiquement depuis le package installé ou via `CATNIP_PATH`. Ils ont priorité sur la
-recherche fichier (sauf si `protocol="py"` ou `protocol="cat"` force un autre backend). Deux backends coexistent, choisis
-dans `spec.toml` :
+recherche fichier (sauf si `protocol="py"` ou `protocol="cat"` force un autre backend). Deux backends coexistent,
+choisis dans `spec.toml` :
 
 - **cdylib PyO3** (`io`, `sys`) : extensions C-Python standalone.
 - **plugin natif catnip_vm** (`http`) : `.so` chargé via `libloading`, sans backend PyO3 (`pyo3 = false`). Exposé au VM
-  PyO3 via un pont qui marshale les valeurs et préserve la distinction attribut/méthode des objets (`Response.status`
-  vs `Response.json()`). Auparavant réservé au PureVM/MCP, il est désormais chargeable depuis tous les exécuteurs.
+  PyO3 via un pont qui marshale les valeurs et préserve la distinction attribut/méthode des objets (`Response.status` vs
+  `Response.json()`). Auparavant réservé au PureVM/MCP, il est désormais chargeable depuis tous les exécuteurs.
 
-| Module | Backend     | Exports                                                                     | PROTOCOL |
-| ------ | ----------- | --------------------------------------------------------------------------- | -------- |
-| `io`   | cdylib PyO3 | `print`, `write`, `writeln`, `eprint`, `input`, `open`                      | `"rust"` |
-| `sys`  | cdylib PyO3 | `argv`, `environ`, `executable`, `version`, `platform`, `cpu_count`, `exit` | `"rust"` |
+| Module | Backend      | Exports                                                                     | PROTOCOL |
+| ------ | ------------ | --------------------------------------------------------------------------- | -------- |
+| `io`   | cdylib PyO3  | `print`, `write`, `writeln`, `eprint`, `input`, `open`                      | `"rust"` |
+| `sys`  | cdylib PyO3  | `argv`, `environ`, `executable`, `version`, `platform`, `cpu_count`, `exit` | `"rust"` |
 | `http` | plugin natif | `get`, `post`, `put`, `delete`, `request`, `Server`, `basic_auth`, `bearer` | `"rust"` |
 
 <!-- check: no-check -->
+
 ```catnip
 io = import('io')
 io.print("BORN TO SEGFAULT", "world", sep=", ")
@@ -288,7 +289,7 @@ démarrage : CATNIP_PATH, caller_dir, CWD. Le code ne peut pas la modifier à l'
 Raisons :
 
 - **Reproductibilité** - le résultat d'un `import('x')` dépend uniquement du fichier appelant et de l'environnement au
-  lancement. Pas d'un `sys.path.insert(0, ...)` trois modules plus haut dans la pile d'appels.
+  lancement. Pas d'un `sys.path.insert(0, ...)` trois modules plus haut dans la call stack.
 - **Raisonnement local** - pour savoir ce que charge `import('utils')`, il suffit de regarder le répertoire du fichier,
   le CWD et la variable d'environnement. Pas besoin de tracer quel code a muté la liste de recherche et dans quel ordre.
 - **Pas d'état global partagé** - un `sys.path` mutable est un état global implicite. Chaque module qui le modifie
@@ -522,7 +523,7 @@ etc.).
 
 ### Cache
 
-Un module chargé une fois est mis en cache. Les appels suivants retournent le même objet :
+Un module chargé une fois est cached. Les appels suivants retournent le même objet :
 
 ```catnip
 a = import('math')
@@ -539,9 +540,9 @@ b = import('math')
 
 La clé de cache dépend du type de module :
 
-- **Modules fichier** (`.cat`, `.py`, extensions natives) : cachés par **chemin absolu résolu**. Deux modules homonymes
+- **Modules fichier** (`.cat`, `.py`, extensions natives) : cached par **chemin absolu résolu**. Deux modules homonymes
   dans des répertoires différents produisent des entrées distinctes.
-- **Modules importlib/stdlib** (`math`, `sys`, packages pip) : cachés par **nom**. Le résultat est indépendant du
+- **Modules importlib/stdlib** (`math`, `sys`, packages pip) : cached par **nom**. Le résultat est indépendant du
   répertoire appelant.
 
 ## Module Policy

@@ -6,7 +6,6 @@ import types
 
 import pytest
 
-
 from catnip.extensions import ExtensionInfo, discover_extensions, load_extension, validate_extension
 
 # ---------------------------------------------------------------------------

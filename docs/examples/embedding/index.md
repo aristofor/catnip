@@ -5,7 +5,7 @@ exemple montre un cas d'usage et des patterns réutilisables.
 
 ## Vue d'ensemble
 
-Catnip est conçu comme DSL embarqué dans des applications Python, avec un moteur de scripting sécurisé. Les exemples
+Catnip est conçu comme embedded DSL dans des applications Python, avec un moteur de scripting sécurisé. Les exemples
 ci-dessous montrent des cas où Catnip permet aux utilisateurs ou admins de définir des règles, des workflows ou des
 transformations sans changer le code.
 

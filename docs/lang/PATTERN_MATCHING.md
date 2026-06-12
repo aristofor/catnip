@@ -2,8 +2,8 @@
 
 ## Pattern Matching
 
-Le pattern matching permet de faire correspondre des valeurs à des motifs de manière déclarative et sûre, en regroupant
-tous les cas au même endroit.
+Le pattern matching permet de faire correspondre des valeurs à des patterns de manière déclarative et sûre, en
+regroupant tous les cas au même endroit.
 
 > Héritage Lisp/ML : rendre la forme explicite clarifie le matching.
 
@@ -13,8 +13,8 @@ tous les cas au même endroit.
 
 ```catnip
 match valeur {
-    motif1 => { action1 }
-    motif2 => { action2 }
+    pattern1 => { action1 }
+    pattern2 => { action2 }
     _ => { action_par_defaut }
 }
 ```

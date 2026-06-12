@@ -5,14 +5,14 @@ matching, fonctions/TCO, et passes d'optimisation.
 
 ## TL;DR
 
-56 fichiers Coq dans `proof/` (~18500 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
-parsing, le broadcasting, la résolution de scopes, le pattern matching, le trampoline TCO, les 10/10 passes
-d'optimisation IR, l'analyse de liveness, la ND-récursion, le pipeline CFG/SSA (Braun et al. 2013), la dominance, le
-NaN-boxing VM, la sécurité de pile VM, les frames/IP/jumps, la linéarisation C3 (MRO), les structs/traits, le desugaring
-opérateurs (sémantique, pureté, broadcast), et le cache. Si `make proof` passe, les théorèmes sont validés
-mécaniquement. Ces preuves portent sur des modèles formels alignés avec le code Rust, pas sur l'exécution du runtime en
-production. L'alignement est maintenu explicitement dans les commentaires en tête de chaque fichier `.v`. Tree-sitter et
-Cranelift ne sont pas formellement prouvés dans ce repo.
+58 fichiers Coq dans `proof/` (~17900 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
+parsing, le broadcasting, la résolution de scopes, le pattern matching, le trampoline TCO, les 5 passes d'optimisation
+IR vivantes (réécritures prouvées + gardes sur les règles retirées), l'analyse de liveness, la ND-récursion, le pipeline
+CFG/SSA (Braun et al. 2013), la dominance, le NaN-boxing VM, la sécurité de pile VM, les frames/IP/jumps, la
+linéarisation C3 (MRO), les structs/traits, le desugaring opérateurs (sémantique, pureté, broadcast), et le cache. Si
+`make proof` passe, les théorèmes sont validés mécaniquement. Ces preuves portent sur des modèles formels alignés avec
+le code Rust, pas sur l'exécution du runtime en production. L'alignement est maintenu explicitement dans les
+commentaires en tête de chaque fichier `.v`. Tree-sitter et Cranelift ne sont pas formellement prouvés dans ce repo.
 
 > Un parseur sans preuve est un parseur qui ne sait pas encore qu'il a tort.
 
@@ -31,8 +31,9 @@ Les fichiers dans `proof/` couvrent six axes :
   trampoline TCO, tail detection), NaN-boxing VM (7 tags), VM opcodes et stack safety, frames/IP/jumps, C3 linearization
   (MRO), structs/traits (field access, method resolution, inheritance), desugaring opérateurs (injectivité, totalité,
   cohérence IR).
-- **Optimisations** - 10/10 passes IR prouvées : strength reduction, blunt code, DCE, block flattening, constant
-  folding, constant/copy propagation, CSE, DSE, tail recursion to loop.
+- **Optimisations** - les 5 passes IR vivantes prouvées (strength reduction, blunt code, DCE, block flattening, constant
+  folding) : réécritures correctes + théorèmes de garde sur les règles retirées ; invariant du TCO (équivalence
+  tail-récursion/boucle).
 - **Analyses** - liveness analysis (linéaire + CFG), dead store elimination, fixpoint, dominance CFG (idom, frontières).
 - **Infrastructure** - CFG/SSA (single assignment, phi-nodes, GVN, LICM, CSE inter-blocs, DSE globale), cache (FIFO,
   LRU+TTL, memoization, atomic writes).
@@ -86,18 +87,17 @@ Prouvent les invariants des composants d'exécution : scopes, pattern matching, 
 
 ### E. Preuves d'optimisation
 
-Prouvent la correction des 10/10 passes IR du pipeline.
+Prouvent la correction des 5 passes IR vivantes du pipeline, avec des gardes `*_untouched` sur les règles retirées.
 
-| Fichier                    | Couverture                                                                     | Théorèmes clés                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `CatnipStrengthRedProof.v` | Strength reduction (20 identités algébriques + correction sémantique)          | `sr_mul_one_r`, `sr_pow_two`, `strength_reduce_bool_sound`                         |
-| `CatnipBluntCodeProof.v`   | Blunt code (boolean algebra, inversion cmp, idempotence, complément)           | `blunt_double_neg`, `blunt_and_complement`, `simplify_blunt_bool_sound`            |
-| `CatnipDCEFlattenProof.v`  | DCE, block flattening, composition de passes, lowering IR                      | `flatten_stmts_idempotent`, `flatten_block_sound`, `compose_preserves_eval`        |
-| `CatnipOptimProof.v`       | Façade (`Require Export` des 3 fichiers ci-dessus)                             | -                                                                                  |
-| `CatnipConstFoldProof.v`   | Constant folding (arith+cmp+bool+bitwise), guards div/0 et b\<0                | `cf_add_fold`, `cf_truediv_fold`, `cf_pow_fold`, `cf_band_fold`, `cf_add_fold_sem` |
-| `CatnipStorePropProof.v`   | Store model, constant propagation, copy propagation, CSE (structural equality) | `const_prop_correct`, `copy_chain_terminates`, `cse_replace_correct`               |
-| `CatnipTailRecLoopProof.v` | Tail recursion → loop, fuel monotonie, two-phase rebinding                     | `tail_rec_loop_equiv`, `rebind_two_phase`, `fuel_monotone`                         |
-| `CatnipPurityProof.v`      | Pureté sous surcharge opérateurs : struct ops hors pure_ops, non CSE-eligible  | `overloaded_op_never_eligible`, `desugared_builtins_are_pure`, `call_not_pure`     |
+| Fichier                    | Couverture                                                                                                          | Théorèmes clés                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `CatnipStrengthRedProof.v` | Strength reduction (And/Or sur 2 littéraux Bool + gardes sur identités retirées)                                    | `sr_and_bools`, `sr_mul_one_untouched`, `strength_reduce_sound`                    |
+| `CatnipBluntCodeProof.v`   | Blunt code (inversion Eq↔Ne, And/Or Bool/Bool, complément + gardes)                                                 | `blunt_not_eq`, `blunt_and_complement`, `simplify_blunt_bool_sound`                |
+| `CatnipDCEFlattenProof.v`  | DCE, block flattening, composition de passes, lowering IR                                                           | `flatten_stmts_idempotent`, `flatten_block_sound`, `compose_preserves_eval`        |
+| `CatnipOptimProof.v`       | Façade (`Require Export` des 3 fichiers ci-dessus)                                                                  | -                                                                                  |
+| `CatnipConstFoldProof.v`   | Constant folding (arith+cmp+bool+bitwise), guards div/0 et b\<0                                                     | `cf_add_fold`, `cf_truediv_fold`, `cf_pow_fold`, `cf_band_fold`, `cf_add_fold_sem` |
+| `CatnipTailRecLoopProof.v` | Équivalence tail-récursion/boucle (invariant du TCO vivant), tail calls généralisés (mutuelle), two-phase rebinding | `tail_rec_to_loop_correct`, `tramp_eq_eval_rec`, `two_phase_uses_original_env`     |
+| `CatnipPurityProof.v`      | Pureté sous surcharge opérateurs : struct ops jamais classés purs (JIT)                                             | `overloaded_op_never_eligible`, `desugared_builtins_are_pure`, `call_not_pure`     |
 
 ### F. Preuves d'analyse et CFG
 
@@ -426,28 +426,35 @@ produit un TailCall), `non_tail_produces_normal` (en position non-tail, l'appel 
 
 ### CatnipOptimProof.v (facade)
 
-Façade qui re-exporte les 3 modules suivants. Source de vérité : `catnip_rs/src/semantic/strength_reduction.rs`,
-`blunt_code.rs`, `dead_code_elimination.rs`, `block_flattening.rs`.
+Façade qui re-exporte les 3 modules suivants. Code modélisé : les passes de `catnip_core/src/semantic/passes/`
+(`strength_reduction.rs`, `blunt_code.rs`, `dead_code_elimination.rs`, `block_flattening.rs`).
 
 Le modèle d'expressions `Expr` (Const, BConst, Var, BinOp, UnOp, IfExpr, WhileExpr, Block, MatchExpr) avec évaluateur
 partiel `eval_expr` est défini dans `CatnipExprModel.v`.
 
+**Réalignement (2026-06-11)** : les modèles `strength_reduce` et `simplify_blunt` reflètent les passes vivantes
+post-revue. Les identités retirées du code (`x * 0 → 0`, `x ** 2 → x * x`, `not not x → x`, `not (a < b) → a >= b`,
+`x == True → x`, idempotence, règles booléennes unilatérales) ne sont plus prouvées comme réécritures : elles sont
+épinglées par des théorèmes de garde `*_untouched` qui certifient que la passe **ne** réécrit **pas** ces formes. Un
+changement de comportement du modèle casse le théorème de garde correspondant.
+
 ### CatnipStrengthRedProof.v
 
-**Strength reduction** (`strength_reduce : Expr -> Expr`) : 20 théorèmes individuels couvrant les identités
-multiplicatives (`x * 1 = x`, `x * 0 = 0`), exponentielles (`x^2 -> x*x`, `x^1 = x`, `x^0 = 1`), additives (`x + 0 = x`,
-`x - 0 = x`), division (`x / 1 = x`), et booléennes (`x && True = x`, `x || False = x`, `x && False = False`,
-`x || True = True`). Correction sémantique prouvée pour les cas arithmétiques. Théorème principal :
-`strength_reduce_bool_sound` (la passe préserve `eval_bool`).
+**Strength reduction** (`strength_reduce : Expr -> Expr`) : les deux réécritures vivantes -- `And`/`Or` quand les
+**deux** opérandes sont des littéraux booléens (`sr_and_bools`, `sr_or_bools` : pliage en `BConst (andb/orb a b)`). 11
+gardes `*_untouched` épinglent l'absence des identités arithmétiques et des règles unilatérales. Théorème principal :
+`strength_reduce_sound` -- la passe préserve `eval_expr` **exactement** (plus fort que l'ancien
+`strength_reduce_bool_sound`, qui ne préservait que la truthiness : conséquence directe d'exiger deux littéraux).
 
 ### CatnipBluntCodeProof.v
 
-**Blunt code** (`simplify_blunt : Expr -> Expr`) : double négation (`not not x = x`), inversion de comparaisons
-(`not (a < b) = a >= b`) avec preuve d'involution de `invert_cmp`, simplification booléenne (`x == True = x`),
-idempotence (`x && x = x`, `x || x = x`), complément (`x && not x = False`, `x || not x = True`). Les preuves de
-complément utilisent des lemmes de taille structurelle (`expr_eqb_not_self` : x n'est jamais structurellement égal à
-`UnOp Not x`). Inclut `expr_eqb_eq` (réflexion de l'égalité structurelle). Théorème principal :
-`simplify_blunt_bool_sound`.
+**Blunt code** (`simplify_blunt : Expr -> Expr`) : inversion `not (a == b) → a != b` restreinte à Eq↔Ne
+(`invert_cmp_involution`, `invert_cmp_negates` ; `invert_cmp_order_none` épingle l'exclusion des comparaisons d'ordre,
+invalides sous NaN), `And`/`Or` sur deux littéraux booléens, complément (`x && not x = False`, `x || not x = True`,
+prouvé sur expressions pures -- le modèle n'a pas d'effets), élagage `if` à condition constante. 9 gardes `*_untouched`
+(double négation, `x == True`, idempotence, inversions d'ordre). Les preuves de complément utilisent des lemmes de
+taille structurelle (`expr_eqb_not_self`). Inclut `expr_eqb_eq` (réflexion de l'égalité structurelle). Théorème
+principal : `simplify_blunt_bool_sound`.
 
 ### CatnipDCEFlattenProof.v
 
@@ -463,9 +470,16 @@ Idempotence (`flatten_stmts_idempotent`, `flatten_block_idempotent`) prouvée vi
 `compose_preserves_eval` (la composition de passes qui préservent la sémantique préserve la sémantique),
 `compose_two_idempotent` (conditions d'idempotence pour la composition de deux passes).
 
-> Les 10 passes du pipeline IR sont toutes prouvées. Les 6 passes store-based (constant folding, constant/copy
-> propagation, CSE, DSE, tail rec to loop) ont été ajoutées dans `CatnipConstFoldProof.v`, `CatnipStorePropProof.v`,
-> `CatnipLivenessProof.v` et `CatnipTailRecLoopProof.v`.
+**Périmètre du modèle** : `Expr` n'a ni assignations ni `match` -- deux comportements vivants restent hors modèle (la
+préservation du scrutinee à l'élimination de `match`, et la non-fusion des blocs déclarant des locals).
+`CatnipStorePropProof.v` (constant/copy propagation, CSE -- passes retirées du pipeline) a été supprimé avec elles ;
+`CatnipTailRecLoopProof.v` prouve l'invariant du mécanisme TCO vivant (trampoline/TailCall) -- sa section
+`GeneralTailCalls` modélise le trampoline à cible arbitraire (un signal `Tail s'` peut changer de fonction, donc la
+récursion mutuelle est une instance) et le réduit au modèle de base par `tramp_eq_eval_rec`, transportant équivalence
+boucle, monotonie du fuel et déterminisme. La liveness de `CatnipLivenessProof.v` est le moteur du linter W312.
+
+> Chaque théorème a du code en face, et chaque règle retirée a un théorème qui vérifie son absence. Le système de preuve
+> surveille aussi ce que le compilateur s'abstient de faire.
 
 ### CatnipVMOpCode.v
 

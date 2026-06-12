@@ -61,6 +61,14 @@ impl NativeList {
             .ok_or_else(|| VMError::IndexError("pop from empty list".into()))
     }
 
+    /// Remove and return item at index (supports negative indexing).
+    /// Transfers the element's refcount to the caller, like `pop()`.
+    pub fn remove_at(&self, index: i64) -> VMResult<Value> {
+        let mut inner = self.inner.borrow_mut();
+        let idx = normalize_index(index, inner.len())?;
+        Ok(inner.remove(idx))
+    }
+
     pub fn insert(&self, index: i64, value: Value) {
         let mut inner = self.inner.borrow_mut();
         let len = inner.len();
@@ -276,6 +284,19 @@ mod tests {
         list.remove(Value::from_int(2)).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list.remove(Value::from_int(99)).is_err());
+    }
+
+    #[test]
+    fn test_list_remove_at() {
+        let list = NativeList::new(vec![Value::from_int(10), Value::from_int(20), Value::from_int(30)]);
+        assert_eq!(list.remove_at(0).unwrap(), Value::from_int(10));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.get(0).unwrap(), Value::from_int(20));
+        // negative index
+        assert_eq!(list.remove_at(-1).unwrap(), Value::from_int(30));
+        assert_eq!(list.len(), 1);
+        // out of range
+        assert!(list.remove_at(5).is_err());
     }
 
     #[test]

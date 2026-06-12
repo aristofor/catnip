@@ -76,22 +76,48 @@ fn flatten(ir: IR) -> IR {
     }
 }
 
-/// Inline OpBlock children into a flat list of statements
+/// Inline OpBlock children into a flat list of statements.
+/// Blocks that declare locals own a scope: inlining them would leak the
+/// bindings into the parent block, so they are kept as-is.
 fn inline_blocks(items: Vec<IR>) -> Vec<IR> {
     let mut flattened = Vec::with_capacity(items.len());
     for item in items {
-        if let IR::Op {
-            opcode: IROpCode::OpBlock,
-            args: inner_args,
-            ..
-        } = item
-        {
-            flattened.extend(inner_args);
-        } else {
-            flattened.push(item);
+        match item {
+            IR::Op {
+                opcode: IROpCode::OpBlock,
+                args: inner_args,
+                ..
+            } if !inner_args.iter().any(declares_locals) => {
+                flattened.extend(inner_args);
+            }
+            other => flattened.push(other),
         }
     }
     flattened
+}
+
+/// True if the IR contains a SetLocals binding in the current scope
+/// (lambda/function bodies open their own scope and are not traversed).
+fn declares_locals(ir: &IR) -> bool {
+    match ir {
+        IR::Op {
+            opcode: IROpCode::SetLocals,
+            ..
+        } => true,
+        IR::Op {
+            opcode: IROpCode::OpLambda,
+            ..
+        }
+        | IR::Op {
+            opcode: IROpCode::FnDef,
+            ..
+        } => false,
+        IR::Op { args, kwargs, .. } => {
+            args.iter().any(declares_locals) || kwargs.iter().any(|(_, v)| declares_locals(v))
+        }
+        IR::Program(items) | IR::List(items) | IR::Tuple(items) => items.iter().any(declares_locals),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +160,19 @@ mod tests {
         } else {
             panic!("Expected Program");
         }
+    }
+
+    #[test]
+    fn test_no_flatten_block_with_locals() {
+        // { { y = 42 } ... }: the inner block scopes y, inlining would leak it
+        let set_y = IR::op(
+            IROpCode::SetLocals,
+            vec![IR::Tuple(vec![IR::Ref("y".into(), 0, 1)]), IR::Int(42), IR::Bool(false)],
+        );
+        let inner = IR::op(IROpCode::OpBlock, vec![set_y]);
+        let outer = IR::op(IROpCode::OpBlock, vec![inner.clone(), IR::Int(3)]);
+        let result = opt(outer);
+        assert_eq!(result.args().unwrap(), &[inner, IR::Int(3)]);
     }
 
     #[test]

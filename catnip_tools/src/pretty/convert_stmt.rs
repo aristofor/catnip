@@ -250,14 +250,21 @@ fn convert_pattern_inner(arena: &mut Arena, node: Node, source: &[u8], indent: i
         }
         "pattern_struct" => {
             let name = node.child_by_field_name("struct_name").unwrap();
-            let name_doc = arena.text(node_text(name, source));
-            // Collect field identifiers
+            // Optional `.Variant` qualifier: keep it as part of the type name.
+            let name_doc = if let Some(variant) = node.child_by_field_name("variant_name") {
+                let base = arena.text(node_text(name, source));
+                let dot = arena.text(".");
+                let variant_doc = arena.text(node_text(variant, source));
+                arena.concat_many(&[base, dot, variant_doc])
+            } else {
+                arena.text(node_text(name, source))
+            };
+            // Collect field identifiers (the `fields`-tagged children only, so the
+            // variant name is not mistaken for a destructured field).
             let mut fields = Vec::new();
             let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "identifier" && child.id() != name.id() {
-                    fields.push(arena.text(node_text(child, source)));
-                }
+            for child in node.children_by_field_name("fields", &mut cursor) {
+                fields.push(arena.text(node_text(child, source)));
             }
             let sep = arena.text(", ");
             let fields_doc = arena.intersperse(&fields, sep);

@@ -15,7 +15,7 @@ Une comprehension combine trois opérations : itération, transformation, filtra
 [x * 2 for x in data if x > 5]      # filter + map
 ```
 
-Catnip n'a pas de comprehensions. Le broadcasting et la ND-recursion couvrent ces cas avec moins de surface syntaxique
+Catnip n'a pas de comprehensions. Le broadcasting et la ND-récursion couvrent ces cas avec moins de surface syntaxique
 et des propriétés supplémentaires (parallélisme, descente dans les structures imbriquées).
 
 ______________________________________________________________________
@@ -133,7 +133,7 @@ range(20).[~~ (n, recur) => {
 }]
 ```
 
-La ND-recursion (`~~`) passe de séquentiel à parallèle en changeant un pragma. Aucune comprehension ne permet ça.
+La ND-récursion (`~~`) passe de séquentiel à parallèle en changeant un pragma. Aucune comprehension ne permet ça.
 
 ______________________________________________________________________
 

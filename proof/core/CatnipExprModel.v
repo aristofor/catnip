@@ -5,7 +5,6 @@
  * and lowering to IRPure. Used by:
  *   CatnipOptimProof.v      (strength reduction, blunt code, DCE, flattening)
  *   CatnipConstFoldProof.v  (constant folding)
- *   CatnipStorePropProof.v  (store model, const/copy propagation, CSE)
  *
  * Depends on: CatnipIR.v (IROpCode, IRPure, ir_op, ir_binop)
  *)

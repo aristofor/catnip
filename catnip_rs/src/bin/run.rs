@@ -216,6 +216,35 @@ fn extract_script_args(raw_args: &[String]) -> (Vec<String>, Vec<String>) {
     (clap_args, script_args)
 }
 
+/// Mark this process as a catnip application: catnip/__init__.py configures
+/// logging when it sees the marker (the package loads lazily, e.g. via the
+/// module loader). A sys attribute is process-local — unlike an env var it
+/// does not leak into child processes importing catnip as a library.
+fn mark_embedded() {
+    Python::attach(|py| {
+        if let Ok(sys) = py.import("sys") {
+            let _ = sys.setattr("_catnip_embedded", true);
+        }
+    });
+}
+
+/// Finalize the embedded interpreter, then exit.
+///
+/// `Py_FinalizeEx` runs atexit hooks, joins non-daemon threads, flushes
+/// std streams and triggers the final GC. A bare `process::exit` skips all
+/// of it: leaked multiprocessing semaphores, threads killed mid-flight,
+/// and C extensions (duckdb) crashing in libc's static destructors while
+/// their background threads still run.
+fn shutdown(code: i32) -> ! {
+    unsafe {
+        if pyo3::ffi::Py_IsInitialized() != 0 {
+            pyo3::ffi::PyGILState_Ensure();
+            pyo3::ffi::Py_FinalizeEx();
+        }
+    }
+    process::exit(code);
+}
+
 /// Delegate the full invocation to the Python CLI (catnip.cli:main).
 /// Sets sys.argv and calls Click's main(), never returns.
 fn delegate_to_python_cli(args: Vec<String>) -> ! {
@@ -249,16 +278,8 @@ fn delegate_to_python_cli(args: Vec<String>) -> ! {
             }
         }
     });
-    // Flush Python stdout/stderr before exiting (may be buffered in embedded mode)
-    Python::attach(|py| {
-        let _ = py
-            .import("sys")
-            .and_then(|sys| sys.getattr("stdout")?.call_method0("flush"));
-        let _ = py
-            .import("sys")
-            .and_then(|sys| sys.getattr("stderr")?.call_method0("flush"));
-    });
-    process::exit(code);
+    // shutdown() finalizes the interpreter, which also flushes stdout/stderr
+    shutdown(code);
 }
 
 fn main() {
@@ -282,7 +303,7 @@ fn main() {
     match cli.command_type {
         Some(Commands::Info) => {
             print_runtime_info();
-            return;
+            shutdown(0);
         }
         Some(Commands::Bench { args }) => {
             let (iterations, file) = match args.as_slice() {
@@ -290,18 +311,18 @@ fn main() {
                 [n, f] => {
                     let iters = n.parse::<usize>().unwrap_or_else(|_| {
                         eprintln!("error: invalid iteration count '{}'", n);
-                        std::process::exit(1);
+                        shutdown(1);
                     });
                     (iters, PathBuf::from(f))
                 }
                 _ => unreachable!(),
             };
             run_benchmark(&file, iterations, !cli.no_jit, cli.jit_threshold);
-            return;
+            shutdown(0);
         }
         Some(Commands::Worker) => {
             run_worker();
-            return;
+            shutdown(0);
         }
         None => {}
     }
@@ -316,7 +337,7 @@ fn main() {
         Ok(src) => src,
         Err(e) => {
             eprintln!("Error reading input: {}", e);
-            process::exit(1);
+            shutdown(1);
         }
     };
 
@@ -355,13 +376,13 @@ fn main() {
             if cli.verbose {
                 stats.print_verbose();
             }
-            process::exit(0);
+            shutdown(0);
         }
         Err(e) => {
-            // exit(N) -> process::exit(N)
+            // exit(N) -> shutdown(N)
             if let Some(code_str) = e.strip_prefix("exit(").and_then(|s| s.strip_suffix(')')) {
                 let code = code_str.parse::<i32>().unwrap_or(1);
-                process::exit(code);
+                shutdown(code);
             }
             // Log internal errors to disk for diagnostics
             if e.contains("WeirdError:") {
@@ -372,7 +393,7 @@ fn main() {
             if cli.verbose {
                 stats.print_verbose();
             }
-            process::exit(1);
+            shutdown(1);
         }
     }
 }
@@ -454,6 +475,7 @@ fn execute(
     argv: Option<Vec<String>>,
     policy_profile: Option<&str>,
 ) -> Result<Option<String>, String> {
+    mark_embedded();
     let mut pipeline = Pipeline::new()?;
     pipeline.set_jit_enabled(enable_jit);
     pipeline.set_jit_threshold(jit_threshold);
@@ -505,6 +527,8 @@ fn execute(
 /// ND worker process: reads WorkerCommands from stdin, executes, writes WorkerResults to stdout.
 fn run_worker() {
     use std::io::{self, BufReader, BufWriter};
+
+    mark_embedded();
 
     let mut stdin = BufReader::new(io::stdin().lock());
     let mut stdout = BufWriter::new(io::stdout().lock());
@@ -634,7 +658,7 @@ fn run_benchmark(file: &PathBuf, iterations: usize, enable_jit: bool, jit_thresh
         Ok(src) => src,
         Err(e) => {
             eprintln!("Error loading file: {}", e);
-            process::exit(1);
+            shutdown(1);
         }
     };
 
@@ -648,7 +672,7 @@ fn run_benchmark(file: &PathBuf, iterations: usize, enable_jit: bool, jit_thresh
     };
     if let Err(e) = execute(&source, &mut warmup_stats, enable_jit, jit_threshold, false, None, None) {
         eprintln!("Warmup failed: {}", e);
-        process::exit(1);
+        shutdown(1);
     }
 
     // Benchmark runs
@@ -665,7 +689,7 @@ fn run_benchmark(file: &PathBuf, iterations: usize, enable_jit: bool, jit_thresh
             }
             Err(e) => {
                 eprintln!("Iteration {} failed: {}", i + 1, e);
-                process::exit(1);
+                shutdown(1);
             }
         }
     }

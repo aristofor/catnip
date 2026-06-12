@@ -31,6 +31,10 @@ pub struct PureInliner<'a> {
     config: InliningConfig,
     registry: &'a PureFunctionRegistry,
     depth: usize,
+    /// Next free scratch slot for inlined callee locals (monotonic across the pass).
+    next_slot: usize,
+    /// Scratch slots allocated for inlined locals, to register in locals_used.
+    inlined_slots: Vec<usize>,
 }
 
 impl<'a> PureInliner<'a> {
@@ -40,6 +44,8 @@ impl<'a> PureInliner<'a> {
             config,
             registry,
             depth: 0,
+            next_slot: 0,
+            inlined_slots: Vec::new(),
         }
     }
 
@@ -55,6 +61,19 @@ impl<'a> PureInliner<'a> {
             .iter()
             .map(|(name, _value, slot)| (name.clone(), *slot))
             .collect();
+
+        // Inlined callee locals get fresh scratch slots above every slot the
+        // host frame can hold: num_locals (frame.locals.len()) and any slot the
+        // trace already references. Without this, arg-binding StoreLocal(0)
+        // clobbers the host's slot 0, and callee temps alias host locals.
+        self.next_slot = trace.num_locals;
+        for &s in &trace.locals_used {
+            self.next_slot = self.next_slot.max(s + 1);
+        }
+        for &s in scope_slots.values() {
+            self.next_slot = self.next_slot.max(s + 1);
+        }
+        self.inlined_slots.clear();
 
         for op in &trace.ops {
             match op {
@@ -76,7 +95,27 @@ impl<'a> PureInliner<'a> {
         }
 
         trace.ops = new_ops;
+
+        // Register the scratch slots so codegen and the locals-array sizing
+        // (loop_max_slot / function max_slot) account for them.
+        for slot in self.inlined_slots.drain(..) {
+            if !trace.locals_used.contains(&slot) {
+                trace.locals_used.push(slot);
+            }
+        }
+
         Ok(())
+    }
+
+    /// Number of local slots a callee body addresses (params + temporaries).
+    fn callee_local_count(info: &JitFunctionInfo) -> usize {
+        let mut max_local = None;
+        for instr in &info.instructions {
+            if matches!(instr.op, VMOpCode::LoadLocal | VMOpCode::StoreLocal) {
+                max_local = Some(max_local.map_or(instr.arg as usize, |m: usize| m.max(instr.arg as usize)));
+            }
+        }
+        max_local.map_or(0, |m| m + 1).max(info.nargs)
     }
 
     /// Try to expand a builtin function call to native TraceOps.
@@ -121,14 +160,21 @@ impl<'a> PureInliner<'a> {
             .get_inlineable(func_id, self.config.max_inline_ops)
             .ok_or_else(|| format!("Function {} not in registry", func_id))?;
 
-        // Convert bytecode to TraceOps
-        let body_ops = self.bytecode_to_trace_ops(info, scope_slots)?;
+        // Allocate a disjoint block of scratch slots for this callee's locals.
+        let local_count = Self::callee_local_count(info);
+        let local_offset = self.next_slot;
+        self.next_slot += local_count;
+        for slot in local_offset..local_offset + local_count {
+            self.inlined_slots.push(slot);
+        }
 
-        // Bind arguments: pop args from stack to local slots
+        // Convert bytecode to TraceOps (callee locals shifted by local_offset)
+        let body_ops = self.bytecode_to_trace_ops(info, scope_slots, local_offset)?;
+
+        // Bind arguments: pop args from stack to the callee's (remapped) slots.
         // Stack: [..., arg0, arg1, ..., argN]
-        // → Store each arg in corresponding local slot
         for i in 0..num_args {
-            new_ops.push(TraceOp::StoreLocal(i));
+            new_ops.push(TraceOp::StoreLocal(local_offset + i));
         }
 
         // Inline body (recursively if needed)
@@ -160,6 +206,7 @@ impl<'a> PureInliner<'a> {
         &self,
         info: &JitFunctionInfo,
         scope_slots: &HashMap<String, usize>,
+        local_offset: usize,
     ) -> Result<Vec<TraceOp>, String> {
         let mut ops = Vec::new();
 
@@ -175,8 +222,11 @@ impl<'a> PureInliner<'a> {
                         JitConstant::Float(f) => TraceOp::LoadConstFloat(*f),
                     }
                 }
-                VMOpCode::LoadLocal => TraceOp::LoadLocal(instr.arg as usize),
-                VMOpCode::StoreLocal => TraceOp::StoreLocal(instr.arg as usize),
+                // Callee locals live in the callee's own slot namespace; shift
+                // them into the scratch block. Scope vars (below) resolve to
+                // host slots and must NOT be shifted.
+                VMOpCode::LoadLocal => TraceOp::LoadLocal(instr.arg as usize + local_offset),
+                VMOpCode::StoreLocal => TraceOp::StoreLocal(instr.arg as usize + local_offset),
                 VMOpCode::LoadScope => {
                     let name = info
                         .names
@@ -359,7 +409,7 @@ mod tests {
         };
 
         let empty_scope = HashMap::new();
-        let ops = inliner.bytecode_to_trace_ops(&info, &empty_scope).unwrap();
+        let ops = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0).unwrap();
 
         assert_eq!(ops.len(), 3);
         assert!(matches!(ops[0], TraceOp::LoadLocal(0)));
@@ -382,7 +432,7 @@ mod tests {
         };
 
         let empty_scope = HashMap::new();
-        let result = inliner.bytecode_to_trace_ops(&info, &empty_scope);
+        let result = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0);
         assert!(result.is_err());
     }
 
@@ -409,11 +459,11 @@ mod tests {
         let mut scope_slots = HashMap::new();
         scope_slots.insert("outer".to_string(), 5);
 
-        let ops = inliner.bytecode_to_trace_ops(&info, &scope_slots).unwrap();
+        let ops = inliner.bytecode_to_trace_ops(&info, &scope_slots, 0).unwrap();
 
         assert_eq!(ops.len(), 4);
         assert!(matches!(ops[0], TraceOp::LoadLocal(0)));
-        assert!(matches!(ops[1], TraceOp::LoadLocal(5))); // outer → slot 5
+        assert!(matches!(ops[1], TraceOp::LoadLocal(5))); // outer → slot 5 (host slot, unshifted)
         assert!(matches!(ops[2], TraceOp::AddInt));
         assert!(matches!(ops[3], TraceOp::Exit));
     }
@@ -433,7 +483,7 @@ mod tests {
         };
 
         let empty_scope = HashMap::new();
-        let result = inliner.bytecode_to_trace_ops(&info, &empty_scope);
+        let result = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown_var"));
     }
@@ -474,14 +524,18 @@ mod tests {
 
         inliner.optimize(&mut trace).unwrap();
 
-        // Expected: LoadConstInt(42), StoreLocal(0), LoadLocal(0), LoadLocal(3), AddInt, Exit
+        // outer is guarded at slot 3, so callee locals are remapped above it
+        // (scratch base = 4). The scope slot 3 itself stays unshifted.
+        // Expected: LoadConstInt(42), StoreLocal(4), LoadLocal(4), LoadLocal(3), AddInt, Exit
         assert_eq!(trace.ops.len(), 6);
         assert!(matches!(trace.ops[0], TraceOp::LoadConstInt(42)));
-        assert!(matches!(trace.ops[1], TraceOp::StoreLocal(0)));
-        assert!(matches!(trace.ops[2], TraceOp::LoadLocal(0)));
-        assert!(matches!(trace.ops[3], TraceOp::LoadLocal(3))); // outer → slot 3
+        assert!(matches!(trace.ops[1], TraceOp::StoreLocal(4)));
+        assert!(matches!(trace.ops[2], TraceOp::LoadLocal(4)));
+        assert!(matches!(trace.ops[3], TraceOp::LoadLocal(3))); // outer → slot 3 (unshifted)
         assert!(matches!(trace.ops[4], TraceOp::AddInt));
         assert!(matches!(trace.ops[5], TraceOp::Exit));
+        // Scratch slot registered for sizing
+        assert!(trace.locals_used.contains(&4));
     }
 
     #[test]

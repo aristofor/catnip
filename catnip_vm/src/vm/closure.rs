@@ -69,6 +69,12 @@ impl PureClosureScope {
         }
     }
 
+    /// Bind a name directly in this scope's captured set, regardless of the
+    /// parent chain (let-rec self-reference binding by MakeFunction).
+    pub fn insert_captured(&self, name: &str, value: Value) {
+        self.inner.captured.borrow_mut().insert(name.to_string(), value);
+    }
+
     /// Set a variable in the nearest scope that contains it.
     pub fn set(&self, name: &str, value: Value) -> bool {
         let mut captured = self.inner.captured.borrow_mut();

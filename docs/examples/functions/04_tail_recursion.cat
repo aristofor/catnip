@@ -93,6 +93,25 @@ print("Fib non terminale(10) :", fib_non_tail(10))  # Lente, temps exponentiel
 print("Fib terminale(10) :", fib_tail(10))          # Rapide, temps linéaire
 print("Fib terminale(100) :", fib_tail(100))        # Fonctionne pour de grandes valeurs de N
 
+# Récursion mutuelle (proper tail calls)
+# --------------------------------------
+# L'optimisation couvre tout appel par nom en position terminale, pas
+# seulement l'auto-récursion : un cycle f -> g -> f tourne en pile constante.
+
+is_even = (n) => {
+    if n == 0 { True }
+    else { is_odd(n - 1) }  # Appel terminal vers l'AUTRE fonction
+}
+
+is_odd = (n) => {
+    if n == 0 { False }
+    else { is_even(n - 1) }
+}
+
+print("\n--- Récursion mutuelle ---")
+print("is_even(100000) =", is_even(100000))  # True, sans débordement de pile
+print("is_odd(99999) =", is_odd(99999))      # True
+
 # Comment ça marche
 # ------------
 # Catnip transforme automatiquement les fonctions terminales récursives en boucles `while` :

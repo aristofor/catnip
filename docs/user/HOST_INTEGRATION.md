@@ -1,11 +1,11 @@
-# Intégration hôte
+# Host integration
 
-Ce guide montre comment intégrer Catnip dans une application Python et exposer proprement des services de l'hôte (cache,
+Ce guide montre comment intégrer Catnip dans une application Python et exposer proprement des services du host (cache,
 logging, exceptions, etc.) aux scripts Catnip.
 
 ## Philosophie
 
-Catnip est conçu comme **DSL embarqué** dans des applications Python. L'hôte peut exposer ses services (Redis, logging,
+Catnip est conçu comme **embedded DSL** dans des applications Python. Le host peut exposer ses services (Redis, logging,
 etc.) via le `Context` pour que les scripts Catnip les utilisent de manière contrôlée.
 
 > Expose l'utile, garde le sas fermé.
@@ -14,7 +14,7 @@ etc.) via le `Context` pour que les scripts Catnip les utilisent de manière con
 
 ### Interface de Cache
 
-Le système de cache de Catnip est **pluggable** : l'hôte peut fournir son propre backend (Redis, diskcache, memcached,
+Le système de cache de Catnip est **pluggable** : le host peut fournir son propre backend (Redis, diskcache, memcached,
 etc.).
 
 #### Protocole de Cache
@@ -126,7 +126,7 @@ catnip = Catnip(cache=CatnipCache(backend=backend))
 
 ### Signature de Cache
 
-Catnip gère les clés de cache automatiquement (xxHash64 sur le source + options). L'hôte n'a pas besoin de calculer ou
+Catnip gère les clés de cache automatiquement (xxHash64 sur le source + options). Le host n'a pas besoin de calculer ou
 manipuler les signatures.
 
 ### Cache avec TTL personnalisé
@@ -172,7 +172,7 @@ catnip = Catnip(cache=CatnipCache(backend=backend))
 
 ### Interface de Logging
 
-L'hôte peut fournir un logger personnalisé pour intercepter les logs de Catnip :
+Le host peut fournir un logger personnalisé pour intercepter les logs de Catnip :
 
 ```python
 import logging
@@ -275,11 +275,11 @@ except CatnipError as e:
 Hiérarchie : `CatnipError` > `CatnipSyntaxError`, `CatnipSemanticError`, `CatnipRuntimeError`, `CatnipNameError`,
 `CatnipTypeError`, `CatnipPatternError`, `CatnipArityError`.
 
-## Exposition de Services Hôte
+## Exposition de services host
 
 ### Injection via Context.globals
 
-L'hôte peut injecter ses services dans les globals du contexte :
+Le host peut injecter ses services dans les globals du contexte :
 
 ```python
 from catnip import Catnip
@@ -328,7 +328,7 @@ backend = RedisCache(redis_client, prefix="myapp:")
 
 catnip = Catnip(cache=CatnipCache(backend=backend))
 
-catnip.parse("x = 2 + 2")   # compilé et mis en cache
+catnip.parse("x = 2 + 2")   # compilé et cached
 catnip.execute()
 
 catnip.parse("x = 2 + 2")   # récupéré depuis le cache

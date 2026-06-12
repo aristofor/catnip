@@ -236,7 +236,7 @@ skip-string-normalization = true
 target-version = ["py313"]
 
 [tool.cibuildwheel]
-build = "cp314-*"
+build = "cp313-* cp314-*"
 skip = "*-musllinux_* *-manylinux_aarch64 *-manylinux_i686"
 build-verbosity = 0
 before-all = [

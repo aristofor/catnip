@@ -25,10 +25,14 @@ enum InferredType {
 pub struct SemanticAnalyzer {
     /// Valid opcodes (static table)
     valid_opcodes: Vec<IROpCode>,
-    /// Pure optimization passes
-    optimizer: Option<PureOptimizer>,
-    /// Tail-call optimization enabled
+    /// Optimization passes enabled (host baseline; file pragmas can flip it)
+    optimize_enabled: bool,
+    /// Tail-call optimization enabled (host baseline; file pragmas can flip it)
     tco_enabled: bool,
+    /// Host override for optimization (CLI/env). Wins over file pragmas.
+    optimize_override: Option<bool>,
+    /// Host override for TCO (CLI/env). Wins over file pragmas.
+    tco_override: Option<bool>,
     /// Known enum definitions: name -> variant names
     enum_defs: HashMap<String, HashSet<String>>,
     /// Known union (ADT) definitions: name -> { variant_name -> has_payload }.
@@ -43,12 +47,14 @@ pub struct SemanticAnalyzer {
 }
 
 impl SemanticAnalyzer {
-    /// Create a new analyzer (no optimization passes)
+    /// Create a new analyzer (no optimization passes by default)
     pub fn new() -> Self {
         Self {
             valid_opcodes: Self::all_opcodes(),
-            optimizer: None,
+            optimize_enabled: false,
             tco_enabled: true,
+            optimize_override: None,
+            tco_override: None,
             enum_defs: HashMap::new(),
             union_defs: HashMap::new(),
             var_types: HashMap::new(),
@@ -56,22 +62,27 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Create a new analyzer with optimization passes enabled
+    /// Create a new analyzer with optimization passes enabled by default
     pub fn with_optimizer() -> Self {
         Self {
-            valid_opcodes: Self::all_opcodes(),
-            optimizer: Some(PureOptimizer::new()),
-            tco_enabled: true,
-            enum_defs: HashMap::new(),
-            union_defs: HashMap::new(),
-            var_types: HashMap::new(),
-            diagnostics: Vec::new(),
+            optimize_enabled: true,
+            ..Self::new()
         }
     }
 
-    /// Enable or disable tail-call optimization marking.
+    /// Enable or disable tail-call optimization marking (baseline).
     pub fn set_tco_enabled(&mut self, enabled: bool) {
         self.tco_enabled = enabled;
+    }
+
+    /// Force TCO on/off regardless of file pragmas (CLI/env override).
+    pub fn set_tco_override(&mut self, forced: Option<bool>) {
+        self.tco_override = forced;
+    }
+
+    /// Force optimization on/off regardless of file pragmas (CLI/env override).
+    pub fn set_optimize_override(&mut self, forced: Option<bool>) {
+        self.optimize_override = forced;
     }
 
     /// Analyze, transform, optimize and validate the IR
@@ -87,13 +98,21 @@ impl SemanticAnalyzer {
         self.diagnostics.clear();
 
         let transformed = self.transform(ir);
-        let tail_marked = if self.tco_enabled {
+        // Precedence: host override (CLI/env) > file pragma > host baseline
+        let (file_tco, file_optimize) = Self::scan_file_pragmas(&transformed);
+        let tco = self.tco_override.or(file_tco).unwrap_or(self.tco_enabled);
+        let optimize = self
+            .optimize_override
+            .or(file_optimize)
+            .unwrap_or(self.optimize_enabled);
+
+        let tail_marked = if tco {
             Self::mark_tail_calls(&transformed)
         } else {
             transformed
         };
-        let optimized = if let Some(ref mut optimizer) = self.optimizer {
-            optimizer.optimize(tail_marked)
+        let optimized = if optimize {
+            PureOptimizer::new().optimize(tail_marked)
         } else {
             tail_marked
         };
@@ -235,127 +254,24 @@ impl SemanticAnalyzer {
     // Tail-call marking
     // -----------------------------------------------------------------------
 
-    /// Mark tail calls in named lambdas for TCO.
+    /// Mark tail calls for TCO (proper tail calls).
     ///
-    /// Traverses the IR looking for `SetLocals([name], OpLambda(...))` patterns.
-    /// Inside each lambda body, calls to `name` in tail position get `tail: true`.
+    /// Inside every lambda body, any call whose target is a plain name
+    /// (Ref/Identifier) in tail position gets `tail: true`: self-recursion,
+    /// mutual recursion and terminal calls alike. All three runtimes execute
+    /// a marked call in O(1) stack: frame reuse in the VMs, trampoline with
+    /// scope swap in the AST interpreter (non-Catnip targets are called
+    /// directly).
     fn mark_tail_calls(ir: &IR) -> IR {
+        Self::mark_tails(ir, false)
+    }
+
+    /// Single traversal. `in_tail` is true when `ir` sits in tail position
+    /// of the enclosing lambda body. `in_tail` only becomes true at lambda
+    /// bodies, so `tail: true` never escapes to top level (a TailCall
+    /// leaking outside a trampoline would surface as a value).
+    fn mark_tails(ir: &IR, in_tail: bool) -> IR {
         match ir {
-            IR::Program(items) => IR::Program(items.iter().map(Self::mark_tail_calls).collect()),
-
-            IR::Op {
-                opcode,
-                args,
-                kwargs,
-                tail,
-                start_byte,
-                end_byte,
-            } if *opcode == IROpCode::SetLocals => {
-                // SetLocals([names...], value, is_const)
-                // Detect: single name + OpLambda value
-                if args.len() >= 2 {
-                    let func_name = Self::extract_single_name(&args[0]);
-                    let is_lambda = matches!(&args[1], IR::Op { opcode, .. } if *opcode == IROpCode::OpLambda);
-
-                    if let (Some(name), true) = (func_name, is_lambda) {
-                        let marked_value = Self::mark_tail_in_lambda(&args[1], &name);
-                        let mut new_args = vec![args[0].clone(), marked_value];
-                        new_args.extend(args[2..].iter().cloned());
-                        return IR::Op {
-                            opcode: *opcode,
-                            args: new_args,
-                            kwargs: kwargs.clone(),
-                            tail: *tail,
-                            start_byte: *start_byte,
-                            end_byte: *end_byte,
-                        };
-                    }
-                }
-                // Not a named lambda - recurse normally
-                IR::Op {
-                    opcode: *opcode,
-                    args: args.iter().map(Self::mark_tail_calls).collect(),
-                    kwargs: kwargs
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Self::mark_tail_calls(v)))
-                        .collect(),
-                    tail: *tail,
-                    start_byte: *start_byte,
-                    end_byte: *end_byte,
-                }
-            }
-
-            // Recurse into other Op nodes
-            IR::Op {
-                opcode,
-                args,
-                kwargs,
-                tail,
-                start_byte,
-                end_byte,
-            } => IR::Op {
-                opcode: *opcode,
-                args: args.iter().map(Self::mark_tail_calls).collect(),
-                kwargs: kwargs
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Self::mark_tail_calls(v)))
-                    .collect(),
-                tail: *tail,
-                start_byte: *start_byte,
-                end_byte: *end_byte,
-            },
-
-            // Don't recurse into Call children at this level (handled inside lambdas)
-            _ => ir.clone(),
-        }
-    }
-
-    /// Extract a single variable name from a SetLocals names argument.
-    /// Returns None if not a single-name assignment.
-    fn extract_single_name(names_ir: &IR) -> Option<String> {
-        match names_ir {
-            IR::List(items) | IR::Tuple(items) if items.len() == 1 => match &items[0] {
-                IR::Ref(name, _, _) | IR::Identifier(name) => Some(name.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Mark tail calls inside a lambda body.
-    fn mark_tail_in_lambda(lambda: &IR, func_name: &str) -> IR {
-        if let IR::Op {
-            opcode,
-            args,
-            kwargs,
-            tail,
-            start_byte,
-            end_byte,
-        } = lambda
-        {
-            if *opcode == IROpCode::OpLambda && args.len() >= 2 {
-                let params = args[0].clone();
-                let body = Self::mark_tail_in_body(&args[1], func_name);
-                let mut new_args = vec![params, body];
-                new_args.extend(args[2..].iter().cloned());
-                return IR::Op {
-                    opcode: *opcode,
-                    args: new_args,
-                    kwargs: kwargs.clone(),
-                    tail: *tail,
-                    start_byte: *start_byte,
-                    end_byte: *end_byte,
-                };
-            }
-        }
-        lambda.clone()
-    }
-
-    /// Mark tail calls in a body expression (recursive).
-    /// `in_tail` is true when the expression is in tail position.
-    fn mark_tail_in_body(ir: &IR, func_name: &str) -> IR {
-        match ir {
-            // Call: mark as tail if it's a direct call to func_name
             IR::Call {
                 func,
                 args,
@@ -364,21 +280,20 @@ impl SemanticAnalyzer {
                 end_byte,
                 ..
             } => {
-                let is_self_call = match func.as_ref() {
-                    IR::Ref(n, _, _) | IR::Identifier(n) => n == func_name,
-                    _ => false,
-                };
+                let nominal = matches!(func.as_ref(), IR::Ref(..) | IR::Identifier(_));
                 IR::Call {
-                    func: func.clone(),
-                    args: args.clone(), // don't recurse into call args
-                    kwargs: kwargs.clone(),
+                    func: Box::new(Self::mark_tails(func, false)),
+                    args: args.iter().map(|a| Self::mark_tails(a, false)).collect(),
+                    kwargs: kwargs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Self::mark_tails(v, false)))
+                        .collect(),
                     start_byte: *start_byte,
                     end_byte: *end_byte,
-                    tail: is_self_call,
+                    tail: in_tail && nominal,
                 }
             }
 
-            // Block: only the last statement is in tail position
             IR::Op {
                 opcode,
                 args,
@@ -386,59 +301,41 @@ impl SemanticAnalyzer {
                 tail,
                 start_byte,
                 end_byte,
-            } if *opcode == IROpCode::OpBlock => {
-                let new_args: Vec<IR> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| {
-                        if i == args.len() - 1 {
-                            Self::mark_tail_in_body(a, func_name)
-                        } else {
-                            a.clone()
-                        }
-                    })
-                    .collect();
-                IR::Op {
-                    opcode: *opcode,
-                    args: new_args,
-                    kwargs: kwargs.clone(),
-                    tail: *tail,
-                    start_byte: *start_byte,
-                    end_byte: *end_byte,
-                }
-            }
+            } => {
+                let new_args: Vec<IR> = match opcode {
+                    // Lambda body: the only place where tail positions begin.
+                    // args: [params, body, ...] -- parameter defaults are not tail.
+                    IROpCode::OpLambda | IROpCode::FnDef if args.len() >= 2 => args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| Self::mark_tails(a, i == 1))
+                        .collect(),
 
-            // If: both branches are in tail position
-            IR::Op {
-                opcode,
-                args,
-                kwargs,
-                tail,
-                start_byte,
-                end_byte,
-            } if *opcode == IROpCode::OpIf => {
-                // OpIf args: [branches_list, else_block]
-                let new_args: Vec<IR> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| {
-                        match (i, a) {
-                            // First arg: list of (condition, block) tuples
+                    // Block: only the last statement inherits tail position
+                    IROpCode::OpBlock => {
+                        let last = args.len().saturating_sub(1);
+                        args.iter()
+                            .enumerate()
+                            .map(|(i, a)| Self::mark_tails(a, in_tail && i == last))
+                            .collect()
+                    }
+
+                    // If: args = [branches, else_block] where branches is a
+                    // list of (condition, block) pairs. Blocks inherit tail
+                    // position, conditions do not.
+                    IROpCode::OpIf => args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| match (i, a) {
                             (0, IR::List(branches)) | (0, IR::Tuple(branches)) => {
                                 let marked: Vec<IR> = branches
                                     .iter()
-                                    .map(|branch| {
-                                        if let IR::Tuple(pair) = branch {
-                                            if pair.len() == 2 {
-                                                let cond = pair[0].clone();
-                                                let block = Self::mark_tail_in_body(&pair[1], func_name);
-                                                IR::Tuple(vec![cond, block])
-                                            } else {
-                                                branch.clone()
-                                            }
-                                        } else {
-                                            branch.clone()
-                                        }
+                                    .map(|branch| match branch {
+                                        IR::Tuple(pair) if pair.len() == 2 => IR::Tuple(vec![
+                                            Self::mark_tails(&pair[0], false),
+                                            Self::mark_tails(&pair[1], in_tail),
+                                        ]),
+                                        _ => Self::mark_tails(branch, false),
                                     })
                                     .collect();
                                 if matches!(a, IR::Tuple(_)) {
@@ -447,43 +344,101 @@ impl SemanticAnalyzer {
                                     IR::List(marked)
                                 }
                             }
-                            // Second arg: else block (tail position)
-                            (1, _) => Self::mark_tail_in_body(a, func_name),
-                            _ => a.clone(),
-                        }
-                    })
-                    .collect();
+                            (1, _) => Self::mark_tails(a, in_tail),
+                            _ => Self::mark_tails(a, false),
+                        })
+                        .collect(),
+
+                    // Match: args = [scrutinee, cases] with cases of shape
+                    // Tuple([pattern, guard, body]). Bodies inherit tail
+                    // position; scrutinee, patterns and guards do not.
+                    IROpCode::OpMatch => args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| match (i, a) {
+                            (1, IR::Tuple(cases)) | (1, IR::List(cases)) => {
+                                let marked: Vec<IR> = cases
+                                    .iter()
+                                    .map(|case| match case {
+                                        IR::Tuple(parts) if parts.len() >= 3 => {
+                                            let new_parts: Vec<IR> = parts
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(j, p)| Self::mark_tails(p, in_tail && j == 2))
+                                                .collect();
+                                            IR::Tuple(new_parts)
+                                        }
+                                        _ => Self::mark_tails(case, false),
+                                    })
+                                    .collect();
+                                if matches!(a, IR::List(_)) {
+                                    IR::List(marked)
+                                } else {
+                                    IR::Tuple(marked)
+                                }
+                            }
+                            _ => Self::mark_tails(a, false),
+                        })
+                        .collect(),
+
+                    // Return: inherits in_tail rather than forcing it.
+                    // op_return propagates a TailCall as a value; marking
+                    // `return f()` inside a loop body would leak the TailCall
+                    // object into op_while/op_for which would treat it as a
+                    // plain statement value.
+                    IROpCode::OpReturn => args.iter().map(|a| Self::mark_tails(a, in_tail)).collect(),
+
+                    // Everything else is not a tail position. Notably:
+                    // - OpTry: the handler must stay on the stack
+                    // - OpWhile/OpFor: loop bodies re-enter
+                    // - And/Or/NullCoalesce: operands feed is_truthy(), a
+                    //   TailCall object would be consumed as truthy
+                    // We still recurse to reach nested lambda bodies.
+                    _ => args.iter().map(|a| Self::mark_tails(a, false)).collect(),
+                };
                 IR::Op {
                     opcode: *opcode,
                     args: new_args,
-                    kwargs: kwargs.clone(),
+                    kwargs: kwargs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Self::mark_tails(v, false)))
+                        .collect(),
                     tail: *tail,
                     start_byte: *start_byte,
                     end_byte: *end_byte,
                 }
             }
 
-            // Return: the inner expression is in tail position
-            IR::Op {
-                opcode,
-                args,
-                kwargs,
-                tail,
-                start_byte,
-                end_byte,
-            } if *opcode == IROpCode::OpReturn && !args.is_empty() => {
-                let new_args = vec![Self::mark_tail_in_body(&args[0], func_name)];
-                IR::Op {
-                    opcode: *opcode,
-                    args: new_args,
-                    kwargs: kwargs.clone(),
-                    tail: *tail,
-                    start_byte: *start_byte,
-                    end_byte: *end_byte,
-                }
-            }
+            // Structural containers: no tail position inside, but nested
+            // lambdas must still be reached
+            IR::Program(items) => IR::Program(items.iter().map(|i| Self::mark_tails(i, false)).collect()),
+            IR::List(items) => IR::List(items.iter().map(|i| Self::mark_tails(i, false)).collect()),
+            IR::Tuple(items) => IR::Tuple(items.iter().map(|i| Self::mark_tails(i, false)).collect()),
+            IR::Set(items) => IR::Set(items.iter().map(|i| Self::mark_tails(i, false)).collect()),
+            IR::Dict(entries) => IR::Dict(
+                entries
+                    .iter()
+                    .map(|(k, v)| (Self::mark_tails(k, false), Self::mark_tails(v, false)))
+                    .collect(),
+            ),
+            IR::Slice { start, stop, step } => IR::Slice {
+                start: Box::new(Self::mark_tails(start, false)),
+                stop: Box::new(Self::mark_tails(stop, false)),
+                step: Box::new(Self::mark_tails(step, false)),
+            },
+            IR::Broadcast {
+                target,
+                operator,
+                operand,
+                broadcast_type,
+            } => IR::Broadcast {
+                target: target.as_ref().map(|t| Box::new(Self::mark_tails(t, false))),
+                operator: Box::new(Self::mark_tails(operator, false)),
+                operand: operand.as_ref().map(|o| Box::new(Self::mark_tails(o, false))),
+                broadcast_type: broadcast_type.clone(),
+            },
 
-            // Everything else: not in tail position, return as-is
+            // Leaves (literals, identifiers, patterns)
             _ => ir.clone(),
         }
     }
@@ -600,6 +555,38 @@ impl SemanticAnalyzer {
                 Ok(())
             }
         }
+    }
+
+    /// Scan top-level pragma directives that affect this analysis pass.
+    /// Returns (tco, optimize); `None` when the file does not set the pragma.
+    /// Pragmas are file-scoped and sequential: the last one wins. Invalid
+    /// values are ignored here -- `validate_pragma` reports them later with
+    /// source positions.
+    fn scan_file_pragmas(ir: &IR) -> (Option<bool>, Option<bool>) {
+        let stmts = match ir {
+            IR::Program(stmts) => stmts.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        let mut tco = None;
+        let mut optimize = None;
+        for stmt in stmts {
+            if let IR::Op {
+                opcode: IROpCode::Pragma,
+                args,
+                ..
+            } = stmt
+            {
+                let (Some(IR::String(directive)), Some(value)) = (args.first(), args.get(1)) else {
+                    continue;
+                };
+                match (directive.to_lowercase().as_str(), value) {
+                    ("tco", IR::Bool(b)) => tco = Some(*b),
+                    (PRAGMA_OPTIMIZE, IR::Int(n)) if (0..=OPTIMIZE_MAX).contains(n) => optimize = Some(*n > 0),
+                    _ => {}
+                }
+            }
+        }
+        (tco, optimize)
     }
 
     /// Validate pragma directive name and value.
@@ -2086,5 +2073,275 @@ mod tests {
             !result.diagnostics.is_empty(),
             "shadowed enum name should not be treated as enum type"
         );
+    }
+
+    fn pragma_stmt(directive: &str, value: IR) -> IR {
+        IR::op(IROpCode::Pragma, vec![IR::String(directive.into()), value])
+    }
+
+    fn foldable_program(pragmas: Vec<IR>) -> IR {
+        let mut stmts = pragmas;
+        stmts.push(IR::op(IROpCode::Add, vec![IR::Int(1), IR::Int(2)]));
+        IR::Program(stmts)
+    }
+
+    fn last_stmt(ir: &IR) -> &IR {
+        match ir {
+            IR::Program(stmts) => stmts.last().unwrap(),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn test_scan_file_pragmas_last_wins() {
+        let program = IR::Program(vec![
+            pragma_stmt("optimize", IR::Int(0)),
+            pragma_stmt("optimize", IR::Int(3)),
+            pragma_stmt("tco", IR::Bool(false)),
+        ]);
+        assert_eq!(SemanticAnalyzer::scan_file_pragmas(&program), (Some(false), Some(true)));
+    }
+
+    #[test]
+    fn test_file_pragma_optimize_off_disables_passes() {
+        let mut a = SemanticAnalyzer::with_optimizer();
+        let result = a
+            .analyze(&foldable_program(vec![pragma_stmt("optimize", IR::Int(0))]))
+            .unwrap();
+        assert!(
+            matches!(
+                last_stmt(&result),
+                IR::Op {
+                    opcode: IROpCode::Add,
+                    ..
+                }
+            ),
+            "pragma optimize 0 must disable constant folding, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_file_pragma_optimize_on_enables_passes() {
+        let mut a = SemanticAnalyzer::new(); // baseline: no optimization
+        let result = a
+            .analyze(&foldable_program(vec![pragma_stmt("optimize", IR::Int(2))]))
+            .unwrap();
+        assert_eq!(last_stmt(&result), &IR::Int(3), "pragma optimize 2 must enable passes");
+    }
+
+    #[test]
+    fn test_host_override_wins_over_file_pragma() {
+        let mut a = SemanticAnalyzer::with_optimizer();
+        a.set_optimize_override(Some(true));
+        let result = a
+            .analyze(&foldable_program(vec![pragma_stmt("optimize", IR::Int(0))]))
+            .unwrap();
+        assert_eq!(
+            last_stmt(&result),
+            &IR::Int(3),
+            "host override (CLI/env) must win over in-file pragma"
+        );
+
+        let mut a = SemanticAnalyzer::new();
+        a.set_optimize_override(Some(false));
+        let result = a
+            .analyze(&foldable_program(vec![pragma_stmt("optimize", IR::Int(3))]))
+            .unwrap();
+        assert!(
+            matches!(
+                last_stmt(&result),
+                IR::Op {
+                    opcode: IROpCode::Add,
+                    ..
+                }
+            ),
+            "host override off must win over in-file pragma on"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tail-call marking (proper tail calls)
+    // -----------------------------------------------------------------------
+
+    fn parse_program(source: &str) -> IR {
+        use tree_sitter::Parser;
+        let language = catnip_grammar::get_language();
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::parser::pure_transforms::transform(tree.root_node(), source).unwrap()
+    }
+
+    /// Collect (callee_name, tail) for every Call with a nominal target.
+    fn collect_calls(ir: &IR, out: &mut Vec<(String, bool)>) {
+        match ir {
+            IR::Call {
+                func,
+                args,
+                kwargs,
+                tail,
+                ..
+            } => {
+                if let IR::Ref(n, _, _) | IR::Identifier(n) = func.as_ref() {
+                    out.push((n.clone(), *tail));
+                }
+                collect_calls(func, out);
+                for a in args {
+                    collect_calls(a, out);
+                }
+                for v in kwargs.values() {
+                    collect_calls(v, out);
+                }
+            }
+            IR::Op { args, kwargs, .. } => {
+                for a in args {
+                    collect_calls(a, out);
+                }
+                for v in kwargs.values() {
+                    collect_calls(v, out);
+                }
+            }
+            IR::Program(items) | IR::List(items) | IR::Tuple(items) | IR::Set(items) | IR::PatternOr(items) => {
+                for i in items {
+                    collect_calls(i, out);
+                }
+            }
+            IR::Dict(entries) => {
+                for (k, v) in entries {
+                    collect_calls(k, out);
+                    collect_calls(v, out);
+                }
+            }
+            IR::Slice { start, stop, step } => {
+                collect_calls(start, out);
+                collect_calls(stop, out);
+                collect_calls(step, out);
+            }
+            IR::Broadcast {
+                target,
+                operator,
+                operand,
+                ..
+            } => {
+                if let Some(t) = target {
+                    collect_calls(t, out);
+                }
+                collect_calls(operator, out);
+                if let Some(o) = operand {
+                    collect_calls(o, out);
+                }
+            }
+            IR::PatternLiteral(inner) => collect_calls(inner, out),
+            _ => {}
+        }
+    }
+
+    fn marked_calls(source: &str) -> Vec<(String, bool)> {
+        let marked = SemanticAnalyzer::mark_tail_calls(&parse_program(source));
+        let mut out = Vec::new();
+        collect_calls(&marked, &mut out);
+        out
+    }
+
+    fn tail_of(calls: &[(String, bool)], name: &str) -> bool {
+        calls
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no call to {name} found"))
+            .1
+    }
+
+    #[test]
+    fn test_mark_tail_self_recursion() {
+        let calls = marked_calls("count = (n) => { if n == 0 { 0 } else { count(n - 1) } }");
+        assert!(tail_of(&calls, "count"), "self-call in tail position must be marked");
+    }
+
+    #[test]
+    fn test_mark_tail_mutual_recursion() {
+        let calls = marked_calls(
+            "is_even = (n) => { if n == 0 { True } else { is_odd(n - 1) } }\n\
+             is_odd = (n) => { if n == 0 { False } else { is_even(n - 1) } }",
+        );
+        assert!(tail_of(&calls, "is_odd"), "mutual call in tail position must be marked");
+        assert!(
+            tail_of(&calls, "is_even"),
+            "mutual call in tail position must be marked"
+        );
+    }
+
+    #[test]
+    fn test_mark_tail_nested_def() {
+        // inner is defined in a non-final block statement: both its self-call
+        // and the final call to it must be marked
+        let calls = marked_calls(
+            "outer = (n) => {\n\
+               inner = (k) => { if k == 0 { 0 } else { inner(k - 1) } }\n\
+               inner(n)\n\
+             }",
+        );
+        assert!(
+            calls.iter().filter(|(n, _)| n == "inner").all(|(_, t)| *t),
+            "nested def: self-call and final call must both be tail, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn test_mark_tail_lambda_in_call_arg() {
+        // lambda passed as argument: its body has its own tail position
+        let calls = marked_calls("r = apply((x) => { helper(x) })");
+        assert!(tail_of(&calls, "helper"), "lambda argument body must get tail marking");
+        assert!(!tail_of(&calls, "apply"), "top-level call must not be tail");
+    }
+
+    #[test]
+    fn test_mark_tail_match_case_bodies() {
+        let calls = marked_calls("f = (n) => { match n { 0 => { g(n) }\n_ if h(n) => { f(n - 1) }\n_ => { 0 } } }");
+        assert!(tail_of(&calls, "g"), "match case body is a tail position");
+        assert!(tail_of(&calls, "f"), "match case body is a tail position");
+        assert!(!tail_of(&calls, "h"), "match guard is not a tail position");
+    }
+
+    #[test]
+    fn test_mark_tail_negative_positions() {
+        // try body, loop body, and/or operands, call args: never tail
+        let calls = marked_calls("f = (n) => { try { g(n) } except { _ => { h(n) } } }");
+        assert!(!tail_of(&calls, "g"), "call under try is not tail (handler on stack)");
+        assert!(!tail_of(&calls, "h"), "except handler body is not tail");
+
+        let calls = marked_calls("f = (n) => { while True { g(n) } }");
+        assert!(!tail_of(&calls, "g"), "loop body is not a tail position");
+
+        let calls = marked_calls("f = (n) => { g(n) or h(n) }");
+        assert!(!tail_of(&calls, "g"), "or lhs is not tail (is_truthy consumes it)");
+        assert!(!tail_of(&calls, "h"), "or rhs is not tail (is_truthy consumes it)");
+
+        let calls = marked_calls("f = (n) => { g(h(n)) }");
+        assert!(tail_of(&calls, "g"), "outer call is tail");
+        assert!(!tail_of(&calls, "h"), "call argument is not tail");
+    }
+
+    #[test]
+    fn test_mark_tail_never_at_top_level() {
+        // a TailCall escaping outside any trampoline would leak as a value
+        let calls = marked_calls("g(1)\nx = h(2)\nf(3)");
+        assert!(
+            calls.iter().all(|(_, t)| !t),
+            "top-level calls must never be marked, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn test_mark_tail_survives_optimizer() {
+        let marked = SemanticAnalyzer::mark_tail_calls(&parse_program(
+            "is_even = (n) => { if n == 0 { True } else { is_odd(n - 1) } }\n\
+             is_odd = (n) => { if n == 0 { False } else { is_even(n - 1) } }",
+        ));
+        let optimized = PureOptimizer::new().optimize(marked);
+        let mut calls = Vec::new();
+        collect_calls(&optimized, &mut calls);
+        assert!(tail_of(&calls, "is_odd"), "tail flag must survive optimization passes");
+        assert!(tail_of(&calls, "is_even"), "tail flag must survive optimization passes");
     }
 }

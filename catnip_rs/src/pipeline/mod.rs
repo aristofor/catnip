@@ -54,6 +54,10 @@ pub struct Pipeline {
     tco_enabled: bool,
     /// Optimization enabled (false = skip all semantic optimization passes)
     optimize_enabled: bool,
+    /// CLI/env override for TCO -- wins over in-file pragmas
+    tco_override: Option<bool>,
+    /// CLI/env override for optimization -- wins over in-file pragmas
+    optimize_override: Option<bool>,
     /// Prepared (parsed + analyzed) IR, ready for compile+execute.
     prepared_ir: Option<IR>,
 }
@@ -75,6 +79,8 @@ impl Pipeline {
             jit_threshold: crate::constants::JIT_THRESHOLD_DEFAULT,
             tco_enabled: true,
             optimize_enabled: true,
+            tco_override: None,
+            optimize_override: None,
             prepared_ir: None,
         })
     }
@@ -112,6 +118,16 @@ impl Pipeline {
         self.optimize_enabled = enabled;
     }
 
+    /// Force TCO on/off regardless of in-file pragmas (CLI/env override).
+    pub fn set_tco_override(&mut self, forced: Option<bool>) {
+        self.tco_override = forced;
+    }
+
+    /// Force optimization on/off regardless of in-file pragmas (CLI/env override).
+    pub fn set_optimize_override(&mut self, forced: Option<bool>) {
+        self.optimize_override = forced;
+    }
+
     /// Set module import policy. Must be called before execute().
     /// The policy is passed to the VMHost when it is lazily created.
     pub fn set_module_policy(&mut self, policy: Py<PyAny>) {
@@ -127,6 +143,8 @@ impl Pipeline {
             SemanticAnalyzer::new()
         };
         analyzer.set_tco_enabled(self.tco_enabled);
+        analyzer.set_tco_override(self.tco_override);
+        analyzer.set_optimize_override(self.optimize_override);
         analyzer
     }
 
@@ -522,6 +540,18 @@ impl PyPipeline {
     /// Enable or disable optimization passes (optimize=0 disables).
     fn set_optimize_enabled(&mut self, enabled: bool) {
         self.inner.set_optimize_enabled(enabled);
+    }
+
+    /// Force TCO on/off regardless of in-file pragmas (CLI/env override).
+    #[pyo3(signature = (forced))]
+    fn set_tco_override(&mut self, forced: Option<bool>) {
+        self.inner.set_tco_override(forced);
+    }
+
+    /// Force optimization on/off regardless of in-file pragmas (CLI/env override).
+    #[pyo3(signature = (forced))]
+    fn set_optimize_override(&mut self, forced: Option<bool>) {
+        self.inner.set_optimize_override(forced);
     }
 
     /// Enable or disable JIT compilation.

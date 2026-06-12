@@ -17,7 +17,7 @@ conditionnelles.
 | `data.[if op value]` | **Filter**         | Collection filtrée (taille ≤ originale)       | `list(1,2,3).[if > 1]` → `[2,3]`                         |
 | `data.[mask]`        | **Masque booléen** | Collection filtrée par masque                 | `list(1,2,3).[list(True,False,True)]` → `[1,3]`          |
 | `data.[~> f]`        | **ND-map**         | Applique `f` à chaque feuille scalaire        | `list(list(-1,2),list(-3,4)).[~> abs]` → `[[1,2],[3,4]]` |
-| `data.[~~ lambda]`   | **ND-recursion**   | Applique `~~` à chaque feuille scalaire       | `list(3,5).[~~ factorial]` → `[6,120]`                   |
+| `data.[~~ lambda]`   | **ND-récursion**   | Applique `~~` à chaque feuille scalaire       | `list(3,5).[~~ factorial]` → `[6,120]`                   |
 
 ### Principe
 
@@ -487,7 +487,7 @@ Les opérateurs ND (`~>` et `~~`) suivent la même sémantique de descente impli
 matrix = list(list(-1, 2), list(-3, 4))
 matrix.[~> abs]  # → [[1, 2], [3, 4]]
 
-# ND-recursion implicite
+# ND-récursion implicite
 nums = list(3, 5)
 nums.[~~(n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]
 # → [6, 120]

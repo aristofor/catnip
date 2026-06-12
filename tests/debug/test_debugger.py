@@ -28,6 +28,36 @@ class TestBreakpoint:
         assert event is not None
         assert event[0] == 'finished'
 
+    def test_breakpoint_in_tail_called_function(self):
+        """A breakpoint inside a function reached by a mutual tail call
+        still triggers (frame reuse elides the caller, not the callee)."""
+        cat = Catnip()
+        code = (
+            'ping = (n) => {\n'
+            '    if n <= 0 { "done" } else { pong(n - 1) }\n'
+            '}\n'
+            'pong = (n) => {\n'
+            '    breakpoint()\n'
+            '    if n <= 0 { "done" } else { ping(n - 1) }\n'
+            '}\n'
+            'ping(3)'
+        )
+        session = DebugSession(cat, code)
+        session.start(blocking=False)
+
+        # pong is entered twice (n=2, n=0): two pauses, then finish
+        for _ in range(2):
+            event = session.wait_for_event(timeout=5)
+            assert event is not None
+            event_type, pause = event
+            assert event_type == 'paused'
+            assert pause.line == 5
+            session.send_command(DebugAction.CONTINUE)
+
+        event = session.wait_for_event(timeout=5)
+        assert event is not None
+        assert event[0] == 'finished'
+
     def test_multiple_breakpoints(self):
         cat = Catnip()
         code = "a = 1\nb = 2\nc = 3\nd = 4"

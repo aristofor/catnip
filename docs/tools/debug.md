@@ -54,7 +54,7 @@ Au point d'arrêt, le prompt `(catnip-dbg:L5) >` attend une commande :
 | `print EXPR` | `p EXPR` | Évaluer une expression dans le scope courant   |
 | `vars`       | `v`      | Afficher les variables locales                 |
 | `list`       | `l`      | Afficher le source autour de la position       |
-| `backtrace`  | `bt`     | Afficher la pile d'appels                      |
+| `backtrace`  | `bt`     | Afficher la call stack                         |
 | `repl`       |          | Entrer en sous-mode REPL dans le scope courant |
 | `quit`       | `q`      | Arrêter l'exécution                            |
 | `help`       | `h`      | Aide                                           |

@@ -1,11 +1,11 @@
-# ND-Recursion
+# ND-récursion
 
 Exemples d'utilisation de la ND-récursion (`~~`, `~>`, `~[]`).
 
 > La ND-récursion permet d'exprimer des computations récursives qui peuvent être exécutées en parallèle sans syntaxe
 > `async`/`await`. Le runtime choisit le mode d'exécution.
 
-## `~~` ND-Recursion
+## `~~` ND-récursion
 
 ### Forme combinateur
 
@@ -140,9 +140,9 @@ tuple(-1, -2, 3).[~> abs]
 # → (1, 2, 3)
 ```
 
-### `data.[~~ lambda]` Broadcast ND-recursion
+### `data.[~~ lambda]` Broadcast ND-récursion
 
-Applique ND-recursion à chaque élément:
+Applique la ND-récursion à chaque élément:
 
 ```catnip
 # Factorielle sur liste

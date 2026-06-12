@@ -3,7 +3,6 @@
 
 import re
 
-from catnip._rs import extract_name_from_error
 from catnip._error_strings import (
     ATTRIBUTE_ERROR_PREFIX,
     CATNIP_TYPE_ERROR_PREFIX,
@@ -18,7 +17,7 @@ from catnip._error_strings import (
     VALUE_ERROR_PREFIX,
     ZERO_DIVISION_ERROR_PREFIX,
 )
-from catnip._rs import CatnipRuntime, Pipeline
+from catnip._rs import CatnipRuntime, Pipeline, extract_name_from_error
 from catnip.exc import (
     CatnipNameError,
     CatnipPragmaError,
@@ -313,6 +312,7 @@ class CatnipStandalone:
     def _setup_import(self):
         """Wire up import() with the same _ImportWrapper as DSL mode."""
         import types
+
         from .context import _ImportWrapper
 
         ns = types.SimpleNamespace(globals=self._globals_view)

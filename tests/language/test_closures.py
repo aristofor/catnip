@@ -474,5 +474,98 @@ class TestScopeIsolation:
         assert result == 100
 
 
+class TestLetrecGroup:
+    """Letrec semantics for named functions defined in the same block.
+
+    Contract: a definition `name = (args) => {...}` sees itself (let-rec)
+    and its sibling definitions of the same block, even after the closures
+    escape the scope. Aliases and rebinds are mutations, not definitions.
+    """
+
+    @pytest.fixture
+    def catnip(self):
+        return Catnip()
+
+    def test_nested_mutual_recursion(self, catnip):
+        """even/odd defined in a function body can call each other."""
+        code = """
+        test = () => {
+            even = (n) => { if n == 0 { True } else { odd(n - 1) } }
+            odd = (n) => { if n == 0 { False } else { even(n - 1) } }
+            even(10)
+        }
+        test()
+        """
+        catnip.parse(code)
+        assert catnip.execute() is True
+
+    def test_escaped_mutual_recursion(self, catnip):
+        """The mutual group still works after escaping its defining scope."""
+        code = """
+        make = () => {
+            even = (n) => { if n == 0 { True } else { odd(n - 1) } }
+            odd = (n) => { if n == 0 { False } else { even(n - 1) } }
+            even
+        }
+        f = make()
+        f(11)
+        """
+        catnip.parse(code)
+        assert catnip.execute() is False
+
+    def test_self_reference_survives_rebind(self, catnip):
+        """The self-reference is fixed at definition: rebinding the name
+        afterwards does not change what the function calls."""
+        code = """
+        test = () => {
+            g = (n) => { if n == 0 { "orig" } else { g(n - 1) } }
+            h = g
+            g = "not a function"
+            h(3)
+        }
+        test()
+        """
+        catnip.parse(code)
+        assert catnip.execute() == 'orig'
+
+    def test_alias_does_not_patch_closures(self, catnip):
+        """An alias (`h = g`) is not a definition: it must not overwrite
+        bindings captured by other functions."""
+        code = """
+        helper = (x) => { "global" }
+        test = () => {
+            f = (x) => { helper(x) }
+            helper2 = f
+            f(1)
+        }
+        test()
+        """
+        catnip.parse(code)
+        assert catnip.execute() == 'global'
+
+    def test_mutual_recursive_function_pickles(self, catnip):
+        """Pickling a function from a mutual group must not recurse forever.
+        The sibling links are letrec bindings, skipped at serialization."""
+        import pickle
+
+        from catnip._rs import set_global_registry
+
+        code = """
+        make = () => {
+            even = (n) => { if n == 0 { True } else { odd(n - 1) } }
+            odd = (n) => { if n == 0 { False } else { even(n - 1) } }
+            even
+        }
+        f = make()
+        f(4)
+        """
+        catnip.parse(code)
+        assert catnip.execute() is True
+        set_global_registry(catnip.registry)
+        f = catnip.context.globals['f']
+        data = pickle.dumps(f)
+        assert pickle.loads(data) is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

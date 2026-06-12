@@ -68,7 +68,8 @@ Les pragmas sont des instructions traitées lors de l'analyse sémantique.
 
 ### TCO (optimisation des appels terminaux)
 
-Contrôle l'optimisation des appels terminaux pour les fonctions récursives.
+Contrôle l'optimisation des appels terminaux : tout appel par nom en position terminale (auto-récursion, récursion
+mutuelle, appel terminal vers une autre fonction) s'exécute en pile constante.
 
 **Syntaxe :**
 
@@ -221,7 +222,7 @@ range(1, 101).[~> (x) => { x * 2 }]
 
 #### nd_memoize
 
-Active la mise en cache automatique des résultats de ND-récursion pour éviter les calculs redondants.
+Active le caching automatique des résultats de ND-récursion pour éviter les calculs redondants.
 
 **Syntaxe :**
 
@@ -375,7 +376,7 @@ Pour une compilation JIT sélective, utilisez plutôt le décorateur `@jit` :
 other_func = (x) => { x * 2 }
 ```
 
-> La compilation JIT ne réussit que pour les fonctions correspondant à un motif compilable (actuellement : fonctions
+> La compilation JIT ne réussit que pour les fonctions correspondant à un pattern compilable (actuellement : fonctions
 > récursives terminales simples avec 1 à 3 paramètres entiers). Les fonctions non conformes s'exécutent normalement via
 > l'interpréteur.
 
@@ -400,17 +401,18 @@ Voir [OPTIMIZATIONS](../dev/OPTIMIZATIONS.md) pour les détails techniques.
 
 ### Optimize
 
-Contrôle le niveau d'optimisation (effet actuellement minimal).
+Contrôle les passes d'optimisation du compilateur pour le fichier qui contient le pragma. L'effet est binaire : `0`
+désactive toutes les passes, `1` à `3` les activent toutes (les valeurs intermédiaires sont acceptées pour
+compatibilité). Un `-o level:N` sur la ligne de commande l'emporte sur le pragma. Voir
+[OPTIMIZATIONS](../dev/OPTIMIZATIONS.md).
 
 **Syntaxe :**
 
 <!-- check: no-check -->
 
 ```catnip
-pragma("optimize", 0)  # Pas d'optimisation
-pragma("optimize", 1)  # Optimisation basique
-pragma("optimize", 2)  # Optimisation modérée
-pragma("optimize", 3)  # Optimisation agressive
+pragma("optimize", 0)  # Désactive les passes pour ce fichier
+pragma("optimize", 3)  # Les active
 ```
 
 ### Cache
@@ -533,6 +535,6 @@ sum_range(100000)  # Pas de dépassement de pile avec TCO
 
 ## Voir aussi
 
-- [ND-Recursion Examples](../examples/advanced/nd_recursion.md) - Exemples d'usage de ND-récursion
+- [Exemples ND-récursion](../examples/advanced/nd_recursion.md) - Exemples d'usage de ND-récursion
 - [Quickstart 2 Minutes](../tuto/QUICKSTART_2MIN.md) - Introduction à Catnip
 - [Glossary](GLOSSARY.md) - Référence du langage

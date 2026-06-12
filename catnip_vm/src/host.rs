@@ -843,13 +843,13 @@ fn native_mul(a: Value, b: Value) -> VMResult<Value> {
     if a.is_native_str() {
         if let Some(n) = b.as_int() {
             let s = unsafe { a.as_native_str_ref().unwrap() };
-            return Ok(string::str_repeat(s, n));
+            return string::str_repeat(s, n);
         }
     }
     if b.is_native_str() {
         if let Some(n) = a.as_int() {
             let s = unsafe { b.as_native_str_ref().unwrap() };
-            return Ok(string::str_repeat(s, n));
+            return string::str_repeat(s, n);
         }
     }
     // List repeat: list * int

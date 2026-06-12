@@ -36,8 +36,7 @@ Fonctions, lambdas et closures :
 - [`02_lambdas.cat`](functions/02_lambdas.cat) - Fonctions anonymes, lambdas inline
 - [`03_closures_and_higher_order.cat`](functions/03_closures_and_higher_order.cat) - Closures, fonctions de fonctions,
   composition
-- [`04_tail_recursion.cat`](functions/04_tail_recursion.cat) - Récursion terminale et transformation automatique en
-  boucles
+- [`04_tail_recursion.cat`](functions/04_tail_recursion.cat) - Tail recursion et transformation automatique en boucles
 - [`05_fold_and_reduce.cat`](functions/05_fold_and_reduce.cat) - Fold et reduce : agrégation avec valeur initiale
 
 ## Pattern matching (`pattern-matching/`)
@@ -83,7 +82,7 @@ Opérations vectorielles sur collections :
 - [`07_cas_illustratifs.cat`](broadcast/07_cas_illustratifs.cat) - Cas d'usage illustratifs
 - [`bench_broadcast.py`](broadcast/bench_broadcast.py) - Mesures de performance
 
-## Chargement de Modules (`module-loading/`)
+## Module loading (`module-loading/`)
 
 Intégration avec Python :
 
@@ -104,7 +103,7 @@ Intégration avec Python :
 
 ## Intégration DSL (`embedding/`)
 
-Catnip comme moteur DSL embarqué dans une application Python :
+Catnip comme moteur DSL embedded dans une application Python :
 
 - [`01_dataframe_dsl.py`](embedding/01_dataframe_dsl.py) - DSL pour DataFrames pandas
 - [`02_config_dsl.py`](embedding/02_config_dsl.py) - Validation de configuration
@@ -130,7 +129,7 @@ Scripts Catnip exécutables en ligne de commande :
 
 ## Graphe de contrôle (`cfg/`)
 
-Analyse et optimisation du flux de contrôle :
+Analyse et optimisation du control flow :
 
 - [`01_cfg_basic.md`](cfg/01_cfg_basic.md) - Construction de CFG, blocs basiques, arêtes
 - [`02_cfg_analysis.md`](cfg/02_cfg_analysis.md) - Dominance, détection de boucles

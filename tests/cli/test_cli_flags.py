@@ -215,6 +215,23 @@ def test_module_multiple(runner):
     assert '2' in result.output
 
 
+def test_module_missing_exits_nonzero(runner):
+    result = runner.invoke(main, ['-m', 'nonexistent_xyz_9999', '-c', '1 + 1'])
+    assert result.exit_code != 0
+
+
+def test_module_explicit_strict_even_if_also_auto(runner, tmp_path):
+    """A module both auto-imported and requested via -m must still fail strict.
+
+    The auto path is tolerant; the explicit CLI request must not be masked by a
+    duplicate auto-import that merely prints an error and continues.
+    """
+    config = tmp_path / 'catnip.toml'
+    config.write_text('[modules.cli]\nauto = ["nonexistent_xyz_9999"]\n')
+    result = runner.invoke(main, ['--config', str(config), '-m', 'nonexistent_xyz_9999', '-c', '1 + 1'])
+    assert result.exit_code != 0
+
+
 # -- --format -----------------------------------------------------------------
 
 

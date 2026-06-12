@@ -28,6 +28,10 @@ pub struct Scope {
     param_names: Vec<HashSet<String>>,
     /// Whether each frame is isolated (function) vs transparent (loop/block)
     frame_isolated: Vec<bool>,
+    /// Monotonic id per frame (never reused), to tell apart functions
+    /// defined in the current frame from ones captured elsewhere
+    frame_tokens: Vec<u64>,
+    next_frame_token: u64,
 }
 
 #[pymethods]
@@ -43,6 +47,8 @@ impl Scope {
             modified_names: vec![HashSet::new()],
             param_names: vec![HashSet::new()],
             frame_isolated: vec![false],
+            frame_tokens: vec![1],
+            next_frame_token: 1,
         };
 
         if let Some(dict) = symbols {
@@ -62,6 +68,21 @@ impl Scope {
         self.modified_names.push(HashSet::new());
         self.param_names.push(HashSet::new());
         self.frame_isolated.push(false);
+        self.next_frame_token += 1;
+        self.frame_tokens.push(self.next_frame_token);
+    }
+
+    /// Monotonic id of the current frame.
+    pub fn current_frame_token(&self) -> u64 {
+        *self.frame_tokens.last().unwrap_or(&1)
+    }
+
+    /// Names introduced in the current frame.
+    pub fn current_frame_names(&self) -> Vec<String> {
+        self.frame_names
+            .last()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Pop a frame (exiting a function/block).
@@ -96,6 +117,7 @@ impl Scope {
         self.modified_names.pop();
         self.param_names.pop();
         self.frame_isolated.pop();
+        self.frame_tokens.pop();
     }
 
     /// Get a symbol value. Returns None if not found.
@@ -210,12 +232,21 @@ impl Scope {
     ///
     /// Call this before pop_frame() to persist closure state.
     pub fn sync_to_captures(&self, py: Python<'_>, captured: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
-        // Sync ALL captured variables back to the closure_scope dict.
-        // Variables in closure_scope are intentional captures and must always
-        // propagate. The shadow/restore mechanism in _set/find_isolating_frame
-        // handles isolation for non-captured name collisions.
+        // Sync captured variables back to the closure_scope dict. Variables in
+        // closure_scope are intentional captures and must propagate. The
+        // shadow/restore mechanism in _set/find_isolating_frame handles
+        // isolation for non-captured name collisions.
+        //
+        // Exception: a captured name that is also a parameter of the current
+        // frame is frame-local and must NOT sync back -- doing so would
+        // overwrite the closure/parent binding with the call-local parameter
+        // value (scope leak when param name == captured name).
+        let params = self.param_names.last();
         for key in captured.keys() {
             let name: String = key.extract()?;
+            if params.is_some_and(|p| p.contains(&name)) {
+                continue;
+            }
             if let Some(value) = self.symbols.get(&name) {
                 captured.set_item(&name, value.clone_ref(py))?;
             }

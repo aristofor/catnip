@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::constants::*;
@@ -33,14 +34,15 @@ fn state_name(s: u8) -> &'static str {
     }
 }
 
-/// Wrapper to satisfy pyclass Send+Sync for mpsc::Receiver.
-struct SyncReceiver(mpsc::Receiver<DebugEvent>);
-unsafe impl Sync for SyncReceiver {}
-
-#[pyclass]
+// `unsendable`: the session owns an mpsc::Receiver (Send but !Sync) and is
+// driven from a single thread (the debugger frontend). `unsendable` makes PyO3
+// enforce that at the Python boundary, instead of an unsound `unsafe impl Sync`
+// asserting a non-Sync Receiver is shareable.
+#[pyclass(unsendable)]
 pub struct DebugSession {
     command_tx: Option<mpsc::Sender<DebugAction>>,
-    event_rx: Option<SyncReceiver>,
+    event_rx: Option<mpsc::Receiver<DebugEvent>>,
+    thread_handle: Option<JoinHandle<()>>,
     state: u8,
     breakpoints: HashSet<u32>,
     source_text: String,
@@ -67,6 +69,7 @@ impl DebugSession {
         Self {
             command_tx: None,
             event_rx: None,
+            thread_handle: None,
             state: STATE_IDLE,
             breakpoints: HashSet::new(),
             source_text,
@@ -164,7 +167,7 @@ impl DebugSession {
         }
 
         self.command_tx = Some(command_tx);
-        self.event_rx = Some(SyncReceiver(event_rx));
+        self.event_rx = Some(event_rx);
         self.vm_ref = Some(inner_vm.unbind());
 
         // Store sourcemap ref as PyObject for dynamic breakpoints
@@ -179,7 +182,7 @@ impl DebugSession {
         let code_ref: Py<PyAny> = code_attr.unbind();
         let event_tx_finish = event_tx;
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             Python::attach(|py| {
                 let executor = executor_ref.bind(py);
                 let code = code_ref.bind(py);
@@ -194,6 +197,7 @@ impl DebugSession {
                 }
             });
         });
+        self.thread_handle = Some(handle);
 
         Ok(())
     }
@@ -217,7 +221,7 @@ impl DebugSession {
     #[pyo3(signature = (timeout=None))]
     fn wait_for_event(&mut self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<Py<PyAny>>> {
         let rx = match &self.event_rx {
-            Some(rx) => &rx.0,
+            Some(rx) => rx,
             None => return Ok(None),
         };
 
@@ -389,5 +393,25 @@ impl DebugSession {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for DebugSession {
+    fn drop(&mut self) {
+        // Dropping the only command Sender makes the VM callback's recv_timeout
+        // return Disconnected immediately (callback continues), so the thread
+        // runs to completion and releases its Py refs instead of parking up to
+        // DEBUG_COMMAND_TIMEOUT_SECS * retries with no observer.
+        self.command_tx = None;
+        if let Some(handle) = self.thread_handle.take() {
+            // Join with the GIL released: the VM thread needs the GIL to finish.
+            // Bounded by the program's remaining runtime (no artificial waits,
+            // since the disconnected channel unparks every breakpoint at once).
+            Python::attach(|py| {
+                py.detach(|| {
+                    let _ = handle.join();
+                });
+            });
+        }
     }
 }

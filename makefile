@@ -58,6 +58,52 @@ build: clean compile
 $(RS_EXT): $(RS_SOURCES) catnip_rs/Cargo.toml catnip_rs/Cargo.lock catnip_grammar/src/parser.c
 	@$(VENV_PYTHON) setup.py build_ext --inplace
 
+# Standalone Rust binaries (catnip + catnip-repl + catnip-lsp + catnip-mcp).
+# Contributor-facing: kept in the distribution makefile so the public repo can
+# build the embedded-Python binaries.
+.PHONY: build-run build-repl build-lsp build-mcp build-bins
+BINS_TARGET := target/bins
+RUN_BIN     := $(BINS_TARGET)/release/catnip
+REPL_BIN    := $(BINS_TARGET)/release/catnip-repl
+LSP_BIN     := $(BINS_TARGET)/release/catnip-lsp
+MCP_BIN     := $(BINS_TARGET)/release/catnip-mcp
+
+# Standalone binaries with embedded Python (catnip, catnip-repl) must link the
+# venv's libpython, not whatever python3-config the build.rs finds first in PATH.
+# We pin PyO3 to the venv interpreter, put its base bin (python3-config) ahead in
+# PATH, and add an rpath to its libdir so the binary finds libpython at runtime.
+# The rpath goes through `cargo rustc -- -C link-arg` so it *adds* to the
+# per-target rustflags in .cargo/config instead of replacing them (RUSTFLAGS env
+# would clobber the platform-specific linker flags defined there).
+# Lazy (=) so non-bin targets don't pay the python startup cost.
+PY_BASE_BIN  = $(shell $(VENV_PYTHON) -c "import sys, os; print(os.path.join(sys.base_prefix, 'bin'))")
+PY_LIBDIR    = $(shell $(VENV_PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+EMBED_ENV    = PATH="$(PY_BASE_BIN):$$PATH" PYO3_PYTHON="$(abspath $(VENV_PYTHON))"
+EMBED_RPATH  = -C link-arg=-Wl,-rpath,$(PY_LIBDIR)
+
+# Depend on makefile too: a change to the build recipe (linker flags, embedded
+# Python) must rebuild the binaries, otherwise a stale one linked against the
+# wrong libpython stays in place since the Rust sources are unchanged.
+$(RUN_BIN): $(RS_SOURCES) catnip_rs/Cargo.toml makefile
+	$(EMBED_ENV) cargo rustc --release -p catnip_rs --bin catnip --features embedded --target-dir $(BINS_TARGET) -- $(EMBED_RPATH)
+
+$(REPL_BIN): $(RS_SOURCES) catnip_rs/Cargo.toml makefile
+	$(EMBED_ENV) cargo rustc --release -p catnip_repl --bin catnip-repl --features repl-standalone --target-dir $(BINS_TARGET) -- $(EMBED_RPATH)
+
+$(LSP_BIN): $(RS_SOURCES) catnip_lsp/Cargo.toml
+	cargo build --release -p catnip_lsp --bin catnip-lsp --target-dir $(BINS_TARGET)
+
+$(MCP_BIN): $(RS_SOURCES) catnip_mcp/Cargo.toml
+	cargo build --release -p catnip_mcp --bin catnip-mcp --target-dir $(BINS_TARGET)
+
+build-run: $(RUN_BIN)
+build-repl: $(REPL_BIN)
+build-lsp: $(LSP_BIN)
+build-mcp: $(MCP_BIN)
+
+build-bins: build-run build-repl build-lsp build-mcp
+	@echo "All Rust binaries built"
+
 build-libs:
 	$(MAKE) -C catnip_libs all
 
@@ -118,9 +164,24 @@ setup:
 	@echo "  Run tests: make test"
 	@echo "  Start REPL: catnip"
 
-# Install Python package + MCP dependencies (skip if already installed)
+.PHONY: install-all install-bins install-run install-repl install-mcp-bin install-lsp
+
+# Install Rust binaries (catnip + repl + lsp + mcp)
+install-bins: install-run install-repl
+	$(MAKE) install-mcp-bin || echo "Warning: catnip-mcp build failed, skipping"
+	$(MAKE) install-lsp || echo "Warning: catnip-lsp build failed, skipping"
+	@echo "Rust binaries installed"
+
+# Install everything (DSL + bins)
+install-all: install install-bins
+	@echo "All components installed"
+
+# Install Python package + MCP dependencies (skip if already installed).
+# The presence check runs from a neutral cwd: build_ext leaves a
+# catnip_lang.egg-info in the source tree, which would otherwise shadow the
+# metadata lookup and make the guard skip the real editable install.
 install-lang: build-deps $(RS_EXT)
-	@$(VENV_PYTHON) -c "from importlib.metadata import version; version('catnip-lang')" 2>/dev/null || \
+	@( cd /tmp && "$(abspath $(VENV_PYTHON))" -c "from importlib.metadata import version; version('catnip-lang')" ) 2>/dev/null || \
 		uv pip install -e "." --no-build-isolation
 
 # Install and register MCP server (project .mcp.json + global config if exists)
@@ -130,6 +191,31 @@ install-mcp: install-lang
 	@test -f "$(CLAUDE_GLOBAL_CFG)" && \
 		echo "$$_MCP_REGISTER" | $(VENV_PYTHON) - "$(CLAUDE_GLOBAL_CFG)" catnip $(CURDIR)/.venv/bin/catnip-mcp || true
 	@echo "MCP server 'catnip' registered"
+
+# Install catnip binary in venv
+install-run: build-run
+	@echo "Installing to $(VENV_BIN)/catnip..."
+	cp $(RUN_BIN) $(VENV_BIN)/
+	@echo "catnip installed in $(VENV_BIN)/"
+
+# Install REPL binary in venv
+install-repl: build-repl
+	@echo "Installing to $(VENV_BIN)/catnip-repl..."
+	cp $(REPL_BIN) $(VENV_BIN)/
+	@echo "catnip-repl installed in $(VENV_BIN)/"
+	@echo "Run with: catnip-repl"
+
+# Install LSP binary in venv
+install-lsp: build-lsp
+	@echo "Installing to $(VENV_BIN)/catnip-lsp..."
+	cp $(LSP_BIN) $(VENV_BIN)/
+	@echo "catnip-lsp installed in $(VENV_BIN)/"
+
+# Install MCP binary in venv
+install-mcp-bin: build-mcp
+	@echo "Installing to $(VENV_BIN)/catnip-mcp..."
+	cp $(MCP_BIN) $(VENV_BIN)/
+	@echo "catnip-mcp installed in $(VENV_BIN)/"
 
 install: install-lang
 
@@ -144,7 +230,7 @@ setup-test: $(RS_EXT)
 	uv pip install -e ".[test]" --no-build-isolation
 
 # Python tests (default mode: VM)
-test: $(RS_EXT)
+test: $(RS_EXT) build-native-libs
 	CATNIP_CACHE=off $(VENV_PYTEST) tests/
 
 #══════════════════════════════════════════════════════════════════════════════

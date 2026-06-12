@@ -179,10 +179,12 @@ impl Drop for ExtendedValue {
     }
 }
 
-// SAFETY: PureVM is single-threaded. ExtendedValue may contain Rc (via
-// module_globals) which is !Send, but we never share across threads.
+// SAFETY: PureVM is single-threaded; an ExtendedValue is owned by a single VM
+// and moved, never shared by reference across threads. `Send` covers that
+// move. `Sync` is intentionally NOT implemented: ExtendedValue holds interior
+// mutability (RefCell in NativeMeta, Rc in Module) whose borrow flags are not
+// atomic, so handing out `&ExtendedValue` to two threads would be a data race.
 unsafe impl Send for ExtendedValue {}
-unsafe impl Sync for ExtendedValue {}
 
 // ---------------------------------------------------------------------------
 // Value

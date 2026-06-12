@@ -347,8 +347,8 @@ class ModuleLoader:
 
         try:
             manifest = tomllib.loads(lib_toml.read_text())
-        except Exception:
-            return None
+        except Exception as e:
+            raise ValueError(f"package {name!r}: invalid lib.toml in {dir_path}: {e}") from e
 
         lib = manifest.get('lib', {})
         entry = lib.get('entry', 'main.cat')
@@ -584,13 +584,18 @@ class ModuleLoader:
             raise CatnipRuntimeError(f"module '{name}' blocked by policy")
         return self._load_bare_name(name, caller_dir=caller_dir, protocol=protocol)
 
-    def load_modules(self, module_names):
+    def load_modules(self, module_names, strict=False):
         """Load modules from CLI -m specs.
 
         Supports suffixes:
           - name      -> namespace (ctx.globals["name"] = namespace)
           - name:!    -> inject all symbols into globals
           - name:alias -> namespace under custom name
+
+        With ``strict=True`` (modules requested explicitly on the CLI), a failed
+        load is fatal: the error is reported and the process exits non-zero. The
+        tolerant default is for config auto-imports, where a missing optional
+        module should not abort the command.
         """
         for spec in module_names:
             try:
@@ -608,6 +613,8 @@ class ModuleLoader:
                     self.inject_as_namespace_obj(module, ns_name)
             except Exception as e:
                 print_error(f"Error loading module '{spec}': {e}")
+                if strict:
+                    raise SystemExit(1) from e
 
     def _inject_globals(self, namespace, name):
         """Inject all public symbols from namespace directly into globals."""

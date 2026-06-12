@@ -285,7 +285,7 @@ ______________________________________________________________________
 
 Les **tail calls** (appels en position terminale) sont des appels de fonction qui sont la dernière opération avant le
 retour d'une fonction. Catnip détecte automatiquement ces appels durant l'analyse sémantique et peut les optimiser pour
-éviter la croissance de la pile d'appels.
+éviter la croissance de la call stack.
 
 ### Qu'est-ce qu'un tail call ?
 
@@ -348,20 +348,36 @@ double_sum = (n) => {
 
 Catnip détecte automatiquement les tail calls pendant l'analyse sémantique :
 
-- Les nœuds `Op` avec `ident='call'` reçoivent un attribut `tail=True` s'ils sont en position terminale
-- Cette annotation permet à l'exécuteur d'optimiser l'appel (réutilisation du cadre d'exécution)
-- Seuls les appels **récursifs** (à la même fonction) sont annotés comme tail calls
+- Tout appel **par nom** en position terminale reçoit un attribut `tail=True` : auto-récursion, récursion mutuelle
+  (`ping` appelle `pong` qui appelle `ping`) et appels terminaux vers une autre fonction
+- Cette annotation permet à l'exécuteur d'optimiser l'appel (réutilisation du cadre d'exécution) : une chaîne d'appels
+  terminaux consomme O(1) de pile quelle que soit sa profondeur
+- Conséquence sur les stack traces : les cadres intermédiaires d'une chaîne terminale sont élidés (une erreur dans `g`
+  après `f() → g()` en position terminale ne montre plus `f`). Désactiver avec `pragma("tco", False)` pour débugger avec
+  les cadres complets
+
+> La fonction appelante disparaît au moment exact où elle n'a plus rien à dire. Le protocole est respecté.
+
+```catnip
+# Récursion mutuelle : profondeur illimitée, pile constante
+is_even = (n) => { if n == 0 { True } else { is_odd(n - 1) } }
+is_odd = (n) => { if n == 0 { False } else { is_even(n - 1) } }
+
+is_even(1000000)  # True, sans débordement de pile
+```
 
 ### Positions terminales
 
-| Structure           | Position terminale                                             |
-| ------------------- | -------------------------------------------------------------- |
-| **Fonction/Lambda** | Dernière expression du corps                                   |
-| **Block**           | Dernière expression du bloc                                    |
-| **If/Elif/Else**    | Dernière expression de chaque branche                          |
-| **Match**           | Dernière expression de chaque case                             |
-| **Return**          | Expression retournée                                           |
-| **Opérations**      | ✗ Les arguments d'opérations ne sont PAS en position terminale |
+| Structure           | Position terminale                                              |
+| ------------------- | --------------------------------------------------------------- |
+| **Fonction/Lambda** | Dernière expression du corps                                    |
+| **Block**           | Dernière expression du bloc                                     |
+| **If/Elif/Else**    | Dernière expression de chaque branche                           |
+| **Match**           | Dernière expression de chaque case                              |
+| **Return**          | Expression retournée                                            |
+| **Opérations**      | ✗ Les arguments d'opérations ne sont PAS en position terminale  |
+| **Try/Except**      | ✗ Aucune position terminale sous `try` (le handler reste actif) |
+| **Boucles**         | ✗ Les corps de `while`/`for` ne sont PAS en position terminale  |
 
 ### Conversion non-tail → tail
 

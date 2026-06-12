@@ -79,5 +79,8 @@ unsafe impl<T> Sync for SendPtr<T> {}
 pub const DEBUG_COMMAND_TIMEOUT_SECS: u64 = 60;
 pub const DEBUG_COMMAND_MAX_RETRIES: u32 = 5;
 pub const DEBUG_PAUSE_CONTEXT_LINES: usize = 2;
-pub const DEBUG_EVENT_WAIT_TIMEOUT_SECS: u64 = 30;
+/// Default consumer wait. Must be >= the callback's total park
+/// (DEBUG_COMMAND_TIMEOUT_SECS * DEBUG_COMMAND_MAX_RETRIES) so wait_for_event
+/// never gives up while the VM thread is still parked waiting for a command.
+pub const DEBUG_EVENT_WAIT_TIMEOUT_SECS: u64 = DEBUG_COMMAND_TIMEOUT_SECS * DEBUG_COMMAND_MAX_RETRIES as u64;
 pub const DEBUG_LIST_CONTEXT_LINES: usize = 5;

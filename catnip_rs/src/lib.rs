@@ -29,7 +29,6 @@ pub mod policy;
 pub mod pragma;
 pub mod repl;
 pub mod runtime;
-pub mod semantic;
 pub mod tools;
 pub mod transformer;
 pub mod types;
@@ -51,11 +50,6 @@ use crate::nd::{
     NDDeclaration, NDFuture, NDParallelDecl, NDParallelRecur, NDRecur, NDScheduler, NDState, NDVmDecl, NDVmRecur,
 };
 use crate::parser::{TreeNode, TreeSitterParser};
-use crate::semantic::{
-    BlockFlatteningPass, BluntCodePass, CommonSubexpressionEliminationPass, ConstantFoldingPass,
-    ConstantPropagationPass, CopyPropagationPass, DeadCodeEliminationPass, DeadStoreEliminationPass,
-    FunctionInliningPass, OptimizationPassBase, Optimizer, Semantic, StrengthReductionPass, TailRecursionToLoopPass,
-};
 use crate::tools::{FormatConfig, Formatter};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -500,20 +494,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCodeObject>()?;
     m.add_class::<TreeSitterParser>()?;
     m.add_class::<TreeNode>()?;
-    m.add_class::<OptimizationPassBase>()?;
-    m.add_class::<Optimizer>()?;
-    m.add_class::<BluntCodePass>()?;
-    m.add_class::<BlockFlatteningPass>()?;
-    m.add_class::<ConstantPropagationPass>()?;
-    m.add_class::<ConstantFoldingPass>()?;
-    m.add_class::<CopyPropagationPass>()?;
-    m.add_class::<FunctionInliningPass>()?;
-    m.add_class::<DeadStoreEliminationPass>()?;
-    m.add_class::<DeadCodeEliminationPass>()?;
-    m.add_class::<StrengthReductionPass>()?;
-    m.add_class::<CommonSubexpressionEliminationPass>()?;
-    m.add_class::<TailRecursionToLoopPass>()?;
-    m.add_class::<Semantic>()?;
     m.add_class::<PyHotLoopDetector>()?;
     #[cfg(feature = "ast-executor")]
     m.add_class::<Function>()?;

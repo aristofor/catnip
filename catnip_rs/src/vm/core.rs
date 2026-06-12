@@ -2341,9 +2341,13 @@ impl VM {
 
                                 if has_compiled {
                                     // Validate guards before executing JIT code
-                                    let guards = {
+                                    let (guards, loop_max_slot) = {
                                         let jit = self.jit.lock().unwrap();
-                                        jit.as_ref().and_then(|e| e.get_guards(loop_offset)).cloned()
+                                        let e = jit.as_ref();
+                                        (
+                                            e.and_then(|e| e.get_guards(loop_offset)).cloned(),
+                                            e.and_then(|e| e.get_loop_max_slot(loop_offset)),
+                                        )
                                     };
 
                                     let mut guards_pass = true;
@@ -2391,9 +2395,14 @@ impl VM {
                                         let mut locals_i64: Vec<i64> =
                                             frame.locals.iter().map(|v| v.bits() as i64).collect();
 
-                                        // Extend locals array for LoadScope slots
-                                        let max_slot = guard_locals.iter().map(|(s, _)| s).max().copied();
-                                        if let Some(max_slot) = max_slot {
+                                        // Extend locals array so every slot codegen
+                                        // addresses is in bounds: both guard slots and
+                                        // the loop's max trace.locals_used slot. The
+                                        // warm-start path never extended frame.locals,
+                                        // so guard slots alone undersize the array.
+                                        let guard_max = guard_locals.iter().map(|(s, _)| *s).max();
+                                        let need = loop_max_slot.into_iter().chain(guard_max).max();
+                                        if let Some(max_slot) = need {
                                             if max_slot >= locals_i64.len() {
                                                 locals_i64.resize(max_slot + 1, 0);
                                             }
@@ -3622,9 +3631,14 @@ impl VM {
                             }
                         }
 
-                        // 5. Reset frame state
+                        // 5. Reset frame state. block_stack must be cleared:
+                        // the jump to ip=0 abandons the body without running
+                        // LeaveBlock, otherwise entries pile up per iteration
+                        // (the pure VM already does this)
                         frame.ip = 0;
                         frame.stack.clear();
+                        frame.block_stack.clear();
+                        frame.match_bindings = None;
                         frame.closure_scope = tco_closure;
 
                         // Setup super proxy for bound method calls (inlined MRO-based)
@@ -4171,7 +4185,53 @@ impl VM {
                         code_py,
                         context: context_for_func,
                     });
+
+                    // arg = name_idx + 1: bind the function under its own name
+                    // in its closure so recursive references resolve (let-rec)
+                    if instr.arg > 0 {
+                        let self_name = frame
+                            .code
+                            .as_ref()
+                            .and_then(|c| c.names.get((instr.arg - 1) as usize))
+                            .cloned();
+                        if let Some(name) = self_name {
+                            if let Some(slot) = self.func_table.get(idx) {
+                                if let Some(ref closure) = slot.closure {
+                                    closure.insert_captured(&name, Value::from_vmfunc(idx));
+                                }
+                            }
+                        }
+                    }
+
                     frame.push(Value::from_vmfunc(idx));
+                }
+
+                OpCode::PatchClosure => {
+                    // Letrec group patch: closure_of(target)[names[arg]] = value.
+                    // No-op when target is not a function (e.g. a sibling slot
+                    // not populated yet because its branch never ran).
+                    let value = frame.pop();
+                    let target = frame.pop();
+                    let mut consumed = false;
+                    if target.is_vmfunc() && value.is_vmfunc() {
+                        let name = frame
+                            .code
+                            .as_ref()
+                            .and_then(|c| c.names.get(instr.arg as usize))
+                            .cloned();
+                        if let Some(name) = name {
+                            if let Some(slot) = self.func_table.get(target.as_vmfunc_idx()) {
+                                if let Some(ref closure) = slot.closure {
+                                    closure.insert_captured(&name, value);
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
+                    if !consumed {
+                        decref_discard(&mut self.struct_registry, value);
+                    }
+                    decref_discard(&mut self.struct_registry, target);
                 }
 
                 // --- Collection literals ---
@@ -4813,9 +4873,13 @@ impl VM {
 
                                 if has_compiled {
                                     // Validate guards before executing JIT code
-                                    let guards = {
+                                    let (guards, loop_max_slot) = {
                                         let jit = self.jit.lock().unwrap();
-                                        jit.as_ref().and_then(|e| e.get_guards(loop_offset)).cloned()
+                                        let e = jit.as_ref();
+                                        (
+                                            e.and_then(|e| e.get_guards(loop_offset)).cloned(),
+                                            e.and_then(|e| e.get_loop_max_slot(loop_offset)),
+                                        )
                                     };
 
                                     let mut guards_pass = true;
@@ -4861,9 +4925,14 @@ impl VM {
                                         let mut locals_raw: Vec<i64> =
                                             frame.locals.iter().map(|v| v.bits() as i64).collect();
 
-                                        // Extend locals array for LoadScope slots
-                                        let max_slot = guard_locals.iter().map(|(s, _)| s).max().copied();
-                                        if let Some(max_slot) = max_slot {
+                                        // Extend locals array so every slot codegen
+                                        // addresses is in bounds: both guard slots and
+                                        // the loop's max trace.locals_used slot. The
+                                        // warm-start path never extended frame.locals,
+                                        // so guard slots alone undersize the array.
+                                        let guard_max = guard_locals.iter().map(|(s, _)| *s).max();
+                                        let need = loop_max_slot.into_iter().chain(guard_max).max();
+                                        if let Some(max_slot) = need {
                                             if max_slot >= locals_raw.len() {
                                                 locals_raw.resize(max_slot + 1, 0);
                                             }
@@ -6278,6 +6347,9 @@ impl VM {
                         if let Some(info) = err.exception_info() {
                             frame.active_exception_stack.push(info);
                         }
+                        for &v in &frame.stack[handler.stack_depth..] {
+                            decref_discard(&mut self.struct_registry, v);
+                        }
                         frame.stack.truncate(handler.stack_depth);
                         frame.block_stack.truncate(handler.block_depth);
                         frame.ip = handler.target_addr;
@@ -6289,6 +6361,9 @@ impl VM {
                 catnip_core::exception::HandlerType::Finally => {
                     let handler = frame.handler_stack.pop().unwrap();
                     frame.pending_unwind = Some(err.to_pending_unwind());
+                    for &v in &frame.stack[handler.stack_depth..] {
+                        decref_discard(&mut self.struct_registry, v);
+                    }
                     frame.stack.truncate(handler.stack_depth);
                     frame.block_stack.truncate(handler.block_depth);
                     // For Return, save the value on the stack

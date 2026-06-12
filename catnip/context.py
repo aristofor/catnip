@@ -1,6 +1,7 @@
 # FILE: catnip/context.py
 import builtins as _builtins
 import logging
+import sys
 
 from catnip import _rs
 from catnip._rs import CatnipMeta, ContextBase
@@ -12,8 +13,41 @@ except ImportError:
 
 from .exc import CatnipTypeError
 
-# Configure logger format
-logging.basicConfig(format='%(asctime)s.%(msecs)03d %(message)s', datefmt='%F %T', level=logging.WARNING)
+
+class _LiveStderrHandler(logging.StreamHandler):
+    """StreamHandler resolving sys.stderr at emit time.
+
+    configure_logging() runs once per process; a handler that captured
+    sys.stderr at creation would keep writing to that stream forever,
+    even after a redirection (pytest capture, Click CliRunner). Same
+    pattern as the stdlib's logging._StderrHandler.
+    """
+
+    def __init__(self):
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+
+def configure_logging():
+    """Attach catnip's CLI log format to the 'catnip' logger hierarchy.
+
+    Called from application entry points only, never at import time: a
+    library must not alter the host's logging (root basicConfig would turn
+    user basicConfig calls into silent no-ops; an import-time handler with
+    propagate=False would prevent the host from routing catnip messages).
+    Idempotent.
+    """
+    logger = logging.getLogger('catnip')
+    if logger.handlers:
+        return
+    handler = _LiveStderrHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(message)s', datefmt='%F %T'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
 
 
 # Module-level helper functions (VM-compatible, not closures)
@@ -127,7 +161,9 @@ class _JitWrapper:
             self.ctx.jit_enabled = True
         self.ctx._init_jit()
 
-        func._try_jit_compile()
+        # No per-function compilation in AST mode: the JIT is a VM feature (hot
+        # loop detection compiles in the VM). Marking jit_enabled is enough; the
+        # wrapper just returns the callable.
         return func
 
     def __reduce__(self):
@@ -149,6 +185,10 @@ class _ImportWrapper:
     def __init__(self, ctx):
         self.ctx = ctx
         self._loader = None
+        # Rust ImportLoader, wired by Catnip.__init__: namespace loading is
+        # delegated to it (native plugins, rs:: cache isolation); the
+        # selective/wild binding below stays here, in the Python globals
+        self._rust_import = None
 
     def _get_loader(self):
         if self._loader is None:
@@ -167,7 +207,18 @@ class _ImportWrapper:
                 caller_dir = Path(meta.file).parent
             except AttributeError:
                 pass
-        namespace = self._get_loader().import_module(spec, caller_dir=caller_dir, protocol=protocol)
+        if self._rust_import is not None:
+            from .compat import _map_exception
+
+            try:
+                namespace = self._rust_import(
+                    spec, protocol=protocol, caller_dir=str(caller_dir) if caller_dir is not None else None
+                )
+            except RuntimeError as e:
+                # Same RuntimeError -> Catnip* mapping the VM applies
+                raise _map_exception(e) from None
+        else:
+            namespace = self._get_loader().import_module(spec, caller_dir=caller_dir, protocol=protocol)
         if names and wild:
             raise CatnipTypeError("cannot combine selective names with wild=True")
         if names:

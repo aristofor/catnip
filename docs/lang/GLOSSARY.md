@@ -4,9 +4,9 @@ Ce document définit les concepts clés et la terminologie utilisée dans Catnip
 
 ## Architecture et composants
 
-### HostApp (application hôte)
+### HostApp (host app)
 
-L'**application hôte** est le programme Python qui intègre et utilise Catnip comme DSL. Elle fournit :
+L'**host app** est le programme Python qui intègre et utilise Catnip comme DSL. Elle fournit :
 
 - Le contexte d'exécution
 - Les fonctions et objets Python accessibles depuis Catnip
@@ -38,7 +38,7 @@ Le **registre** est le composant central qui :
 
 Le **contexte d'exécution** contient :
 
-- Les scopes (portées) avec leurs variables locales/globales
+- Les scopes avec leurs variables locales/globales
 - Le résultat de la dernière expression
 - L'accès aux builtins Python
 - L'état d'exécution (pile de scopes)
@@ -130,12 +130,12 @@ Op(ident=OpCode.ADD, args=(left, right), kwargs={})
 
 **Différence** : IR est la sortie brute du parser (avant optimisation), Op est optimisé et annoté (tail calls, etc.).
 
-### Scope (Portée)
+### Scope
 
-Une **portée** est un dictionnaire de symboles (variables) avec un parent optionnel :
+Un **scope** est un dictionnaire de symboles (variables) avec un parent optionnel :
 
-- **Global scope**: Portée racine
-- **Local scope**: Portée créée par fonction/lambda/bloc
+- **Global scope**: scope racine
+- **Local scope**: scope créé par fonction/lambda/bloc
 - **Lookup**: Recherche en cascade (local → parent → global)
 
 **Caractéristique**: Résolution en temps constant O(1) via table de hachage
@@ -193,11 +193,11 @@ fonction.
 **Optimisation des appels terminaux**: Les fonctions qui se terminent par un appel récursif sont optimisées pour ne pas
 consommer de stack Python.
 
-**Implémentation**: Trampoline pattern avec détection de self-recursion.
+**Implémentation** : Trampoline pattern avec détection de récursion sur soi-même.
 
-**Pragma**: `pragma("tco", True)` / `pragma("tco", False)`
+**Pragma** : `pragma("tco", True)` / `pragma("tco", False)`
 
-### ND-Recursion (Non-Deterministic Recursion)
+### ND-récursion (Non-Deterministic Recursion)
 
 **Récursion non-déterministe** : Modèle de concurrence structurelle où l'async émerge de la sémantique plutôt que de
 mots-clés explicites.
@@ -211,7 +211,7 @@ mots-clés explicites.
 
 **Syntaxe** :
 
-- `~~` : ND recursion
+- `~~` : ND-récursion
 - `~>` : ND map
 - `~[]` : ND empty topos
 
@@ -414,7 +414,7 @@ Décomposition d'une structure de données en plusieurs variables.
 
 Application d'une opération, étendue naturellement à toutes les dimensions internes.
 
-La même expression fonctionne quel que soit le "niveau" : scalaire, liste, matrice, colonne, tenseur, ou structure hôte
+La même expression fonctionne quel que soit le "niveau" : scalaire, liste, matrice, colonne, tenseur, ou structure host
 arbitraire.
 
 **Syntaxe**: `collection.[operation]`
@@ -480,7 +480,7 @@ pragma("cache", True)
 
 Environnement d'exécution **isolé** qui limite les actions possibles du code.
 
-**Objectif** : Permettre l'exécution de code utilisateur sans risque pour le système hôte.
+**Objectif** : Permettre l'exécution de code utilisateur sans risque pour le host system.
 
 > Catnip peut s'exécuter dans un contexte restreint où seules certaines fonctions Python sont accessibles.
 

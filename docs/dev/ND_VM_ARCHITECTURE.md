@@ -76,7 +76,7 @@ Opérateur `~~` - récursion non-déterministe avec 2 formes.
 **Stack effect** : variable selon arg
 
 - Form 0 (combinator) : `(seed, lambda) -> result`
-- Form 1 (declaration) : `(lambda) -> lambda`
+- Form 1 (déclaration) : `(lambda) -> lambda`
 
 **Arguments** :
 
@@ -326,11 +326,11 @@ preservation : list→list, tuple→tuple. Filter par condition ou masque boolé
 `dispatch()`, puis restaure le frame_stack. Permet d'appeler des VMFunc depuis la logique broadcast sans modifier la
 boucle de dispatch.
 
-**ND recursion** : `nd_recursion_call()` utilise un sentinel `"__nd_recur__"` comme handle `recur`. Le lambda reçoit
+**ND-récursion** : `nd_recursion_call()` utilise un sentinel `"__nd_recur__"` comme handle `recur`. Le lambda reçoit
 `(seed, recur)`, et le Call opcode intercepte les appels au sentinel pour déclencher la récursion. Stack de lambdas ND
 (`nd_lambda_stack`) pour supporter la récursion imbriquée. Depth guard à 10k.
 
-**ND declaration** : `~~(lambda)` et `~>(func)` produisent des wrappers NativeTuple (`("__nd_decl__", lambda)`,
+**ND-déclaration** : `~~(lambda)` et `~>(func)` produisent des wrappers NativeTuple (`("__nd_decl__", lambda)`,
 `("__nd_lift__", func)`) reconnus par le Call opcode.
 
 ## Pragmas Supportés
@@ -395,7 +395,7 @@ Coût : ~5-10 ns par dispatch (vs ~100-200 ns pour lookup Python dict).
 
 ### Allocation Minimale
 
-La forme lift est un no-op (0 alloc). La forme declaration alloue un `NDDeclaration` wrapper (1 alloc) :
+La forme lift est un no-op (0 alloc). La forme déclaration alloue un `NDDeclaration` wrapper (1 alloc) :
 
 ```rust
 // Declaration: ~~ lambda

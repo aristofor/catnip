@@ -17,7 +17,7 @@ Les constantes proviennent de deux sources :
 - **`constants.rs`** - Valeurs non-visuelles (messages, seuils, tailles)
 - **`visual.toml`** - Couleurs et prompts (OKLCH), injectées via `build.rs` dans `theme_generated.rs`
 
-Les constantes non-visuelles vivent dans `catnip_core` (pure Rust, sans PyO3). Les constantes visuelles sont generees
+Les constantes non-visuelles vivent dans `catnip_core` (pure Rust, sans PyO3). Les constantes visuelles sont générées
 par `build.rs` dans `catnip_rs`. Le fichier `catnip_rs/src/constants.rs` re-exporte tout via
 `pub use catnip_core::constants::*` + `include!()`, donc tous les modules accèdent à tout via `crate::constants::*`.
 

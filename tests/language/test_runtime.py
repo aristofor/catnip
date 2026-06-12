@@ -7,7 +7,6 @@ Tests the `catnip` builtin namespace for inspecting interpreter state.
 
 import pytest
 
-
 from catnip import Catnip, __version__
 
 

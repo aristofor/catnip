@@ -13,12 +13,12 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
 - [STRUCTURES](STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
 - [ENUMS](ENUMS.md) - Types énumérés : variantes nommées, pattern matching et sémantique d'égalité
 - [UNIONS](UNIONS.md) - Unions taggées (ADT) : variantes avec ou sans payload, destructuration dans `match`, génériques
-- [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
+- [PATTERN_MATCHING](PATTERN_MATCHING.md) - Référence complète du pattern matching
 
 ## Aller plus loin
 
 - [BROADCAST](BROADCAST.md) - Notation vectorielle sur collections : opérations avec `A.[op M]`, transformations sur
-  listes et dictionnaires, motifs de broadcasting
+  listes et dictionnaires, patterns de broadcasting
 
 - [ND_RECURSION](ND_RECURSION.md) - Récursion non-déterministe : opérateurs `~~`, `~>`, `~[]`, modes d'exécution,
   mémoïsation et broadcast ND
@@ -29,8 +29,8 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
 - [COMPREHENSIONS](COMPREHENSIONS.md) - Comprehensions Python vers Catnip : traduction des patterns map, filter, flatmap
   et produit cartesien
 
-- [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Affectation, portée des variables et closures : résolution de
-  portée, masquage (shadowing), captures et durée de vie
+- [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Affectation, scope des variables et closures : résolution de scope,
+  shadowing, captures et durée de vie
 
 - [PRAGMAS](PRAGMAS.md) - Directives de compilation (TCO, JIT avec `@jit` et `pragma("jit", "all")`), récursion ND (mode
   parallèle, mémoïsation) et import de modules

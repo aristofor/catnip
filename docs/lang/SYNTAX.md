@@ -238,6 +238,7 @@ ______________________________________________________________________
 Le bloc `except` utilise une syntaxe match-like avec `=>` :
 
 <!-- check: no-check -->
+
 ```catnip
 try {
     resultat = operation_risquee()
@@ -250,28 +251,29 @@ try {
 }
 ```
 
-Regles :
+Règles :
 
 - `try` + bloc obligatoire
 - `except` optionnel, contient 1..N clauses `pattern => { body }`
-- `finally` optionnel, execute dans tous les cas (succes, exception, return, break)
+- `finally` optionnel, exécuté dans tous les cas (succès, exception, return, break)
 - au moins un `except` ou `finally` requis
-- `_` (catch-all) doit etre la derniere clause
+- `_` (catch-all) doit être la dernière clause
 - binding optionnel : `e: TypeError` bind le message d'erreur dans `e`
 - union de types : `ValueError | KeyError` match l'un ou l'autre
 
 ### raise
 
 <!-- check: expect-error -->
+
 ```catnip
-raise ValueError("message")    # lever une exception typee
+raise ValueError("message")    # lever une exception typée
 raise "message"                 # lever un RuntimeError
 raise                           # re-lever l'exception courante (dans except)
 ```
 
 ### Types d'exception
 
-Hierarchie compatible Python :
+Hiérarchie compatible Python :
 
 ```
 Exception
@@ -288,12 +290,13 @@ Exception
     └── KeyError
 ```
 
-Le matching `except` suit la hierarchie : `except { e: ArithmeticError => { ... } }` catch aussi `ZeroDivisionError`.
+Le matching `except` suit la hiérarchie : `except { e: ArithmeticError => { ... } }` catch aussi `ZeroDivisionError`.
 `except { e: Exception => { ... } }` catch tout.
 
 ### with (context managers)
 
 <!-- check: no-check -->
+
 ```catnip
 with f = open("data.csv") {
     f.read()
@@ -305,13 +308,13 @@ with a = open("in"), b = open("out") {
 }
 ```
 
-Regles :
+Règles :
 
 - `with` + au moins un binding `name = expr` + bloc obligatoire
-- bindings separes par `,`, chacun visible pour les suivants
-- `__enter__()` appele de gauche a droite, `__exit__()` de droite a gauche
-- si `__exit__` retourne truthy, l'exception est supprimee
-- traceback toujours `None` (ecart avec Python)
+- bindings séparés par `,`, chacun visible pour les suivants
+- `__enter__()` appelé de gauche à droite, `__exit__()` de droite à gauche
+- si `__exit__` retourne truthy, l'exception est supprimée
+- traceback toujours `None` (écart avec Python)
 
 ______________________________________________________________________
 

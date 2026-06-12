@@ -27,6 +27,10 @@ pub struct JITExecutor {
     compiled: HashMap<usize, CompiledFn>,
     /// Guards for each compiled loop trace: loop_offset -> Vec<(name, expected_value, slot)>
     guards: HashMap<usize, Vec<NameGuard>>,
+    /// Highest local slot the compiled loop code addresses: loop_offset -> max_slot.
+    /// Sizes the locals array at execution time; codegen writes every
+    /// `trace.locals_used` slot, not just guard slots.
+    loop_max_slot: HashMap<usize, usize>,
     /// Compiled function traces: func_id -> (function pointer, num_locals_used, name_guards)
     compiled_functions: HashMap<String, FunctionTrace>,
     /// Registry of pure functions available for inlining
@@ -50,6 +54,7 @@ impl JITExecutor {
             codegen: None,
             compiled: HashMap::new(),
             guards: HashMap::new(),
+            loop_max_slot: HashMap::new(),
             compiled_functions: HashMap::new(),
             pure_registry: PureFunctionRegistry::new(),
             enabled: true,
@@ -122,6 +127,12 @@ impl JITExecutor {
     /// Get guards for a compiled loop.
     pub fn get_guards(&self, offset: usize) -> Option<&Vec<(String, i64, usize)>> {
         self.guards.get(&offset)
+    }
+
+    /// Highest local slot the compiled loop code addresses, if compiled.
+    #[inline]
+    pub fn get_loop_max_slot(&self, offset: usize) -> Option<usize> {
+        self.loop_max_slot.get(&offset).copied()
     }
 
     /// Check if a compiled version exists for a function.
@@ -210,6 +221,13 @@ impl JITExecutor {
             let _ = inliner.optimize(&mut trace);
         }
 
+        // Record the highest slot codegen will address (post-inlining), so the
+        // executor can size the locals array even on the warm-start path where
+        // frame.locals was never extended by tracing.
+        if let Some(max_slot) = trace.locals_used.iter().copied().max() {
+            self.loop_max_slot.insert(offset, max_slot);
+        }
+
         // Compile trace
         let codegen = self.ensure_codegen()?;
         let func = codegen.compile(&trace)?;
@@ -293,6 +311,7 @@ impl JITExecutor {
         self.recorder.abort();
         self.compiled.clear();
         self.guards.clear();
+        self.loop_max_slot.clear();
     }
 
     /// Register a pre-built JitFunctionInfo for potential inlining.

@@ -174,7 +174,7 @@ def double(x):
     return x * 2
 ```
 
-### Chargement dans Catnip
+### Loading dans Catnip
 
 <!-- check: no-check -->
 

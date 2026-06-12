@@ -201,7 +201,7 @@ pub struct CallMember {
 impl CallMember {
     #[new]
     #[pyo3(signature = (ident, params=None))]
-    fn new(py: Python, ident: Py<PyAny>, params: Option<Py<Params>>) -> PyResult<(Self, Member)> {
+    fn new(py: Python, ident: Py<PyAny>, params: Option<Py<Params>>) -> PyResult<PyClassInitializer<Self>> {
         let params_obj = if let Some(p) = params {
             p
         } else {
@@ -209,7 +209,7 @@ impl CallMember {
         };
 
         let member = Member::new(ident);
-        Ok((Self { params: params_obj }, member))
+        Ok(PyClassInitializer::from(member).add_subclass(Self { params: params_obj }))
     }
 
     fn __repr__(slf: PyRef<'_, Self>, py: Python) -> PyResult<String> {

@@ -1,6 +1,6 @@
-# Chargement de modules - bases
+# Module loading - bases
 
-Exemples courts pour comprendre le chargement de modules Python.
+Exemples courts pour comprendre le module loading Python.
 
 ## Fichiers
 

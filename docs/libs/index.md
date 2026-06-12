@@ -5,7 +5,7 @@ dépendance Python runtime.
 
 > À ne pas confondre avec les modules Python chargés via `-m` (CLI) ou `import('numpy')` (selon la policy). Les stdlib
 > Catnip sont compilées dans le runtime ; les modules Python passent par le loader externe. Voir
-> [Module Loading](../user/MODULE_LOADING.md) pour la distinction.
+> [Module loading](../user/MODULE_LOADING.md) pour la distinction.
 
 ## Modules disponibles
 

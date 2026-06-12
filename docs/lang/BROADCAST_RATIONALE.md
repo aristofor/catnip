@@ -47,7 +47,7 @@ data.[list(True, False, True, False, False)]  # Masque: [3, 2]
 
 # Opérateurs ND
 data.[~> abs]    # ND-map: applique abs à chaque élément
-data.[~~(n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]  # ND-recursion: factorielle
+data.[~~(n, recur) => { if n <= 1 { 1 } else { n * recur(n - 1) } }]  # ND-récursion : factorielle
 ```
 
 > Achievement unlocked: Compréhension partielle du broadcasting.

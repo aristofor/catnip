@@ -3,9 +3,10 @@
 
 use super::Registry;
 use crate::constants::*;
+use crate::core::function::Lambda;
 use crate::vm::structs::MethodKey;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyTuple};
 use std::cell::RefCell;
 
 use crate::types::{catnip, exceptions};
@@ -407,8 +408,8 @@ impl Registry {
             false
         };
 
-        // Evaluate the value first
-        let mut value = self.exec_stmt_impl(py, value_node)?;
+        // Evaluate the value first (keep value_node for letrec detection below)
+        let mut value = self.exec_stmt_impl(py, value_node.clone_ref(py))?;
 
         // If explicit_unpack=true and value is a single-element sequence, unwrap it
         // BUT only if the pattern is also a single simple element (no star, no nested)
@@ -484,8 +485,100 @@ impl Registry {
             }
         }
 
+        // letrec*: a syntactic function definition (`name = (args) => {...}`)
+        // sees itself in its own closure, and is injected into the closures of
+        // functions previously defined in the same frame -- a group of mutually
+        // recursive functions keeps working after escaping its scope.
+        // Aliases and rebinds are not definitions: they never patch closures.
+        self.apply_letrec_binding(py, names_node.bind(py), value_node.bind(py), &value, &locals)?;
+
         // Return the value (for chaining assignments like x = y = 10)
         Ok(value)
+    }
+
+    /// Letrec binding for `op_set_locals`: detects `name = <lambda literal>`
+    /// syntactically and wires self/sibling references into closure scopes.
+    fn apply_letrec_binding(
+        &self,
+        py: Python<'_>,
+        names_node: &Bound<'_, PyAny>,
+        value_node: &Bound<'_, PyAny>,
+        value: &Py<PyAny>,
+        locals: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        // Only a lambda literal on the RHS is a definition
+        let is_lambda_def = value_node.get_type().name()? == catnip::OP
+            && value_node.getattr("ident")?.extract::<i32>()? == self.opcodes.op_lambda;
+        if !is_lambda_def {
+            return Ok(());
+        }
+        let Some(fn_name) = Self::single_assign_name(names_node)? else {
+            return Ok(());
+        };
+        let Ok(lambda_cell) = value.bind(py).cast::<Lambda>() else {
+            return Ok(());
+        };
+
+        let token: u64 = locals.call_method0("current_frame_token")?.extract()?;
+        let frame_names: Vec<String> = locals.call_method0("current_frame_names")?.extract()?;
+
+        // Self-reference + mark as defined in this frame
+        {
+            let mut lambda = lambda_cell.borrow_mut();
+            lambda.def_frame_token = token;
+            lambda
+                .closure_scope
+                .bind(py)
+                .cast::<PyDict>()?
+                .set_item(&fn_name, value)?;
+        }
+
+        // Patch sibling definitions of this frame (and only this frame:
+        // functions captured from elsewhere keep their own bindings)
+        for peer_name in frame_names {
+            if peer_name == fn_name {
+                continue;
+            }
+            let Some(peer) = locals
+                .call_method1("get", (peer_name.as_str(),))?
+                .extract::<Option<Py<PyAny>>>()?
+            else {
+                continue;
+            };
+            if let Ok(peer_lambda) = peer.bind(py).cast::<Lambda>() {
+                let peer_ref = peer_lambda.borrow();
+                if peer_ref.def_frame_token == token {
+                    peer_ref
+                        .closure_scope
+                        .bind(py)
+                        .cast::<PyDict>()?
+                        .set_item(&fn_name, value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract the name of a simple single-target assignment pattern
+    /// (`x = ...`), unwrapping the parser's single-element tuple. Returns
+    /// None for tuple/star/nested patterns.
+    fn single_assign_name(pattern: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+        let type_name = pattern.get_type().name()?;
+        if type_name == catnip::REF {
+            return Ok(Some(pattern.getattr("ident")?.extract()?));
+        }
+        if type_name == catnip::LVALUE {
+            return Ok(Some(pattern.getattr("value")?.extract()?));
+        }
+        if let Ok(tuple) = pattern.cast::<PyTuple>() {
+            if tuple.len() == 1 {
+                let inner = tuple.get_item(0)?;
+                if inner.cast::<PyTuple>().is_err() {
+                    return Self::single_assign_name(&inner);
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Recursively unpack a pattern against a value (supports nested patterns and star operator)
@@ -1477,9 +1570,10 @@ impl Registry {
 
         let enum_type_obj = Py::new(py, CatnipEnumType::new(name.clone(), 0, &variant_names))?;
 
-        // Store in context globals
+        // Store in global scope (same path used by op_struct / op_trait_def / op_union).
         let ctx = self.ctx.bind(py);
-        ctx.call_method1("set_local", (name.as_str(), &enum_type_obj))?;
+        let globals = ctx.getattr("globals")?;
+        globals.call_method1("__setitem__", (name.as_str(), &enum_type_obj))?;
 
         Ok(py.None())
     }
@@ -1576,7 +1670,7 @@ impl Registry {
     }
 
     /// Check if a PyErr is a control flow signal (ReturnValue, BreakLoop, ContinueLoop).
-    fn is_control_flow_signal(py: Python<'_>, exc: &PyErr) -> bool {
+    pub(crate) fn is_control_flow_signal(py: Python<'_>, exc: &PyErr) -> bool {
         if let Ok(type_name) = exc.get_type(py).name() {
             matches!(
                 type_name.to_string().as_str(),
@@ -1635,6 +1729,10 @@ impl Registry {
                         };
 
                         if matches {
+                            // Exception consumed: drop its recorded position so a
+                            // later error doesn't inherit it
+                            self.error_byte.set(-1);
+
                             // Save/restore active exception (nested try/except
                             // inside a handler must not clobber the outer context)
                             let prev = self.active_exception.borrow_mut().take();

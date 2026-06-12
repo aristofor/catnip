@@ -20,7 +20,7 @@ use std::path::PathBuf;
 /// Cache version - derived from max VM opcode + a salt for semantic changes.
 /// Bump COMPILER_SALT when compilation semantics change (e.g. tail-call marking)
 /// without adding new opcodes.
-const COMPILER_SALT: u32 = 3;
+const COMPILER_SALT: u32 = 4;
 const CACHE_VERSION: u32 = VMOpCode::MAX as u32 + COMPILER_SALT;
 
 /// Wrapper that includes version metadata for safe deserialization.

@@ -2,7 +2,6 @@
 pub mod config;
 pub mod debugger;
 pub mod errors;
-pub mod ffi;
 pub mod formatter;
 pub mod indentation;
 pub mod lint_cfg;

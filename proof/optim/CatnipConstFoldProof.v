@@ -2,7 +2,7 @@
 (* CatnipConstFoldProof.v - Correctness of the constant folding pass
  *
  * Source of truth:
- *   catnip_rs/src/semantic/constant_folding.rs
+ *   catnip_core/src/semantic/passes/constant_folding.rs
  *
  * Scope: pure algebraic constant folding. Expressions whose operands
  * are all concrete literals are replaced by their computed value.

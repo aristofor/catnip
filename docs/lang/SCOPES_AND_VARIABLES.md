@@ -62,7 +62,7 @@ items[2] = 3
 > `obj.__setitem__(k, v)`. Ce qui signifie que tout objet exposant ces méthodes devient automatiquement mutable depuis
 > Catnip.
 
-## Portée des variables dans les blocs
+## Scope des variables dans les blocs
 
 Les variables dans les blocs ne sont pas accessibles à l'extérieur.
 
@@ -106,8 +106,8 @@ Catnip applique le principe de moindre surprise: une variable locale reste local
 
 ## Vue d'Ensemble
 
-Catnip utilise la **portée lexicale** (lexical scoping) : la résolution des variables dépend de la structure du code,
-pas du flux d'exécution.
+Catnip utilise le **lexical scoping** : la résolution des variables dépend de la structure du code, pas du flux
+d'exécution.
 
 **Propriétés fondamentales** :
 
@@ -325,6 +325,59 @@ print(c2())  # 102
 
 **Note** : Dans l'exemple ci-dessus, chaque lambda `increment` a accès au `count` de son scope parent, créant ainsi une
 closure.
+
+### Fonctions imbriquées récursives
+
+Une fonction nommée peut s'appeler elle-même, y compris quand elle est définie dans le corps d'une autre fonction. La
+liaison `nom = (params) => { ... }` rend le nom visible dans le corps de la fonction, avant même que l'assignation du
+scope englobant soit terminée :
+
+```catnip
+outer = () => {
+    inner = (n, acc=0) => {
+        if n <= 0 { acc } else { inner(n - 1, acc + 1) }  # self-référence OK
+    }
+    inner(1000)
+}
+
+outer()  # 1000
+```
+
+La visibilité anticipée s'étend au **groupe** : les fonctions nommées définies dans le même bloc se voient entre elles,
+même celle définie après. La récursion mutuelle fonctionne donc aussi entre fonctions imbriquées, y compris quand les
+fonctions sont retournées hors de leur scope de définition :
+
+```catnip
+make = () => {
+    even = (n) => { if n == 0 { True } else { odd(n - 1) } }   # odd pas encore définie
+    odd  = (n) => { if n == 0 { False } else { even(n - 1) } }
+    even
+}
+f = make()
+f(10)  # True -- le groupe even/odd survit à la sortie de make
+```
+
+Les appels mutuels en position terminale bénéficient de la TCO comme l'auto-récursion : un cycle `even → odd → even`
+consomme O(1) de pile quelle que soit la profondeur (voir [FUNCTIONS.md](FUNCTIONS.md), section Tail Calls).
+
+Ces liaisons sont figées à la définition : c'est la **définition syntaxique** (`nom = (params) => { ... }`) qui crée le
+lien, pas la valeur courante du nom. Réassigner le nom ensuite ne change pas ce que les fonctions du groupe appellent,
+et un alias (`h = g`) ne crée aucun lien :
+
+```catnip
+test = () => {
+    g = (n) => { if n == 0 { "orig" } else { g(n - 1) } }
+    h = g                  # alias, pas une définition
+    g = "autre chose"      # mutation : le lien de récursion ne bouge pas
+    h(3)                   # "orig"
+}
+```
+
+Limitation : sérialiser (pickle) une fonction d'un groupe mutuel ne conserve que sa self-référence ; les liens vers les
+autres fonctions du groupe sont perdus (ils forment des cycles que la sérialisation ne représente pas).
+
+> Le nom existe dans le corps avant d'exister dehors. La fonction se connaît elle-même une instruction avant tout le
+> monde, et reconnaît ses voisines de bloc à vie.
 
 ### Paramètres de fonction
 

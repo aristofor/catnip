@@ -443,5 +443,5 @@ ______________________________________________________________________
 ## Références
 
 - [prompt_toolkit dialogs](https://python-prompt-toolkit.readthedocs.io/en/master/pages/dialogs.html)
-- [MODULE_LOADING](../user/MODULE_LOADING.md) -- chargement de modules Python depuis Catnip
+- [MODULE_LOADING](../user/MODULE_LOADING.md) -- module loading Python depuis Catnip
 - [CLICK_INTEGRATION](CLICK_INTEGRATION.md) -- construire une CLI avec Click

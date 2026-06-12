@@ -71,8 +71,11 @@ impl ImportLoader {
         })
     }
 
-    /// Main entry point: import(spec, *names, wild=False, protocol=None)
-    #[pyo3(signature = (spec, *names, wild=false, protocol=None))]
+    /// Main entry point: import(spec, *names, wild=False, protocol=None, caller_dir=None)
+    ///
+    /// `caller_dir` overrides the META.file-derived directory; used by the AST
+    /// executor whose META lives in the Python context, not in the VM globals.
+    #[pyo3(signature = (spec, *names, wild=false, protocol=None, caller_dir=None))]
     fn __call__(
         &mut self,
         py: Python<'_>,
@@ -80,6 +83,7 @@ impl ImportLoader {
         names: &Bound<'_, PyTuple>,
         wild: bool,
         protocol: Option<&str>,
+        caller_dir: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         // Validate spec
         let validated = resolve::validate_spec(spec).map_err(PyRuntimeError::new_err)?;
@@ -100,8 +104,8 @@ impl ImportLoader {
             return Err(PyTypeError::new_err("cannot combine selective names with wild=True"));
         }
 
-        // Get caller_dir from META.file
-        let caller_dir = self.caller_dir(py);
+        // Explicit caller_dir wins; fall back to META.file in the VM globals
+        let caller_dir = caller_dir.map(PathBuf::from).or_else(|| self.caller_dir(py));
 
         // Load the module namespace
         let namespace = if validated.starts_with('.') {
@@ -560,6 +564,18 @@ impl ImportLoader {
             }
 
             ext_mod.call_method1("load_extension", (module, &ctx))?;
+        }
+
+        // Mirror exports into the Python context globals: the AST executor
+        // resolves names there, not in the VM globals the proxy fed
+        if let Some(ref real_ctx) = self.context {
+            let ext_dict = ext_meta.cast::<pyo3::types::PyDict>()?;
+            if let Some(exports) = ext_dict.get_item("exports")? {
+                if !exports.is_none() {
+                    let globals = real_ctx.bind(py).getattr("globals")?;
+                    globals.call_method1("update", (exports,))?;
+                }
+            }
         }
 
         Ok(())

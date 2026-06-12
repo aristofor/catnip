@@ -3,13 +3,7 @@
 Fixtures communes pour les tests JIT.
 """
 
-import os
-
 import pytest
-
-# Force VM mode for all JIT tests
-os.environ['CATNIP_EXECUTOR'] = 'vm'
-
 from catnip._rs import VM, Compiler
 
 from catnip import Catnip

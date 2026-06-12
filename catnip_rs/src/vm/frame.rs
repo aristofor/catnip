@@ -538,6 +538,10 @@ pub enum ClosureParent {
 struct ClosureScopeInner {
     captured: RefCell<IndexMap<String, Value>>,
     parent: ClosureParent,
+    /// Names bound by letrec (self-reference or sibling injected by
+    /// MakeFunction/PatchClosure). Skipped at serialization: they form
+    /// reference cycles that pickle cannot memoize (fresh wrappers).
+    letrec_names: RefCell<std::collections::HashSet<String>>,
 }
 
 /// Pure-Rust closure scope eliminating Python boundary crossings for
@@ -554,8 +558,27 @@ impl NativeClosureScope {
             inner: Rc::new(ClosureScopeInner {
                 captured: RefCell::new(captured),
                 parent,
+                letrec_names: RefCell::new(std::collections::HashSet::new()),
             }),
         }
+    }
+
+    /// Bind a name directly in this scope's captured set, regardless of the
+    /// parent chain (letrec binding by MakeFunction/PatchClosure). The name
+    /// is marked as a letrec entry and skipped at serialization.
+    pub fn insert_captured(&self, name: &str, value: Value) {
+        self.inner.captured.borrow_mut().insert(name.to_string(), value);
+        self.inner.letrec_names.borrow_mut().insert(name.to_string());
+    }
+
+    /// Whether a captured name was bound by letrec (not serializable).
+    pub fn is_letrec_entry(&self, name: &str) -> bool {
+        self.inner.letrec_names.borrow().contains(name)
+    }
+
+    /// Identity comparison (same underlying scope).
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Return all captured variable entries (name, value) in this scope only.
@@ -771,6 +794,13 @@ pub fn native_scope_to_py(py: Python<'_>, scope: &NativeClosureScope) -> PyResul
     let captured = scope.inner.captured.borrow();
     let dict = PyDict::new(py);
     for (name, &val) in captured.iter() {
+        // Skip letrec bindings (self-reference or mutual group sibling):
+        // converting them would cycle (function -> closure -> function ->
+        // ...) through pickle, which cannot memoize the fresh wrappers.
+        // __setstate__ restores the self-reference after unpickle.
+        if scope.is_letrec_entry(name) {
+            continue;
+        }
         dict.set_item(name, val.to_pyobject(py))?;
     }
     drop(captured);
@@ -1283,7 +1313,28 @@ impl VMFunction {
                 py.None(),
             ],
         )?;
-        Ok(PyTuple::new(py, [cls.into_any(), args.into_any()])?.into_any().unbind())
+        // Non-None state triggers __setstate__, which restores the let-rec
+        // self-binding skipped during serialization (see native_scope_to_py)
+        let state = pyo3::types::PyBool::new(py, true).to_owned().into_any();
+        Ok(PyTuple::new(py, [cls.into_any(), args.into_any(), state])?
+            .into_any()
+            .unbind())
+    }
+
+    /// Restore the let-rec self-binding after unpickling: serialization
+    /// omits it (it would cycle), so named lambdas re-bind themselves here.
+    fn __setstate__(slf: &Bound<'_, Self>, _state: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let name = slf.borrow().name.clone();
+        if name == "<lambda>" || name == "<module>" || name == "<fn>" {
+            return Ok(());
+        }
+        let val = Value::from_pyobject(py, slf.as_any())?;
+        let func = slf.borrow();
+        if let Some(ref native) = func.native_closure {
+            native.insert_captured(&name, val);
+        }
+        Ok(())
     }
 
     #[pyo3(signature = (*args, **kwargs))]

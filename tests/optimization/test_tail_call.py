@@ -682,6 +682,269 @@ class TestTailCallEdgeCases(unittest.TestCase):
         result = catnip2.execute()
         self.assertEqual(result, 5050)  # sum(1..100) = 5050
 
+    def test_deep_recursion_real_depth(self):
+        """50k tail calls: catches C-stack growth that small depths miss.
+
+        Regression guard: the tail flag used to be dropped in the IR->Op
+        conversion (AST mode), so each "tail call" nested a native call and
+        the C stack overflowed around 10k frames while the Python recursion
+        counter stayed flat.
+        """
+        catnip = Catnip()
+        catnip.parse("""
+            deep = (n, acc=0) => {
+                if n <= 0 { acc } else { deep(n - 1, acc + 1) }
+            }
+
+            deep(50000)
+        """)
+        self.assertEqual(catnip.execute(), 50000)
+
+    def test_deep_recursion_through_match(self):
+        """Tail calls in match case bodies are in tail position.
+
+        Regression guard: mark_tail_in_body had no OpMatch case, so
+        recursion through match piled up frames (O(n) memory in VM,
+        stack overflow in AST mode).
+        """
+        catnip = Catnip()
+        catnip.parse("""
+            f = (n, acc=0) => {
+                match n {
+                    0 => { acc }
+                    _ => { f(n - 1, acc + 1) }
+                }
+            }
+
+            f(50000)
+        """)
+        self.assertEqual(catnip.execute(), 50000)
+
+    def test_nested_function_self_recursion(self):
+        """A nested named function can call itself (let-rec).
+
+        Regression guard: the VM captured closures by snapshot at
+        MakeFunction time, before the function's own name was bound, so
+        the recursive reference raised NameError (AST mode worked).
+        """
+        catnip = Catnip()
+        catnip.parse("""
+            outer = () => {
+                inner = (n, acc=0) => {
+                    if n <= 0 { acc } else { inner(n - 1, acc + 1) }
+                }
+                inner(1000)
+            }
+
+            outer()
+        """)
+        self.assertEqual(catnip.execute(), 1000)
+
+
+class TestProperTailCalls(unittest.TestCase):
+    """
+    Proper tail calls: any call to a plain name in tail position is
+    optimized, not just self-recursion.
+
+    Regression guards: tail marking used to be restricted to self-calls
+    (is_self_call), so mutual recursion consumed O(n) frames in VM mode
+    (787 MB at 1M calls) and crashed the C stack in AST mode around 10k.
+    Nested definitions were skipped entirely (non-final block statements
+    were cloned without traversal).
+    """
+
+    def test_mutual_recursion_real_depth(self):
+        """50k mutual calls: above the AST-mode crash threshold (~10k)."""
+        catnip = Catnip()
+        catnip.parse("""
+            ping = (n) => {
+                if n <= 0 { "done" } else { pong(n - 1) }
+            }
+
+            pong = (n) => {
+                if n <= 0 { "done" } else { ping(n - 1) }
+            }
+
+            ping(50000)
+        """)
+        self.assertEqual(catnip.execute(), "done")
+
+    def test_mutual_recursion_through_match(self):
+        """Mutual tail calls in match case bodies."""
+        catnip = Catnip()
+        catnip.parse("""
+            is_even = (n) => {
+                match n {
+                    0 => { True }
+                    _ => { is_odd(n - 1) }
+                }
+            }
+
+            is_odd = (n) => {
+                match n {
+                    0 => { False }
+                    _ => { is_even(n - 1) }
+                }
+            }
+
+            is_even(50000)
+        """)
+        self.assertEqual(catnip.execute(), True)
+
+    def test_nested_function_deep_self_recursion(self):
+        """Nested defs get tail marking too (50k self-calls)."""
+        catnip = Catnip()
+        catnip.parse("""
+            outer = (n) => {
+                inner = (k, acc=0) => {
+                    if k <= 0 { acc } else { inner(k - 1, acc + 1) }
+                }
+                inner(n)
+            }
+
+            outer(50000)
+        """)
+        self.assertEqual(catnip.execute(), 50000)
+
+    def test_nested_function_mutual_recursion(self):
+        """Two nested functions in the same block call each other (letrec
+        group), deep enough to require O(1) frames."""
+        catnip = Catnip()
+        catnip.parse("""
+            outer = (n) => {
+                ping = (k) => {
+                    if k <= 0 { "done" } else { pong(k - 1) }
+                }
+                pong = (k) => {
+                    if k <= 0 { "done" } else { ping(k - 1) }
+                }
+                ping(n)
+            }
+
+            outer(50000)
+        """)
+        self.assertEqual(catnip.execute(), "done")
+
+    def test_tail_call_to_builtin(self):
+        """A builtin in tail position: plain-call semantics preserved."""
+        catnip = Catnip()
+        catnip.parse("""
+            size = (items) => { len(items) }
+            size([1, 2, 3])
+        """)
+        self.assertEqual(catnip.execute(), 3)
+
+    def test_tail_call_to_struct_constructor(self):
+        """A struct constructor in tail position instantiates normally.
+
+        Regression guard: the PureVM TailCall handler had no struct-type
+        branch and failed with "cannot call <type>".
+        """
+        catnip = Catnip()
+        catnip.parse("""
+            struct Point { x; y }
+            make = (a, b) => { Point(a, b) }
+            p = make(1, 2)
+            p.x + p.y
+        """)
+        self.assertEqual(catnip.execute(), 3)
+
+    def test_escaped_closure_tail_call(self):
+        """A closure returned by a factory, tail-called from another
+        function: the trampoline swaps closure scopes correctly."""
+        catnip = Catnip()
+        catnip.parse("""
+            make_adder = (k) => {
+                (n, acc) => { if n <= 0 { acc } else { step(n - 1, acc + k) } }
+            }
+            adder = make_adder(2)
+            step = (n, acc) => { adder(n, acc) }
+            step(50000, 0)
+        """)
+        self.assertEqual(catnip.execute(), 100000)
+
+    def test_tco_pragma_disable_mutual(self):
+        """pragma tco off: mutual calls are not marked, shallow depth ok."""
+        catnip = Catnip()
+        catnip.parse("""
+            pragma("tco", False)
+
+            ping = (n) => { if n <= 0 { "done" } else { pong(n - 1) } }
+            pong = (n) => { if n <= 0 { "done" } else { ping(n - 1) } }
+            ping(100)
+        """)
+        self.assertEqual(catnip.execute(), "done")
+
+    def test_captured_state_survives_tail_call_swap(self):
+        """Writes to captured variables survive a tail call to another
+        function.
+
+        Regression guard (AST mode): the trampoline scope swap popped the
+        outgoing function's scope without syncing, dropping its captured
+        writes, and the final pop synced against the entry function's
+        closure instead of the one that actually finished. The counter
+        froze at 1 across calls (expected: 1, 2, 3).
+        """
+        catnip = Catnip()
+        catnip.parse("""
+            make = () => {
+                count = 0
+                noop = (x) => { x }
+                bump = () => {
+                    count = count + 1
+                    noop(count)
+                }
+                bump
+            }
+            b = make()
+            [b(), b(), b()]
+        """)
+        self.assertEqual(catnip.execute(), [1, 2, 3])
+
+    def test_cross_context_tail_call(self):
+        """A tail call to a function from another Catnip instance executes
+        in its own context.
+
+        Regression guard for the AST trampoline (vm_mode forced off:
+        cross-instance function injection is not supported by the VM
+        executor): the trampoline hosted the foreign function -- its
+        closure was pushed onto the caller's scope stack while its body
+        resolved names against its home context, raising NameError on
+        captured variables. Cross-context targets must be called directly,
+        like non-Catnip callables.
+        """
+        provider = Catnip(vm_mode='off')
+        provider.parse("""
+            make = () => {
+                secret = "from-provider"
+                (n) => { secret }
+            }
+            g = make()
+        """)
+        provider.execute()
+        g = provider.context.globals['g']
+
+        consumer = Catnip(vm_mode='off')
+        consumer.context.globals['g'] = g
+        consumer.parse("""
+            f = (n) => { g(n) }
+            f(1)
+        """)
+        self.assertEqual(consumer.execute(), "from-provider")
+
+    def test_exception_after_tail_calls_caught(self):
+        """try around a deep tail-call chain still catches the final raise
+        (calls under try are not tail, but the chain entered from the try
+        body unwinds back to its handler)."""
+        catnip = Catnip()
+        catnip.parse("""
+            boom = (n) => {
+                if n <= 0 { 1 / 0 } else { boom(n - 1) }
+            }
+            try { boom(50000) } except { _ => { "caught" } }
+        """)
+        self.assertEqual(catnip.execute(), "caught")
+
 
 if __name__ == "__main__":
     unittest.main()

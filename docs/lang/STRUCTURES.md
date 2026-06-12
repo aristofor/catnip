@@ -152,7 +152,7 @@ struct Point {
 Point(3, 4).sum()  # 7
 ```
 
-Les méthodes respectent la portée lexicale: elles peuvent capturer des variables locales du scope englobant.
+Les méthodes respectent le lexical scoping : elles peuvent capturer des variables locales du scope englobant.
 
 ```catnip
 make_point_type = () => {

@@ -165,11 +165,17 @@ pub enum VMOpCode {
     /// in globals. Variants are materialized as struct types (with payload)
     /// or enum singletons (nullary).
     MakeUnion = 98,
+
+    /// Letrec group patch: pops `value` then `target`; if `target` is a
+    /// VM function, inserts `value` under name `names[arg]` into its
+    /// closure. No-op otherwise (e.g. sibling defined in a branch not
+    /// taken yet). Pushes nothing.
+    PatchClosure = 99,
 }
 
 impl VMOpCode {
     /// Highest opcode value. Used for range checks and cache invalidation.
-    pub const MAX: u8 = VMOpCode::MakeUnion as u8;
+    pub const MAX: u8 = VMOpCode::PatchClosure as u8;
 
     /// Highest shared opcode value (same values as IROpCode).
     pub const SHARED_MAX: u8 = VMOpCode::Breakpoint as u8;
@@ -238,6 +244,7 @@ impl VMOpCode {
                 | VMOpCode::MakeStruct
                 | VMOpCode::MakeTrait
                 | VMOpCode::MakeUnion
+                | VMOpCode::PatchClosure
                 // Control
                 | VMOpCode::Exit
                 // String formatting
@@ -362,6 +369,7 @@ impl VMOpCode {
             VMOpCode::MakeTrait => (0, 0),
             VMOpCode::MakeEnum => (0, 0),
             VMOpCode::MakeUnion => (0, 0),
+            VMOpCode::PatchClosure => (2, 0),
             // VM: Control
             VMOpCode::Halt => (0, 0),
             VMOpCode::Exit => (-1, 0),
@@ -430,7 +438,8 @@ mod tests {
         assert_eq!(VMOpCode::ResumeUnwind as u8, 96);
         assert_eq!(VMOpCode::ClearException as u8, 97);
         assert_eq!(VMOpCode::MakeUnion as u8, 98);
-        assert_eq!(VMOpCode::MAX, VMOpCode::MakeUnion as u8);
+        assert_eq!(VMOpCode::PatchClosure as u8, 99);
+        assert_eq!(VMOpCode::MAX, VMOpCode::PatchClosure as u8);
     }
 
     #[test]

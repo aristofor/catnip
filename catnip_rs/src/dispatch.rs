@@ -24,7 +24,9 @@ pub fn process_input(py: Python<'_>, catnip: &Bound<'_, PyAny>, text: &str, leve
     match level {
         0 => process_level_0(py, catnip, text),
         1 => process_level_ir(py, text, false),
-        2 => process_level_ir(py, text, true),
+        // Level 2 must show the IR exactly as level 3 would execute it:
+        // Catnip.parse() applies host baselines, CLI overrides and file pragmas.
+        2 => Ok(catnip.call_method1("parse", (text,))?.unbind()),
         3 => process_level_3(py, catnip, text),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Invalid parsing level: {}. Must be 0-3",

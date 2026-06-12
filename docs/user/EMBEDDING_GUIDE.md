@@ -1,6 +1,6 @@
-# Guide d'intégration
+# Guide d'embedding
 
-Guide complet pour embarquer Catnip comme moteur de scripting dans vos applications Python.
+Guide complet pour embedder Catnip comme moteur de scripting dans vos applications Python.
 
 ## Table des matières
 
@@ -475,7 +475,7 @@ finally:
 
 ### Compilation cache
 
-Les scripts identiques sont automatiquement cachés par Catnip. Pour cache persistant :
+Les scripts identiques sont automatiquement cached par Catnip. Pour cache persistant :
 
 ```python
 import hashlib
@@ -533,7 +533,7 @@ Voir [`docs/examples/embedding/`](../examples/embedding/) pour des exemples comp
 1. **streamlit_app.py** - Dashboard Streamlit
 1. **dataframe_dsl.py** - DSL pandas
 
-## Checklist d'intégration
+## Checklist d'embedding
 
 Avant de déployer un DSL Catnip en production :
 

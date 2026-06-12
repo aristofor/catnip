@@ -32,6 +32,8 @@ enum ReplResult {
     Resume(DebugAction),
     /// Exit REPL, back to debug prompt.
     Exit,
+    /// Quit the whole debug session (back to the caller, with cleanup).
+    Quit,
 }
 
 // --- Helpers ---
@@ -213,7 +215,7 @@ fn run_repl_submode(py: Python<'_>, dctx: &DebugContext, pause: &PauseEvent) -> 
 
             DebugCommand::Quit => {
                 eprintln!("Aborting.");
-                std::process::exit(0);
+                return ReplResult::Quit;
             }
             DebugCommand::Repl => eprintln!("Already in REPL mode."),
             DebugCommand::Repeat => {} // empty line handled by read_multiline_stdin
@@ -392,7 +394,7 @@ pub fn run_debugger(
         let mut last_action = DebugAction::StepInto;
         let timeout = Duration::from_secs(DEBUG_EVENT_WAIT_TIMEOUT_SECS);
 
-        loop {
+        'console: loop {
             let event = match event_rx.recv_timeout(timeout) {
                 Ok(ev) => ev,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -481,11 +483,12 @@ pub fn run_debugger(
                                     ReplResult::Exit => {
                                         eprintln!("Leaving REPL, back to debugger.");
                                     }
+                                    ReplResult::Quit => break 'console 0,
                                 }
                             }
                             DebugCommand::Quit => {
                                 eprintln!("Aborting.");
-                                std::process::exit(0);
+                                break 'console 0;
                             }
                             DebugCommand::Help => {
                                 eprintln!("{}", debugger::format_help());

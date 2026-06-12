@@ -209,6 +209,12 @@ impl PluginRegistry {
         let mut attrs = IndexMap::new();
 
         // Static attributes
+        if desc.num_attrs > 0 && desc.attrs.is_null() {
+            return Err(VMError::RuntimeError(format!(
+                "plugin '{}': num_attrs={} but attrs pointer is null",
+                expected_name, desc.num_attrs
+            )));
+        }
         for i in 0..desc.num_attrs as usize {
             let attr = unsafe { &*desc.attrs.add(i) };
             let name = unsafe { CStr::from_ptr(attr.name) }.to_str().map_err(|_| {
@@ -219,6 +225,12 @@ impl PluginRegistry {
 
         // Callable function entries (stored as qualified NativeStr)
         let call_fn = desc.call;
+        if desc.num_functions > 0 && desc.functions.is_null() {
+            return Err(VMError::RuntimeError(format!(
+                "plugin '{}': num_functions={} but functions pointer is null",
+                expected_name, desc.num_functions
+            )));
+        }
         for i in 0..desc.num_functions as usize {
             let name_ptr = unsafe { *desc.functions.add(i) };
             let fn_name = unsafe { CStr::from_ptr(name_ptr) }.to_str().map_err(|_| {

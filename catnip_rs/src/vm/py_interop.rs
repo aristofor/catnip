@@ -712,9 +712,10 @@ pub(crate) fn convert_py_to_vm_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> 
         if let Ok(i) = obj.extract::<i64>() {
             return Ok(VmValue::from_int(i));
         }
-        return Err(pyo3::exceptions::PyOverflowError::new_err(
-            "integer too large for native plugin argument",
-        ));
+        // Promote out-of-range ints to BigInt, symmetric with the VM->Py path
+        // (convert_vm_value), instead of rejecting them.
+        let n = crate::vm::value::pyobject_to_integer(obj)?;
+        return Ok(VmValue::from_bigint(n));
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
         return Ok(VmValue::from_float(f.extract()?));

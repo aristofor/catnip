@@ -114,7 +114,12 @@ def test_level_0_returns_parse_tree(cat):
 
 
 def test_level_2_applies_constant_folding(cat):
-    """Level 2 applies semantic analysis (constant folding)."""
+    """Level 2 applies semantic analysis (constant folding).
+
+    Level 2 reflects the instance settings (same IR as level 3 would
+    execute), so optimization must be enabled on the instance.
+    """
+    cat.pragma_context.optimize_level = 3
     ir1 = rust_process_input(cat, "2 + 3", 1)
     ir2 = rust_process_input(cat, "2 + 3", 2)
     # Level 1: raw IR has Add op
@@ -128,6 +133,7 @@ def test_level_2_applies_constant_folding(cat):
 
 def test_level_1_and_2_differ_on_optimizable_code(cat):
     """Levels 1 and 2 produce different IR when optimizations apply."""
+    cat.pragma_context.optimize_level = 3
     code = "x = 10 * 2"
     ir1 = rust_process_input(cat, code, 1)
     ir2 = rust_process_input(cat, code, 2)

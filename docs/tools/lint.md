@@ -79,6 +79,7 @@ catnip lint --max-depth 0 --max-complexity 0 --max-length 0 --max-params 0 scrip
 Ajouter `# noqa` en fin de ligne pour supprimer les diagnostics sur cette ligne :
 
 <!-- check: no-check -->
+
 ```catnip
 x = compute()  # noqa           -- supprime tout sur cette ligne
 y = value       # noqa: W200    -- supprime W200 seulement
@@ -195,7 +196,7 @@ par `_`. W202 avertit qu'assigner le retour d'un `import('...', wild=True)` est 
 
 W300 détecte le code mort après un `return` dans le même bloc. W302 signale les boucles `while True` dont le corps ne
 contient pas de `break` (les `break` dans des boucles ou lambdas imbriquées ne comptent pas). W201 signale les
-paramètres de fonction jamais utilisés dans le corps (les paramètres prefixés par `_` et `self` sont ignorés). Les
+paramètres de fonction jamais utilisés dans le corps (les paramètres préfixés par `_` et `self` sont ignorés). Les
 paramètres lus dans une lambda imbriquée (capture) comptent comme utilisés. W204 détecte les affectations qui créent une
 variable locale qui masque une variable du scope parent. L'heuristique distingue les mutations de capture (`x = x + 1`
 dans une closure) du vrai shadowing. W301 signale les branches mortes quand la condition d'un `if` est un littéral

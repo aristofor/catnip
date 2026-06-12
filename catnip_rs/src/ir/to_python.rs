@@ -156,9 +156,9 @@ fn ir_pure_to_python_impl(py: Python, ir: IR, cache: &PythonCache) -> PyResult<P
             func,
             args,
             kwargs,
+            tail,
             start_byte,
             end_byte,
-            ..
         } => {
             let py_func = ir_pure_to_python_impl(py, *func, cache)?;
 
@@ -177,6 +177,10 @@ fn ir_pure_to_python_impl(py: Python, ir: IR, cache: &PythonCache) -> PyResult<P
             let opcode_int = IROpCode::Call as u8 as i32;
             let op_class = cache.rs_module.getattr("Op")?;
             let op_obj = op_class.call1((opcode_int, py_args_tuple, py_kwargs, start_byte, end_byte))?;
+            // The AST trampoline reads this flag to emit TailCall instead of
+            // a nested native call; dropping it overflows the C stack on deep
+            // recursion
+            op_obj.setattr("tail", tail)?;
 
             Ok(op_obj.unbind())
         }

@@ -63,7 +63,7 @@ Debugger interactif avec breakpoints, stepping et inspection de variables.
 
 - Breakpoints par ligne (`-b`) ou dans le code (`breakpoint()`)
 - Stepping : step into, step over, step out
-- Inspection : variables locales, pile d'appels, evaluation d'expressions
+- Inspection : variables locales, call stack, evaluation d'expressions
 - Integration MCP (6 tools pour agents)
 
 ### [Extract Grammar](extract_grammar.md)

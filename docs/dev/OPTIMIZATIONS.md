@@ -4,61 +4,51 @@ Vue d'ensemble des optimisations disponibles dans Catnip, avec l'idée simple : 
 
 ## Niveaux d'Optimisation
 
-Catnip supporte 4 niveaux d'optimisation (0-3) contrôlables via pragma, CLI ou API.
+Le niveau accepte les valeurs 0-3, mais l'effet est binaire : `0` désactive toutes les passes, `1` à `3` les activent
+toutes. Les valeurs intermédiaires sont acceptées pour compatibilité ; aucune sélection de passes par niveau n'est
+câblée.
 
-**Défaut** : `optimize=0` (aucune optimisation)
+**Défauts par entrypoint** :
 
-| Niveau | Alias              | Description              | Passes actives                                                           |
-| ------ | ------------------ | ------------------------ | ------------------------------------------------------------------------ |
-| **0**  | none, off (défaut) | Aucune optimisation      | Aucune                                                                   |
-| **1**  | low                | Optimisations légères    | Constant folding (IR)                                                    |
-| **2**  | medium             | Optimisations standard   | Constant folding, Strength reduction, Block flattening (IR)              |
-| **3**  | high               | Optimisations agressives | Toutes passes IR + CFG (dead code, merge, empty, branches), 5 itérations |
+| Entrypoint                                | Défaut          |
+| ----------------------------------------- | --------------- |
+| CLI `catnip` (config `optimize`)          | `3` (activé)    |
+| Binaire standalone `catnip-run`, MCP, LSP | activé          |
+| API Python `Catnip()`                     | `0` (désactivé) |
 
-## Quand Activer les Optimisations
+## Quand Désactiver les Optimisations
 
-**Défaut (`optimize=0`)** - Recommandé pour :
+Les passes sont sûres (elles préservent les valeurs observables) et leur coût de compilation est négligeable. Désactiver
+(`optimize=0`) sert surtout à :
 
-- Scripts et REPL (latence optimale)
-- Code avec JIT activé (JIT domine les optimisations)
-- Développement itératif (compilation 2x plus rapide)
+- inspecter l'IR tel qu'écrit (`-p 2` montre l'IR que le niveau 3 exécute, optimisations comprises) ;
+- isoler une passe suspecte en cas de comportement inattendu ;
+- comparer les sorties optimisé/non optimisé (c'est le protocole de test des passes elles-mêmes).
 
-**`optimize=3`** - Activer pour :
-
-- Code exécuté 100+ fois sans JIT (gains 4-11%)
-- Templates/code généré avec beaucoup de dead code (réduction AST 46%)
-- Scripts de production sans JIT
-
-**Trade-offs mesurés** :
-
-- Compile-time : `optimize=3` est 2x plus lent (0.3ms → 0.7ms)
-- Runtime sans JIT : `optimize=3` est 4-11% plus rapide
-- Runtime avec JIT : aucune différence (JIT masque les optimisations)
-
-> Les optimisations sont un boost au démarrage. Le JIT est un turbo qui s'allume en plein vol. Si ton code chauffe assez
-> pour déclencher le JIT, les optimisations de compile-time deviennent secondaires.
+> Le mode débrayé existe pour pouvoir prouver que le mode embrayé ne ment pas.
 
 ## Contrôle du Niveau
+
+**Précédence** : CLI/env > pragma in-file > config/défaut. Un `-o level:N` sur la ligne de commande (ou
+`CATNIP_OPTIMIZE=level:N`) l'emporte sur les `pragma("optimize", ...)` du fichier, qui l'emportent sur la config et le
+défaut.
 
 **Via CLI** :
 
 ```bash
-catnip script.cat                 # Défaut (optimize=0)
-catnip -o level:3 script.cat      # Active toutes les optimisations
+catnip script.cat                 # Défaut CLI : activé
+catnip -o level:0 script.cat      # Désactive toutes les passes
 
-# Alias textuels
-catnip -o level:none script.cat   # Niveau 0 (défaut)
-catnip -o level:low script.cat    # Niveau 1
-catnip -o level:medium script.cat # Niveau 2
-catnip -o level:high script.cat   # Niveau 3
+# Alias textuels (none=0, low=1, medium=2, high=3)
+catnip -o level:none script.cat   # Désactivé
+catnip -o level:high script.cat   # Activé
 ```
 
-**Via pragma** :
+**Via pragma** (file-scoped, s'applique au fichier qui le contient) :
 
 ```python
-# Défaut : optimize=0
-pragma("optimize", 3)   # Activer toutes les optimisations
-pragma("optimize", 1)   # Optimisations légères
+pragma("optimize", 0)   # Désactive les passes pour ce fichier
+pragma("optimize", 3)   # Les active
 ```
 
 **Via API Python** :
@@ -66,8 +56,8 @@ pragma("optimize", 1)   # Optimisations légères
 ```python
 from catnip import Catnip
 
-cat = Catnip()              # Défaut (optimize=0)
-cat = Catnip(optimize=3)    # Toutes les optimisations
+cat = Catnip()              # Défaut API : désactivé
+cat = Catnip(optimize=3)    # Activé ; ce kwarg est un override, les pragmas in-file ne le renversent pas
 ```
 
 **Introspection** :
@@ -87,10 +77,10 @@ if catnip.optimize > 0 {
 
 Catnip applique deux types de passes complémentaires.
 
-Les passes IR existent en deux implémentations : PyO3 (`catnip_rs/src/semantic/`) opérant sur `Op` (pipeline Standard)
-et pure Rust (`catnip_core/src/semantic/passes/`) opérant directement sur `IR` (pipeline Standalone). Le trait
-`PurePass` et le `PureOptimizer` appliquent les passes itérativement jusqu'au point fixe (max 10 itérations, détection
-par `PartialEq`).
+Les passes IR vivent dans `catnip_core/src/semantic/passes/` (pur Rust, opèrent directement sur `IR`) et servent tous
+les pipelines. Le trait `PurePass` et le `PureOptimizer` appliquent les passes itérativement jusqu'au point fixe (max 10
+itérations, détection par `PartialEq`). L'ancien pipeline PyO3 (`catnip_rs/src/semantic/`, classes `Semantic` et
+`Optimizer` exposées à Python) a été supprimé : hors production, il divergeait du pipeline vivant.
 
 ### Passes IR (Niveau Expression)
 
@@ -100,126 +90,111 @@ Optimisations locales sur expressions et statements :
 
    - `2 + 3` → `5`
    - `True and False` → `False`
+   - Ne s'applique que si **tous** les opérandes sont des littéraux
 
-1. **Strength Reduction** - Remplace opérations coûteuses par équivalents rapides
-
-   - `x * 2` → `x + x` (si x simple)
-   - `x ** 2` → `x * x`
+1. **Strength Reduction** - Simplifications booléennes (`True && False` → `False`) quand les deux opérandes sont des
+   `Bool` littéraux
 
 1. **Block Flattening** - Simplifie les blocs imbriqués
 
-   - `{ { { x } } }` → `x`
+   - `{ { x } y }` → `{ x y }`
+   - Un bloc qui déclare des variables locales est conservé : il porte un scope, l'aplatir ferait fuiter les liaisons
+     dans le bloc parent
 
 1. **Dead Code Elimination** - Supprime code inaccessible
 
-   - Code après `return`
-   - Branches `if False`
+   - Branches `if False`, `while False`, cases de match à guard constamment faux
+   - Un match réduit à un seul case `_` est remplacé par son corps ; le scrutinee est conservé s'il n'est pas un
+     littéral (il peut porter des effets ou lever)
+   - Un match dont tous les cases sont morts est conservé tel quel : au runtime il lève « no case matched »
 
 1. **Blunt Code Simplification** - Simplifie patterns maladroits
 
-   - `not not x` → `x`
-   - `x == True` → `x`
-   - `not (a < b)` → `a >= b` (inversion de comparaison)
+   - `not (a == b)` → `a != b` (et `!=` → `==` ; les comparaisons d'ordre ne sont pas inversées : `not (a < b)` n'est
+     pas équivalent à `a >= b` en présence de `NaN`)
    - `x and (not x)` → `False` (complement)
    - Les simplifications `and`/`or` avec constantes (`x and False` → `False`, `x or True` → `True`) ne s'appliquent que
      quand les deux opérandes sont des `Bool`. En Catnip, `and`/`or` retournent toujours un booléen — simplifier avec un
      opérande non-bool changerait le type de retour
 
-1. **Constant/Copy Propagation** - Propage valeurs connues
+**Identités absentes par construction** : sans information de type, les réécritures arithmétiques changent des valeurs
+observables dans un langage dynamique. `"abc" * 0` vaut `""` (pas `0`), `7.5 // 1` vaut `7.0` (pas `7.5`), `7 / 1` vaut
+`7.0` (pas `7`), `5 == True` vaut `False` (pas `5`), `not not 5` vaut `True` (pas `5`), et `x ** 2` ne peut pas devenir
+`x * x` (`**` et `*` dispatchent vers des surcharges distinctes). Le cas tout-littéral revient au constant folding ; les
+réductions typées relèvent du JIT, où les types sont gardés au runtime.
 
-   - `x = 5; y = x * 2` → `x = 5; y = 10`
+**Passes désactivées** : Constant Propagation, Copy Propagation et Dead Store Elimination sont retirées du pipeline.
+Leur suivi des assignations est insensible au flot de contrôle et aux scopes ; les réactiver demande un vrai dataflow
+(invalidation par branche, invalidation des sources de copies, détection de cycles).
 
-### Passes CFG (Niveau Contrôle de Flux)
+### Passes CFG/SSA (hors pipeline)
 
-Optimisations globales sur le graphe de flot de contrôle :
-
-1. **Dead Block Elimination** - Supprime blocs inaccessibles
-1. **Block Merging** - Fusionne blocs consécutifs
-1. **Empty Block Removal** - Supprime blocs vides
-1. **Constant Branch Folding** - Résout branches constantes
-
-### Passes SSA (Niveau Inter-blocs)
-
-Optimisations globales en forme SSA ([Braun et al. 2013](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf)),
-activées au niveau 3 :
-
-1. **CSE inter-blocs** (`ssa_cse.rs`) - Élimine expressions redondantes entre blocs dominants (même opcode + mêmes
-   operandes SSA)
-1. **LICM** (`ssa_licm.rs`) - Hoist les opérations pures invariantes hors des boucles vers un preheader
-1. **GVN** (`ssa_gvn.rs`) - Global Value Numbering, assigne un value number à chaque expression pour détecter les
-   équivalences
-1. **DSE globale** (`ssa_dse.rs`) - Élimine les SetLocals avec RHS pur dont le résultat n'est jamais utilisé, itération
-   au fixpoint
+Le module `catnip_rs/src/cfg/` contient une infrastructure complète CFG + SSA
+([Braun et al. 2013](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf)) : construction du graphe, passes
+inter-blocs (CSE, LICM, GVN, DSE globale), destruction SSA et reconstruction IR. Elle n'est **pas branchée** sur le
+pipeline sémantique vivant : son unique consommateur (l'analyzer PyO3 hérité) a été supprimé, il ne reste que ses
+propres tests. Le JIT construit ses propres CFG pour la compilation de traces, indépendamment de ce module.
 
 ## Architecture du Pipeline
 
 ```mermaid
 flowchart TD
-    IR["IR brut"]
+    IR["IR brut"] --> SCAN["Pré-scan pragmas (tco, optimize)"]
+    SCAN --> TAIL["Marquage tail calls"]
 
-    subgraph LOCAL["Passes locales · intra-bloc"]
+    subgraph LOCAL["PureOptimizer · fixpoint ≤ 10 itérations"]
         B1["BluntCode"]
-        B2["ConstProp + Fold"]
-        B3["CopyProp"]
-        B4["DeadStore"]
-        B5["StrengthRed"]
-        B6["BlockFlat"]
-        B7["DeadCode"]
-        B1 --> B2 --> B3 --> B4 --> B5 --> B6 --> B7
+        B2["ConstFold"]
+        B3["StrengthRed"]
+        B4["BlockFlat"]
+        B5["DeadCode"]
+        B1 --> B2 --> B3 --> B4 --> B5
     end
 
-    subgraph GLOBAL["Passes globales · inter-blocs"]
-        G1["CSE inter-blocs"]
-        G2["LICM"]
-        G3["GVN"]
-        G4["DSE fixpoint"]
-        G5["Destruction SSA"]
-        G6["Dead blocks + Merge"]
-        G7["Const branches"]
-        G1 --> G2 --> G3 --> G4 --> G5 --> G6 --> G7
-    end
-
-    IR --> LOCAL
-    LOCAL -->|"level ≥ 3"| BUILD["Construction CFG + SSA"]
-    BUILD --> GLOBAL
-    GLOBAL --> RECON["Reconstruction IR"]
-    LOCAL -.->|"level < 3"| SEM
-    RECON --> SEM["Semantic → Op"]
-    SEM --> TAIL["Tail → Loop"]
+    TAIL --> LOCAL
+    SCAN -.->|"optimize off"| VALID
+    LOCAL --> VALID["Validation + diagnostics"]
 ```
 
-**Ordre d'exécution** :
+**Ordre d'exécution** (`SemanticAnalyzer::analyze_full`, `catnip_core/src/pipeline/semantic.rs`) :
 
-1. Passes IR (8 passes) sur l'IR brut
-1. CFG construction depuis IR optimisé
-1. Analyse de dominance + construction SSA (Braun)
-1. Passes SSA (4 passes) sur le graphe en forme SSA
-1. Destruction SSA (phi → SetLocals)
-1. Passes CFG (4 passes) sur le graphe
-1. Reconstruction IR depuis CFG optimisé
-1. Semantic analysis → Op final
-
-**Itérations** : à niveau 3, le pipeline IR+CFG est exécuté 5 fois (certaines passes débloquent d'autres optimisations)
+1. Transform (interception des intrinsics : `typeof`, `breakpoint`)
+1. Pré-scan des pragmas top-level (`tco`, `optimize`) -- précédence : override host (CLI/env) > pragma in-file >
+   baseline
+1. Marquage des tail calls (si TCO actif)
+1. Passes IR (5 passes) jusqu'au point fixe, max 10 itérations (si optimisation active)
+1. Validation des opcodes et pragmas, collecte des diagnostics (exhaustivité)
 
 ## Tail Call Optimization (TCO)
 
 La TCO est une optimisation **toujours active** (indépendante du niveau) :
 
-**Principe** : transforme récursion terminale en boucle (stack O(1))
+**Principe** : proper tail calls -- tout appel **par nom** en position terminale s'exécute en pile O(1), pas seulement
+l'auto-récursion. Couvre la récursion mutuelle (`ping` → `pong` → `ping`), les fonctions imbriquées et les appels
+terminaux vers une autre fonction.
 
 ```python
-fact = (n, acc) => {
-    if n <= 1 { acc }
-    else { fact(n-1, n*acc) }  # ← Tail call
-}
+is_even = (n) => { if n == 0 { True } else { is_odd(n - 1) } }   # ← tail call mutuel
+is_odd  = (n) => { if n == 0 { False } else { is_even(n - 1) } }
 ```
 
-**Détection** : automatique par l'analyseur sémantique (appels en dernière position)
+**Détection** : traversée unique `mark_tails` dans l'analyseur sémantique (`catnip_core/src/pipeline/semantic.rs`).
+Positions terminales propagées : dernière expression d'un bloc, corps des branches d'un `if`, corps des cases d'un
+`match`, expression d'un `return`. La traversée descend dans tous les corps de lambdas, y compris les définitions
+imbriquées et les lambdas passées en argument. Le flag ne peut jamais apparaître hors d'un corps de lambda (un signal
+`TailCall` qui fuirait au top-level surfacerait comme valeur).
 
-**Implémentation** : trampoline pattern (pas de frame empilée)
+**Implémentation** : trampoline pattern (pas de frame empilée). En VM, `TailCall` réutilise le frame courant (locals
+rebindés, piles vidées, code object remplacé si la cible diffère) ; en mode AST, l'appel retourne un signal `TailCall`
+consommé par la boucle trampoline, avec swap de scope synchronisé quand la cible change de closure (les écritures aux
+variables capturées sont propagées comme au retour d'un appel normal). Les cibles non-fonction (builtins, constructeurs
+de structs, fonctions d'un autre contexte Catnip) sont appelées directement.
 
-**Boucles** : `visit_while` et `visit_for` forcent `in_tail_position = false` avant de visiter le body. Les appels dans
-le corps d'une boucle ne sont jamais marqués comme tail calls, même quand la boucle est le dernier statement d'une
-fonction.
+**Positions jamais terminales** :
+
+- corps de `while`/`for` (la boucle doit reprendre la main), y compris un `return f()` dans une boucle ;
+- tout ce qui est sous `try` (le handler doit rester sur la pile) ;
+- opérandes de `and`/`or`/`??` (consommés par le test de vérité) ;
+- arguments d'appels, conditions, guards de match.
 
 Voir [ARCHITECTURE](ARCHITECTURE.md) section TCO pour détails.

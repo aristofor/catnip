@@ -25,7 +25,6 @@ lang/CatnipFunctionProof.v
 lang/CatnipPatternProof.v
 
 optim/CatnipConstFoldProof.v
-optim/CatnipStorePropProof.v
 optim/CatnipStrengthRedProof.v
 optim/CatnipBluntCodeProof.v
 optim/CatnipDCEFlattenProof.v

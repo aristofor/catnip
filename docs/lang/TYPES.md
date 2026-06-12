@@ -334,6 +334,7 @@ f"{x:.2f}"
 Les chaînes de bytes utilisent le préfixe `b` et produisent un objet `bytes` Python :
 
 <!-- check: no-check -->
+
 ```catnip
 # Bytes simples
 data = b"hello world"
@@ -353,7 +354,7 @@ binary
 data
 """
 
-# Chargement de modules Python (voir docs/user/)
+# Module loading Python (voir docs/user/)
 orjson = import('orjson')
 json_bytes = orjson.dumps(dict(key="value"))  # Retourne bytes
 ```

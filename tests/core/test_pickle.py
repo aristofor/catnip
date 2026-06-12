@@ -113,6 +113,48 @@ class TestFunctionPickle:
         assert result == 42
 
 
+class TestRecursiveFunctionPickle:
+    """The let-rec self-binding must survive pickling.
+
+    Serialization skips the self-reference (it would cycle through fresh
+    conversions); __setstate__ re-binds the restored VMFunction under its
+    own name.
+    """
+
+    def test_pickled_recursive_lambda_executes(self):
+        from catnip._rs import set_global_registry
+
+        c = Catnip()
+        c.parse("f = (n) => { if n <= 0 { 0 } else { f(n - 1) } }")
+        c.execute()
+        set_global_registry(c.registry)
+
+        restored = pickle.loads(pickle.dumps(c.context.globals.get('f')))
+
+        # Fresh context without 'f' in globals: only the self-binding
+        # restored by __setstate__ can resolve the recursive call
+        c2 = Catnip()
+        c2.context.globals['g'] = restored
+        c2.parse("g(10)")
+        assert c2.execute() == 0
+
+    def test_double_round_trip(self):
+        from catnip._rs import set_global_registry
+
+        c = Catnip()
+        c.parse("f = (n) => { if n <= 0 { 0 } else { f(n - 1) } }")
+        c.execute()
+        set_global_registry(c.registry)
+
+        once = pickle.loads(pickle.dumps(c.context.globals.get('f')))
+        twice = pickle.loads(pickle.dumps(once))
+
+        c2 = Catnip()
+        c2.context.globals['h'] = twice
+        c2.parse("h(7)")
+        assert c2.execute() == 0
+
+
 class TestPickleProtocols:
     """Test different pickle protocols."""
 

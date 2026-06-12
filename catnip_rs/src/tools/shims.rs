@@ -395,6 +395,9 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
     if cfg.check_semantic {
         if let Some(ir) = parse_and_transform(source) {
             let mut analyzer = catnip_core::pipeline::SemanticAnalyzer::new();
+            // Lint the source as written: in-file pragma("optimize", N) must
+            // not rewrite the IR under the diagnostics
+            analyzer.set_optimize_override(Some(false));
             if let Ok(result) = analyzer.analyze_full(&ir) {
                 // Always remove CST-level I103: semantic check is authoritative
                 diagnostics.retain(|d| d.code != "I103");

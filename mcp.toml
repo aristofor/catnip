@@ -85,7 +85,7 @@ mime_type = "application/json"
 
 [resource_templates.codex]
 uri_template = "catnip://codex/{category}/{module}"
-description = "Catnip integration examples (data-analytics, files-formats, geometry, geospatial, images-media, symbolic-graphs, utils, visualization, web)."
+description = "Catnip integration examples (data-analytics, files-formats, geometry, geospatial, images-media, persistence, symbolic-graphs, utils, visualization, web)."
 mime_type = "text/plain"
 
 [resource_templates.docs-topic]

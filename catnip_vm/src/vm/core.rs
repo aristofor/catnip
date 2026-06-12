@@ -897,7 +897,53 @@ impl PureVM {
                         code: func_code,
                         closure: Some(closure),
                     });
+
+                    // arg = name_idx + 1: bind the function under its own name
+                    // in its closure so recursive references resolve (let-rec)
+                    if instr.arg > 0 {
+                        let self_name = frame
+                            .code
+                            .as_ref()
+                            .and_then(|c| c.names.get((instr.arg - 1) as usize))
+                            .cloned();
+                        if let Some(name) = self_name {
+                            if let Some(slot) = self.func_table.get(new_idx) {
+                                if let Some(ref closure) = slot.closure {
+                                    closure.insert_captured(&name, Value::from_vmfunc(new_idx));
+                                }
+                            }
+                        }
+                    }
+
                     frame.push(Value::from_vmfunc(new_idx));
+                }
+
+                VMOpCode::PatchClosure => {
+                    // Letrec group patch: closure_of(target)[names[arg]] = value.
+                    // No-op when target is not a function (e.g. a sibling slot
+                    // not populated yet because its branch never ran).
+                    let value = frame.pop();
+                    let target = frame.pop();
+                    let mut consumed = false;
+                    if target.is_vmfunc() && value.is_vmfunc() {
+                        let name = frame
+                            .code
+                            .as_ref()
+                            .and_then(|c| c.names.get(instr.arg as usize))
+                            .cloned();
+                        if let Some(name) = name {
+                            if let Some(slot) = self.func_table.get(target.as_vmfunc_idx()) {
+                                if let Some(ref closure) = slot.closure {
+                                    closure.insert_captured(&name, value);
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
+                    if !consumed {
+                        value.decref();
+                    }
+                    target.decref();
                 }
 
                 // =============================================================
@@ -912,36 +958,7 @@ impl PureVM {
                     args.reverse();
                     let func = frame.pop();
 
-                    if func.is_struct_type() {
-                        let type_id = func.as_struct_type_id().unwrap();
-                        let result = self.construct_struct(type_id, &args, &IndexMap::new())?;
-                        // If init_fn, call it
-                        let init_fn = self.struct_registry.get_type(type_id).and_then(|ty| ty.init_fn);
-                        if let Some(init_idx) = init_fn {
-                            let slot = self
-                                .func_table
-                                .get(init_idx)
-                                .ok_or_else(|| VMError::RuntimeError("invalid init function".into()))?;
-                            let callee_code = Arc::clone(&slot.code);
-                            let closure = slot.closure.clone();
-                            if self.frame_stack.len() >= MAX_FRAME_DEPTH {
-                                return Err(VMError::FrameOverflow);
-                            }
-                            // Push instance onto caller stack first -- init's return will be discarded.
-                            // No incref needed: caller owns the ref (refcount=1 from create_instance),
-                            // init receives the same index as a read-only self parameter.
-                            frame.push(result);
-                            let init_args = vec![result];
-                            let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
-                            new_frame.bind_args(&init_args);
-                            new_frame.closure_scope = closure;
-                            new_frame.discard_return = true;
-                            let old_frame = std::mem::replace(frame, new_frame);
-                            self.frame_stack.push(old_frame);
-                        } else {
-                            frame.push(result);
-                        }
-                    } else if func.is_vmfunc() && !func.is_invalid() {
+                    if func.is_vmfunc() && !func.is_invalid() {
                         let idx = func.as_vmfunc_idx();
                         let slot = self
                             .func_table
@@ -961,43 +978,8 @@ impl PureVM {
                         // Save current frame, switch to new
                         let old_frame = std::mem::replace(frame, new_frame);
                         self.frame_stack.push(old_frame);
-                    } else if Self::is_nd_recur_sentinel(func) {
-                        // ND recursion callback: recur(value)
-                        let result = self.handle_nd_recur_call(&args, host)?;
-                        frame.push(result);
-                    } else if let Some((tag, inner)) = Self::check_nd_wrapper(func) {
-                        // ND declaration/lift wrapper call
-                        let result = if tag == super::broadcast::ND_DECL_TAG {
-                            self.handle_nd_decl_call(inner, &args, host)?
-                        } else {
-                            self.handle_nd_lift_call(inner, &args, host)?
-                        };
-                        frame.push(result);
-                    } else if func.is_native_str() {
-                        let name = unsafe { func.as_native_str_ref().unwrap() };
-                        if name == "isinstance" && args.len() == 2 {
-                            let result = self.check_isinstance(args[0], args[1]);
-                            func.decref();
-                            for a in &args {
-                                a.decref();
-                            }
-                            frame.push(result?);
-                        } else if name == "import" && self.import_loader.is_some() {
-                            let result = self.handle_import(&args, &[], host)?;
-                            frame.push(result);
-                        } else if let Some(hof) = Self::try_build_hof(name, &args) {
-                            // HofCall owns func, iterable, and init (fold).
-                            // Only the builtin name string is untracked.
-                            func.decref();
-                            return Err(VMError::HofBuiltin(hof));
-                        } else {
-                            let result = host.call_function(func, &args)?;
-                            frame.push(result);
-                        }
                     } else {
-                        // Delegate to host
-                        let result = host.call_function(func, &args)?;
-                        frame.push(result);
+                        self.call_non_vmfunc(func, args, frame, host)?;
                     }
                 }
                 VMOpCode::TailCall => {
@@ -1038,43 +1020,12 @@ impl PureVM {
                         frame.match_bindings = None;
                         frame.closure_scope = closure;
                         frame.bind_args(&args);
-                    } else if func.is_native_str() {
-                        let name = unsafe { func.as_native_str_ref().unwrap() };
-                        let result = if name == "isinstance" && args.len() == 2 {
-                            let r = self.check_isinstance(args[0], args[1]);
-                            func.decref();
-                            for a in &args {
-                                a.decref();
-                            }
-                            r?
-                        } else if name == "import" && self.import_loader.is_some() {
-                            self.handle_import(&args, &[], host)?
-                        } else if let Some(hof) = Self::try_build_hof(name, &args) {
-                            func.decref();
-                            return Err(VMError::HofBuiltin(hof));
-                        } else {
-                            host.call_function(func, &args)?
-                        };
-                        // Return the result up the call stack
-                        if self.frame_stack.len() > base_depth {
-                            let caller = self.frame_stack.pop().unwrap();
-                            let old = std::mem::replace(frame, caller);
-                            self.frame_pool.free(old);
-                            frame.push(result);
-                        } else {
-                            return Ok(result);
-                        }
                     } else {
-                        // Non-VMFunc, non-builtin: delegate to host
-                        let result = host.call_function(func, &args)?;
-                        if self.frame_stack.len() > base_depth {
-                            let caller = self.frame_stack.pop().unwrap();
-                            let old = std::mem::replace(frame, caller);
-                            self.frame_pool.free(old);
-                            frame.push(result);
-                        } else {
-                            return Ok(result);
-                        }
+                        // Non-VMFunc target (struct type, ND sentinel/wrapper,
+                        // builtin, host object): plain-call semantics. The
+                        // result lands on the current stack and the body's
+                        // trailing Return forwards it to the caller.
+                        self.call_non_vmfunc(func, args, frame, host)?;
                     }
                 }
                 VMOpCode::CallMethod => {
@@ -2238,6 +2189,9 @@ impl PureVM {
                         if let Some(info) = err.exception_info() {
                             frame.active_exception_stack.push(info);
                         }
+                        for i in handler.stack_depth..frame.stack.len() {
+                            frame.stack[i].decref();
+                        }
                         frame.stack.truncate(handler.stack_depth);
                         frame.block_stack.truncate(handler.block_depth);
                         frame.ip = handler.target_addr;
@@ -2249,6 +2203,9 @@ impl PureVM {
                 catnip_core::exception::HandlerType::Finally => {
                     let handler = frame.handler_stack.pop().unwrap();
                     frame.pending_unwind = Some(err.to_pending_unwind());
+                    for i in handler.stack_depth..frame.stack.len() {
+                        frame.stack[i].decref();
+                    }
                     frame.stack.truncate(handler.stack_depth);
                     frame.block_stack.truncate(handler.block_depth);
                     // For Return, save the value on the stack
@@ -2931,6 +2888,88 @@ impl PureVM {
     }
 
     /// Call a struct operator method: pushes a new frame with self=a and other=b.
+    /// Execute a call whose target is not a VM function: struct type
+    /// (instantiation + optional init frame), ND recursion sentinel, ND
+    /// declaration/lift wrapper, builtin name, or host object. Shared by
+    /// Call and TailCall -- in both cases the result (or the init frame)
+    /// goes through the current frame.
+    fn call_non_vmfunc(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+        frame: &mut PureFrame,
+        host: &dyn VmHost,
+    ) -> VMResult<()> {
+        if func.is_struct_type() {
+            let type_id = func.as_struct_type_id().unwrap();
+            let result = self.construct_struct(type_id, &args, &IndexMap::new())?;
+            // If init_fn, call it
+            let init_fn = self.struct_registry.get_type(type_id).and_then(|ty| ty.init_fn);
+            if let Some(init_idx) = init_fn {
+                let slot = self
+                    .func_table
+                    .get(init_idx)
+                    .ok_or_else(|| VMError::RuntimeError("invalid init function".into()))?;
+                let callee_code = Arc::clone(&slot.code);
+                let closure = slot.closure.clone();
+                if self.frame_stack.len() >= MAX_FRAME_DEPTH {
+                    return Err(VMError::FrameOverflow);
+                }
+                // Push instance onto caller stack first -- init's return will be discarded.
+                // No incref needed: caller owns the ref (refcount=1 from create_instance),
+                // init receives the same index as a read-only self parameter.
+                frame.push(result);
+                let init_args = vec![result];
+                let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
+                new_frame.bind_args(&init_args);
+                new_frame.closure_scope = closure;
+                new_frame.discard_return = true;
+                let old_frame = std::mem::replace(frame, new_frame);
+                self.frame_stack.push(old_frame);
+            } else {
+                frame.push(result);
+            }
+        } else if Self::is_nd_recur_sentinel(func) {
+            // ND recursion callback: recur(value)
+            let result = self.handle_nd_recur_call(&args, host)?;
+            frame.push(result);
+        } else if let Some((tag, inner)) = Self::check_nd_wrapper(func) {
+            // ND declaration/lift wrapper call
+            let result = if tag == super::broadcast::ND_DECL_TAG {
+                self.handle_nd_decl_call(inner, &args, host)?
+            } else {
+                self.handle_nd_lift_call(inner, &args, host)?
+            };
+            frame.push(result);
+        } else if func.is_native_str() {
+            let name = unsafe { func.as_native_str_ref().unwrap() };
+            if name == "isinstance" && args.len() == 2 {
+                let result = self.check_isinstance(args[0], args[1]);
+                func.decref();
+                for a in &args {
+                    a.decref();
+                }
+                frame.push(result?);
+            } else if name == "import" && self.import_loader.is_some() {
+                let result = self.handle_import(&args, &[], host)?;
+                frame.push(result);
+            } else if let Some(hof) = Self::try_build_hof(name, &args) {
+                // HofCall owns func, iterable, and init (fold).
+                // Only the builtin name string is untracked.
+                func.decref();
+                return Err(VMError::HofBuiltin(hof));
+            } else {
+                let result = host.call_function(func, &args)?;
+                frame.push(result);
+            }
+        } else {
+            // Delegate to host
+            let result = host.call_function(func, &args)?;
+            frame.push(result);
+        }
+        Ok(())
+    }
+
     fn call_struct_op(&mut self, func_idx: u32, a: Value, b: Value, frame: &mut PureFrame) -> VMResult<()> {
         let slot = self
             .func_table

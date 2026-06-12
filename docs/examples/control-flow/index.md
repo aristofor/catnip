@@ -1,4 +1,4 @@
-# Flux de contrôle
+# Control flow
 
 Structures de contrôle avancées, sans détour.
 

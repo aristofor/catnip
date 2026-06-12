@@ -61,6 +61,12 @@ pub struct CompilerCore {
     pub outer_names: HashSet<String>,
     /// Nesting depth of active Finally handlers (for break/continue/return through finally)
     pub finally_depth: usize,
+    /// Name being bound to the lambda currently compiled, if any (let-rec:
+    /// MakeFunction injects a self-reference into the closure)
+    pub pending_self_name: Option<String>,
+    /// Named function definitions per open block (name, local slot),
+    /// for letrec group patching (PatchClosure between siblings)
+    pub block_fn_defs: Vec<Vec<(String, usize)>>,
 }
 
 impl CompilerCore {
@@ -84,6 +90,8 @@ impl CompilerCore {
             loop_modified_vars: Vec::new(),
             outer_names: HashSet::new(),
             finally_depth: 0,
+            pending_self_name: None,
+            block_fn_defs: vec![Vec::new()],
         }
     }
 
@@ -105,6 +113,8 @@ impl CompilerCore {
         self.in_optimized_loop = false;
         self.loop_modified_vars.clear();
         self.outer_names.clear();
+        self.block_fn_defs.clear();
+        self.block_fn_defs.push(Vec::new());
     }
 
     // ========== Emit helpers ==========

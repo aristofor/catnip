@@ -248,3 +248,18 @@ carre_puis_double = (x) => {
 }
 
 print("  carré puis double(5) =", carre_puis_double(5))
+
+print("⇒ Récursion mutuelle dans une closure")
+
+# Les fonctions nommées définies dans le même bloc se voient entre elles,
+# même celle définie après (letrec de groupe). Le groupe survit à la
+# sortie de son scope de définition.
+fabrique_parite = () => {
+    pair = (n) => { if n == 0 { True } else { impair(n - 1) } }
+    impair = (n) => { if n == 0 { False } else { pair(n - 1) } }
+    pair
+}
+
+est_pair = fabrique_parite()
+print("est_pair(10) =", est_pair(10))
+print("est_pair(7) =", est_pair(7))

@@ -25,10 +25,10 @@ def test_cse_block_pipeline_smoke(executor):
         """
     cat.parse(code)
 
-    # Verify IR is produced and block was flattened by semantic
+    # Verify IR is produced; the block is preserved (it declares locals,
+    # flattening it would leak the bindings into the enclosing scope)
     ir = cat._pipeline.get_prepared_ir_nodes()
     assert ir
-    # Block flattening turns OpBlock contents into top-level SetLocals
-    assert any(n.kind == "Op" and n.opcode == "SetLocals" for n in ir)
+    assert any(n.kind == "Op" and n.opcode == "OpBlock" for n in ir)
 
     assert cat.execute() == 30

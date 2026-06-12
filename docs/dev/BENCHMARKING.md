@@ -644,7 +644,7 @@ print(f"Résultat: {avg:.2f}ms ± {margin:.2f}ms (IC 95%)")
 
 ### Scénario : IR passes vs CFG optimizations
 
-Hypothèse : comparer pipeline actuel (6 passes IR) vs futur pipeline (CFG).
+Hypothèse : comparer pipeline actuel (5 passes IR) vs futur pipeline (CFG).
 
 ```python
 import time
@@ -687,7 +687,7 @@ dead, merged, empty, branches = stats
 # time_cfg = ...
 
 print(f"Pipeline IR:  {time_ir:.2f}ms")
-print(f"IR passes:    6 (BluntCode, ConstFold, StrengthRed, BlockFlat, DeadCode, CSE)")
+print(f"IR passes:    5 (BluntCode, ConstFold, StrengthRed, BlockFlat, DeadCode)")
 
 print(f"\nPipeline CFG: [Non intégré]")
 print(f"CFG passes:   4 (dead code, merge blocks, empty blocks, const branches)")
@@ -748,7 +748,7 @@ Les benchmarks suivants ont été déplacés (besoin de les réécrire pour refl
 1. **Itérations multiples** : 10+ runs, rapporter moyenne ± écart-type
 1. **Vérifier résultats** : `assert result_a == result_b` pour garantir sémantique identique
 1. **Contexte complet** : Versions, hardware, configuration
-1. **Benchmark varié** : Tester plusieurs types de code (loops, recursion, pattern matching)
+1. **Benchmark varié** : tester plusieurs types de code (loops, récursion, pattern matching)
 
 ### Pour mesurer impact optimisations
 

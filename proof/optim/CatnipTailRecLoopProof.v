@@ -1,18 +1,31 @@
 (* FILE: proof/optim/CatnipTailRecLoopProof.v *)
-(* CatnipTailRecLoopProof.v - Tail recursion to loop transformation
+(* CatnipTailRecLoopProof.v - Tail recursion / loop equivalence (TCO)
  *
- * Source of truth:
- *   catnip_rs/src/semantic/tail_recursion_to_loop.rs
+ * Code modeled: the live TCO mechanism -- tail-call marking in
+ * catnip_core/src/pipeline/semantic.rs (mark_tail_calls: any call to
+ * a plain name in tail position, covering self-recursion, mutual
+ * recursion and terminal calls) executed as frame reuse by the VM
+ * TailCall handlers (catnip_rs/src/vm/core.rs, catnip_vm/src/vm/core.rs)
+ * and as the AST trampoline loop (catnip_rs/src/core/function.rs).
+ * The former IR rewriting pass (tail_recursion_to_loop.rs) was removed
+ * with the legacy pipeline; the invariant proved here is the one the
+ * live mechanism relies on.
  *
  * Proves the semantic equivalence between tail-recursive functions
- * and their loop-based transformation. The pass converts:
+ * and their loop-based execution:
  *   f(s) = if base(s) then result(s) else f(step(s))
- * into:
+ * is equivalent to:
  *   f(s) = { while !base(s) { s := step(s) }; result(s) }
  *
+ * Section H generalizes to arbitrary tail-call targets: the state St
+ * encodes (target, arguments), so a Tail signal that switches target
+ * models mutual recursion. tramp_eq_eval_rec reduces this trampoline
+ * to the section B model, transporting every B-E theorem (loop
+ * equivalence, fuel monotonicity, determinism) to mutual recursion.
+ *
  * Also proves the correctness of two-phase rebinding through
- * temporaries, which ensures arguments are evaluated with the
- * original parameter values before reassignment.
+ * temporaries (the TailCall handlers evaluate all arguments with the
+ * original parameter values before rebinding the frame locals).
  *
  * Standalone: no dependencies on other Catnip proofs.
  *)
@@ -417,3 +430,113 @@ Example ex_swap_diverge :
   two_phase nat swap_env [0; 1] [RVar nat 1; RVar nat 0] <>
   sequential nat swap_env [0; 1] [RVar nat 1; RVar nat 0].
 Proof. discriminate. Qed.
+
+
+(* ================================================================ *)
+(* H. General Tail Calls (mutual recursion)                          *)
+(*                                                                    *)
+(* The marking covers ANY nominal call in tail position: a TailCall  *)
+(* may target a different function than the current one. Model: the  *)
+(* body of the current target either finishes (Done r) or signals a  *)
+(* tail call to a new state (Tail s'), where St encodes the target   *)
+(* and its arguments. The trampoline loops on Tail signals in O(1)   *)
+(* stack -- one body dispatch per fuel unit, no nesting.             *)
+(* ================================================================ *)
+
+Section GeneralTailCalls.
+
+Variable St : Type.
+Variable R : Type.
+
+Inductive TStep :=
+  | Done : R -> TStep
+  | Tail : St -> TStep.
+
+Variable body : St -> TStep.
+
+Fixpoint tramp (fuel : nat) (s : St) : option R :=
+  match fuel with
+  | 0 => None
+  | S n =>
+      match body s with
+      | Done r => Some r
+      | Tail s' => tramp n s'
+      end
+  end.
+
+(* eval_rec parameters extracted from body. default_r totalizes
+   t_base_val on non-base states, where its value is never used. *)
+Variable default_r : R.
+
+Definition t_is_base (s : St) : bool :=
+  match body s with Done _ => true | Tail _ => false end.
+
+Definition t_base_val (s : St) : R :=
+  match body s with Done r => r | Tail _ => default_r end.
+
+Definition t_step (s : St) : St :=
+  match body s with Done _ => s | Tail s' => s' end.
+
+(* The general trampoline IS the section B model: every B-E theorem
+   (loop equivalence, fuel monotonicity, determinism) transports to
+   mutual recursion by instantiation. *)
+Theorem tramp_eq_eval_rec : forall fuel s,
+  tramp fuel s = eval_rec St R t_is_base t_base_val t_step fuel s.
+Proof.
+  induction fuel as [|n IH]; intros s.
+  - reflexivity.
+  - simpl. unfold t_is_base, t_base_val, t_step.
+    destruct (body s) eqn:Hb.
+    + reflexivity.
+    + apply IH.
+Qed.
+
+Corollary tramp_fuel_monotone : forall n m s v,
+  tramp n s = Some v ->
+  tramp (n + m) s = Some v.
+Proof.
+  intros n m s v H.
+  rewrite tramp_eq_eval_rec in *.
+  exact (eval_rec_fuel_monotone _ _ _ _ _ n m s v H).
+Qed.
+
+Corollary tramp_deterministic : forall n1 n2 s v1 v2,
+  tramp n1 s = Some v1 ->
+  tramp n2 s = Some v2 ->
+  v1 = v2.
+Proof.
+  intros n1 n2 s v1 v2 H1 H2.
+  rewrite tramp_eq_eval_rec in *.
+  exact (eval_rec_steps_deterministic _ _ _ _ _ n1 n2 s v1 v2 H1 H2).
+Qed.
+
+End GeneralTailCalls.
+
+
+(* --- Mutual recursion instance: is_even/is_odd --- *)
+(* State: (target, n) with target false = is_even, true = is_odd.
+   Each recursive case tail-calls the OTHER function: the Tail signal
+   switches target, which a self-call-only marking cannot express. *)
+
+Definition eo_body (s : bool * nat) : TStep (bool * nat) bool :=
+  match s with
+  | (false, 0) => Done _ _ true          (* is_even 0 = True *)
+  | (true, 0) => Done _ _ false          (* is_odd 0 = False *)
+  | (false, S n) => Tail _ _ (true, n)   (* is_even n -> is_odd (n-1) *)
+  | (true, S n) => Tail _ _ (false, n)   (* is_odd n -> is_even (n-1) *)
+  end.
+
+Example ex_mutual_even_10 :
+  tramp _ _ eo_body 11 (false, 10) = Some true.
+Proof. reflexivity. Qed.
+
+Example ex_mutual_odd_10 :
+  tramp _ _ eo_body 11 (true, 10) = Some false.
+Proof. reflexivity. Qed.
+
+(* The mutual pair inherits loop equivalence from section D *)
+Example ex_mutual_loop_equiv :
+  tramp _ _ eo_body 11 (false, 10) =
+  eval_loop _ _ (t_is_base _ _ eo_body) (t_base_val _ _ eo_body true)
+    (t_step _ _ eo_body) 11 (false, 10).
+Proof. reflexivity. Qed.

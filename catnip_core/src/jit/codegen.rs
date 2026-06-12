@@ -474,21 +474,11 @@ fn compile_simple_op(
         TraceOp::PopTop => {
             stack.pop().ok_or("Stack underflow on PopTop")?;
         }
-        TraceOp::AddInt => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().iadd(a, b));
-        }
-        TraceOp::SubInt => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().isub(a, b));
-        }
-        TraceOp::MulInt => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().imul(a, b));
-        }
+        // AddInt/SubInt/MulInt are never routed here: build_function_body
+        // handles them with a SmallInt overflow guard before falling through to
+        // compile_simple_op. Keeping unchecked iadd/isub/imul arms would be a
+        // silent-overflow footgun for any future caller, so they're omitted and
+        // fall to the "unexpected op" error below.
         TraceOp::DivInt => {
             let b = stack.pop().ok_or("Stack underflow")?;
             let a = stack.pop().ok_or("Stack underflow")?;
@@ -877,10 +867,12 @@ impl JITCodegen {
             None
         };
 
-        // Compute func_id hash for memoization cache key
+        // Compute func_id hash for memoization cache key.
+        // FNV-1a over the full func_id: a byte-sum would collide on any
+        // permutation of the same hex digits, returning another function's
+        // memoized result for the same argument.
         let func_id_hash = if let Some(ref func_id_str) = trace.func_id {
-            // Simple hash: sum of bytes (good enough for cache isolation)
-            func_id_str.bytes().map(|b| b as u64).sum::<u64>()
+            super::trace_cache::hash_bytecode(func_id_str.as_bytes())
         } else {
             0
         };

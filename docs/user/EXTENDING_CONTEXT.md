@@ -3,7 +3,7 @@
 ## Introduction
 
 Catnip est volontairement **sans I/O** : pas d'accès réseau, fichiers, ni même `print` par défaut. Les fonctions I/O
-(`print`, `write`, `input`) viennent du module `io`, auto-importé en CLI et REPL mais absent en mode embarqué. L'hôte
+(`print`, `write`, `input`) viennent du module `io`, auto-importé en CLI et REPL mais absent en embedded mode. Le host
 expose ensuite ce dont l'application a besoin, au bon niveau de contrôle.
 
 > Kernighan, Ritchie et Thompson auraient probablement approuvé un coeur sans I/O.
@@ -13,7 +13,7 @@ transporte :
 
 - **`globals`** : dictionnaire de fonctions, classes et valeurs accessibles depuis Catnip
 - **`locals`** : scope local (géré automatiquement par Catnip)
-- **`result`** : dernier résultat (accessible via `ctx.result` côté hôte)
+- **`result`** : dernier résultat (accessible via `ctx.result` côté host)
 
 Par défaut, le context expose des primitives de calcul (`len`, `range`, `sorted`...) et un logger minimal, mais aucune
 fonction I/O. `print`, `write` et `input` sont fournis par le module `io` (auto-importé en CLI/REPL, configurable via

@@ -78,6 +78,7 @@ pub(crate) struct OpCodeCache {
     pub exc_info: i32,
     pub set_locals: i32,
     pub call: i32,
+    pub op_lambda: i32,
 
     // Access
     pub getattr: i32,
@@ -184,6 +185,7 @@ impl OpCodeCache {
             exc_info: get("EXC_INFO")?,
             set_locals: get("SET_LOCALS")?,
             call: get("CALL")?,
+            op_lambda: get("OP_LAMBDA")?,
 
             getattr: get("GETATTR")?,
             getitem: get("GETITEM")?,
@@ -334,6 +336,11 @@ pub struct Registry {
 
     /// Active exception for bare raise in except handlers
     pub(crate) active_exception: RefCell<Option<PyErr>>,
+
+    /// Byte offset of the deepest node that raised during execution.
+    /// -1 when empty; first failure wins, cleared when a handler catches
+    /// or when read via take_error_byte().
+    pub(crate) error_byte: std::cell::Cell<isize>,
 }
 
 #[pymethods]
@@ -364,6 +371,7 @@ impl Registry {
             opcodes,
             operator_cache,
             active_exception: RefCell::new(None),
+            error_byte: std::cell::Cell::new(-1),
         };
 
         // Register operations in internals for semantic analysis
@@ -394,6 +402,14 @@ impl Registry {
     /// Use exec_stmt() for new code.
     fn resolve_stmt(&self, py: Python<'_>, stmt: Py<PyAny>) -> PyResult<Py<PyAny>> {
         self.exec_stmt_impl(py, stmt)
+    }
+
+    /// Read and clear the byte offset of the deepest failing node (-1 if none).
+    /// Used by Python error enrichment to report accurate positions.
+    fn take_error_byte(&self) -> isize {
+        let byte = self.error_byte.get();
+        self.error_byte.set(-1);
+        byte
     }
 
     /// Resolve an identifier from locals/globals

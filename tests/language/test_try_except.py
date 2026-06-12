@@ -2,6 +2,7 @@
 """Tests for try/except/finally and raise."""
 
 import pytest
+
 from catnip import Catnip
 from catnip.exc import CatnipRuntimeError
 

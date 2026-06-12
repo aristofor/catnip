@@ -1,5 +1,6 @@
 # FILE: catnip/__init__.py
 import os
+import sys as _sys
 
 from ._rs import CatnipRuntime, Pipeline, Scope, SourceMap
 
@@ -7,11 +8,18 @@ from ._rs import CatnipRuntime, Pipeline, Scope, SourceMap
 StandalonePipeline = Pipeline
 from ._version import __build_date__, __commit__, __lang_id__, __version__
 from .cachesys import CatnipCache
-from .context import Context, _ImportWrapper
+from .context import Context, _ImportWrapper, configure_logging
 from .executor import Executor
 from .pragma import PRAGMA_ATTRS, PragmaContext
 from .registry import Registry
 from .semantic.opcode import OpCode
+
+# Embedded binaries (catnip-run, catnip-repl) set this process-local marker
+# before running user code: they are the application, so logging gets
+# configured as soon as the package becomes live. Library hosts (plain
+# `import catnip`) and child processes are untouched.
+if getattr(_sys, '_catnip_embedded', False):
+    configure_logging()
 
 
 class Catnip:
@@ -37,8 +45,10 @@ class Catnip:
         self.pragma_context = PragmaContext()
         self.use_pragmas = kwargs.get('use_pragmas', True)
 
-        # Apply optimization level from kwargs if provided
-        if 'optimize' in kwargs:
+        # Caller overrides (kwargs/CLI/env) win over in-file pragmas
+        self._optimize_forced = 'optimize' in kwargs
+        self._tco_forced = False
+        if self._optimize_forced:
             self.pragma_context.optimize_level = kwargs['optimize']
 
         # VM execution mode: "on" (default), "off"
@@ -85,10 +95,17 @@ class Catnip:
         if policy is not None:
             loader_ctx_ns.module_policy = policy
         py_loader = ModuleLoader(loader_ctx_ns)
-        cat_loader = lambda path, name: py_loader.load_catnip_module(path, module_name=name)
+
+        def cat_loader(path, name):
+            return py_loader.load_catnip_module(path, module_name=name)
 
         self._fixed_import = ImportLoader(proxy, policy=policy, cat_loader=cat_loader, context=self.context)
         self._pipeline.set_global('import', self._fixed_import)
+        # AST mode resolves `import` from the Python context globals: route its
+        # namespace loading through the same Rust loader (shared module cache)
+        imp = self.context.globals.get('import')
+        if isinstance(imp, _ImportWrapper):
+            imp._rust_import = self._fixed_import
 
     def parse(self, text, semantic=True, filename=None):
         """
@@ -109,10 +126,15 @@ class Catnip:
             self._pipeline.set_source_path(filename)
 
         try:
-            # Apply known pragma settings before parsing (optimize=0 disables passes)
+            # Baseline before parsing; in-file pragmas can flip it during the
+            # semantic pass, unless forced by the caller (kwargs/CLI/env)
             if self.use_pragmas:
-                self._pipeline.set_optimize_enabled(self.pragma_context.optimize_level > 0)
-                self._pipeline.set_tco_enabled(self.pragma_context.tco_enabled)
+                optimize = self.pragma_context.optimize_level > 0
+                tco = self.pragma_context.tco_enabled
+                self._pipeline.set_optimize_enabled(optimize)
+                self._pipeline.set_tco_enabled(tco)
+                self._pipeline.set_optimize_override(optimize if self._optimize_forced else None)
+                self._pipeline.set_tco_override(tco if self._tco_forced else None)
 
             if not semantic:
                 return self._pipeline.parse_to_ir(text, False)
@@ -193,6 +215,11 @@ class Catnip:
                     # bool() on strings silently returns True, check type
                     if typ is bool and not isinstance(value, bool):
                         raise ValueError(f"requires True or False, got {value!r}")
+                    # Caller overrides (kwargs/CLI/env) win over file pragmas:
+                    # pragma_context must keep the forced (effective) value,
+                    # both for the next parse and for catnip.optimize introspection
+                    if (directive == 'optimize' and self._optimize_forced) or (directive == 'tco' and self._tco_forced):
+                        continue
                     setattr(self.pragma_context, attr, typ(value))
                 except (ValueError, TypeError) as e:
                     exc = CatnipPragmaError(f"Invalid value for pragma '{directive}': {e}")
@@ -332,14 +359,22 @@ class Catnip:
             exc.traceback = tb
 
     def _enrich_error_position(self, exc, statements):
-        """Try to set .line/.column on an exception from the current statement."""
-        stmt = getattr(self, 'executor', None) and getattr(self.executor, 'current_stmt', None)
-        if stmt is None:
-            return
-        byte_offset = getattr(stmt, 'start_byte', None)
-        if byte_offset is not None:
-            exc.line = self._line_from_byte(byte_offset)
-            exc.column = self._col_from_byte(byte_offset)
+        """Try to set .line/.column on an exception from the failing node.
+
+        Prefers the deepest failing node recorded by the Rust registry,
+        falls back to the enclosing top-level statement.
+        """
+        take = getattr(self.registry, 'take_error_byte', None)
+        byte_offset = take() if take is not None else -1
+        if byte_offset < 0:
+            stmt = getattr(self, 'executor', None) and getattr(self.executor, 'current_stmt', None)
+            if stmt is None:
+                return
+            byte_offset = getattr(stmt, 'start_byte', None)
+            if byte_offset is None:
+                return
+        exc.line = self._line_from_byte(byte_offset)
+        exc.column = self._col_from_byte(byte_offset)
 
     @staticmethod
     def _enrich_attribute_error(exc, msg):
@@ -373,6 +408,10 @@ class Catnip:
         # Filter out Pragma ops (already processed by _sync_pragmas_from_ir)
         statements = [s for s in statements if not (type(s) is Op and s.ident == OpCode.PRAGMA)]
         self.executor = self.executor_class(self.registry, self.context)
+        # Drop any position left over from a previous (handled) error
+        take = getattr(self.registry, 'take_error_byte', None)
+        if take is not None:
+            take()
         try:
             return self.executor.execute(statements, trace=trace)
         except (CatnipRuntimeError, CatnipTypeError) as e:

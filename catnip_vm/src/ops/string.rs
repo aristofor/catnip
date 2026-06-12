@@ -20,13 +20,20 @@ pub fn str_concat(a: &str, b: &str) -> Value {
     Value::from_string(result)
 }
 
+/// Upper bound on the byte length produced by `str_repeat`, to turn a
+/// pathological `"x" * 10**12` into a recoverable error instead of a process
+/// abort on a multi-terabyte allocation.
+const MAX_STR_REPEAT_BYTES: usize = 256 * 1024 * 1024;
+
 /// String repeat: s * n.
 #[inline]
-pub fn str_repeat(s: &str, n: i64) -> Value {
+pub fn str_repeat(s: &str, n: i64) -> VMResult<Value> {
     if n <= 0 {
-        Value::from_string(String::new())
-    } else {
-        Value::from_string(s.repeat(n as usize))
+        return Ok(Value::from_string(String::new()));
+    }
+    match s.len().checked_mul(n as usize) {
+        Some(bytes) if bytes <= MAX_STR_REPEAT_BYTES => Ok(Value::from_string(s.repeat(n as usize))),
+        _ => Err(VMError::ValueError("repeated string is too long".into())),
     }
 }
 
@@ -84,7 +91,6 @@ pub fn str_getitem(s: &str, index: i64) -> VMResult<Value> {
         )));
     }
     let ch = s.chars().nth(idx as usize).unwrap();
-    Value::from_string(ch.to_string());
     Ok(Value::from_string(ch.to_string()))
 }
 
@@ -292,9 +298,11 @@ mod tests {
 
     #[test]
     fn test_repeat() {
-        assert_eq!(s(str_repeat("ab", 3)), "ababab");
-        assert_eq!(s(str_repeat("x", 0)), "");
-        assert_eq!(s(str_repeat("x", -1)), "");
+        assert_eq!(s(str_repeat("ab", 3).unwrap()), "ababab");
+        assert_eq!(s(str_repeat("x", 0).unwrap()), "");
+        assert_eq!(s(str_repeat("x", -1).unwrap()), "");
+        // Pathological length is a recoverable error, not an abort.
+        assert!(str_repeat("x", i64::MAX).is_err());
     }
 
     #[test]

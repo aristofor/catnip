@@ -11,4 +11,3 @@ crate-type = ["rlib"]
 catnip_grammar = { path = "../catnip_grammar" }
 tree-sitter = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }

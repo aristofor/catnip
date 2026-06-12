@@ -9,7 +9,7 @@ Guide pour mesurer les performances de Catnip.
 Script de référence. Benchmarke des chemins VM d'actualité et compare Catnip VM à Python natif :
 
 - `ForRangeInt` (boucle numérique range)
-- transformation tail recursion -> loop
+- transformation tail recursion -> boucle
 - arithmétique BigInt (croissance et div/mod)
 
 ```bash
@@ -40,8 +40,8 @@ python docs/examples/performance/pipeline_comparison_benchmark.py -l 0-2
 Compare trois approches équivalentes sur `sum(1..n)` :
 
 - boucle impérative
-- récursion terminale avec `tco:on`
-- récursion terminale avec `tco:off`
+- tail recursion avec `tco:on`
+- tail recursion avec `tco:off`
 
 ```bash
 python docs/examples/performance/tco_vs_iteration_benchmark.py
@@ -54,7 +54,7 @@ python docs/examples/performance/tco_vs_iteration_benchmark.py --fast
 - [`profiling_example.py`](profiling_example.py)
 
 Point de départ minimal pour profiler un chemin Catnip représentatif avec `cProfile`. Mesure `parse + execute` sur une
-charge mixte boucle + récursion terminale.
+charge mixte boucle + tail recursion.
 
 ```bash
 python docs/examples/performance/profiling_example.py

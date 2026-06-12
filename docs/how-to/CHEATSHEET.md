@@ -1,18 +1,18 @@
 # Catnip Cheat-Sheet
 
-Reference rapide du langage. Pour le detail, voir les pages liees.
+Référence rapide du langage. Pour le détail, voir les pages liées.
 
 ## Syntaxe de base
 
 ```catnip
 # Commentaire ligne
 x = 42                      # affectation
-x = y = 0                   # affectation chainee
+x = y = 0                   # affectation chaînée
 { a = 1; a + 2 }            # bloc (expression, retourne 3)
 ```
 
-Separateurs : retour a la ligne ou `;`. Parentheses pour multilignes : `(expr\n+ expr)`. Dot-continuation : `.` en debut
-de ligne continue l'expression precedente.
+Séparateurs : retour à la ligne ou `;`. Parenthèses pour multilignes : `(expr\n+ expr)`. Dot-continuation : `.` en début
+de ligne continue l'expression précédente.
 
 Voir [SYNTAX](../lang/SYNTAX.md).
 
@@ -40,9 +40,9 @@ Builtins : `typeof(x)` retourne le nom du type. `RUNTIME.smallint_max/min` pour 
 
 Voir [TYPES](../lang/TYPES.md).
 
-## Operateurs
+## Opérateurs
 
-| Priorite (haute -> basse) | Operateurs                                                       |
+| Priorité (haute -> basse) | Opérateurs                                                       |
 | ------------------------- | ---------------------------------------------------------------- |
 | Puissance                 | `**`                                                             |
 | Unaire                    | `-x`, `+x`, `~x`                                                 |
@@ -54,13 +54,13 @@ Voir [TYPES](../lang/TYPES.md).
 | Logique                   | `not`, `and`, `or`                                               |
 | Nil-coalescing            | `??` (None-only, preserve falsy)                                 |
 
-Comparaisons chainees : `1 < x < 10`. Logiques short-circuit, retournent `bool`.
+Comparaisons chaînées : `1 < x < 10`. Logiques short-circuit, retournent `bool`.
 
 Indexation : `obj[i]`, `obj[start:stop:step]`. Dot-slice : `obj.[1:3]`.
 
 Voir [EXPRESSIONS](../lang/EXPRESSIONS.md).
 
-## Controle de flux
+## Contrôle de flux
 
 <!-- check: no-check -->
 
@@ -90,16 +90,16 @@ Voir [CONTROL_FLOW](../lang/CONTROL_FLOW.md), [PATTERN_MATCHING](../lang/PATTERN
 ## Fonctions
 
 ```catnip
-add = (a, b) => { a + b }                # definition
-square = (x) => { x ** 2 }               # retour implicite (derniere expr)
-greet = (name, sep="") => { sep + name } # defaut
+add = (a, b) => { a + b }                # définition
+square = (x) => { x ** 2 }               # retour implicite (dernière expr)
+greet = (name, sep="") => { sep + name } # défaut
 variadic = (*args) => { args }           # variadique
 ```
 
-- Args manquants -> `None`, args en trop ignores
+- Args manquants -> `None`, args en trop ignorés
 - Closures : capture lexicale auto (pas de `nonlocal`)
-- TCO : auto-detecte sur appels recursifs terminaux
-- Decorateurs : `@dec f = ...` -> `f = dec(f)`, empilables
+- TCO : auto-détectée sur appels récursifs terminaux
+- Décorateurs : `@dec f = ...` -> `f = dec(f)`, empilables
 
 Builtins : `print`, `len`, `abs`, `min`, `max`, `sum`, `round`, `sorted`, `reversed`, `enumerate`, `zip`, `map`,
 `filter`, `range`, `int`, `float`, `str`, `bool`, `type`, `list`, `tuple`, `dict`, `set`, `fold`, `reduce`, `globals`,
@@ -110,10 +110,10 @@ Voir [FUNCTIONS](../lang/FUNCTIONS.md).
 ## Structures
 
 ```catnip
-struct Point { x; y=0 }                  # champs + defaut
+struct Point { x; y=0 }                  # champs + défaut
 p = Point(1, 2)                          # instantiation positionnelle
-p = Point(x=1, y=2)                      # instantiation nommee
-p.x                                      # acces champ
+p = Point(x=1, y=2)                      # instantiation nommée
+p.x                                      # accès champ
 p.x = 5                                  # mutation
 
 struct Point {
@@ -128,9 +128,9 @@ struct Point {
 ### Enums
 
 ```catnip
-enum Color { red; green; blue }       # declaration
-c = Color.red                         # acces qualifie
-c == Color.green                      # egalite : False
+enum Color { red; green; blue }       # déclaration
+c = Color.red                         # accès qualifié
+c == Color.green                      # égalité : False
 ```
 
 <!-- check: no-check -->
@@ -143,24 +143,24 @@ match c {
 }
 ```
 
-Pas de payload, pas de methodes, pas d'heritage. Toujours truthy.
+Pas de payload, pas de méthodes, pas d'héritage. Toujours truthy.
 
 Voir [ENUMS](../lang/ENUMS.md).
 
-### Heritage et traits
+### Héritage et traits
 
 <!-- check: no-check -->
 
 ```catnip
-struct Child extends(Parent) { z }                # heritage simple
-struct Multi extends(A, B) { }                    # heritage multiple (C3 MRO)
+struct Child extends(Parent) { z }                # héritage simple
+struct Multi extends(A, B) { }                    # héritage multiple (C3 MRO)
 super.method()                                    # appel parent
 
 trait Printable { @abstract to_str(self) }
 struct Pt implements(Printable) { x; to_str(self) => { f"{self.x}" } }
 ```
 
-Operateurs surchargeables : `+`, `-`, `*`, `/`, `//`, `%`, `**`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&`, `|`, `^`, `<<`,
+Opérateurs surchargeables : `+`, `-`, `*`, `/`, `//`, `%`, `**`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&`, `|`, `^`, `<<`,
 `>>`, `in`, `not in`, unaires `-`, `+`, `~`. Dispatch inverse auto : `5 + S(10)` appelle `S.op+`.
 
 Voir [STRUCTURES](../lang/STRUCTURES.md).
@@ -170,7 +170,7 @@ Voir [STRUCTURES](../lang/STRUCTURES.md).
 <!-- check: no-check -->
 
 ```catnip
-data.[+ 1]                       # map : ajouter 1 a chaque element
+data.[+ 1]                       # map : ajouter 1 à chaque élément
 data.[if > 5]                    # filter : garder les > 5
 data.[(x) => { x * 2 }]          # map lambda
 data.[if (x) => { x % 2 == 0 }]  # filter lambda
@@ -178,16 +178,16 @@ data.[abs]                       # map fonction unaire
 data.[1:3]                       # dot-slice
 ```
 
-Chainable : `data.[if > 0].[* 2].[abs]`. Descente recursive dans les listes/tuples imbriques. Preservation de type :
+Chainable : `data.[if > 0].[* 2].[abs]`. Descente récursive dans les listes/tuples imbriqués. Préservation de type :
 list->list, tuple->tuple, set/dict/range->list.
 
-### ND-recursion
+### ND-récursion
 
 <!-- check: no-check -->
 
 ```catnip
-data.[~> f]                 # ND-map : appliquer f a chaque feuille
-data.[~~(n, r) => { ... }]  # ND-recursion : recursion sur chaque feuille
+data.[~> f]                 # ND-map : appliquer f à chaque feuille
+data.[~~(n, r) => { ... }]  # ND-récursion : récursion sur chaque feuille
 ~~(seed, lambda)            # appel direct
 ~> f                        # lift : wrapper ND
 ```
@@ -205,7 +205,7 @@ m = import('math')                # bind explicite
 import('io'); io.print("hello")   # stdlib
 import('sys'); sys.exit(0)        # stdlib
 
-import('.sibling')                # relatif (meme dossier)
+import('.sibling')                # relatif (même dossier)
 import('..parent_mod')            # relatif (dossier parent)
 ```
 
@@ -214,7 +214,7 @@ Voir [MODULE_LOADING](../user/MODULE_LOADING.md).
 ## Pragmas
 
 ```catnip
-pragma('tco', True)           # tail-call optimization (defaut: True)
+pragma('tco', True)           # tail-call optimization (défaut: True)
 pragma('jit', True)           # compilation JIT
 pragma('optimize', 3)         # niveau d'optimisation (0-3)
 pragma('nd_mode', ND.thread)  # backend ND : sequential, thread, process
@@ -226,6 +226,6 @@ Voir [PRAGMAS](../lang/PRAGMAS.md).
 
 | Namespace | Attributs                                                    |
 | --------- | ------------------------------------------------------------ |
-| `META`    | `.file` (chemin source), `.main` (True si execution directe) |
+| `META`    | `.file` (chemin source), `.main` (True si exécution directe) |
 | `ND`      | `.sequential`, `.thread`, `.process`                         |
 | `RUNTIME` | `.smallint_max`, `.smallint_min`                             |

@@ -2,13 +2,16 @@
 //! Blunt code simplification pass (pure Rust).
 //!
 //! Simplifies patterns:
-//! - not not x → x
-//! - not (a == b) → a != b
-//! - x == True → x, x == False → not x
-//! - x + 0 → x, x * 1 → x, x * 0 → 0
-//! - x and False → False, x or True → True
-//! - x and x → x, x or x → x (idempotence)
+//! - not (a == b) → a != b (Eq/Ne only: order inversions are unsound with NaN)
+//! - True and False → False, ... (both operands Bool literals)
 //! - x and (not x) → False, x or (not x) → True (complement)
+//! - if True { a } → a, if False { a } elif ... → elif ...
+//!
+//! Arithmetic identities (x + 0, x * 1, x * 0, x / 1, x // 1, x == True,
+//! not not x) are intentionally absent: without type information they change
+//! observable values in a dynamic language ("abc" * 0 is "", 7.5 // 1 is 7.0,
+//! 5 == True is False, not not 5 is True). All-literal cases are handled by
+//! constant folding.
 
 use super::{PurePass, invert_comparison, is_truthy_constant, map_children};
 use crate::ir::{IR, IROpCode};
@@ -38,16 +41,7 @@ fn simplify_op(opcode: IROpCode, args: &[IR]) -> Option<IR> {
     match opcode {
         // --- NOT ---
         IROpCode::Not if !args.is_empty() => {
-            // not not x → x
-            if let IR::Op {
-                opcode: IROpCode::Not,
-                args: inner_args,
-                ..
-            } = &args[0]
-            {
-                return inner_args.first().cloned();
-            }
-            // not (a cmp b) → a inv_cmp b
+            // not (a cmp b) → a inv_cmp b (Eq↔Ne only, see invert_comparison)
             if let IR::Op {
                 opcode: inner_op,
                 args: inner_args,
@@ -67,73 +61,6 @@ fn simplify_op(opcode: IROpCode, args: &[IR]) -> Option<IR> {
                         end_byte: *ieb,
                     });
                 }
-            }
-            None
-        }
-
-        // --- EQ with True/False ---
-        IROpCode::Eq if args.len() >= 2 => {
-            let (left, right) = (&args[0], &args[1]);
-            if matches!(right, IR::Bool(true)) {
-                return Some(left.clone());
-            }
-            if matches!(left, IR::Bool(true)) {
-                return Some(right.clone());
-            }
-            if matches!(right, IR::Bool(false)) {
-                return Some(IR::op(IROpCode::Not, vec![left.clone()]));
-            }
-            if matches!(left, IR::Bool(false)) {
-                return Some(IR::op(IROpCode::Not, vec![right.clone()]));
-            }
-            None
-        }
-
-        // --- ADD ---
-        IROpCode::Add if args.len() >= 2 => {
-            if is_zero(&args[1]) {
-                return Some(args[0].clone());
-            }
-            if is_zero(&args[0]) {
-                return Some(args[1].clone());
-            }
-            None
-        }
-
-        // --- SUB ---
-        IROpCode::Sub if args.len() >= 2 => {
-            if is_zero(&args[1]) {
-                return Some(args[0].clone());
-            }
-            None
-        }
-
-        // --- MUL ---
-        IROpCode::Mul if args.len() >= 2 => {
-            if is_zero(&args[0]) || is_zero(&args[1]) {
-                return Some(IR::Int(0));
-            }
-            if is_one(&args[1]) {
-                return Some(args[0].clone());
-            }
-            if is_one(&args[0]) {
-                return Some(args[1].clone());
-            }
-            None
-        }
-
-        // --- DIV / TRUEDIV ---
-        IROpCode::Div | IROpCode::TrueDiv if args.len() >= 2 => {
-            if is_one(&args[1]) {
-                return Some(args[0].clone());
-            }
-            None
-        }
-
-        // --- FLOORDIV ---
-        IROpCode::FloorDiv if args.len() >= 2 => {
-            if is_one(&args[1]) {
-                return Some(args[0].clone());
             }
             None
         }
@@ -229,22 +156,6 @@ fn simplify_if(args: &[IR]) -> Option<IR> {
     None
 }
 
-fn is_zero(ir: &IR) -> bool {
-    match ir {
-        IR::Int(0) => true,
-        IR::Float(v) => *v == 0.0,
-        _ => false,
-    }
-}
-
-fn is_one(ir: &IR) -> bool {
-    match ir {
-        IR::Int(1) => true,
-        IR::Float(v) => *v == 1.0,
-        _ => false,
-    }
-}
-
 fn is_negation_of(a: &IR, b: &IR) -> bool {
     if let IR::Op {
         opcode: IROpCode::Not,
@@ -268,10 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn test_double_negation() {
+    fn test_double_negation_preserved() {
+        // not not x must NOT become x: not not 5 is True, not 5
         let x = IR::Ref("x".into(), 0, 1);
-        let ir = IR::op(IROpCode::Not, vec![IR::op(IROpCode::Not, vec![x.clone()])]);
-        assert_eq!(opt(ir), x);
+        let ir = IR::op(IROpCode::Not, vec![IR::op(IROpCode::Not, vec![x])]);
+        assert_eq!(opt(ir.clone()), ir);
     }
 
     #[test]
@@ -285,37 +197,36 @@ mod tests {
     }
 
     #[test]
-    fn test_eq_true() {
-        let x = IR::Ref("x".into(), 0, 1);
-        let ir = IR::op(IROpCode::Eq, vec![x.clone(), IR::Bool(true)]);
-        assert_eq!(opt(ir), x);
+    fn test_not_lt_preserved() {
+        // not (a < b) must NOT become a >= b: unsound with NaN operands
+        let a = IR::Ref("a".into(), 0, 1);
+        let b = IR::Ref("b".into(), 2, 3);
+        let lt = IR::op(IROpCode::Lt, vec![a, b]);
+        let ir = IR::op(IROpCode::Not, vec![lt]);
+        assert_eq!(opt(ir.clone()), ir);
     }
 
     #[test]
-    fn test_eq_false() {
+    fn test_eq_true_preserved() {
+        // x == True must NOT become x: 5 == True is False, not 5
         let x = IR::Ref("x".into(), 0, 1);
-        let ir = IR::op(IROpCode::Eq, vec![x.clone(), IR::Bool(false)]);
-        let result = opt(ir);
-        assert_eq!(result.opcode(), Some(IROpCode::Not));
+        let ir = IR::op(IROpCode::Eq, vec![x, IR::Bool(true)]);
+        assert_eq!(opt(ir.clone()), ir);
     }
 
     #[test]
-    fn test_add_zero() {
+    fn test_arithmetic_identities_preserved() {
+        // x + 0, x * 1, x * 0: unsound without type info ("abc" * 0 is "")
         let x = IR::Ref("x".into(), 0, 1);
-        assert_eq!(opt(IR::op(IROpCode::Add, vec![x.clone(), IR::Int(0)])), x);
-        assert_eq!(opt(IR::op(IROpCode::Add, vec![IR::Int(0), x.clone()])), x);
-    }
-
-    #[test]
-    fn test_mul_zero() {
-        let x = IR::Ref("x".into(), 0, 1);
-        assert_eq!(opt(IR::op(IROpCode::Mul, vec![x.clone(), IR::Int(0)])), IR::Int(0));
-    }
-
-    #[test]
-    fn test_mul_one() {
-        let x = IR::Ref("x".into(), 0, 1);
-        assert_eq!(opt(IR::op(IROpCode::Mul, vec![x.clone(), IR::Int(1)])), x);
+        for ir in [
+            IR::op(IROpCode::Add, vec![x.clone(), IR::Int(0)]),
+            IR::op(IROpCode::Mul, vec![x.clone(), IR::Int(1)]),
+            IR::op(IROpCode::Mul, vec![x.clone(), IR::Int(0)]),
+            IR::op(IROpCode::FloorDiv, vec![x.clone(), IR::Int(1)]),
+            IR::op(IROpCode::TrueDiv, vec![x.clone(), IR::Int(1)]),
+        ] {
+            assert_eq!(opt(ir.clone()), ir);
+        }
     }
 
     #[test]

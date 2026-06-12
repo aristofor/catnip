@@ -1,8 +1,8 @@
 # Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
-version <!-- catnip:version -->0.1.0<!-- /catnip:version -->
+version <!-- catnip:version -->0.1.1<!-- /catnip:version -->
 
-Né comme langage de script embarquable pour Python.
+Né comme langage de script embeddable pour Python.
 
 Catnip vise un équilibre entre simplicité d'usage, expressivité et performances. Minimal en surface, précis dans sa
 conception.
@@ -10,7 +10,7 @@ conception.
 <!-- doc-snapshot: index/repl-ieee754 -->
 
 ```console
-Catnip REPL v0.0.10
+Catnip REPL v0.1.1
 Type /help for help, /exit to quit
 ▸ 0.1 + 0.2
 0.30000000000000004
@@ -66,7 +66,7 @@ Démarrage express. **[tuto/](tuto/)**
 Recettes d'utilisation. **[how-to/](how-to/)**
 
 - [PATTERN_MATCHING](how-to/PATTERN_MATCHING.md) - Mettre en place du pattern matching pas à pas
-- [ND_CONCURRENCY](how-to/ND_CONCURRENCY.md) - Choisir entre `sequential`, `thread` et `process` pour la ND-recursion
+- [ND_CONCURRENCY](how-to/ND_CONCURRENCY.md) - Choisir entre `sequential`, `thread` et `process` pour la ND-récursion
 - [CLICK_INTEGRATION](how-to/CLICK_INTEGRATION.md) - Construire une CLI avec Click depuis Catnip
 - [INTERACTIVE_MENUS](how-to/INTERACTIVE_MENUS.md) - Menus interactifs avec `prompt_toolkit`
 
@@ -109,7 +109,7 @@ Référence complète de la syntaxe et des concepts du langage.
 - [CONTROL_FLOW](lang/CONTROL_FLOW.md) - Structures de contrôle (`if`, `while`, `for`, `break`, `continue`)
 - [FUNCTIONS](lang/FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
 - [STRUCTURES](lang/STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
-- [PATTERN_MATCHING](lang/PATTERN_MATCHING.md) - Référence complète du filtrage par motifs (pattern matching)
+- [PATTERN_MATCHING](lang/PATTERN_MATCHING.md) - Référence complète du pattern matching
 - [BROADCAST](lang/BROADCAST.md) - Notation vectorielle sur collections
   - [BROADCAST_SPEC](lang/BROADCAST_SPEC.md) - Spécification normative (syntaxe et sémantique)
   - [BROADCAST_RATIONALE](lang/BROADCAST_RATIONALE.md) - Motivation et comparaisons
@@ -117,8 +117,8 @@ Référence complète de la syntaxe et des concepts du langage.
   - [BROADCAST_RUNTIME](lang/BROADCAST_RUNTIME.md) - Détails d'implémentation runtime
 - [COMPREHENSIONS](lang/COMPREHENSIONS.md) - Traduction des comprehensions Python vers Catnip
 - [FOLD_GUIDE](lang/FOLD_GUIDE.md) - Fold et reduce : agrégation de structures
-- [SCOPES_AND_VARIABLES](lang/SCOPES_AND_VARIABLES.md) - Portée des variables et closures
-- [PRAGMAS](lang/PRAGMAS.md) - Pragmas (TCO, JIT, ND-recursion, modules)
+- [SCOPES_AND_VARIABLES](lang/SCOPES_AND_VARIABLES.md) - Scope des variables et closures
+- [PRAGMAS](lang/PRAGMAS.md) - Pragmas (TCO, JIT, ND-récursion, modules)
 - [TURING_COMPLETENESS](lang/TURING_COMPLETENESS.md) - Socle formel et complétude de Turing
 - [COQ_PROOFS](dev/COQ_PROOFS.md) - Référentiel des preuves Coq
 - [GLOSSARY](lang/GLOSSARY.md) - Termes techniques
@@ -133,7 +133,7 @@ Exemples **[examples/](examples/)**
 - [control-flow/](examples/control-flow/) - Break et continue
 - [broadcast/](examples/broadcast/) - Broadcasting
 - [cfg/](examples/cfg/) - Control Flow Graph (analyse et optimisations)
-- [module-loading/](examples/module-loading/) - Chargement de modules (bases)
+- [module-loading/](examples/module-loading/) - Module loading (bases)
 - [run/](examples/run/) - Exemples standalone (CLI)
 - [advanced/](examples/advanced/) - Techniques avancées
 - [embedding/](examples/embedding/) - Embedding Catnip dans Python
@@ -142,7 +142,7 @@ Exemples **[examples/](examples/)**
 
 ## Écosystème
 
-Les exemples d'intégration de l'écosystème Python (numpy, polars, duckdb, geopandas, networkx, …) forment le **Codex**,
+Les exemples d'embedding de l'écosystème Python (numpy, polars, duckdb, geopandas, networkx, …) forment le **Codex**,
 désormais un side project autonome dont les sources vivent dans `codex/` à la racine du dépôt.
 
 ## Cœur

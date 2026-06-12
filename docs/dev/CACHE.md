@@ -41,8 +41,8 @@ flowchart TD
 **`catnip_rs/src/cache/memoization.rs`** - Mémoïsation :
 
 - `Memoization` : cache résultats de fonctions avec index HashMap
-- `get(func_name, args, kwargs)` : retourne la valeur cachée ou `None` (ne distingue pas miss de valeur `None`)
-- `get_entry(func_name, args, kwargs)` : retourne le `CacheEntry` complet ou `None` (distingue miss de valeur cachée
+- `get(func_name, args, kwargs)` : retourne la valeur cached ou `None` (ne distingue pas miss de valeur `None`)
+- `get_entry(func_name, args, kwargs)` : retourne le `CacheEntry` complet ou `None` (distingue miss de valeur cached
   `None`)
 - `set`, `invalidate`, `invalidate_key` : écriture et invalidation
 - `make_key` : canonicalise les kwargs (`sorted(kwargs.items())`) pour que l'ordre n'affecte pas la clé
@@ -57,7 +57,7 @@ flowchart TD
 **`catnip/cachesys/memoization.py`** - Wrapper Python :
 
 - `CachedWrapper` : utilisé par `context.py` pour le décorateur `cached()`
-- Utilise `get_entry()` pour distinguer un cache miss d'une valeur cachée `None`
+- Utilise `get_entry()` pour distinguer un cache miss d'une valeur cached `None`
 - Passe `args` et `kwargs` séparément au backend pour bénéficier de la canonicalisation des kwargs
 
 **`catnip/cachesys/__init__.py`** - Réexports :
@@ -129,7 +129,7 @@ cache.set_bytecode(source, bytecode, optimize=True)
 
 ## Protocole pour backends personnalisés
 
-Les applications hôtes peuvent implémenter leurs propres backends.
+Les host apps peuvent implémenter leurs propres backends.
 
 ### Interface
 

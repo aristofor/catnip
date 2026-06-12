@@ -701,7 +701,7 @@ done
 ## Limitations connues
 
 1. **Broadcasting edge cases** : `.[` peut avoir une espace superflue dans certains cas complexes
-1. **Jointure non-idempotente** : formatter deux fois un code avec des lignes jointes puis recoupees peut donner un
-   resultat different (les coupures de ligne ne reproduisent pas forcement l'indentation originale)
+1. **Jointure non-idempotente** : formatter deux fois un code avec des lignes jointes puis recoupées peut donner un
+   résultat différent (les coupures de ligne ne reproduisent pas forcément l'indentation originale)
 
 > Le formatteur ajuste les espaces et l'indentation, pas la structure logique du code.

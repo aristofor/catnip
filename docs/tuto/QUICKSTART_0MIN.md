@@ -5,7 +5,7 @@ lui-même, voir le [Guide 2 minutes](QUICKSTART_2MIN.md).
 
 ## Prérequis
 
-- **Python** >= 3.12 avec headers (`python3-dev` / `python3-devel`)
+- **Python** >= 3.13 avec headers (`python3-dev` / `python3-devel`)
 - **Rust** stable avec `cargo` ([rustup.rs](https://rustup.rs))
 - **uv** ([docs.astral.sh/uv](https://docs.astral.sh/uv))
 - **libgmp-dev** (arithmétique précision arbitraire)
@@ -26,16 +26,20 @@ brew install gmp
 > Ce guide se lit en *0 minute* si tu lis vite et que tu ne tiens pas compte du temps d'installation. Techniquement
 > correct, donc validé en mode speedrun.
 
-Pour la release **v0.1.0**, l'installation éclair sera :
+Le **Python DSL** est sur PyPI :
 
 ```bash
-# Catnip standalone
-sudo apt install catnip
-# Python DSL
 pip install catnip-lang
 ```
 
-En attendant cette release, le chemin le plus court **depuis le dépôt source** est :
+Le **paquet Debian standalone** (`.deb`) se récupère sur les
+[GitHub Releases](https://github.com/aristofor/catnip/releases) :
+
+```bash
+sudo apt install ./catnip_0.1.0-1_amd64.deb
+```
+
+Pour partir **depuis le dépôt source**, le chemin le plus court est :
 
 ```bash
 git clone http://framagit.org/aristofor/catnip

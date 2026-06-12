@@ -627,5 +627,69 @@ class TestOptimizationLevel:
         assert result0 == result3 == 5
 
 
+class TestFilePragmaSemanticEffect:
+    """In-file pragmas must affect their own file's semantic pass.
+
+    Precedence contract (PRAGMAS.md): CLI/env override > file pragma > baseline.
+    """
+
+    OPTIMIZABLE = 'f = (x) => { match x { _ => { 42 } } }\nf(1)'
+    RECURSIVE = 'count = (n) => { if n == 0 { "done" } else { count(n - 1) } }'
+
+    @staticmethod
+    def _prepared_json(cat, src):
+        import json
+
+        cat.parse(src)
+        return json.dumps([json.loads(n.to_json()) for n in cat._pipeline.get_prepared_ir_nodes()])
+
+    def test_pragma_optimize_0_disables_passes_same_file(self):
+        """pragma('optimize', 0) keeps the IR unoptimized on first parse."""
+        from catnip import Catnip
+
+        cat = Catnip(optimize=3)
+        cat._optimize_forced = False  # plain baseline, not a caller override
+        ir = self._prepared_json(cat, 'pragma("optimize", 0)\n' + self.OPTIMIZABLE)
+        assert '"OpMatch"' in ir, "match must not be eliminated with pragma optimize 0"
+
+    def test_pragma_optimize_enables_passes_same_file(self):
+        """pragma('optimize', 2) turns optimization on for its own file."""
+        from catnip import Catnip
+
+        cat = Catnip()  # direct-API baseline: optimization off
+        ir = self._prepared_json(cat, 'pragma("optimize", 2)\n' + self.OPTIMIZABLE)
+        assert '"OpMatch"' not in ir, "pragma optimize 2 must enable passes"
+
+    def test_caller_override_wins_over_file_pragma(self):
+        """Catnip(optimize=N) is a caller override: file pragmas cannot flip it."""
+        from catnip import Catnip
+
+        cat = Catnip(optimize=2)
+        ir = self._prepared_json(cat, 'pragma("optimize", 0)\n' + self.OPTIMIZABLE)
+        assert '"OpMatch"' not in ir, "caller override must win over file pragma"
+
+    def test_caller_override_survives_subsequent_parses(self):
+        """The file pragma must not pollute the forced value for later parses."""
+        from catnip import Catnip
+
+        cat = Catnip(optimize=2)
+        self._prepared_json(cat, 'pragma("optimize", 0)\n' + self.OPTIMIZABLE)
+        assert cat.pragma_context.optimize_level == 2, "sync must not overwrite a forced value"
+        ir = self._prepared_json(cat, self.OPTIMIZABLE)
+        assert '"OpMatch"' not in ir, "caller override must still apply on the next parse"
+
+    def test_pragma_tco_false_disables_tail_marking_same_file(self):
+        """pragma('tco', False) removes tail marking on first parse (VM path)."""
+        from catnip import Catnip
+
+        cat = Catnip()
+        ir = self._prepared_json(cat, 'pragma("tco", False)\n' + self.RECURSIVE)
+        assert '"tail": true' not in ir
+
+        control = Catnip()
+        ir = self._prepared_json(control, self.RECURSIVE)
+        assert '"tail": true' in ir, "control: tail marking active without pragma"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, "-v"])

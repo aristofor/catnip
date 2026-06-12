@@ -5,17 +5,18 @@ import os
 import sys
 from pathlib import Path
 
-# Capture before Click rewrites sys.argv
-_p = Path(sys.argv[0]) if sys.argv and not sys.argv[0].startswith('-') else None
-_CATNIP_EXECUTABLE = str(_p.resolve()) if _p and _p.exists() else None
-
 import click
 from click.shell_completion import CompletionItem
 
 from .. import __version__
 from ..colors import Theme
 from ..config import ConfigManager
+from ..context import configure_logging
 from .plugins import discover_plugins, load_plugin
+
+# Capture at import time, before Click rewrites sys.argv during invocation
+_p = Path(sys.argv[0]) if sys.argv and not sys.argv[0].startswith('-') else None
+_CATNIP_EXECUTABLE = str(_p.resolve()) if _p and _p.exists() else None
 
 
 def _version_callback(ctx, param, value):
@@ -225,6 +226,14 @@ def setup_catnip(
     catnip.pragma_context.tco_enabled = config_manager.get('tco')
     catnip.pragma_context.optimize_level = config_manager.get('optimize')
 
+    # CLI/env settings win over in-file pragmas; config file and defaults
+    # are just the baseline (precedence: CLI > file pragma > default)
+    from ..config import ConfigSource
+
+    session_sources = (ConfigSource.CLI, ConfigSource.ENV)
+    catnip._tco_forced = config_manager.get_with_source('tco').source in session_sources
+    catnip._optimize_forced = config_manager.get_with_source('optimize').source in session_sources
+
     # Memory guard (config-level, not pragma)
     memory_limit = config_manager.get('memory_limit')
     if memory_limit is not None:
@@ -241,14 +250,18 @@ def setup_catnip(
     # Collect auto-import modules from config (per-mode with fallback)
     auto_mode = {'repl': 'repl', 'standalone': 'cli'}.get(mode, 'cli') if mode else 'cli'
     auto = list(config_manager.get_auto_modules(auto_mode))
+    cli_specs = set(modules or [])
 
-    # Merge with CLI -m (deduplicated, preserving order)
-    all_modules = list(dict.fromkeys(auto + list(modules or [])))
-    if all_modules:
+    # Original load order (auto first, then CLI), deduplicated: preserved so that
+    # symbol precedence for ':!' wild injects is unchanged. A spec requested via
+    # -m loads strictly (failure exits non-zero); auto-only specs stay tolerant.
+    ordered = list(dict.fromkeys(auto + list(modules or [])))
+    if ordered:
         from ..loader import ModuleLoader
 
         loader = ModuleLoader(catnip.context, verbose=verbose)
-        loader.load_modules(all_modules)
+        for spec in ordered:
+            loader.load_modules([spec], strict=spec in cli_specs)
 
     return catnip
 
@@ -267,7 +280,7 @@ def setup_catnip(
 @click.option('-c', '--command', 'cmd', type=str, help="Evaluate command and display result")
 @click.option(
     '--parsing',
-    type=int,
+    type=click.IntRange(0, 3),
     default=3,
     shell_complete=_complete_parsing,
     help="Parsing level: 0=tree, 1=IR, 2=exec IR, 3=run",
@@ -378,15 +391,21 @@ def main(
       plugins   Inspect registered plugins
       repl      Start interactive REPL (explicit)
     """
+    configure_logging()
+
     # Merge --quiet flag with CATNIP_QUIET env var
     quiet = quiet or os.environ.get('CATNIP_QUIET', '').lower() in ('1', 'true', 'on')
 
     # Build ConfigManager with full precedence chain
     config_manager = ConfigManager()
-    if config_path:
-        config_manager.load_file(Path(config_path))
-    else:
-        config_manager.load_file()
+    try:
+        if config_path:
+            config_manager.load_file(Path(config_path))
+        else:
+            config_manager.load_file()
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
     config_manager.load_env()
 
     # Apply CLI overrides

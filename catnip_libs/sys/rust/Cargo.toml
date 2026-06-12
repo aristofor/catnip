@@ -16,4 +16,4 @@ embedded = ["pyo3/auto-initialize"]
 [dependencies]
 catnip_vm = { path = "../../../catnip_vm" }
 indexmap = "2"
-pyo3 = { version = "0.28", default-features = false, features = ["macros"], optional = true }
+pyo3 = { version = "0.29", default-features = false, features = ["macros"], optional = true }

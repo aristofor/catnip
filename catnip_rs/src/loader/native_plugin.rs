@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError};
+use pyo3::exceptions::{PyAttributeError, PyFileNotFoundError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -130,6 +130,98 @@ impl Drop for NativePluginObject {
 impl NativePluginObject {
     fn __repr__(&self) -> String {
         "<native plugin object>".to_string()
+    }
+
+    /// Python-side attribute protocol, used by the AST executor (the VM routes
+    /// `OpCode::GetAttr`/`CallMethod` through the host instead). Tries the
+    /// plugin's getattr callback, then falls back to binding the name as a
+    /// method dispatched at call time (the AST lowers `obj.m(...)` to
+    /// getattr-then-call, so attribute-vs-method cannot be decided here).
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        // Underscore names are Python protocol probes (__reduce__, __iter__,
+        // ...), never plugin members: refuse them so hasattr stays honest
+        if name.starts_with('_') {
+            return Err(PyAttributeError::new_err(format!(
+                "'NativePluginObject' object has no attribute '{name}'"
+            )));
+        }
+        let (handle, cbs) = self
+            .handle_and_callbacks()
+            .ok_or_else(|| PyRuntimeError::new_err("invalid plugin object"))?;
+        if let Some(getattr_fn) = cbs.getattr {
+            let name_owned = name.to_string();
+            let cbs_clone = cbs.clone();
+            let result: Result<u64, String> = py.detach(move || {
+                plugin::call_plugin_getattr(handle, getattr_fn, &name_owned, &cbs_clone)
+                    .map(|v| v.bits())
+                    .map_err(|e| e.to_string())
+            });
+            if let Ok(bits) = result {
+                return vm_value_to_py(py, VmValue::from_raw(bits));
+            }
+        }
+        if cbs.method.is_some() {
+            self.vm_value.clone_refcount();
+            let bound = NativePluginBoundMethod {
+                vm_value: self.vm_value,
+                method_name: name.to_string(),
+            };
+            return Ok(Py::new(py, bound)?.into_any());
+        }
+        Err(PyAttributeError::new_err(format!(
+            "'NativePluginObject' object has no attribute '{name}'"
+        )))
+    }
+}
+
+/// A method bound to a plugin object by `NativePluginObject.__getattr__`.
+/// Owns one reference to the object (released on Drop); dispatches through the
+/// plugin's method callback at call time, mirroring `OpCode::CallMethod`.
+#[pyclass(name = "NativePluginBoundMethod", module = "catnip._rs")]
+pub struct NativePluginBoundMethod {
+    vm_value: VmValue,
+    method_name: String,
+}
+
+impl Drop for NativePluginBoundMethod {
+    fn drop(&mut self) {
+        self.vm_value.decref();
+    }
+}
+
+#[pymethods]
+impl NativePluginBoundMethod {
+    #[pyo3(signature = (*args))]
+    fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let (handle, cbs) = unsafe { self.vm_value.as_plugin_object_ref() }
+            .ok_or_else(|| PyRuntimeError::new_err("invalid plugin object"))?;
+        let method_fn = cbs
+            .method
+            .ok_or_else(|| PyRuntimeError::new_err(format!("plugin object has no method '{}'", self.method_name)))?;
+
+        let mut vm_args: Vec<VmValue> = Vec::with_capacity(args.len());
+        for a in args.iter() {
+            vm_args.push(convert_py_to_vm_value(py, &a)?);
+        }
+
+        let name = self.method_name.clone();
+        // Release the GIL: some plugin methods block (network, etc.).
+        let result: Result<u64, String> = py.detach(|| {
+            plugin::call_plugin_method(handle, method_fn, &name, &vm_args, &cbs)
+                .map(|v| v.bits())
+                .map_err(|e| e.to_string())
+        });
+
+        for a in &vm_args {
+            a.decref();
+        }
+
+        let bits = result.map_err(vmerr_to_py)?;
+        vm_value_to_py(py, VmValue::from_raw(bits))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<native plugin method '{}'>", self.method_name)
     }
 }
 

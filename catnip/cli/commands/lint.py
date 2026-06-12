@@ -2,7 +2,6 @@
 """Lint command - full code analysis."""
 
 import sys
-from pathlib import Path
 
 import click
 

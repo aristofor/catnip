@@ -113,6 +113,7 @@ class VMOp(IntEnum):
     RESUME_UNWIND = 96
     CLEAR_EXCEPTION = 97
     MAKE_UNION = 98
+    PATCH_CLOSURE = 99
 
 
 # Stack effect: (pops, pushes) for each opcode

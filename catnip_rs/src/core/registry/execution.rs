@@ -22,6 +22,27 @@ impl Registry {
     /// - Broadcast nodes: handle broadcasting
     /// - Literals: return as-is
     pub(crate) fn exec_stmt_impl(&self, py: Python<'_>, stmt: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        match self.exec_stmt_dispatch(py, stmt.clone_ref(py)) {
+            Err(e) => {
+                // Record the deepest failing node position (first failure wins).
+                // Control-flow signals (return/break/continue) are not errors.
+                if self.error_byte.get() < 0 && !Self::is_control_flow_signal(py, &e) {
+                    if let Ok(sb) = stmt.bind(py).getattr("start_byte") {
+                        if let Ok(sb) = sb.extract::<isize>() {
+                            if sb >= 0 {
+                                self.error_byte.set(sb);
+                            }
+                        }
+                    }
+                }
+                Err(e)
+            }
+            ok => ok,
+        }
+    }
+
+    /// Dispatch a statement by node type (Broadcast, Op, Call, Ref, literal).
+    fn exec_stmt_dispatch(&self, py: Python<'_>, stmt: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let stmt_bound = stmt.bind(py);
 
         // Get the type of stmt for dispatch
@@ -475,6 +496,10 @@ impl Registry {
         } else if let Ok(proxy) = obj.cast::<crate::vm::structs::CatnipStructProxy>() {
             let name = proxy.borrow().type_name.clone();
             return Ok(pyo3::types::PyString::intern(py, &name).into_any().unbind());
+        } else if let Ok(variant) = obj.cast::<crate::vm::enums::CatnipEnumVariant>() {
+            // Enum variant: resolve to the enum type name (mirrors VM TypeOf)
+            let name = variant.get().enum_name.clone();
+            return Ok(pyo3::types::PyString::intern(py, &name).into_any().unbind());
         } else if obj.is_callable() {
             "function"
         } else {
@@ -543,19 +568,19 @@ impl Registry {
 
         // Not found
         if check {
-            // Try to suggest a similar name
+            // CatnipNameError takes the bare name (it formats the message
+            // itself); suggestions go through the dedicated kwarg
             let suggestion = self.suggest_name(py, ident)?;
-            let base_msg = catnip_core::constants::format_name_error(ident);
-            let error_msg = if let Some(sugg) = suggestion {
-                format!("{base_msg}. Did you mean '{sugg}'?")
-            } else {
-                base_msg
-            };
-
-            // Use CatnipNameError for better error handling
             let exc_module = py.import(PY_MOD_EXC)?;
             let catnip_name_error = exc_module.getattr("CatnipNameError")?;
-            Err(PyErr::from_value(catnip_name_error.call1((error_msg,))?))
+            let exc = if let Some(sugg) = suggestion {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("suggestions", vec![sugg])?;
+                catnip_name_error.call((ident,), Some(&kwargs))?
+            } else {
+                catnip_name_error.call1((ident,))?
+            };
+            Err(PyErr::from_value(exc))
         } else {
             Ok(None)
         }

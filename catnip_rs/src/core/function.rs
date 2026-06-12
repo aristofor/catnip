@@ -6,6 +6,8 @@
 //! optimization (TCO).
 
 use crate::constants::*;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
 
@@ -39,6 +41,9 @@ pub struct Function {
     #[pyo3(get)]
     pub jit_func_id: String,
     pub jit_compiled_func: Option<Py<PyAny>>,
+    /// Frame token of the defining scope (0 = not a block-local definition).
+    /// Set by op_set_locals to drive letrec group patching.
+    pub def_frame_token: u64,
 }
 
 #[pymethods]
@@ -65,12 +70,33 @@ impl Function {
             closure_scope,
             jit_func_id,
             jit_compiled_func: None,
+            def_frame_token: 0,
         })
     }
 
     #[getter]
     fn get_closure_scope(&self, py: Python<'_>) -> Py<PyAny> {
         self.closure_scope.clone_ref(py)
+    }
+
+    // The closure may hold a self-reference (letrec): participate in GC
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.params)?;
+        visit.call(&self.body)?;
+        visit.call(&self.registry)?;
+        visit.call(&self.closure_scope)?;
+        if let Some(ref f) = self.jit_compiled_func {
+            visit.call(f)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        Python::attach(|py| {
+            // Break the lambda <-> closure dict cycle
+            self.closure_scope = py.None();
+        });
+        self.jit_compiled_func = None;
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -107,17 +133,20 @@ impl Function {
         let ctx = self.registry.getattr(py, "ctx")?;
         ctx.call_method1(py, "push_scope_with_capture", (&self.closure_scope,))?;
 
+        // Tail calls may swap to another function's closure mid-loop: the
+        // final pop must sync against the closure that actually finished.
+        let mut cur_closure = self.closure_scope.clone_ref(py);
         let result = execute_trampoline(
             py,
             &self.body,
             &self.registry,
             &self.params,
-            &self.closure_scope,
             args,
             kwargs,
+            &mut cur_closure,
         );
 
-        ctx.call_method1(py, "pop_scope_with_sync", (&self.closure_scope,))?;
+        ctx.call_method1(py, "pop_scope_with_sync", (&cur_closure,))?;
         result
     }
 
@@ -150,6 +179,9 @@ pub struct Lambda {
     #[pyo3(get)]
     pub jit_func_id: String,
     pub jit_compiled_func: Option<Py<PyAny>>,
+    /// Frame token of the defining scope (0 = not a block-local definition).
+    /// Set by op_set_locals to drive letrec group patching.
+    pub def_frame_token: u64,
 }
 
 #[pymethods]
@@ -182,12 +214,37 @@ impl Lambda {
             closure_values,
             jit_func_id,
             jit_compiled_func: None,
+            def_frame_token: 0,
         })
     }
 
     #[getter]
     fn get_closure_scope(&self, py: Python<'_>) -> Py<PyAny> {
         self.closure_scope.clone_ref(py)
+    }
+
+    // The closure may hold a self-reference (letrec): participate in GC
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.params)?;
+        visit.call(&self.body)?;
+        visit.call(&self.registry)?;
+        visit.call(&self.closure_scope)?;
+        if let Some(ref v) = self.closure_values {
+            visit.call(v)?;
+        }
+        if let Some(ref f) = self.jit_compiled_func {
+            visit.call(f)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        Python::attach(|py| {
+            // Break the lambda <-> closure dict cycle
+            self.closure_scope = py.None();
+        });
+        self.closure_values = None;
+        self.jit_compiled_func = None;
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -227,41 +284,85 @@ impl Lambda {
         let ctx = self.registry.getattr(py, "ctx")?;
         ctx.call_method1(py, "push_scope_with_capture", (&self.closure_scope,))?;
 
+        // Tail calls may swap to another function's closure mid-loop: the
+        // final pop must sync against the closure that actually finished.
+        let mut cur_closure = self.closure_scope.clone_ref(py);
         let result = execute_trampoline(
             py,
             &self.body,
             &self.registry,
             &self.params,
-            &self.closure_scope,
             args,
             kwargs,
+            &mut cur_closure,
         );
 
-        ctx.call_method1(py, "pop_scope_with_sync", (&self.closure_scope,))?;
+        ctx.call_method1(py, "pop_scope_with_sync", (&cur_closure,))?;
         result
     }
 
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         let reconstruct_fn = py.import(PY_MOD_RS)?.getattr("_reconstruct_lambda")?;
-        let closure_vals = self
+        let closure_vals = this
             .closure_values
             .as_ref()
             .map(|v| v.clone_ref(py))
             .unwrap_or_else(|| py.None());
-        let jit_id_obj: Py<PyAny> = self.jit_func_id.clone().into_pyobject(py)?.unbind().into();
+        let jit_id_obj: Py<PyAny> = this.jit_func_id.clone().into_pyobject(py)?.unbind().into();
 
         let args = PyTuple::new(
             py,
             [
-                self.body.clone_ref(py),
-                self.params.clone_ref(py),
+                this.body.clone_ref(py),
+                this.params.clone_ref(py),
                 jit_id_obj,
                 closure_vals,
             ],
         )?;
 
-        let result = PyTuple::new(py, [reconstruct_fn.into_any().unbind(), args.into_any().unbind()])?;
+        // Let-rec self-binding: names in the closure scope that point back at
+        // this lambda. Omitted from closure_values (would cycle through fresh
+        // reconstructions); re-injected by __setstate__ so a pickled
+        // named-recursive lambda keeps resolving its own recursive call.
+        // Mirrors the VM's VMFunction self-name restore.
+        let self_names = PyList::empty(py);
+        if let Ok(dict) = this.closure_scope.cast_bound::<PyDict>(py) {
+            for (k, v) in dict.iter() {
+                if v.is(slf.as_any()) {
+                    self_names.append(k)?;
+                }
+            }
+        }
+
+        let result = PyTuple::new(
+            py,
+            [
+                reconstruct_fn.into_any().unbind(),
+                args.into_any().unbind(),
+                self_names.into_any().unbind(),
+            ],
+        )?;
         Ok(result.into_any().unbind())
+    }
+
+    /// Restore the let-rec self-binding after unpickling. Serialization omits
+    /// it (the closure would cycle); a pickled named-recursive lambda re-binds
+    /// itself into its own closure scope here. No-op for non-recursive lambdas
+    /// (empty state).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let Ok(names) = state.cast::<PyList>() else {
+            return Ok(());
+        };
+        let this = slf.borrow();
+        if let Ok(dict) = this.closure_scope.cast_bound::<PyDict>(py) {
+            for name in names.iter() {
+                dict.set_item(name, slf.as_any())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -300,14 +401,20 @@ fn try_jit_call(
 }
 
 /// Execute body with trampoline loop for TCO.
+///
+/// `cur_closure` is in/out: on entry, the closure scope already pushed by
+/// the caller; on exit, the closure scope of the function that actually
+/// finished. A tail call to a different function swaps scopes mid-loop,
+/// so the caller must pop-with-sync against the final value, not against
+/// the entry function's closure.
 fn execute_trampoline(
     py: Python<'_>,
     body: &Py<PyAny>,
     registry: &Py<PyAny>,
     params: &Py<PyAny>,
-    closure_scope: &Py<PyAny>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
+    cur_closure: &mut Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
     // Import classes
     let nodes = py.import(PY_MOD_NODES)?;
@@ -323,7 +430,6 @@ fn execute_trampoline(
     let mut cur_body = body.clone_ref(py);
     let mut cur_registry = registry.clone_ref(py);
     let mut cur_params = params.clone_ref(py);
-    let mut cur_closure = closure_scope.clone_ref(py);
     let mut cur_args: Py<PyTuple> = args.clone().unbind();
     let mut cur_kwargs: Option<Py<PyDict>> = kwargs.map(|k| k.clone().unbind());
     let mut is_first = true;
@@ -332,7 +438,7 @@ fn execute_trampoline(
         // Bind parameters
         let params_bound = cur_params.bind(py);
         if params_bound.len()? > 0 {
-            bind_params(py, &cur_params, &cur_registry, &cur_args, &cur_kwargs, is_first)?;
+            bind_params(py, &cur_params, &cur_registry, &cur_args, &cur_kwargs)?;
         }
 
         // Consume pending super proxy (set by op_call for struct method calls).
@@ -378,13 +484,26 @@ fn execute_trampoline(
                 return target.call(py, new_args.bind(py), kw_ref);
             }
 
-            // Scope swap for mutual recursion
+            // Scope swap for mutual recursion. Pop WITH sync: the current
+            // function may have written to its captured variables, and a
+            // plain pop would drop those updates (a normal call returning
+            // here would have synced them into its closure dict and the
+            // parent scope). Same closure object implies same function,
+            // hence same context: the checks below only run on real swaps.
             let new_closure = target.getattr(py, "closure_scope")?;
-            if !new_closure.is(&cur_closure) {
-                let ctx = registry.getattr(py, "ctx")?;
-                ctx.call_method0(py, "pop_scope")?;
+            if !new_closure.is(&*cur_closure) {
+                // A target from another Catnip context cannot be hosted by
+                // this trampoline: its scope stack lives on its own context.
+                // Call it directly -- its __call__ pushes and pops there.
+                let target_ctx = target.getattr(py, "registry")?.getattr(py, "ctx")?;
+                let ctx = cur_registry.getattr(py, "ctx")?;
+                if !target_ctx.is(&ctx) {
+                    let kw_ref = new_kwargs.as_ref().map(|k| k.bind(py));
+                    return target.call(py, new_args.bind(py), kw_ref);
+                }
+                ctx.call_method1(py, "pop_scope_with_sync", (&*cur_closure,))?;
                 ctx.call_method1(py, "push_scope_with_capture", (&new_closure,))?;
-                cur_closure = new_closure;
+                *cur_closure = new_closure;
             }
 
             // Update state
@@ -408,7 +527,6 @@ fn bind_params(
     registry: &Py<PyAny>,
     args: &Py<PyTuple>,
     kwargs: &Option<Py<PyDict>>,
-    is_first: bool,
 ) -> PyResult<()> {
     let ctx = registry.getattr(py, "ctx")?;
     let locals = ctx.getattr(py, "locals")?;
@@ -446,35 +564,36 @@ fn bind_params(
         }
     }
 
-    // Defaults (only on first iteration)
-    if is_first {
-        for i in num_args..num_regular {
-            let param = params_list.get_item(i)?;
-            let name = extract_param_name(&param)?;
+    // Defaults: bound on every trampoline iteration. A tail call can target
+    // a different function than the one bound on entry (mutual recursion),
+    // whose omitted parameters were never bound. No-op when all args are
+    // passed (the common case: num_args == num_regular).
+    for i in num_args..num_regular {
+        let param = params_list.get_item(i)?;
+        let name = extract_param_name(&param)?;
 
-            if kwargs
-                .as_ref()
-                .map(|k| k.bind(py).contains(&name).unwrap_or(false))
-                .unwrap_or(false)
-            {
-                continue;
-            }
+        if kwargs
+            .as_ref()
+            .map(|k| k.bind(py).contains(&name).unwrap_or(false))
+            .unwrap_or(false)
+        {
+            continue;
+        }
 
-            let plen = get_param_len(&param);
-            if plen > 1 {
-                let default = get_param_default(&param)?;
-                let val = if default.is_none() {
-                    py.None()
-                } else {
-                    registry.call_method1(py, "exec_stmt", (&default,))?
-                };
-                locals.call_method1(py, "_set_param", (&name, val))?;
+        let plen = get_param_len(&param);
+        if plen > 1 {
+            let default = get_param_default(&param)?;
+            let val = if default.is_none() {
+                py.None()
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                    "Missing required argument: '{}'",
-                    name
-                )));
-            }
+                registry.call_method1(py, "exec_stmt", (&default,))?
+            };
+            locals.call_method1(py, "_set_param", (&name, val))?;
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Missing required argument: '{}'",
+                name
+            )));
         }
     }
 

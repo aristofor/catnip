@@ -325,8 +325,8 @@ Bien que Turing-complet théoriquement, Catnip a des limites pratiques :
 
 Catnip dispose de plusieurs niveaux d'optimisation qui repoussent les limites pratiques :
 
-- **TCO (Tail-Call Optimization)** : La récursion terminale utilise O(1) d'espace pile via un trampoline Rust - pas de
-  stack overflow pour les appels récursifs en position terminale
+- **TCO (Tail-Call Optimization)** : La tail recursion utilise O(1) d'espace pile via un trampoline Rust - pas de stack
+  overflow pour les appels récursifs en position terminale
 - **VM bytecode** : Exécution par défaut sur une VM stack-based Rust avec NaN-boxing
 - **JIT** : Compilation Cranelift vers x86-64 natif pour les boucles et fonctions récursives chaudes
 

@@ -22,7 +22,8 @@ systématique des **tests internes de passes**.
 - transformations IR/Op (passes d'optimisation)
 - structures internes (CFG, SSA, sérialisation pure, helpers bas niveau)
 
-Exemples : `catnip_rs/src/semantic/tests/` (passes d'optimisation), `catnip_rs/src/cfg/tests.rs` (CFG/SSA).
+Exemples : `catnip_core/src/semantic/passes/` (passes d'optimisation, tests inline), `catnip_rs/src/cfg/tests.rs`
+(CFG/SSA).
 
 ### 2. Tests d'intégration Python
 
@@ -101,7 +102,7 @@ def test_language_behavior_parity(executor):
 
 ## Tests standalone (`catnip_rs/tests/run_*.rs`)
 
-Tests d'intégration du binaire `catnip` (Rust pur avec Python embarqué).
+Tests d'intégration du binaire `catnip` (Rust pur avec embedded Python).
 
 Helpers disponibles dans `common/mod.rs` :
 

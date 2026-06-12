@@ -95,7 +95,14 @@ dispatch `match` et `GetAttr`. Opcode `MakeEnum` (89) enregistre un type enum et
 Opcode `MakeUnion` (98) matérialise un type somme : variantes nullaires en `CatnipEnumVariant` (réutilise tag 3),
 variantes avec payload en `CatnipStructType` au nom qualifié `"Union.Variant"`. Le `CatnipUnionType` est un objet Python
 qui expose les variantes via `__getattr__`. Le handler PyO3 réutilise `build_union_type` (partagé avec `op_union` côté
-AST) ; la PureVM standalone rejette explicitement (pas de support Python embarqué pour les CatnipUnionType).
+AST) ; la PureVM standalone rejette explicitement (pas de support embedded Python pour les CatnipUnionType).
+
+Opcode `PatchClosure` (99) câble le letrec de groupe : `MakeFunction(name_idx + 1)` injecte la self-référence dans la
+closure de la fonction créée, et `PatchClosure` (émis par le compilateur à chaque définition `nom = lambda` d'un bloc,
+une fois par voisine déjà définie) insère la nouvelle fonction dans les closures des définitions précédentes du même
+bloc -- la récursion mutuelle entre fonctions imbriquées fonctionne donc après échappement du scope. Ces liaisons sont
+marquées dans la `NativeClosureScope` et omises à la sérialisation (elles forment des cycles que le memo de pickle ne
+voit pas : chaque conversion native→Python crée des wrappers frais) ; `__setstate__` ne restaure que la self-référence.
 
 Tags 5, 8-14 sont définis dans `catnip_vm` (VM pure Rust, sans PyO3). Tag 5 (Struct) utilise un index dans
 `PureStructRegistry` avec refcount explicite (pas Arc). Tag 14 (StructType) est un type callable pour la construction.
@@ -303,7 +310,7 @@ Les deux premiers niveaux (captured vars, self.globals) sont des IndexMap lookup
 frontière PyO3. La closure parent chain et ctx_globals impliquent des appels Python et ne sont atteints que pour les
 variables non locales ni capturées.
 
-**Host abstraction** (`vm/host.rs`) : le dispatch loop ne fait pas d'appels PyO3 directs pour les opérations hôte. Le
+**Host abstraction** (`vm/host.rs`) : le dispatch loop ne fait pas d'appels PyO3 directs pour les opérations host. Le
 trait `VmHost` (13+ méthodes) abstrait la résolution de noms (`lookup_global`, `store_global`, `delete_global`,
 `has_global`), les opérateurs binaires Python (`binary_op` via `BinaryOp` enum, 11 variants), l'accès au registry
 (`resolve_registry`), l'itération (`get_iter`), la construction de closures (`build_closure_parent`), l'accès
@@ -346,6 +353,15 @@ directement de la stack du caller vers les locals du callee via un buffer inline
 Les defaults sont remplis pour les params manquants. Le slow path (varargs, > 8 args, PyObject callables) utilise
 `bind_args` avec un Vec.
 
+**TailCall** : tout appel par nom en position terminale compile en opcode `TailCall` (proper tail calls : mutuelle et
+imbriquées incluses, pas seulement l'auto-récursion). Si la cible est une VMFunction, le frame courant est réutilisé :
+locals rebindés, piles vidées, code object remplacé par celui de la cible -- O(1) frames sur toute chaîne d'appels
+terminaux. Les cibles non-VMFunction (constructeurs de structs, wrappers ND, builtins, objets host) passent par la même
+logique que `Call` (helper `call_non_vmfunc` partagé) ; le résultat atterrit sur la stack du frame courant et le
+`Return` final du corps le renvoie à l'appelant. Côté AST, le même contrat est assuré par la boucle trampoline
+(`catnip_rs/src/core/function.rs`) : swap de scope synchronisé quand la cible change de closure, appel direct pour les
+cibles non-Catnip ou d'un autre contexte.
+
 ## Modes d'Exécution
 
 **VM mode** (défaut) :
@@ -373,7 +389,7 @@ et n'a pas accès au JIT. Code Rust derrière le feature flag `ast-executor`.
 
 ## Error Handling
 
-La VM produit des messages d'erreur avec position source (fichier, ligne, colonne) et pile d'appels.
+La VM produit des messages d'erreur avec position source (fichier, ligne, colonne) et call stack.
 
 **Principe** : capture lazy - zéro overhead sur le chemin normal d'exécution.
 
@@ -402,13 +418,17 @@ son `start_byte`. Le peephole optimizer maintient cette correspondance.
 **Capture** : quand une erreur se produit, la VM consulte la line table et snapshote le call stack dans un
 `ErrorContext` (start_byte, error_type, message, call_stack).
 
-**Enrichissement** : deux chemins distincts selon le mode d'exécution :
+**Enrichissement** : trois chemins selon le mode d'exécution :
 
 - **Standalone (binaire Rust)** : `Executor.enrich_error()` lit l'`ErrorContext` (sans le consommer) et génère un
   snippet via `SourceMap.get_snippet()`. Le snippet est ajouté au message d'erreur sous forme de texte
 - **Python (PyO3)** : `_enrich_with_position()` dans `compat.py` ou `_enrich_error()` dans `rust_bridge.py` récupère
   l'`ErrorContext` via `get_last_error_context()` et enrichit l'exception `CatnipError` avec les champs structurés
   (`filename`, `line`, `column`, `context`, `traceback`)
+- **Mode AST** : le `Registry` enregistre le `start_byte` du nœud fautif le plus profond (`error_byte` dans
+  `core/registry/mod.rs` : premier échec gagne, les signaux return/break/continue sont exclus, un `try` qui attrape
+  purge la position). Côté Python, `_enrich_error_position` le lit via `take_error_byte()` (lecture destructive) et
+  retombe sur le statement top-level courant si rien n'a été enregistré
 
 **Format des messages** : `VMError::Display` utilise les préfixes Python standards (`TypeError:`, `ValueError:`, etc.)
 sans double-wrapping. Les types sans variante dédiée (`IndexError`, `KeyError`, etc.) préfixent le message dans
@@ -442,35 +462,35 @@ fallback AST.
 | `SetupExcept`    | 90     | handler_addr          | Push Except handler sur la handler_stack      |
 | `SetupFinally`   | 91     | finally_addr          | Push Finally handler                          |
 | `PopHandler`     | 92     | --                    | Pop top handler                               |
-| `Raise`          | 93     | 0=expr, 1=re-raise    | Leve une exception                            |
+| `Raise`          | 93     | 0=expr, 1=re-raise    | Lève une exception                            |
 | `CheckExcMatch`  | 94     | const_idx (type name) | Push bool: type match?                        |
 | `LoadException`  | 95     | --                    | Push message de l'exception active            |
-| `ResumeUnwind`   | 96     | --                    | Reprend le pending_unwind apres finally       |
+| `ResumeUnwind`   | 96     | --                    | Reprend le pending_unwind après finally       |
 | `ClearException` | 97     | --                    | Pop de l'active_exception_stack (fin handler) |
 
 **Structures Frame** :
 
 - `handler_stack: Vec<Handler>` -- pile de handlers actifs (Except/Finally)
-- `active_exception_stack: Vec<ExceptionInfo>` -- pile d'exceptions actives avec MRO pour matching hierarchique
-- `pending_unwind: Option<PendingUnwind>` -- signal sauvegarde pendant l'execution du finally
+- `active_exception_stack: Vec<ExceptionInfo>` -- pile d'exceptions actives avec MRO pour matching hiérarchique
+- `pending_unwind: Option<PendingUnwind>` -- signal sauvegardé pendant l'exécution du finally
 
-**Dispatch refactor** : la boucle dispatch est scindee en `dispatch` (wrapper) et `dispatch_inner` (execution).
+**Dispatch refactor** : la boucle dispatch est scindée en `dispatch` (wrapper) et `dispatch_inner` (exécution).
 `dispatch_inner` prend `frame: &mut Frame` (pas ownership). Quand une instruction retourne `Err`, le wrapper intercepte
 l'erreur et parcourt le `handler_stack` via `try_unwind_to_handler` :
 
 - Except handler : push exception sur `active_exception_stack`, jump au handler
 - Finally handler : set `pending_unwind`, push la valeur de retour si Return, jump au finally body
-- Signaux de controle (Return/Break/Continue) : sautent les Except handlers, s'arretent au premier Finally
+- Signaux de contrôle (Return/Break/Continue) : sautent les Except handlers, s'arrêtent au premier Finally
 
-Pour Break/Continue a travers finally, le compilateur inline le finally body avant le jump (comme CPython). Le VM
+Pour Break/Continue à travers finally, le compilateur inline le finally body avant le jump (comme CPython). Le VM
 n'utilise pas les opcodes Break/Continue dans ce cas.
 
-**Compilation** : le `finally` est duplique (inline sur happy path, inline sur handler match path, et landing pad pour
+**Compilation** : le `finally` est dupliqué (inline sur happy path, inline sur handler match path, et landing pad pour
 l'unwind VM). Chaque handler except fait un `CheckExcMatch` par type, avec `Raise 1` si aucun match (re-raise par le
 handler stack).
 
-**Peephole** : `SetupExcept`/`SetupFinally` sont traites comme des jump targets (code handler marque live).
-`Raise`/`ResumeUnwind` sont terminaux (pas de fallthrough). Les targets de `SetupExcept`/`SetupFinally` sont remappes
+**Peephole** : `SetupExcept`/`SetupFinally` sont traités comme des jump targets (code handler marqué live).
+`Raise`/`ResumeUnwind` sont terminaux (pas de fallthrough). Les targets de `SetupExcept`/`SetupFinally` sont remappées
 lors du compactage.
 
 **Scope write** : le compilateur pre-scanne le body d'une fonction pour detecter les variables assignees qui existent

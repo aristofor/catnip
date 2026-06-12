@@ -748,11 +748,27 @@ impl PureCompiler {
 
         // Single name, single value: simple assignment
         if names.len() == 1 && values.len() == 1 && !explicit_unpack {
+            // Named lambda: let compile_lambda bind the name as a
+            // self-reference in the closure (let-rec)
+            let is_lambda_def = matches!(
+                values[0],
+                IR::Op {
+                    opcode: IROpCode::OpLambda,
+                    ..
+                }
+            );
+            if is_lambda_def {
+                self.core.pending_self_name = Some(names[0].clone());
+            }
             self.compile_node(values[0])?;
+            self.core.pending_self_name = None;
             if !is_void {
                 self.emit(VMOpCode::DupTop, 0);
             }
             self.emit_store(&names[0]);
+            if is_lambda_def {
+                self.register_letrec_def(&names[0]);
+            }
             return Ok(());
         }
 
@@ -1171,6 +1187,7 @@ impl PureCompiler {
         };
         self.emit(VMOpCode::PushBlock, push_arg);
 
+        self.core.block_fn_defs.push(Vec::new());
         let len = args.len();
         for (i, item) in args.iter().enumerate() {
             let is_void = is_op_ir(item, IROpCode::SetItem) || is_op_ir(item, IROpCode::SetAttr);
@@ -1185,6 +1202,7 @@ impl PureCompiler {
                 self.emit(VMOpCode::LoadConst, idx as u32);
             }
         }
+        self.core.block_fn_defs.pop();
 
         let pop_arg = if is_module_block { 1u32 } else { 0u32 };
         self.emit(VMOpCode::PopBlock, pop_arg);
@@ -1416,8 +1434,37 @@ impl PureCompiler {
         Ok(())
     }
 
+    /// Record a syntactic function definition (`name = lambda`) and patch the
+    /// closures of sibling definitions of the same block (letrec*): each
+    /// earlier sibling gets the new function injected under its name, so
+    /// mutual recursion works even after the closures escape the scope.
+    fn register_letrec_def(&mut self, name: &str) {
+        // Rebinding a captured outer name is a mutation, not a definition
+        if self.nesting_depth > 0 && self.core.outer_names.contains(name) {
+            return;
+        }
+        let Some(slot) = self.core.locals.iter().position(|n| n == name) else {
+            return;
+        };
+        let peers: Vec<(String, usize)> = self.core.block_fn_defs.last().cloned().unwrap_or_default();
+        let name_idx = self.add_name(name);
+        for (peer_name, peer_slot) in peers {
+            if peer_name == name {
+                continue;
+            }
+            self.emit(VMOpCode::LoadLocal, peer_slot as u32);
+            self.emit(VMOpCode::LoadLocal, slot as u32);
+            self.emit(VMOpCode::PatchClosure, name_idx as u32);
+        }
+        if let Some(defs) = self.core.block_fn_defs.last_mut() {
+            defs.retain(|(n, _)| n != name);
+            defs.push((name.to_string(), slot));
+        }
+    }
+
     fn compile_lambda(&mut self, args: &[IR]) -> CompileResult<()> {
         Self::require_args(args, 2, "lambda")?;
+        let self_name = self.core.pending_self_name.take();
         let raw_params = &args[0];
         let body = &args[1];
 
@@ -1426,7 +1473,7 @@ impl PureCompiler {
         let mut code = self.compile_function_inner(FunctionCompileSpec {
             params: param_names,
             body,
-            name: "<lambda>",
+            name: self_name.as_deref().unwrap_or("<lambda>"),
             defaults,
             vararg_idx,
             parent_nesting_depth: self.nesting_depth,
@@ -1439,7 +1486,13 @@ impl PureCompiler {
         let val = Value::from_vmfunc(func_idx);
         let idx = self.core.add_const(val);
         self.emit(VMOpCode::LoadConst, idx as u32);
-        self.emit(VMOpCode::MakeFunction, 0);
+        // arg = name_idx + 1 binds the name to the function itself in its
+        // closure (let-rec); 0 = anonymous
+        let mf_arg = match self_name {
+            Some(name) => self.add_name(&name) as u32 + 1,
+            None => 0,
+        };
+        self.emit(VMOpCode::MakeFunction, mf_arg);
         Ok(())
     }
 
@@ -1467,7 +1520,8 @@ impl PureCompiler {
         let val = Value::from_vmfunc(func_idx);
         let idx = self.core.add_const(val);
         self.emit(VMOpCode::LoadConst, idx as u32);
-        self.emit(VMOpCode::MakeFunction, 0);
+        let mf_arg = self.add_name(&name) as u32 + 1;
+        self.emit(VMOpCode::MakeFunction, mf_arg);
 
         self.core.emit_store(&name);
         Ok(())

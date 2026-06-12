@@ -8,7 +8,7 @@ Documentation pour apprendre et utiliser Catnip.
 
 - [REPL](REPL.md) - Mode interactif : commandes REPL, mode verbeux, historique et astuces
 
-- [RUN](RUN.md) - Mode standalone avec VM embarquée et binaire `catnip` (shebang, argv, benchmark)
+- [RUN](RUN.md) - Mode standalone avec embedded VM et binaire `catnip` (shebang, argv, benchmark)
 
 - [CONFIG](CONFIG.md) - Configuration hiérarchique, overrides par mode et éditeur interactif
 

@@ -299,7 +299,7 @@ Les [directives pragma](../lang/PRAGMAS.md) fonctionnent dans les deux REPL. L'�
 ▸ # Les pragmas restent actifs pour les évaluations suivantes
 ```
 
-Les pragmas s'appliquent au contexte d'exécution immédiatement. La precedence reste : CLI > REPL > Défaut.
+Les pragmas s'appliquent au contexte d'exécution immédiatement. La précédence reste : CLI > REPL > Défaut.
 
 ## Affichage des résultats
 
@@ -374,7 +374,7 @@ make setup
 
 ## Messages d'Erreur
 
-Les erreurs runtime affichent la position source avec pile d'appels :
+Les erreurs runtime affichent la position source avec call stack :
 
 <!-- check: expect-error -->
 

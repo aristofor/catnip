@@ -46,7 +46,7 @@ Catnip est avant tout un **moteur DSL** :
 **Règle empirique** : si ton script Catnip dépasse ~200 lignes ou demande des imports compliqués, il vaut mieux basculer
 sur Python et garder Catnip pour les parties configurables.
 
-Voir [`docs/examples/embedding/`](../examples/embedding/) pour patterns d'intégration.
+Voir [`docs/examples/embedding/`](../examples/embedding/) pour patterns d'embedding.
 
 ______________________________________________________________________
 
@@ -54,7 +54,7 @@ ______________________________________________________________________
 
 ### Runtime Rust (catnip)
 
-Le binaire `catnip` est un runtime Rust avec Python embarqué (PyO3). Il sert de point d'entrée unique : l'exécution de
+Le binaire `catnip` est un runtime Rust avec embedded Python (PyO3). Il sert d'entrypoint unique : l'exécution de
 scripts est traitée directement par la VM Rust, et les sous-commandes outils (format, lint, cache, etc.) sont déléguées
 au CLI Python.
 
@@ -75,7 +75,7 @@ catnip debug script.cat
 **Délégation** : au lancement, le binaire inspecte les arguments avant le parsing Clap. Si le premier argument
 positionnel est une sous-commande Python connue (`format`, `lint`, `cache`, `config`, `debug`, `repl`, `lsp`,
 `commands`, `plugins`, `module`, `completion`, `extensions`), l'invocation est déléguée au CLI Python
-(`catnip.cli:main`) via PyO3 embarqué. Sinon, Clap parse normalement pour l'exécution de scripts.
+(`catnip.cli:main`) via embedded PyO3. Sinon, Clap parse normalement pour l'exécution de scripts.
 
 **Caractéristiques** :
 
@@ -265,6 +265,9 @@ catnip -o level:3 script.cat      # Toutes (défaut)
 
 Niveaux, alias et détails : voir [Pragmas](../lang/PRAGMAS.md).
 
+Les options `-o level:N` et `-o tco:...` (ou leurs équivalents `CATNIP_OPTIMIZE`) l'emportent sur les
+`pragma("optimize", ...)` et `pragma("tco", ...)` écrits dans le fichier.
+
 **Memory guard** (défaut: `2048` MB) :
 
 ```bash
@@ -275,7 +278,7 @@ catnip -o memory:0 script.cat     # Désactive le guard
 La VM vérifie périodiquement le RSS du processus et lève `MemoryError` si la limite est dépassée. Actif par défaut à
 2048 MB, Linux uniquement (no-op sur autres plateformes). Voir [VM](../dev/VM.md#memory-guard).
 
-### Options de Chargement de Modules
+### Options de module loading
 
 #### `-m, --module MODULE`
 
@@ -439,8 +442,8 @@ catnip --no-cache script.cat
 catnip --no-cache -c "2 + 2"
 ```
 
-**Par défaut** : Le cache est activé. Chaque script parsé est mis en cache avec sa configuration (niveau d'optimisation,
-TCO, etc.).
+**Par défaut** : Le cache est activé. Chaque script parsé est cached avec sa configuration (niveau d'optimisation, TCO,
+etc.).
 
 **Désactivation persistante** : Via variable d'environnement (`CATNIP_CACHE=off`) ou config (fichier `catnip.toml`).
 
@@ -496,11 +499,11 @@ Affiche la version de Catnip. `-V` donne la version courte, `--version` inclut l
 
 ```console
 $ catnip -V
-catnip 0.0.10
+catnip 0.1.1
 $ catnip --version
-catnip 0.0.10
-  commit  99bf8bc
-  build   2026-05-14-21:17:07
+catnip 0.1.1
+  commit  7056f27b
+  build   2026-06-10-11:37:50
 ```
 
 #### `--help`
@@ -662,6 +665,7 @@ format      builtin  ok      Format Catnip code files.
 lint        builtin  ok      Full code analysis (syntax + style +...
 lsp         builtin  ok      Start Catnip LSP server.
 module      builtin  ok      Inspect module access policies.
+new-lib     builtin  ok      Scaffold a new stdlib extension module.
 plugins     builtin  ok      List registered plugins and their status.
 repl        builtin  ok      Start the interactive REPL (default mode).
 ```
@@ -691,6 +695,7 @@ format      builtin  ok      catnip.cli.commands.format:cmd_format
 lint        builtin  ok      catnip.cli.commands.lint:cmd_lint
 lsp         builtin  ok      catnip.cli.commands.lsp:cmd_lsp
 module      builtin  ok      catnip.cli.commands.module:cmd_module
+new-lib     builtin  ok      catnip.cli.commands.new_lib:cmd_new_lib
 plugins     builtin  ok      catnip.cli.commands.plugins:cmd_plugins
 repl        builtin  ok      catnip.cli.commands.repl:cmd_repl
 ```
@@ -926,7 +931,7 @@ Voir `docs/user/MODULE_LOADING.md` pour la configuration des policies.
 Gère le cache de compilation. Le cache est **activé par défaut** et stocke le parsing et bytecode dans
 `~/.cache/catnip/` (XDG_CACHE_HOME).
 
-**Comportement par défaut** : Tous les scripts exécutés sont automatiquement mis en cache.
+**Comportement par défaut** : Tous les scripts exécutés sont automatiquement cached.
 
 ```bash
 # Afficher statistiques du cache
@@ -949,8 +954,8 @@ $ catnip cache stats
 Disk Cache Statistics
 ==================================================
 Directory:      /home/ari/.cache/catnip
-Entries:        213
-Volume:         1.78 MB (1871226 bytes)
+Entries:        0
+Volume:         0.00 MB (0 bytes)
 Max size:       100.00 MB
 TTL:            86400 seconds
 
@@ -1040,7 +1045,7 @@ catnip debug -b 3 -b 7 -b 15 script.cat
 | `print EXPR` | `p EXPR` | Évaluer une expression dans le scope courant |
 | `vars`       | `v`      | Afficher les variables locales               |
 | `list`       | `l`      | Afficher le source autour de la position     |
-| `backtrace`  | `bt`     | Afficher la pile d'appels                    |
+| `backtrace`  | `bt`     | Afficher la call stack                       |
 | `repl`       |          | Sous-mode REPL dans le scope courant         |
 | `quit`       | `q`      | Arrêter l'exécution                          |
 | `help`       | `h`      | Aide                                         |
@@ -1183,7 +1188,7 @@ catnip --no-color script.cat > output.log
 
 #### Messages d'Erreur et Stack Traces
 
-Les erreurs runtime affichent la position source complète avec pile d'appels :
+Les erreurs runtime affichent la position source complète avec call stack :
 
 <!-- doc-snapshot: cli/error-not-callable -->
 
@@ -1249,7 +1254,7 @@ cat data.cat | catnip -o tco:on -v
 ```mermaid
 flowchart TD
     A["Invocation catnip ..."] --> B{"Pré-parse :<br/>sous-commande Python ?<br/>(format/lint/cache/...)"}
-    B -->|Oui| C["Délégation CLI Python<br/>(PyO3 embarqué)"]
+    B -->|Oui| C["Délégation CLI Python<br/>(embedded PyO3)"]
     B -->|Non| D{"Sous-commande Rust ?<br/>(info/bench)"}
     D -->|Oui| E["Exécution Rust directe"]
     D -->|Non| F{"Option -c présente ?"}

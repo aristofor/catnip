@@ -181,22 +181,36 @@ impl ConfigManager {
     }
 
     /// Load catnip.toml, overriding defaults.
+    ///
+    /// A missing default config path is tolerated (returns `Ok`). An explicitly
+    /// requested path that is missing, or any existing file that cannot be read
+    /// or parsed, raises: the caller asked for a specific config and must not
+    /// silently fall back to defaults.
     #[pyo3(signature = (path=None, mode=None))]
-    fn load_file(&mut self, py: Python<'_>, path: Option<PathBuf>, mode: Option<&str>) {
+    fn load_file(&mut self, py: Python<'_>, path: Option<PathBuf>, mode: Option<&str>) -> PyResult<()> {
+        let explicit = path.is_some();
         let config_path = path.unwrap_or_else(get_config_path);
         if !config_path.exists() {
-            return;
+            if explicit {
+                return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                    "Config file not found: {}",
+                    config_path.display()
+                )));
+            }
+            return Ok(());
         }
 
-        let content = match fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let content = fs::read_to_string(&config_path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Cannot read config file {}: {}", config_path.display(), e))
+        })?;
 
-        let data: toml::Table = match toml::from_str(&content) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let data: toml::Table = toml::from_str(&content).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid TOML in config file {}: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
 
         let path_str = config_path.to_string_lossy().to_string();
 
@@ -309,9 +323,10 @@ impl ConfigManager {
             let has_policy_keys =
                 modules.contains_key("policy") || modules.contains_key("allow") || modules.contains_key("deny");
             if has_policy_keys {
-                if let Ok(p) = policy::parse_profile(modules) {
-                    self.module_policy = Some(p);
-                }
+                let p = policy::parse_profile(modules).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("Invalid module policy in {}: {}", path_str, e))
+                })?;
+                self.module_policy = Some(p);
             }
             if let Some(arr) = modules.get("auto").and_then(|v| v.as_array()) {
                 self.auto_modules = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -329,9 +344,13 @@ impl ConfigManager {
             if let Some(policies) = modules.get("policies").and_then(|v| v.as_table()) {
                 for (name, value) in policies {
                     if let Some(table) = value.as_table() {
-                        if let Ok(p) = policy::parse_profile(table) {
-                            self.named_policies.insert(name.clone(), p);
-                        }
+                        let p = policy::parse_profile(table).map_err(|e| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Invalid named policy '{}' in {}: {}",
+                                name, path_str, e
+                            ))
+                        })?;
+                        self.named_policies.insert(name.clone(), p);
                     }
                 }
             }
@@ -391,6 +410,8 @@ impl ConfigManager {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Load mode-specific overrides from [mode.{mode}] section.

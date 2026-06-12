@@ -163,10 +163,10 @@ décorateurs, pas de dispatch par introspection.
 
 ______________________________________________________________________
 
-## 7. Quand préférer Python comme point d'entrée
+## 7. Quand préférer Python comme entrypoint
 
 Le pattern pur Catnip convient aux scripts utilitaires autonomes. Si la CLI grossit (sous-commandes, middlewares,
-plugins, gestion d'erreurs fine), Python comme point d'entrée donne plus de contrôle :
+plugins, gestion d'erreurs fine), Python comme entrypoint donne plus de contrôle :
 
 ```python
 import click

@@ -1,13 +1,15 @@
 (* FILE: proof/optim/CatnipPurityProof.v *)
 (* Optimization safety under operator overloading
  *
- * Source of truth:
- *   catnip_rs/src/semantic/common_subexpression_elimination.rs  (pure_ops)
+ * Code modeled:
+ *   catnip_core/src/jit/  (pure_op classification: registry.rs,
+ *                          function_info.rs, trace.rs, executor.rs)
  *   catnip_rs/src/vm/core.rs  (try_struct_binop -> method call)
  *
  * Key insight: struct operator overloads desugar to method calls (Call),
- * and Call is never in pure_ops. Therefore CSE/DCE/folding/LICM skip
- * struct operator expressions by construction.
+ * and Call is never classified pure. Therefore purity-gated
+ * optimizations (JIT memoization/LICM, DCE) skip struct operator
+ * expressions by construction.
  *
  * Proves:
  *   - pure_op classifies exactly the builtin opcodes

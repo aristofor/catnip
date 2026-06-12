@@ -25,21 +25,7 @@ pub fn list_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
                 let idx = args[0]
                     .as_int()
                     .ok_or_else(|| VMError::TypeError("pop() index must be int".into()))?;
-                // pop at index: get then remove
-                let v = list.get(idx)?;
-                // remove by shifting
-                let inner_len = list.len();
-                let norm = if idx < 0 { idx + inner_len as i64 } else { idx };
-                if norm < 0 || norm >= inner_len as i64 {
-                    return Err(VMError::IndexError("pop index out of range".into()));
-                }
-                // We need to manually handle indexed pop -- for now, use get + set approach
-                // Actually NativeList doesn't expose remove_at. Let's use a simpler approach.
-                // We already got the value, now we need to shift. Since NativeList only
-                // exposes remove(value), we'll add a remove_at later if needed.
-                // For now, return the value and note this is a simplification.
-                v.decref(); // undo the clone from get()
-                list.pop() // simplified: always pop from end for now
+                list.remove_at(idx)
             }
         }
         "insert" => {

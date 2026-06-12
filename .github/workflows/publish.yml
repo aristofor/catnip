@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v5
 
       # No actions/setup-python: cibuildwheel manages all target interpreters
-      # (cp314) itself. A host framework Python would leak into the
+      # (cp313, cp314) itself. A host framework Python would leak into the
       # macOS link step and mismatch the wheel's target version.
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.4.0
@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.14"]
+        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v5
 
@@ -98,7 +98,7 @@ jobs:
 
       - name: Install and test
         run: |
-          # dist/ holds cp314 wheels. Install the local wheel
+          # dist/ holds both cp313 and cp314 wheels. Install the local wheel
           # file matching the current interpreter by its cp tag, so the smoke
           # test can never silently fall back to a PyPI release. The default
           # index stays enabled so runtime deps (click, xxhash) still resolve.

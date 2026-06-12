@@ -1719,21 +1719,28 @@ impl VmHost for VMHost {
                     .and_then(|cls| cls.call((), Some(&kwargs)))
                     .map_err(map_err)?;
 
-                let futures: Vec<Bound<'_, PyAny>> = elements
-                    .iter()
-                    .map(|elem| {
-                        executor
-                            .call_method1("submit", (&worker_fn, elem, lambda))
-                            .map_err(map_err)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                // Run on the pool, then always shut it down -- even if submit or
+                // result() errors -- so an error path doesn't leak worker procs.
+                let collect_results = || -> Result<Bound<'_, pyo3::types::PyList>, super::core::VMError> {
+                    let futures: Vec<Bound<'_, PyAny>> = elements
+                        .iter()
+                        .map(|elem| {
+                            executor
+                                .call_method1("submit", (&worker_fn, elem, lambda))
+                                .map_err(map_err)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
 
-                let result_list = pyo3::types::PyList::empty(py);
-                for future in &futures {
-                    let r = future.call_method0("result").map_err(map_err)?;
-                    result_list.append(r).map_err(map_err)?;
-                }
+                    let result_list = pyo3::types::PyList::empty(py);
+                    for future in &futures {
+                        let r = future.call_method0("result").map_err(map_err)?;
+                        result_list.append(r).map_err(map_err)?;
+                    }
+                    Ok(result_list)
+                };
+                let collected = collect_results();
                 let _ = executor.call_method1("shutdown", (false,));
+                let result_list = collected?;
 
                 if is_tuple {
                     Ok(pyo3::types::PyTuple::new(py, result_list)

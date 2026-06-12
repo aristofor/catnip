@@ -106,25 +106,26 @@ L'analyse sémantique transforme l'IR en Op exécutable :
 **Responsabilités** :
 
 - Résolution des identifiants
+- Pré-scan des pragmas `tco`/`optimize` (précédence : CLI/env > pragma in-file > défaut)
 - Détection des tail calls (TCO)
-- Application des pragmas
-- Optimisations (10 passes)
+- Optimisations (5 passes IR)
 
-**Optimisations** (optionnel, contrôlé par niveau 0-3) :
+**Optimisations** (effet binaire : `optimize=0` désactive toutes les passes, 1-3 les activent) :
 
-- **Passes IR** (niveau expression) : simplifications locales (constant folding, CSE, dead code, etc.)
-- **Passes CFG/SSA** (niveau contrôle de flux, level >= 3) : optimisations globales (voir ci-dessous)
+- **Passes IR** (niveau expression) : simplifications locales (constant folding, dead code, etc.)
 
-Voir [OPTIMIZATIONS](OPTIMIZATIONS.md) pour détails sur les niveaux.
+Voir [OPTIMIZATIONS](OPTIMIZATIONS.md) pour le détail des passes et des défauts par entrypoint.
 
 **Op** : structure exécutable finale avec OpCode optimisé
 
-#### CFG/SSA : Optimisations Inter-blocs
+#### CFG/SSA : Infrastructure Inter-blocs (non branchée)
 
-À partir du niveau 3, le semantic analyzer construit un **Control Flow Graph** (CFG) puis passe en **SSA** pour pouvoir
-optimiser à l'échelle de plusieurs blocs.
+Le module `catnip_rs/src/cfg/` sait construire un **Control Flow Graph** (CFG) puis passer en **SSA** pour optimiser à
+l'échelle de plusieurs blocs. Il n'est **pas branché** sur le pipeline sémantique : son consommateur (l'ancien analyzer
+PyO3) a été supprimé, et le JIT construit ses propres CFG. Le design reste documenté ici pour qui voudrait le rebrancher
+; ses tests tournent toujours.
 
-> Warning: ce passage augmente la résistance mentale de +5.
+> Warning: ce passage augmente la résistance mentale de +5, sur un graphe que plus personne ne traverse.
 
 **Pipeline CFG/SSA** :
 
@@ -208,7 +209,7 @@ Recherche d'une variable = remonter la chaîne jusqu'à trouver
 
 - Un seul IndexMap contenant toutes les variables (ordre d'insertion préservé)
 - Tracking par frame pour savoir quoi nettoyer au pop
-- Shadow stack pour gérer le masquage de variables
+- Shadow stack pour gérer le variable shadowing
 
 **Trade-off** : lookup O(1), cleanup O(n) où n = variables dans le frame
 
@@ -228,17 +229,21 @@ Le Registry dispatche les opcodes vers leurs implémentations Rust via pattern m
 
 ### Tail Call Optimization (TCO)
 
-Catnip utilise un **trampoline pattern** pour éviter que la pile d'appels grossisse :
+Catnip implémente les **proper tail calls** via un **trampoline pattern** : tout appel par nom en position terminale est
+optimisé, pas seulement l'auto-récursion (récursion mutuelle, fonctions imbriquées, appels terminaux vers une autre
+fonction).
 
 **Principe** :
 
-1. La fonction tail-recursive retourne `TailCall(func, args)` au lieu d'appeler
-1. La boucle trampoline détecte `TailCall`, rebind les paramètres, continue
-1. Un seul frame Python pour toute la récursion
+1. Un appel en position terminale retourne `TailCall(func, args)` au lieu d'appeler
+1. La boucle trampoline détecte `TailCall`, rebind les paramètres (et swap le scope si la cible change de closure),
+   continue
+1. Un seul frame Python pour toute la chaîne d'appels terminaux, quelle que soit la cible
 
-**Avantage** : récursion possible sans gonfler la stack (O(1) stack space)
+**Avantage** : récursion possible sans gonfler la stack (O(1) stack space), y compris sur cycles mutuels `f → g → f`
 
-**Détection** : automatique par l'analyseur sémantique (appels en dernière position)
+**Détection** : automatique par l'analyseur sémantique (appels en position terminale, traversée de tous les corps de
+lambdas)
 
 **Références** :
 
@@ -261,7 +266,7 @@ Les opérations de contrôle de flux (`if`, `while`, `for`, `match`, etc.) reço
 
 ### Error Handling : Source Locations
 
-Les erreurs runtime capturent la position source complète (fichier, ligne, colonne) avec une pile d'appels claire.
+Les erreurs runtime capturent la position source complète (fichier, ligne, colonne) avec une call stack claire.
 
 **Pipeline de propagation** :
 
@@ -276,8 +281,8 @@ flowchart TD
 ```
 
 **Line table** : le `CodeObject` contient un vecteur parallèle aux instructions qui mappe chaque instruction vers son
-`start_byte`. La VM maintient `last_src_byte` (mis à jour à chaque instruction) et une pile d'appels avec nom de
-fonction et position source.
+`start_byte`. La VM maintient `last_src_byte` (mis à jour à chaque instruction) et une call stack avec nom de fonction
+et position source.
 
 **Capture lazy** : quand une erreur se produit, la VM utilise `last_src_byte` (toujours à jour, même si le frame est
 dépilé pendant la propagation), snapshote le call stack, puis le bridge Python convertit `start_byte` en ligne/colonne
@@ -308,7 +313,7 @@ File '<input>', line 1, column 1: Name 'factoral' is not defined
 
 **Détails** : voir [VM](VM.md) pour l'architecture.
 
-### Module Loading : Résolution Statique
+### Module loading : Résolution Statique
 
 Le loader résout les imports par nom avec une liste de recherche **fixée au démarrage** : caller_dir -> CWD ->
 CATNIP_PATH. Le code ne peut pas modifier cette liste à l'exécution.
@@ -318,23 +323,23 @@ Deux implémentations partagent la même logique de résolution (`catnip_core::l
 - **`ImportLoader`** (`catnip_rs/src/loader/`) : mode PyO3 (Python + Rust), supporte `.cat`, `.py`, extensions C-Python,
   et les plugins natifs catnip_vm (`libcatnip_{name}.so`, ex. `http`) via le pont `native_plugin.rs`
 - **`PureImportLoader`** (`catnip_vm/src/loader.rs`) : mode pur Rust (PurePipeline/MCP), supporte `.cat` et `.so`
-  (plugins natifs). Les modules stdlib sont decouverts par scan de `CATNIP_STDLIB_PATH`, exe dir, ou `target/debug/`
-  pour `libcatnip_{name}.so`. Parite avec le loader Python : `protocol=`, `wild=True`, import selectif avec alias,
+  (plugins natifs). Les modules stdlib sont découverts par scan de `CATNIP_STDLIB_PATH`, exe dir, ou `target/debug/`
+  pour `libcatnip_{name}.so`. Parité avec le loader Python : `protocol=`, `wild=True`, import sélectif avec alias,
   filtrage `__all__` et `lib.exports.include`
 
 **Plugins natifs** (`catnip_vm/src/plugin.rs`) : ABI v2 avec handles opaques. Un plugin exporte
 `extern "C" catnip_plugin_init() -> *const PluginDescriptor` avec magic ABI + version + callbacks method/getattr/drop.
 Le `PluginRegistry` (partage entre host et loader via `Rc<RefCell<>>`) valide l'ABI, enregistre les fonctions avec noms
-qualifies (`__plugin::module::fn`), et wrappe chaque appel dans `catch_unwind`. Les objets plugin (`PluginObject`) sont
-des handles u64 opaques dont les methodes et attributs sont dispatches a travers les callbacks du plugin. `Arc<Library>`
-dans les callbacks previent le dlclose tant que des objets vivent. Tous les modules stdlib (io, sys, http) sont des
+qualifiés (`__plugin::module::fn`), et wrappe chaque appel dans `catch_unwind`. Les objets plugin (`PluginObject`) sont
+des handles u64 opaques dont les méthodes et attributs sont dispatchés à travers les callbacks du plugin. `Arc<Library>`
+dans les callbacks prévient le dlclose tant que des objets vivent. Tous les modules stdlib (io, sys, http) sont des
 plugins natifs -- aucun code stdlib dans catnip_vm
 
 Le même `PluginRegistry` est désormais aussi monté sur l'`ImportLoader` PyO3. Le pont `native_plugin.rs` (`catnip_rs`)
-marshale `catnip_vm::Value` <-> PyObject et route getattr/method via les opcodes (`OpCode::GetAttr` / `OpCode::CallMethod`),
-si bien qu'un plugin PureVM-only comme `http` (`pyo3 = false`) se charge depuis n'importe quel exécuteur, plus seulement
-le PurePipeline/MCP. Les stdlib Rust sont cachées sous une clé `rs::<name>` pour ne pas entrer en collision avec leur
-homonyme Python (`protocol="py"`).
+marshale `catnip_vm::Value` \<-> PyObject et route getattr/method via les opcodes (`OpCode::GetAttr` /
+`OpCode::CallMethod`), si bien qu'un plugin PureVM-only comme `http` (`pyo3 = false`) se charge depuis n'importe quel
+exécuteur, plus seulement le PurePipeline/MCP. Les stdlib Rust sont cached sous une clé `rs::<name>` pour ne pas entrer
+en collision avec leur homonyme Python (`protocol="py"`).
 
 **Choix de design : pas de `sys.path`**
 
@@ -372,7 +377,7 @@ sequenceDiagram
     CB->>VM: DebugAction<br/>(CONTINUE / STEP_* / ...)
 ```
 
-### Points d'entrée dans la VM
+### Entrypoints dans la VM
 
 Le breakpoint opcode est injecté par l'analyseur sémantique quand il rencontre un appel `breakpoint()`. La VM intercepte
 aussi les instructions dont le `start_byte` correspond à un breakpoint utilisateur (ajouté via
@@ -407,7 +412,7 @@ composant Rust et prouve ses invariants.
 | Syntaxe       | Grammaire CF, précédence (13 niveaux), monotonie fuel                                                                                          |
 | Sémantique    | Broadcasting (foncteur, confluence), ND-récursion                                                                                              |
 | Runtime       | IR opcodes, scopes, patterns, fonctions/TCO, NaN-boxing, VM stack safety, frames/IP/jumps, C3 MRO, structs/traits/enums, desugaring opérateurs |
-| Optimisations | 10/10 passes IR (constant folding, CSE, DCE, propagation, etc.)                                                                                |
+| Optimisations | 5 passes IR vivantes (strength reduction, blunt code, DCE, block flattening, constant folding) + gardes sur règles retirées                    |
 | Analyses      | Liveness/DSE, dominance CFG, SSA complet (49 lemmes), cache                                                                                    |
 
 Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ_PROOFS.md).
@@ -421,7 +426,7 @@ Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ
 | `catnip/`         | API Python, intégration                                                                             |
 | `catnip_core/`    | Coeur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, freeze, constants, symbols)                |
 | `catnip_vm/`      | VM pure Rust sans PyO3 (Value NaN-boxed, collections, structs/traits/enums, PureHost, PureCompiler) |
-| `catnip_rs/`      | Bindings PyO3 + runtime (parser, semantic, VM, PyIRNode)                                            |
+| `catnip_rs/`      | Bindings PyO3 + runtime (parser, VM, PyIRNode)                                                      |
 | `catnip_libs/`    | Standard library (specs TOML + implémentations Rust par module)                                     |
 | `catnip_grammar/` | Grammaire Tree-sitter                                                                               |
 | `catnip_tools/`   | Outils Rust (formatter, linter + CFG deep analysis, debugger)                                       |

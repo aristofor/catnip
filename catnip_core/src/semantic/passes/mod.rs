@@ -45,11 +45,14 @@ impl PureOptimizer {
         Self {
             passes: vec![
                 Box::new(BluntCodePass),
-                Box::new(ConstantPropagationPass::new()),
                 Box::new(ConstantFoldingPass),
-                Box::new(CopyPropagationPass::new()),
+                // ConstantPropagation/CopyPropagation/DeadStoreElimination:
+                // disabled -- they match `IR::Identifier` as SetLocals target
+                // while the transformer emits `Tuple[Ref]` (silent no-ops), and
+                // their tracking is control-flow- and scope-insensitive.
+                // Re-enabling requires a dataflow rework, see
+                // wip/CODE_REVIEW_SEMANTIC_2026-06-10.md.
                 // FunctionInlining: not ported (legacy only)
-                Box::new(DeadStoreEliminationPass),
                 Box::new(StrengthReductionPass),
                 Box::new(BlockFlatteningPass),
                 Box::new(DeadCodeEliminationPass),
@@ -155,15 +158,13 @@ pub fn is_truthy_constant(ir: &IR) -> Option<bool> {
     }
 }
 
-/// Invert a comparison opcode (Eq↔Ne, Lt↔Ge, Le↔Gt).
+/// Invert a comparison opcode. Eq↔Ne only: order comparisons (Lt/Le/Gt/Ge)
+/// are not complementary under IEEE 754 (`not (nan < 1)` is True, `nan >= 1`
+/// is False), so inverting them changes program behavior.
 pub fn invert_comparison(opcode: IROpCode) -> Option<IROpCode> {
     match opcode {
         IROpCode::Eq => Some(IROpCode::Ne),
         IROpCode::Ne => Some(IROpCode::Eq),
-        IROpCode::Lt => Some(IROpCode::Ge),
-        IROpCode::Le => Some(IROpCode::Gt),
-        IROpCode::Gt => Some(IROpCode::Le),
-        IROpCode::Ge => Some(IROpCode::Lt),
         _ => None,
     }
 }
@@ -262,7 +263,10 @@ mod tests {
     #[test]
     fn test_invert_comparison() {
         assert_eq!(invert_comparison(IROpCode::Eq), Some(IROpCode::Ne));
-        assert_eq!(invert_comparison(IROpCode::Lt), Some(IROpCode::Ge));
+        assert_eq!(invert_comparison(IROpCode::Ne), Some(IROpCode::Eq));
+        // Order comparisons are not invertible (NaN)
+        assert_eq!(invert_comparison(IROpCode::Lt), None);
+        assert_eq!(invert_comparison(IROpCode::Ge), None);
         assert_eq!(invert_comparison(IROpCode::Add), None);
     }
 
@@ -271,7 +275,7 @@ mod tests {
         let mut opt = PureOptimizer::new();
         let ir = IR::op(IROpCode::Add, vec![IR::Int(1), IR::Int(0)]);
         let result = opt.optimize(ir);
-        // BluntCode: x + 0 → x
+        // ConstantFolding: 1 + 0 → 1 (both operands literal)
         assert_eq!(result, IR::Int(1));
     }
 

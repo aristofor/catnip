@@ -968,7 +968,7 @@ fn integer_to_pyobject(py: Python<'_>, n: &Integer) -> Py<PyAny> {
 }
 
 /// Convert a Python int to a rug::Integer via bytes.
-fn pyobject_to_integer(obj: &Bound<'_, PyAny>) -> PyResult<Integer> {
+pub(crate) fn pyobject_to_integer(obj: &Bound<'_, PyAny>) -> PyResult<Integer> {
     // Fast path: fits in i64
     if let Ok(val) = obj.extract::<i64>() {
         return Ok(Integer::from(val));

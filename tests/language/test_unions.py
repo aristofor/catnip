@@ -8,6 +8,7 @@ executor explicitly use `vm_mode='off'`.
 """
 
 import pytest
+
 from catnip import Catnip
 
 

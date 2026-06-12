@@ -1,6 +1,6 @@
 # Graphe de contrôle (CFG)
 
-Construction, analyse et optimisation du flux de contrôle.
+Construction, analyse et optimisation du control flow.
 
 - [01_cfg_basic.md](01_cfg_basic.md) - Construction de CFG, blocs basiques, arêtes
 - [02_cfg_analysis.md](02_cfg_analysis.md) - Dominance, détection de boucles

@@ -4,15 +4,35 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{CacheEntry, CacheKey, CacheType};
 use crate::config::get_cache_dir;
 
+/// Minimum staleness before a read rewrites the stored access time. Avoids a
+/// write on every cache hit while keeping LRU recency roughly accurate.
+const ACCESS_BUMP_SECS: u64 = 60;
+
 /// Check if cache debug mode is enabled via CATNIP_CACHE_DEBUG env var.
 fn is_debug_enabled() -> bool {
     std::env::var("CATNIP_CACHE_DEBUG").is_ok()
+}
+
+/// Current Unix time in seconds (0 if the clock is before the epoch).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Filesystem creation time (fallback modified) in Unix seconds, for legacy
+/// entries written before timestamps were embedded in the pickle.
+fn fs_time_secs(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let t = meta.created().or_else(|_| meta.modified()).ok()?;
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// Metadata for a cached entry on disk.
@@ -68,63 +88,48 @@ impl DiskCache {
         let file_path = self.get_file_path(&key_str);
 
         if !file_path.exists() {
-            self.misses += 1;
-            if is_debug_enabled() {
-                eprintln!("[cache] MISS {}", key_str);
-            }
-            return Ok(None);
+            return Ok(self.record_miss(&key_str, "MISS"));
         }
 
-        // Check TTL
-        if let Some(ttl) = self.ttl_seconds {
-            let metadata = fs::metadata(&file_path)?;
-            // Use created time, fallback to modified if not available
-            let creation_time = metadata.created().or_else(|_| metadata.modified())?;
-            let age = SystemTime::now()
-                .duration_since(creation_time)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            if age >= ttl {
-                // Expired, delete and return None
+        // Load defensively: a truncated/corrupt/incompatible file is treated as
+        // a miss (evict + None), never a hard error propagated to the caller.
+        let entry_dict = match self.load_entry_dict(py, &file_path) {
+            Ok(d) => d,
+            Err(_) => {
                 let _ = fs::remove_file(&file_path);
-                self.misses += 1;
-                if is_debug_enabled() {
-                    eprintln!("[cache] MISS (expired) {}", key_str);
+                return Ok(self.record_miss(&key_str, "MISS (corrupt)"));
+            }
+        };
+
+        let now = now_secs();
+
+        // TTL from the timestamp stored inside the entry. Filesystem birth/mtime
+        // is unavailable on some filesystems and mutable by unrelated tooling.
+        if let Some(ttl) = self.ttl_seconds {
+            let created = Self::dict_u64(&entry_dict, "created_at").or_else(|| fs_time_secs(&file_path));
+            if let Some(created) = created {
+                if now.saturating_sub(created) >= ttl {
+                    let _ = fs::remove_file(&file_path);
+                    return Ok(self.record_miss(&key_str, "MISS (expired)"));
                 }
-                return Ok(None);
             }
         }
 
-        // Read and deserialize with pickle
-        let data = fs::read(&file_path)?;
-        let pickle = py.import("pickle")?;
-        let loads = pickle.getattr("loads")?;
-        let py_bytes = PyBytes::new(py, &data);
-        let entry_dict: Bound<'_, PyDict> = loads.call1((py_bytes,))?.extract()?;
-
-        // Reconstruct CacheEntry from dict
-        let key: String = entry_dict.get_item("key")?.unwrap().extract()?;
-        let value: Py<PyAny> = entry_dict.get_item("value")?.unwrap().extract()?;
-        let cache_type_str: String = entry_dict.get_item("cache_type")?.unwrap().extract()?;
-        let cache_type = match cache_type_str.as_str() {
-            "source" => CacheType::Source,
-            "ast" => CacheType::Ast,
-            "bytecode" => CacheType::Bytecode,
-            "result" => CacheType::Result,
-            _ => CacheType::Source, // fallback
-        };
-        let metadata: Py<PyDict> = entry_dict.get_item("metadata")?.unwrap().extract()?;
-
-        let entry = CacheEntry {
-            key,
-            value,
-            cache_type,
-            metadata,
+        // Reconstruct the entry; a missing/mistyped field is corruption -> miss.
+        let entry = match Self::build_entry(&entry_dict) {
+            Some(e) => e,
+            None => {
+                let _ = fs::remove_file(&file_path);
+                return Ok(self.record_miss(&key_str, "MISS (corrupt)"));
+            }
         };
 
-        // Update access time
-        let _ = fs::File::open(&file_path);
+        // LRU: refresh the stored access time, gated so repeated reads don't
+        // rewrite the file every time. prune() sorts evictions by this value.
+        let accessed = Self::dict_u64(&entry_dict, "accessed_at").unwrap_or(0);
+        if now.saturating_sub(accessed) >= ACCESS_BUMP_SECS && entry_dict.set_item("accessed_at", now).is_ok() {
+            let _ = self.rewrite_entry(py, &file_path, &entry_dict);
+        }
 
         self.hits += 1;
         if is_debug_enabled() {
@@ -141,22 +146,19 @@ impl DiskCache {
 
         // Create entry as dict for pickling
         let metadata = metadata.unwrap_or_else(|| PyDict::new(py).into());
+        let now = now_secs();
         let entry_dict = PyDict::new(py);
         entry_dict.set_item("key", key_str.clone())?;
         entry_dict.set_item("value", value)?;
         // Store cache_type as string for pickle compatibility
         entry_dict.set_item("cache_type", key.cache_type.__str__())?;
         entry_dict.set_item("metadata", metadata)?;
+        // Embed timestamps so TTL/LRU don't depend on fragile filesystem times.
+        entry_dict.set_item("created_at", now)?;
+        entry_dict.set_item("accessed_at", now)?;
 
-        // Serialize with pickle
-        let pickle = py.import("pickle")?;
-        let dumps = pickle.getattr("dumps")?;
-        let pickled_bytes: Bound<'_, PyBytes> = dumps.call1((entry_dict,))?.extract()?;
-
-        // Atomic write: temp file + rename (safe for concurrent processes)
-        let tmp_path = file_path.with_extension("tmp");
-        fs::write(&tmp_path, pickled_bytes.as_bytes())?;
-        fs::rename(&tmp_path, &file_path)?;
+        // Serialize and write atomically (temp file + rename).
+        self.rewrite_entry(py, &file_path, &entry_dict)?;
 
         // Check if we need to prune
         if self.max_size_bytes.is_some() {
@@ -242,9 +244,9 @@ impl DiskCache {
     }
 
     /// Prune expired entries and enforce size limit.
-    fn prune(&mut self, _py: Python<'_>) -> PyResult<u64> {
+    fn prune(&mut self, py: Python<'_>) -> PyResult<u64> {
         let mut removed_count = 0u64;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = now_secs();
 
         // Collect all entries with metadata
         let mut entries: Vec<(PathBuf, EntryMetadata)> = Vec::new();
@@ -258,20 +260,23 @@ impl DiskCache {
                 continue;
             }
 
-            let metadata = fs::metadata(&path)?;
-            let size = metadata.len();
+            let size = fs::metadata(&path)?.len();
 
-            let created_at = metadata
-                .created()
-                .or_else(|_| metadata.modified())
-                .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_secs())
-                .unwrap_or(0);
-
-            let accessed_at = metadata
-                .accessed()
-                .or_else(|_| metadata.modified())
-                .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_secs())
-                .unwrap_or(0);
+            // Read timestamps from the entry itself (consistent with get()).
+            // A file that no longer deserializes is corrupt -> evict now.
+            let (created_at, accessed_at) = match self.load_entry_dict(py, &path) {
+                Ok(d) => (
+                    Self::dict_u64(&d, "created_at")
+                        .or_else(|| fs_time_secs(&path))
+                        .unwrap_or(0),
+                    Self::dict_u64(&d, "accessed_at").unwrap_or(0),
+                ),
+                Err(_) => {
+                    let _ = fs::remove_file(&path);
+                    removed_count += 1;
+                    continue;
+                }
+            };
 
             entries.push((
                 path.clone(),
@@ -283,11 +288,11 @@ impl DiskCache {
             ));
         }
 
-        // Remove expired entries (TTL)
+        // Remove expired entries (TTL). Same boundary as get(): age >= ttl.
         if let Some(ttl) = self.ttl_seconds {
             entries.retain(|(path, meta)| {
                 let age = now.saturating_sub(meta.created_at);
-                if age > ttl {
+                if age >= ttl {
                     let _ = fs::remove_file(path);
                     removed_count += 1;
                     false
@@ -351,6 +356,68 @@ impl DiskCache {
 const DISK_CACHE_PREFIX: &str = "catnip_";
 
 impl DiskCache {
+    /// Record a miss (counter + optional debug log) and return `None`.
+    fn record_miss(&mut self, key_str: &str, reason: &str) -> Option<Py<CacheEntry>> {
+        self.misses += 1;
+        if is_debug_enabled() {
+            eprintln!("[cache] {} {}", reason, key_str);
+        }
+        None
+    }
+
+    /// Read and unpickle the entry dict. Errors (I/O, unpickling, wrong type)
+    /// propagate so the caller can treat the file as corrupt and evict it.
+    ///
+    /// Note: entries are pickled, so the cache directory is a trust boundary —
+    /// only this user should be able to write to it (XDG cache, user-owned).
+    /// A writable-by-others cache dir would allow arbitrary code execution on
+    /// load; the key signature guards correctness, not safety.
+    fn load_entry_dict<'py>(&self, py: Python<'py>, file_path: &Path) -> PyResult<Bound<'py, PyDict>> {
+        let data = fs::read(file_path)?;
+        let pickle = py.import("pickle")?;
+        let loads = pickle.getattr("loads")?;
+        let py_bytes = PyBytes::new(py, &data);
+        Ok(loads.call1((py_bytes,))?.extract()?)
+    }
+
+    /// Serialize an entry dict and write it atomically (temp file + rename).
+    fn rewrite_entry(&self, py: Python<'_>, file_path: &Path, entry_dict: &Bound<'_, PyDict>) -> PyResult<()> {
+        let pickle = py.import("pickle")?;
+        let dumps = pickle.getattr("dumps")?;
+        let pickled_bytes: Bound<'_, PyBytes> = dumps.call1((entry_dict,))?.extract()?;
+        let tmp_path = file_path.with_extension("tmp");
+        fs::write(&tmp_path, pickled_bytes.as_bytes())?;
+        fs::rename(&tmp_path, file_path)?;
+        Ok(())
+    }
+
+    /// Extract a `u64` field from an entry dict, or `None` if absent/mistyped.
+    fn dict_u64(d: &Bound<'_, PyDict>, key: &str) -> Option<u64> {
+        d.get_item(key).ok().flatten().and_then(|v| v.extract::<u64>().ok())
+    }
+
+    /// Reconstruct a `CacheEntry` from an entry dict; `None` if any required
+    /// field is missing or has the wrong type (treated as corruption).
+    fn build_entry(d: &Bound<'_, PyDict>) -> Option<CacheEntry> {
+        let key: String = d.get_item("key").ok().flatten()?.extract().ok()?;
+        let value: Py<PyAny> = d.get_item("value").ok().flatten()?.extract().ok()?;
+        let cache_type_str: String = d.get_item("cache_type").ok().flatten()?.extract().ok()?;
+        let cache_type = match cache_type_str.as_str() {
+            "source" => CacheType::Source,
+            "ast" => CacheType::Ast,
+            "bytecode" => CacheType::Bytecode,
+            "result" => CacheType::Result,
+            _ => CacheType::Source,
+        };
+        let metadata: Py<PyDict> = d.get_item("metadata").ok().flatten()?.extract().ok()?;
+        Some(CacheEntry {
+            key,
+            value,
+            cache_type,
+            metadata,
+        })
+    }
+
     /// Get the file path for a cache key.
     fn get_file_path(&self, key: &str) -> PathBuf {
         // Use the key directly as filename (it's already a hash)

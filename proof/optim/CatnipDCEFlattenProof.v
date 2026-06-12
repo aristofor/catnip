@@ -1,14 +1,20 @@
 (* FILE: proof/optim/CatnipDCEFlattenProof.v *)
 (* Dead Code Elimination, Block Flattening, Pass Composition.
  *
- * Source: catnip_rs/src/semantic/dead_code_elimination.rs
- *         catnip_rs/src/semantic/block_flattening.rs
+ * Source: catnip_core/src/semantic/passes/dead_code_elimination.rs
+ *         catnip_core/src/semantic/passes/block_flattening.rs
+ *
+ * Model scope: Expr has no assignments and no match, so two live
+ * behaviors are out of model: the scrutinee preservation of match
+ * elimination (effects), and the no-flatten rule for blocks declaring
+ * locals (scopes). The rules proved here (if/while/block) are exactly
+ * the live ones on pure expressions.
  *
  * Proves:
  *   - DCE: if-true/false elimination, while-false, empty/singleton block
  *   - Block flattening: flatten_one, idempotence, flatten_block_sound
  *   - Pass composition: compose_preserves_eval, compose_two_idempotent
- *   - Lowering to IRPure (sr_mul_one_r_ir, sr_add_zero_r_ir, blunt_double_neg_ir)
+ *   - Lowering to IRPure (sr_and_bools_ir, blunt_not_eq_ir)
  *
  * Depends on: CatnipIR.v, CatnipExprModel.v,
  *             CatnipStrengthRedProof.v, CatnipBluntCodeProof.v
@@ -272,12 +278,13 @@ Qed.
 (* G. Concrete Examples                                              *)
 (* ================================================================ *)
 
-Example ex_sr_mul :
-  strength_reduce (BinOp Mul (Const 3) (Const 1)) = Const 3.
+Example ex_sr_and :
+  strength_reduce (BinOp And (BConst true) (BConst false)) = BConst false.
 Proof. reflexivity. Qed.
 
-Example ex_blunt_double_neg :
-  simplify_blunt (UnOp Not (UnOp Not (Const 5))) = Const 5.
+Example ex_blunt_not_eq :
+  simplify_blunt (UnOp Not (BinOp Eq (Var 0) (Const 5)))
+  = BinOp Ne (Var 0) (Const 5).
 Proof. reflexivity. Qed.
 
 Example ex_dce_if :
@@ -289,13 +296,14 @@ Example ex_flatten :
   = Block [Var 0; Var 1; Var 2].
 Proof. reflexivity. Qed.
 
-(* Pipeline: blunt then strength on not(not(x * 1)) *)
+(* Pipeline: blunt then DCE on if not(a == b) with literal condition *)
 Example ex_pipeline :
-  let e := UnOp Not (UnOp Not (BinOp Mul (Var 0) (Const 1))) in
+  let e := IfExpr (BConst true)
+             (UnOp Not (BinOp Eq (Var 0) (Var 1))) (Const 0) in
   let step1 := simplify_blunt e in
-  let step2 := strength_reduce step1 in
-  step1 = BinOp Mul (Var 0) (Const 1) /\
-  step2 = Var 0.
+  let step2 := simplify_blunt step1 in
+  step1 = UnOp Not (BinOp Eq (Var 0) (Var 1)) /\
+  step2 = BinOp Ne (Var 0) (Var 1).
 Proof. split; reflexivity. Qed.
 
 
@@ -305,14 +313,12 @@ Proof. split; reflexivity. Qed.
 (* expr_to_ir is defined in CatnipExprModel.v.                       *)
 (* ================================================================ *)
 
-Theorem sr_mul_one_r_ir : forall x,
-  expr_to_ir (strength_reduce (BinOp Mul x (Const 1))) = expr_to_ir x.
+Theorem sr_and_bools_ir : forall a b,
+  expr_to_ir (strength_reduce (BinOp And (BConst a) (BConst b)))
+  = expr_to_ir (BConst (andb a b)).
 Proof. reflexivity. Qed.
 
-Theorem sr_add_zero_r_ir : forall x,
-  expr_to_ir (strength_reduce (BinOp Add x (Const 0))) = expr_to_ir x.
-Proof. reflexivity. Qed.
-
-Theorem blunt_double_neg_ir : forall x,
-  expr_to_ir (simplify_blunt (UnOp Not (UnOp Not x))) = expr_to_ir x.
+Theorem blunt_not_eq_ir : forall x y,
+  expr_to_ir (simplify_blunt (UnOp Not (BinOp Eq x y)))
+  = expr_to_ir (BinOp Ne x y).
 Proof. reflexivity. Qed.

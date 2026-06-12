@@ -160,7 +160,7 @@ flowchart TD
 ```
 
 1. **Hash du bytecode** : chaque CodeObject reçoit un hash FNV-1a calculé sur les instructions (opcode + arg) ET le
-   constant pool (valeurs NaN-boxed), cachée dans un `OnceLock<u64>` pour éviter le recalcul. Le hash est mis à jour
+   constant pool (valeurs NaN-boxed), cached dans un `OnceLock<u64>` pour éviter le recalcul. Le hash est mis à jour
    dans le JIT executor à chaque Call (nouveau frame) et restauré sur Return.
 
 1. **Stockage** : les traces sont sérialisées en postcard dans `~/.cache/catnip/` (fichiers plats). Clé :
@@ -179,15 +179,15 @@ Le cache est safe pour l'exécution concurrente ND (mode `spawn`) :
 
 - **Atomic writes** : écriture dans fichier temporaire puis `rename()` (POSIX atomique)
 - **Last writer wins** : toutes les traces pour un même offset sont équivalentes, pas besoin de lock
-- **Mémoire séparée** : chaque worker recompile indépendamment depuis la trace cachée
+- **Mémoire séparée** : chaque worker recompile indépendamment depuis la trace cached
 
-### Ce qui est cachée vs ce qui ne l'est pas
+### Ce qui est cached vs ce qui ne l'est pas
 
 **Cachée** : la `Trace` (séquence de `TraceOp`, type, metadata) - structure sérialisable
 
-**Non cachée** : le `CompiledFn` (pointeur vers code machine) - runtime-specific, non sérialisable
+**Non cached** : le `CompiledFn` (pointeur vers code machine) - runtime-specific, non sérialisable
 
-Les stencils Cranelift (code machine non relocaté + table de relocations) sont cachés séparément
+Les stencils Cranelift (code machine non relocaté + table de relocations) sont cached séparément
 (`jit_nv{CACHE_VERSION}_{SHA256}`) via le trait `CacheKvStore` de Cranelift. Le préfixe `nv` (native versioned) inclut
 `CACHE_VERSION = VMOpCode::MAX + COMPILER_SALT`, ce qui invalide automatiquement le cache quand les opcodes ou la
 sémantique de compilation changent. Au démarrage, les fichiers d'anciennes versions (y compris le legacy `jit_native_*`)

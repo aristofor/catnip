@@ -13,7 +13,7 @@ discret, compact, dimension-agnostique, pensé pour manipuler des données sans 
 
 Objectif :
 
-1. **Scripter en sécurité** - sans exposer l'hôte
+1. **Scripter en sécurité** - sans exposer le host
 1. **Simplifier pandas** - en supprimant `.loc[…].apply(lambda)` comme routine quotidienne
 1. **Unifier les dimensions** - scalaires, listes, DataFrames, tensors : une seule forme
 1. **S'intégrer dans Python** - pas d'écosystème séparé, pas de rupture cognitive
@@ -97,7 +97,7 @@ C'est un choix technique :
 Pourquoi ?
 
 - la notation `.[…]` (broadcasting) est prioritaire
-- les scripts Catnip reçoivent surtout des structures venant du Python hôte
+- les scripts Catnip reçoivent surtout des structures venant du Python host
 - éviter les collisions syntaxiques
 - préserver un langage minimal, donc robuste
 
@@ -215,7 +215,7 @@ ______________________________________________________________________
 
 Catnip reprend ces principes, les simplifie, les unifie et surtout :
 
-**il les rend applicables à n'importe quelle structure fournie par l'hôte Python.**
+**il les rend applicables à n'importe quelle structure fournie par le host Python.**
 
 ## Ce que Catnip emprunte aux autres langages
 

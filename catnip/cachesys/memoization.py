@@ -9,12 +9,12 @@ Note: This is memoization (storing function results), not compilation caching.
 
 from typing import Any, Callable, Optional
 
-# Sentinel to distinguish cache miss from a cached None value
-_CACHE_MISS = object()
-
 from catnip._rs import CacheEntry, CacheKey, CacheType, MemoryCache
 
 from .base import CacheBackend
+
+# Sentinel to distinguish cache miss from a cached None value
+_CACHE_MISS = object()
 
 
 class Memoization:

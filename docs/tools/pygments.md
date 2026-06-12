@@ -423,7 +423,7 @@ git commit -m "update grammar and regenerate lexer"
 
 ## Architecture interne
 
-Le lexer utilise `RegexLexer` de Pygments avec des règles de correspondance par expressions régulières.
+Le lexer utilise `RegexLexer` de Pygments avec des règles de regex matching.
 
 ### Structure de base
 

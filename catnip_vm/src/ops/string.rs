@@ -157,6 +157,9 @@ pub fn str_join(sep: &str, parts: &[Value]) -> VMResult<Value> {
         if i > 0 {
             result.push_str(sep);
         }
+        // SAFETY: `part` is borrowed from the caller-owned `parts` slice, so its Arc
+        // payload stays alive while `s` is borrowed; as_native_str_ref checks the tag
+        // internally and returns None (mapped to a TypeError) for non-string elements.
         let s = unsafe {
             part.as_native_str_ref()
                 .ok_or_else(|| VMError::TypeError("join expects all string elements".to_string()))?

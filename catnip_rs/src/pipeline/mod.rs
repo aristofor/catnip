@@ -11,7 +11,7 @@ use crate::vm::unified_compiler::UnifiedCompiler;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tree_sitter::Parser;
 
@@ -60,6 +60,23 @@ pub struct Pipeline {
     optimize_override: Option<bool>,
     /// Prepared (parsed + analyzed) IR, ready for compile+execute.
     prepared_ir: Option<IR>,
+}
+
+/// Internal-only CFG gate, read once from the environment.
+///
+/// The CFG+SSA round-trip is wired behind `SemanticAnalyzer::set_cfg_enabled`
+/// but exposes no user surface (no `-o`, pragma, or kwarg): the round-trip is
+/// not yet a guaranteed identity. `CATNIP_CFG_INTERNAL=1` forces it on so the
+/// existing test suite acts as a differential oracle -- a test green both
+/// cfg-off and cfg-on proves observable equivalence on that program.
+fn cfg_internal_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("CATNIP_CFG_INTERNAL").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
 }
 
 impl Pipeline {
@@ -145,6 +162,7 @@ impl Pipeline {
         analyzer.set_tco_enabled(self.tco_enabled);
         analyzer.set_tco_override(self.tco_override);
         analyzer.set_optimize_override(self.optimize_override);
+        analyzer.set_cfg_enabled(cfg_internal_enabled());
         analyzer
     }
 
@@ -210,6 +228,11 @@ impl Pipeline {
     /// Parse + transform + semantic analysis, storing the optimized IR
     /// for later execution via `execute_prepared()`.
     pub fn prepare(&mut self, source: &str) -> Result<(), String> {
+        // Invalidate any previously prepared IR up front: a failed prepare
+        // (now reachable via fatal E300, not just syntax/validation errors)
+        // must not leave stale code executable through execute_prepared().
+        self.prepared_ir = None;
+
         let tree = self.parser.parse(source, None).ok_or("Failed to parse source")?;
         let root = tree.root_node();
 
@@ -222,6 +245,30 @@ impl Pipeline {
         let optimized = semantic.analyze(&ir)?;
         self.prepared_ir = Some(optimized);
         Ok(())
+    }
+
+    /// Re-box a top-level VM result so a result that escaped as a PyObject is
+    /// always a freshly *owned* ObjectTable handle. The round-trip demotes
+    /// recognizable objects (struct proxies, enum variants, scalars) to native
+    /// Values; anything else (struct/union type markers, arbitrary Python
+    /// objects) is re-interned via `from_owned_pyobject`. The handle held by
+    /// the returned Value is owned by the caller, who must `decref` it once it
+    /// has been converted to Python -- otherwise the global table pins the
+    /// result (and any Context reachable through its methods) forever.
+    fn rebox_owned_result(py: Python<'_>, last_result: Value) -> Value {
+        if !last_result.is_pyobj() {
+            return last_result;
+        }
+        let py_obj = last_result.to_pyobject(py);
+        let reboxed = Value::from_pyobject(py, py_obj.bind(py)).unwrap_or(last_result);
+        // Voie A: `last_result` is an owned handle. The re-box produced either a
+        // fresh owned value (a different handle, or a demoted native) or -- on
+        // `from_pyobject` failure -- the original itself. Release the original
+        // only when it was actually replaced.
+        if reboxed.bits() != last_result.bits() {
+            last_result.decref();
+        }
+        reboxed
     }
 
     /// Compile + execute from previously prepared IR (set by `prepare()`).
@@ -243,13 +290,7 @@ impl Pipeline {
                 .map_err(|e| format!("Compilation error: {}", e))?;
 
             let last_result = executor.execute(Arc::new(code))?;
-
-            if last_result.is_pyobj() {
-                let py_obj = last_result.to_pyobject(py);
-                Ok(Value::from_pyobject(py, py_obj.bind(py)).unwrap_or(last_result))
-            } else {
-                Ok(last_result)
-            }
+            Ok(Self::rebox_owned_result(py, last_result))
         })
     }
 
@@ -287,14 +328,7 @@ impl Pipeline {
                 .map_err(|e| format!("Compilation error: {}", e))?;
 
             let last_result = executor.execute(Arc::new(code))?;
-
-            // Convert PyObject result to native Value if possible
-            if last_result.is_pyobj() {
-                let py_obj = last_result.to_pyobject(py);
-                Ok(Value::from_pyobject(py, py_obj.bind(py)).unwrap_or(last_result))
-            } else {
-                Ok(last_result)
-            }
+            Ok(Self::rebox_owned_result(py, last_result))
         })
     }
 
@@ -384,14 +418,7 @@ impl Pipeline {
                 .map_err(|e| format!("Compilation error: {}", e))?;
 
             let last_result = executor.execute(Arc::new(code))?;
-
-            let final_result = if last_result.is_pyobj() {
-                let py_obj = last_result.to_pyobject(py);
-                Value::from_pyobject(py, py_obj.bind(py)).unwrap_or(last_result)
-            } else {
-                last_result
-            };
-            Ok::<_, String>(final_result)
+            Ok::<_, String>(Self::rebox_owned_result(py, last_result))
         })?;
         timings.execute_us = exec_start.elapsed().as_micros() as u64;
 
@@ -420,6 +447,45 @@ pub struct PyPipeline {
     inner: Pipeline,
 }
 
+impl PyPipeline {
+    /// Convert a result Value through the executor's thread-locals so
+    /// symbols and structs resolve against this pipeline's VM tables.
+    /// Plain conversion when no executor exists yet.
+    fn result_to_py(&self, py: Python<'_>, value: Value) -> Py<PyAny> {
+        match self.inner.executor.as_ref() {
+            Some(ex) => ex.value_to_pyobject(py, value),
+            None => value.to_pyobject(py),
+        }
+    }
+
+    /// Convert an OWNED result Value (the Halt-popped stack ref, from
+    /// `execute`/`execute_prepared`/`execute_quiet`) to Python and release it.
+    /// `to_pyobject` made its own reference (a struct result materializes a
+    /// proxy that increfs its slot), so the Value's ref is no longer needed:
+    /// an unreleased handle pins the ObjectTable slot, an unreleased
+    /// BigInt/Complex leaks its whole allocation, an unreleased TAG_STRUCT
+    /// pins one registry count per run (struct-aware release via the
+    /// executor's registry). NOT for borrowed values read out of a live map,
+    /// such as `get_global`'s.
+    fn consume_result(&mut self, py: Python<'_>, value: Value) -> Py<PyAny> {
+        let obj = self.result_to_py(py, value);
+        match self.inner.executor.as_mut() {
+            Some(ex) => ex.release_owned(value),
+            None => {
+                // No executor => no registry ever ran => no struct result can
+                // exist. `decref` is a no-op on TAG_STRUCT, so if that invariant
+                // ever broke, a struct result would leak silently; assert it.
+                debug_assert!(
+                    !value.is_struct_instance(),
+                    "struct result reached consume_result with no executor/registry"
+                );
+                value.decref();
+            }
+        }
+        obj
+    }
+}
+
 #[pymethods]
 impl PyPipeline {
     #[new]
@@ -427,6 +493,33 @@ impl PyPipeline {
         Ok(Self {
             inner: Pipeline::new().map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?,
         })
+    }
+
+    /// Participate in CPython's cyclic GC as the OWNER of the VM globals map.
+    /// The host's globals hold `Value` handles whose strong `Py` references
+    /// live in the global `OBJECT_TABLE`, invisible to the collector; the
+    /// wrappers and `RUNTIME` among them reference the Python context back,
+    /// closing a `Context <-> Pipeline` cycle only these hooks make visible.
+    ///
+    /// Reporting from here -- and only here -- keeps the accounting exact:
+    /// while this pipeline is externally referenced, everything the map
+    /// reaches is marked reachable (a live pipeline can never lose its
+    /// builtins to a collection); once the owning session dies, the cycle is
+    /// fully visible and `__clear__` drains the map. Co-holders of the `Rc`
+    /// (`ImportLoader`, `GlobalsProxy`) deliberately do not report it.
+    fn __traverse__(&self, visit: pyo3::gc::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(executor) = &self.inner.executor {
+            executor.gc_traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    /// Break the cycle reported by `__traverse__` (drain the globals map,
+    /// decref'ing every handle -- see `VMHost::gc_clear`).
+    fn __clear__(&mut self) {
+        if let Some(executor) = &mut self.inner.executor {
+            executor.gc_clear();
+        }
     }
 
     /// Set source file path for relative import resolution.
@@ -502,7 +595,7 @@ impl PyPipeline {
             .inner
             .execute_prepared()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
-        Ok(value.to_pyobject(py))
+        Ok(self.consume_result(py, value))
     }
 
     /// Execute source code and return the result as a PyObject.
@@ -511,7 +604,7 @@ impl PyPipeline {
             .inner
             .execute(source)
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
-        Ok(value.to_pyobject(py))
+        Ok(self.consume_result(py, value))
     }
 
     /// Get the last error context from the VM (start_byte, error_type, message).
@@ -580,7 +673,31 @@ impl PyPipeline {
             .inner
             .execute_quiet(source)
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
-        Ok(value.to_pyobject(py))
+        // The Halt-popped result is owned like on the execute paths: convert
+        // AND release, or a bare heap result leaks per call.
+        Ok(self.consume_result(py, value))
+    }
+
+    /// Debug: (idx, refcount, type name) of every live struct instance slot
+    /// in this pipeline's registry. Leak-hunt tooling (the struct counterpart
+    /// of `_rs._debug_live_slot_types`, per-pipeline because the registry is).
+    fn _debug_struct_slots(&self) -> Vec<(u32, u32, String)> {
+        match self.inner.executor.as_ref() {
+            Some(ex) => ex.debug_instance_slots(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Debug: summed refcount of every live struct instance slot in this
+    /// pipeline's registry (the struct counterpart of `OBJECT_TABLE`'s `refs`,
+    /// per-pipeline because the registry is). Catches a pure-rc pin on a
+    /// persistent live instance -- the ledger blind spot that the live-slot
+    /// COUNT `_debug_struct_slots` cannot see.
+    fn _debug_struct_rc_sum(&self) -> u64 {
+        match self.inner.executor.as_ref() {
+            Some(ex) => ex.debug_instance_rc_sum(),
+            None => 0,
+        }
     }
 
     /// Get a global variable by name. Returns None if not found.
@@ -588,7 +705,7 @@ impl PyPipeline {
         if let Some(executor) = &self.inner.executor {
             if let Some(globals) = executor.globals() {
                 let g = globals.borrow();
-                return Ok(g.get(name).map(|v| v.to_pyobject(py)));
+                return Ok(g.get(name).map(|v| executor.value_to_pyobject(py, *v)));
             }
         }
         Ok(None)
@@ -601,10 +718,17 @@ impl PyPipeline {
         executor
             .ensure_host(py)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let registry_id = executor.struct_registry_id();
+        // Make the registry resolvable by id so the proxy can install it as the
+        // conversion thread-local and release displaced structs against it, even
+        // if no struct proxy was ever materialized.
+        executor.register_struct_registry();
         let globals_arc = executor
             .globals()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Host not initialized"))?;
-        Ok(GlobalsProxy::new(Rc::clone(globals_arc)))
+        // Bind the registry so overwriting a struct global releases the displaced
+        // instance (a plain `decref` no-ops on struct and pinned it).
+        Ok(GlobalsProxy::with_registry(Rc::clone(globals_arc), registry_id))
     }
 
     /// Set the Python context (enables pass_context and registry access).
@@ -639,11 +763,21 @@ impl PyPipeline {
         executor
             .ensure_host(py)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        let globals_arc = executor
-            .globals()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Host not initialized"))?;
+        let globals_arc = Rc::clone(
+            executor
+                .globals()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Host not initialized"))?,
+        );
         let val = Value::from_pyobject(py, &value).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        globals_arc.borrow_mut().insert(name.to_string(), val);
+        // `Value` is `Copy` with manual refcounting: release the displaced
+        // entry or its ref leaks (overwriting e.g. the host's `import` loader
+        // would otherwise orphan it and pin the context cycle). Struct-aware
+        // and outside the borrow: a plain `decref` is a no-op on TAG_STRUCT,
+        // and a pyobj release can run `__del__` code re-entering the map.
+        let old = globals_arc.borrow_mut().insert(name.to_string(), val);
+        if let Some(old) = old {
+            executor.release_owned(old);
+        }
         Ok(())
     }
 }

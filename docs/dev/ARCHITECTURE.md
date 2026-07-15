@@ -34,7 +34,7 @@ Catnip utilise une architecture hybride, pour garder l'ergonomie côté Python e
 - [PyO3 User Guide](https://pyo3.rs/)
 - [Extending Python with Rust](https://www.youtube.com/watch?v=jmP_i3C_O4Y) (PyCon 2023)
 
-## Pipeline d'Execution
+## Pipeline d'exécution
 
 En mode VM (défaut), `Catnip` délègue l'exécution à `Pipeline`, un pipeline Rust complet :
 
@@ -55,7 +55,7 @@ re-parse). Un seul chemin de parsing.
 au MCP `parse_catnip`.
 
 `PyIRNode` (`catnip_rs/src/ir/pyclass.rs`) wrappe `IR` pour inspection Python : getters en lecture seule (`opcode`,
-`args`, `kwargs`, `value`, `name`...) et serialisation JSON native (`to_json()`).
+`args`, `kwargs`, `value`, `name`...) et sérialisation JSON native (`to_json()`).
 
 ### 1. Parsing : Tree-sitter
 
@@ -109,6 +109,8 @@ L'analyse sémantique transforme l'IR en Op exécutable :
 - Pré-scan des pragmas `tco`/`optimize` (précédence : CLI/env > pragma in-file > défaut)
 - Détection des tail calls (TCO)
 - Optimisations (5 passes IR)
+- Vérification statique des annotations de type et exhaustivité des `match` (diagnostics surfacés par le lint : E300,
+  I103)
 
 **Optimisations** (effet binaire : `optimize=0` désactive toutes les passes, 1-3 les activent) :
 
@@ -118,14 +120,21 @@ Voir [OPTIMIZATIONS](OPTIMIZATIONS.md) pour le détail des passes et des défaut
 
 **Op** : structure exécutable finale avec OpCode optimisé
 
-#### CFG/SSA : Infrastructure Inter-blocs (non branchée)
+#### CFG/SSA : Infrastructure Inter-blocs (non branchée par défaut)
 
-Le module `catnip_rs/src/cfg/` sait construire un **Control Flow Graph** (CFG) puis passer en **SSA** pour optimiser à
-l'échelle de plusieurs blocs. Il n'est **pas branché** sur le pipeline sémantique : son consommateur (l'ancien analyzer
-PyO3) a été supprimé, et le JIT construit ses propres CFG. Le design reste documenté ici pour qui voudrait le rebrancher
-; ses tests tournent toujours.
+Le module `catnip_core/src/cfg/` sait construire un **Control Flow Graph** (CFG) puis passer en **SSA** pour optimiser à
+l'échelle de plusieurs blocs. Pur Rust, sans dépendance Python (porté depuis `catnip_rs` en 2026-06, opérant sur
+`enum IR`). Il n'est **pas branché par défaut** sur le pipeline sémantique : son ancien consommateur (l'analyzer PyO3) a
+été supprimé, et le JIT construit ses propres CFG.
 
-> Warning: ce passage augmente la résistance mentale de +5, sur un graphe que plus personne ne traverse.
+Un **gate interne** (`SemanticAnalyzer::set_cfg_enabled`, off par défaut) câble le round-trip dans `analyze_full`, après
+les passes locales : `IR → CFG → SSA → LICM → DSE → GVN → destruction → reconstruction`. Trois passes inter-blocs y
+tournent, chacune gardée pour refuser plutôt que dégrader (hoist gardé par la condition de boucle, stores transparents
+tués sur tous les chemins, copies limitées aux scalaires immuables prouvés). Aucune surface utilisateur (ni CLI, ni
+pragma, ni config) ne l'expose, **délibérément** : le différentiel passe la suite entière passes actives, mais le chemin
+reste non distribuable en l'état (voir « Vérification » ci-dessous).
+
+> Warning: ce passage augmente la résistance mentale de +5, sur un graphe que traversent désormais trois passes.
 
 **Pipeline CFG/SSA** :
 
@@ -135,47 +144,127 @@ flowchart TD
     IR --> CFG["1. Construction CFG<br/>BasicBlocks + edges"]
     CFG --> DOM["2. Analyse dominance<br/>Dominator tree, boucles"]
     DOM --> SSA["3. Construction SSA<br/>SSA values, phi-nodes"]
-    SSA --> PASSES["4. Passes SSA<br/>CSE, LICM, GVN, IV detect, DSE"]
+    SSA --> PASSES["4. Passes SSA<br/>LICM, DSE, GVN"]
     PASSES --> DESTR["5. Destruction SSA<br/>SetLocals explicites"]
-    DESTR --> IVSR["6. IV Strength Reduction<br/>Induction variables"]
-    IVSR --> OPT["7. Optimisations CFG<br/>Dead blocks, merging"]
-    OPT --> RECON["8. Reconstruction IR<br/>Op nodes optimisés"]
+    DESTR --> RECON["6. Reconstruction IR<br/>Op nodes optimisés"]
 ```
 
-**Passes SSA** (5 passes inter-blocs) :
+**Passes SSA** (inter-blocs, dans l'ordre du hook) :
 
-1. **CSE inter-blocs** - Élimine expressions redondantes entre blocs dominants
-1. **LICM** - Hoist les calculs invariants hors des boucles
-1. **GVN** - Global Value Numbering, détecte équivalences entre expressions
-1. **IV detection** - Détecte les variables d'induction dans les boucles (utilise les infos SSA)
-1. **DSE globale** - Élimine les SetLocals dont le résultat n'est jamais lu
+1. **LICM** - Hoist les défs invariantes de `while` dans un bloc gardé par une copie de la condition (pas de spéculation
+   zéro-itération). Un candidat doit tourner à chaque itération : son bloc domine chaque source de back-edge (les défs
+   de branches conditionnelles restent en place), une boucle à sortie précoce est refusée en entier, et le contenu
+   **opaque** d'un `match` préservé compte — ses arms sont scannés dans l'IR pour le contrôle de boucle
+   (`break`/`continue`/`return` sans arête CFG) et leurs cibles d'affectation comptent comme défs de boucle (aucune
+   valeur SSA ne les représente). Enfin, une boucle dont un bloc du corps contient un appel est refusée en entier :
+   l'appel peut relire par capture de closure (late binding) un nom que le hoist déplacerait, une lecture invisible aux
+   use-sets SSA — la même barrière-call que la DSE. Câblée
+1. **DSE globale** - Élimine les stores jamais lus, v1 gardée : seuls les stores transparents (littéral scalaire ou
+   référence) tués sur tous les chemins tombent ; un call ou un op fautable dans la fenêtre fait barrière ; câblée
+1. **GVN** - Global Value Numbering : les expressions redondantes prouvées scalaires immuables deviennent des copies
+   (alias single-def, snapshot `__gvnN` multi-def) ; subsume la CSE syntaxique ; câblée
 
-**Post-SSA** : après destruction SSA, **IV strength reduction** transforme les multiplications d'induction en additions
-incrémentales.
+**IV (induction variables) — différée** (2026-07-03) : la strength reduction échange un Mul contre un Add par itération,
+un gain noyé dans le dispatch de la VM, et Cranelift refait la sienne sur le natif JIT — le ratio gain/risque ne
+justifie pas la seule passe qui réécrirait une récurrence. `ssa_iv.rs` (détection BIV/DIV) reste dans le module, non
+câblé ; le cadrage d'une v1 est tracé dans `wip/CFG_SSA_REWIRING.md` si le contexte change (backend AOT, boucles chaudes
+hors JIT).
+
+**Boucles naturelles** : `detect_loops` fusionne les boucles partageant un header (construction standard) — un
+`continue` ajoute une seconde back-edge au même header de `while`, et analyser les deux corps partiels séparément
+donnerait aux passes une boucle amputée des blocs et défs de la branche sœur.
 
 **Construction SSA** : utilise l'algorithme de
 [Braun et al. (2013)](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf), en un seul passage RPO (reverse
 postorder), sans calcul explicite des dominance frontiers.
 
-**SetLocals** est le nœud IR central pour l'SSA : chaque affectation crée une nouvelle version de variable. Les
-phi-nodes aux jonctions sont convertis en SetLocals explicites lors de la destruction SSA.
+**SetLocals** est le nœud IR central pour l'SSA : chaque affectation crée une nouvelle version de variable. Dans le
+round-trip actuel (zéro passe), la **destruction est un no-op** : la reconstruction réémet les affectations préservées
+des blocs, qui portent déjà chaque valeur aux jonctions. Les anciennes copies identité `var = var` par phi ont été
+retirées — inertes dans le cas général, elles cassaient au préheader d'une variable définie pour la première fois dans
+une boucle (lecture d'une variable non liée). La vraie destruction (temporaires + versioning) ne devient nécessaire
+qu'avec les passes inter-blocs, qui déplacent des valeurs (swap / lost-copy).
 
 > L'SSA garantit que chaque variable n'est assignée qu'une seule fois. Ce qui est pratique pour l'optimiseur, mais
 > existentiellement perturbant pour les variables qui se pensaient réassignables.
 
-### 4. Execution
+**Vérification structurelle** : le module valide ses propres invariants en build debug. `ControlFlowGraph::verify()`
+contrôle la cohérence entry/exit, la validité des arêtes et la consistance bidirectionnelle prédécesseurs/successeurs ;
+`SSAContext::verify()` contrôle l'arité des phi (un opérande par prédécesseur) et l'absence de phi incomplet après
+scellage. Ces `debug_assert!` se déclenchent à la sortie de la construction CFG et SSA, transformant une corruption
+silencieuse en panique localisée. Un harnais round-trip (`catnip_vm/tests/cfg_roundtrip.rs`) rejoue
+`source → IR → CFG → SSA → destruction → reconstruction` sur de l'IR réellement parsé. La reconstruction (`region.rs`)
+couvre tout le corpus du harnais avec vérification structurelle : linéaire, `if/else`, `while`, `for`, boucles
+imbriquées et `match`. Le type de boucle (`while`/`for`) et ses opérandes hors-corps sont récupérés depuis l'op de
+boucle que le builder stocke dans le bloc header. Le `match` est, lui, préservé tel quel (l'`OpMatch` original est
+réémis) plutôt que reconstruit arm par arm — suffisant sur IR non optimisé, à durcir au moment du rebranchement.
+
+La vérification structurelle ne suffit pas : un différentiel d'exécution (gate on vs off, même programme) a exposé trois
+**non-identités** que la forme seule masquait, toutes refermées.
+
+1. Le code suivant un `match` était droppé (le `match` préservé était réémis, puis le parcours s'arrêtait). La
+   reconstruction reprend désormais au bloc de merge que le builder **enregistre** explicitement
+   (`BasicBlock.match_merge`) : l'inférer du graphe échoue dès qu'un arm finit par `break`/`continue`/`return`, puisque
+   cet arm saute hors du `match` et ne rejoint jamais le merge.
+1. Une boucle dont le corps sort toujours (`while True { ... break }`) n'a pas de back-edge vers son header et était
+   reconstruite en `if/else` (« break outside loop »). Le header est maintenant reconnu par l'op de boucle préservé, et
+   les arêtes `break`/`continue`/`return` arrêtent la reconstruction du corps au lieu d'y aspirer le code post-région.
+1. Le merge d'un `if` interne à une boucle était mal détecté (la back-edge faisait passer le header/exit de boucle pour
+   le merge, collapsant l'`if`). Il est désormais contraint d'être **dominé** par le header de l'`if`.
+
+Régression couverte par `gate_roundtrip_break_continue_post_match` (arms `break`/`continue` suivis de code post-match
+vivant inclus).
+
+Le différentiel a ensuite été étendu à la **suite entière** : une env interne (`CATNIP_CFG_INTERNAL`) force le gate sur
+les ~2350 tests d'intégration, qui servent d'oracle (un test vert cfg-on **et** cfg-off prouve l'équivalence sur son
+programme). Il a exposé trois nouvelles classes, toutes refermées :
+
+1. **Destruction SSA triviale** — voir « SetLocals » ci-dessus : les copies identité `var = var` cassaient au préheader
+   d'une variable née dans une boucle. Supprimées.
+1. **Chaîne `elif`** — le builder ne lisait que la première paire `(condition, bloc)` de l'`OpIf`, droppant toute
+   branche elif. Il replie désormais les paires suivantes dans un `OpIf` imbriqué (cascade équivalente).
+1. **Bloc × scope** — un `{...}` standalone isole son scope (ses locals ne fuient pas) ; le builder l'aplatissait,
+   droppant la valeur finale et faisant fuiter les liaisons. Il est désormais préservé opaque, tandis qu'un helper
+   distinct aplatit les corps de contrôle (`for`/`while`/`if`), qui, eux, fuient.
+
+La suite passe à 100 % cfg-on en mode VM **et** AST, **passes actives** (LICM, DSE et GVN câblées et gardées) : le
+différentiel est observablement identité sur tout le corpus. Le gate reste néanmoins interne — le `match` round-trippe
+par préservation d'op (arms non reconstruits), et l'activation par env ambiante doit sortir du binaire distribué avant
+tout ship. Exposer une surface utilisateur reste prématuré.
+
+Le corpus fini a ensuite été dépassé par un **harnais par propriétés** (`catnip_vm/tests/cfg_proptest.rs`, proptest) :
+un générateur de programmes bien formés et terminants par construction, biaisé vers les formes que les passes réécrivent
+(boucles imbriquées, `break`/`continue`, `match` gardé, closures relues après redéfinition), avec pour seule propriété
+`run_with_cfg(src, off) == run_with_cfg(src, on)` — la référence est la spécification, aucun oracle à écrire. Sa
+première campagne a débusqué **sept défauts** en quelques milliers d'échantillons, tous fermés avec oracle vérifié rouge
+: deux hors du moteur CFG (compaction peephole sans réadressage des cibles composites, élision fautive du saut de merge
+d'un `if` — voir [VM](VM.md)), et cinq dedans — recherche de merge qui suivait les back-edges (une boucle nichée dans
+une branche de `if` était reconstruite hors de sa branche, atteinte depuis la branche sœur via la boucle englobante ; la
+marche est désormais forward-only), boucles naturelles non fusionnées par header, et les trois gardes LICM décrites plus
+haut (défs conditionnelles, sorties précoces, arms de `match` opaques au CFG **et** au SSA). Une reprise ultérieure
+(2026-07-05) en a ajouté un huitième : la barrière-call LICM ci-dessus — un candidat invariant hoisté au-dessus d'un
+appel qui le relit par capture de closure produisait un faux résultat au premier tour ; le diagnostic « GVN/closures »
+initialement soupçonné était erroné, cinq variantes discriminantes l'ont isolé sur LICM. Deux preuves Coq bornent les
+invariants touchés : `CatnipRegionMergeProof.v` (la recherche forward-only retourne le merge du builder quel que soit
+l'ordre de parcours) et `CatnipDestructionBridge.v` (le lot de copies séquentialisé d'une arête réalise la sémantique
+parallèle des phis du join) — voir [COQ_PROOFS](COQ_PROOFS.md).
+
+> Warning: un graphe que personne ne traverse n'a pas de bugs. Celui-ci en a livré quatorze au total, dont huit à un
+> générateur qui ne sait même pas ce qu'il cherche. Zéro trou connu n'est toujours pas zéro trou.
+
+### 4. Exécution
 
 `Pipeline.prepare()` stocke l'IR optimisé. `execute_prepared()` compile et exécute depuis l'IR stocké (pas de re-parse).
-Voir [VM](VM.md) pour details.
+Voir [VM](VM.md) pour les détails.
 
 **Mode AST** (interne, non documenté utilisateur) : `parse()` convertit l'IR en Op nodes via `prepared_ir_to_op()`.
 `execute()` interprète les Op directement via Registry (`exec_stmt()`). Accessible via `-x ast` ou
 `CATNIP_EXECUTOR=ast`. Sert d'oracle indépendant : un test qui passe en AST et échoue en VM isole un bug de compilation
 ou de dispatch VM. Code derrière le feature flag `ast-executor` en Rust.
 
-**Mode standalone** (`--executor standalone`) : `CatnipStandalone` (`catnip/compat.py`) utilise les memes classes PyO3
+**Mode standalone** (`--executor standalone`) : `CatnipStandalone` (`catnip/compat.py`) utilise les mêmes classes PyO3
 que le mode DSL (`PragmaContext`, `CatnipRuntime`, `_ImportWrapper`, `Memoization`). Couvre 100% du langage Catnip. Les
-seules differences sont les couches d'adaptation de l'API d'embedding Python (`@pass_context`, `Catnip(context=ctx)`,
+seules différences sont les couches d'adaptation de l'API d'embedding Python (`@pass_context`, `Catnip(context=ctx)`,
 broadcast purity tracking) qui ne concernent pas les scripts `.cat`.
 
 ## Concepts Clés
@@ -212,6 +301,13 @@ Recherche d'une variable = remonter la chaîne jusqu'à trouver
 - Shadow stack pour gérer le variable shadowing
 
 **Trade-off** : lookup O(1), cleanup O(n) où n = variables dans le frame
+
+**Closures** : la capture est **par copie** à la création (snapshot des liaisons de fonction — les module globals sont
+exclus et résolus vivants à l'appel), les écritures d'un nom capturé persistent dans la capture de la closure sans
+remonter au parent, et un global lu depuis une fonction s'écrit dans la liaison vivante (le pendant AST de la règle
+`outer_names` du compilateur VM). Sémantique commune aux deux exécuteurs, gravée dans la grille différentielle de
+`tests/language/test_closures.py` ; la spec utilisateur est dans
+[SCOPES_AND_VARIABLES](../lang/SCOPES_AND_VARIABLES.md).
 
 **Références** :
 
@@ -273,10 +369,9 @@ Les erreurs runtime capturent la position source complète (fichier, ligne, colo
 ```mermaid
 flowchart TD
     TS["Tree-sitter<br/>start_byte, end_byte"]
-    TS --> IRN["IR nodes<br/>positions natives"]
-    IRN --> SA["Semantic Analyzer<br/>propagate_position"]
-    SA --> OP["Op + Ref nodes<br/>start_byte, end_byte préservés"]
-    OP --> VMC["VM Compiler<br/>line_table par instruction"]
+    TS --> IRN["IR nodes<br/>positions natives (champs start_byte/end_byte)"]
+    IRN --> OPT["Passes d'optimisation<br/>positions recopiées à chaque IR::match"]
+    OPT --> VMC["UnifiedCompiler<br/>line_table par instruction"]
     VMC --> ERR["VM Error → ErrorContext → CatnipError"]
 ```
 
@@ -327,19 +422,30 @@ Deux implémentations partagent la même logique de résolution (`catnip_core::l
   pour `libcatnip_{name}.so`. Parité avec le loader Python : `protocol=`, `wild=True`, import sélectif avec alias,
   filtrage `__all__` et `lib.exports.include`
 
-**Plugins natifs** (`catnip_vm/src/plugin.rs`) : ABI v2 avec handles opaques. Un plugin exporte
-`extern "C" catnip_plugin_init() -> *const PluginDescriptor` avec magic ABI + version + callbacks method/getattr/drop.
-Le `PluginRegistry` (partage entre host et loader via `Rc<RefCell<>>`) valide l'ABI, enregistre les fonctions avec noms
-qualifiés (`__plugin::module::fn`), et wrappe chaque appel dans `catch_unwind`. Les objets plugin (`PluginObject`) sont
-des handles u64 opaques dont les méthodes et attributs sont dispatchés à travers les callbacks du plugin. `Arc<Library>`
-dans les callbacks prévient le dlclose tant que des objets vivent. Tous les modules stdlib (io, sys, http) sont des
-plugins natifs -- aucun code stdlib dans catnip_vm
+**Plugins natifs** (`catnip_vm/src/plugin.rs`) : ABI v5 avec handles opaques et frontière de valeur verrouillée. Un
+plugin exporte `extern "C" catnip_plugin_init(host: *const PluginHostApi) -> *const PluginDescriptor` avec magic ABI +
+version + callbacks method/getattr/drop/has_member. `PluginHostApi` fournit les builder callbacks (`make_string`,
+`make_bytes`, `make_list`, `make_dict`, `make_bigint`) : un plugin construit toute valeur structurée de retour dans le
+heap **host**, jamais dans le sien. Un résultat traverse par exactement un canal -- OBJECT (handle opaque), HOSTVALUE
+(valeur host-construite, de confiance), ou aucun flag (alors un scalaire inline, validé par `from_raw_scalar`) -- si
+bien que le host ne déréférence jamais un `Arc` appartenant au plugin (verrou prouvé, `CatnipPluginBoundaryProof`). Les
+attributs statiques du descriptor suivent le même verrou (v5) : un attr porte `PLUGIN_ATTR_HOSTVALUE` quand sa valeur
+est un pointeur host-construit, sinon il doit être un scalaire validé par `from_raw_scalar` -- un pointeur brut non
+déclaré est rejeté à l'admission au lieu d'être déréférencé. Le `PluginRegistry` (partage entre host et loader via
+`Rc<RefCell<>>`) valide l'ABI, enregistre les fonctions avec noms qualifiés (`__plugin::module::fn`), et wrappe chaque
+appel dans `catch_unwind`. Les objets plugin (`PluginObject`) sont des handles u64 opaques dont les méthodes et
+attributs sont dispatchés à travers les callbacks du plugin. `Arc<Library>` dans les callbacks prévient le dlclose tant
+que des objets vivent. Tous les modules stdlib (io, sys, http) sont des plugins natifs -- aucun code stdlib dans
+catnip_vm
 
 Le même `PluginRegistry` est désormais aussi monté sur l'`ImportLoader` PyO3. Le pont `native_plugin.rs` (`catnip_rs`)
 marshale `catnip_vm::Value` \<-> PyObject et route getattr/method via les opcodes (`OpCode::GetAttr` /
 `OpCode::CallMethod`), si bien qu'un plugin PureVM-only comme `http` (`pyo3 = false`) se charge depuis n'importe quel
-exécuteur, plus seulement le PurePipeline/MCP. Les stdlib Rust sont cached sous une clé `rs::<name>` pour ne pas entrer
-en collision avec leur homonyme Python (`protocol="py"`).
+exécuteur, plus seulement le PurePipeline/MCP. En VM, attribut et méthode sont distingués syntaxiquement (`GetAttr` vs
+`CallMethod`) ; l'exécuteur AST abaisse `obj.m(...)` en getattr-puis-call et ne peut donc pas trancher au getattr, alors
+le pont consulte le probe `has_member` du plugin : il ne lie une méthode que si le membre existe, sinon `AttributeError`
+-- ce qui aligne accès attribut et `hasattr` sur la VM. Les stdlib Rust sont cached sous une clé `rs::<name>` pour ne
+pas entrer en collision avec leur homonyme Python (`protocol="py"`).
 
 **Choix de design : pas de `sys.path`**
 
@@ -355,6 +461,21 @@ mutation runtime.
 comme package avec entry point et exports filtrés.
 
 **Détails** : voir [MODULE_LOADING](../user/MODULE_LOADING.md).
+
+### Delta dataflow : le noyau différentiel (en construction)
+
+Le module `catnip_core/src/delta/` pose le socle d'un moteur **differential dataflow** (McSherry et al.) pour les flux :
+une `Collection<V>` est un multiset versionné (état = somme des diffs signées par valeur, présence = multiplicité > 0),
+un `Delta<V>` est une transition compactée (une entrée par valeur, zéro éliminé, ordre de première apparition stable).
+Les opérateurs sont two-phase : `compute` exécute les callbacks sans muter le nœud et retourne le delta de sortie plus
+les écritures d'état différées (`Staged`), `commit` applique sans pouvoir échouer — une exception Catnip remonte au site
+du `push` avec le graphe observationnellement intact. Trois opérateurs stateless sont livrés (`map`, `filter`,
+`concat`), génériques sur la valeur (aucune dépendance VM : le pont est le trait `DeltaHost`). Les invariants
+algébriques sont prouvés en Coq (`proof/delta/`, voir [COQ_PROOFS](COQ_PROOFS.md)). Le module est **inerte** : aucun
+chemin d'appel depuis le pipeline — le graphe, les opérateurs stateful et le pont VM arrivent par étapes (roadmap
+privée).
+
+> Un moteur qui ne recalcule que ce qui a changé, livré en pièces qui ne changent encore rien.
 
 ## Debugger
 
@@ -424,7 +545,7 @@ Preuves paramétriques, compilent avec `make proof`. Détails : [COQ_PROOFS](COQ
 | Dossier           | Contenu                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------- |
 | `catnip/`         | API Python, intégration                                                                             |
-| `catnip_core/`    | Coeur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, freeze, constants, symbols)                |
+| `catnip_core/`    | Cœur Rust pur (types, IR, VM opcodes, JIT, parser, CFG, delta dataflow, freeze, constants, symbols) |
 | `catnip_vm/`      | VM pure Rust sans PyO3 (Value NaN-boxed, collections, structs/traits/enums, PureHost, PureCompiler) |
 | `catnip_rs/`      | Bindings PyO3 + runtime (parser, VM, PyIRNode)                                                      |
 | `catnip_libs/`    | Standard library (specs TOML + implémentations Rust par module)                                     |

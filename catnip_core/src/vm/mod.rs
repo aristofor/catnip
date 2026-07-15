@@ -1,6 +1,7 @@
 // FILE: catnip_core/src/vm/mod.rs
 //! VM types - pure Rust opcodes and utilities.
 
+pub mod compiler_core;
 pub mod memory;
 pub mod mro;
 pub mod opcode;
@@ -20,3 +21,7 @@ pub const FOR_RANGE_JUMP_MASK: u32 = 0x7FFF;
 pub const FOR_RANGE_STEP_SHIFT: u32 = 16;
 pub const FOR_RANGE_STEP_BYTE_MASK: u32 = 0xFF;
 pub const FOR_RANGE_STEP_JUMP_MASK: u32 = 0xFFFF;
+
+// CallMethod bit-packing: (name_idx << 16) | nargs
+pub const CALL_ARGS_SHIFT: u32 = 16;
+pub const CALL_ARGS_MASK: u32 = 0xFFFF;

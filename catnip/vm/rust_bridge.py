@@ -8,21 +8,11 @@ for operations that need Python runtime support.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
-from .._error_strings import (
-    ATTRIBUTE_ERROR_PREFIX,
-    INDEX_ERROR_PREFIX,
-    KEY_ERROR_PREFIX,
-    RUNTIME_ERROR_PREFIX,
-    TYPE_PREFIXES,
-    VALUE_ERROR_PREFIX,
-    WEIRD_ERROR_PREFIX,
-)
 from .._rs import VM as _VM
 from .._rs import SourceMap
-from ..exc import CatnipNameError, CatnipRuntimeError, CatnipTypeError, CatnipWeirdError
+from ..exc import CatnipNameError, CatnipRuntimeError
 from ..suggest import suggest_name
 from ..traceback import CatnipFrame, CatnipTraceback
 
@@ -33,59 +23,14 @@ if TYPE_CHECKING:
 
 
 def _convert_rust_exception(exc: Exception) -> Exception:
-    """Convert Rust VM exceptions to Catnip/Python exceptions."""
-    msg = str(exc)
+    """Convert Rust VM exceptions to Catnip/Python exceptions.
 
-    # Pass through standard Python exceptions
-    if isinstance(exc, NameError):
-        return CatnipNameError(msg)
-    if isinstance(exc, ZeroDivisionError):
-        return CatnipRuntimeError(msg)
-    if isinstance(exc, (ValueError, IndexError, KeyError, AttributeError)):
-        return exc  # Pass through as-is
+    Delegates to compat._map_exception so the debugger path and the pipeline
+    path produce identical exceptions for the same VM error.
+    """
+    from ..compat import _map_exception
 
-    # Strip "runtime error: " prefix if present
-    if msg.startswith(RUNTIME_ERROR_PREFIX):
-        msg = msg[len(RUNTIME_ERROR_PREFIX) :]
-
-    # Check for wrapped Python exceptions in message
-    if msg.startswith(INDEX_ERROR_PREFIX):
-        return IndexError(msg[len(INDEX_ERROR_PREFIX) :])
-    if msg.startswith(KEY_ERROR_PREFIX):
-        key = msg[len(KEY_ERROR_PREFIX) :]
-        return KeyError(key.strip("'\""))
-    if msg.startswith(ATTRIBUTE_ERROR_PREFIX):
-        return AttributeError(msg[len(ATTRIBUTE_ERROR_PREFIX) :])
-
-    # ValueError - return Python ValueError
-    if msg.startswith(VALUE_ERROR_PREFIX):
-        return ValueError(msg[len(VALUE_ERROR_PREFIX) :])
-
-    # TypeError / CatnipTypeError - return CatnipTypeError for enrichment with source location
-    if isinstance(exc, TypeError) or msg.startswith(TYPE_PREFIXES):
-        type_msg = msg
-        for prefix in TYPE_PREFIXES:
-            if msg.startswith(prefix):
-                type_msg = msg[len(prefix) :]
-                break
-        # Transform Python's "X object is not iterable" to Catnip format
-        match = re.match(r"'(\w+)' object is not iterable", type_msg)
-        if match:
-            type_name = match.group(1)
-            return CatnipTypeError(f"Cannot unpack non-iterable {type_name}")
-        return CatnipTypeError(type_msg)
-
-    # Type errors without prefix
-    if 'unsupported operand' in msg:
-        return CatnipTypeError(msg)
-    if 'not iterable' in msg:
-        return CatnipTypeError(msg)
-
-    # Internal VM errors (stack underflow, frame overflow)
-    if msg.startswith(WEIRD_ERROR_PREFIX):
-        return CatnipWeirdError(msg[len(WEIRD_ERROR_PREFIX) :], cause='vm')
-
-    return CatnipRuntimeError(msg)
+    return _map_exception(exc)
 
 
 class VMExecutor:

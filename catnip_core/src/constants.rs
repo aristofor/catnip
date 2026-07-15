@@ -131,27 +131,34 @@ pub const REPL_MAX_HISTORY: usize = 1000;
 // JIT - Configuration
 // ============================================================================
 
-/// JIT enabled by default
-pub const JIT_ENABLED_DEFAULT: bool = true;
+/// JIT default for the standalone/embedded world (catnip binary via `!no_jit`,
+/// REPL config): performance-first, opt out with `--no-jit`.
+pub const JIT_DEFAULT_STANDALONE: bool = true;
+
+/// JIT default for the Python pipeline (CLI `catnip`, `Catnip()` API): off --
+/// auto mode, file pragmas (`pragma("jit", ...)`) opt in per script.
+pub const JIT_DEFAULT_PIPELINE: bool = false;
 
 /// Hot detection threshold (iterations before compilation)
 pub const JIT_THRESHOLD_DEFAULT: u32 = 100;
 
+/// Max ops recorded per trace before aborting (loop too large to JIT)
+pub const JIT_MAX_TRACE_OPS: usize = 10000;
+
 /// Max recursion depth before interpreter fallback
 pub const JIT_MAX_RECURSION_DEPTH: usize = 10000;
 
-/// Max ND recursion depth before RecursionError.
-/// Each ND recursive call creates a new VM stack frame (~16KB).
-/// On 8MB thread stacks, overflow occurs around ~494 frames.
-/// 200 provides safe margin across platforms (200 × 16KB = 3.2MB).
-pub const ND_MAX_RECURSION_DEPTH: usize = 200;
+/// Max ND recursion depth before RecursionError (PyO3 pipeline).
+/// Each ND recursive call burns native C stack shared with CPython (historical
+/// estimate ~16KB/frame, overflow around ~494 frames on 8MB stacks). 300 keeps
+/// a ~40% margin under that estimate (300 × 16KB = 4.8MB); raise only after
+/// re-measuring the per-frame cost. The pure VM allows 10_000: its depth lives
+/// on the heap, not the C stack -- see ND_MAX_DEPTH in catnip_vm/src/vm/broadcast.rs.
+pub const ND_MAX_RECURSION_DEPTH: usize = 300;
 
 // ============================================================================
 // VM - Configuration
 // ============================================================================
-
-/// Initial VM stack size
-pub const VM_STACK_INITIAL_SIZE: usize = 256;
 
 /// Initial stack capacity per frame
 pub const VM_FRAME_STACK_CAPACITY: usize = 32;
@@ -165,7 +172,8 @@ pub const VM_FRAME_POOL_SIZE: usize = 64;
 /// Default memory limit in MB (0 = disabled)
 pub const MEMORY_LIMIT_DEFAULT_MB: u64 = 2048;
 
-/// Check RSS every N instructions (power of 2 for bitwise AND mask)
+/// Periodic-check mask (interrupt flag + RSS), applied as `count & MASK == 0`
+/// so checks fire every 65536 instructions.
 pub const MEMORY_CHECK_INTERVAL: u64 = 0xFFFF; // 65535
 
 // ============================================================================
@@ -209,9 +217,6 @@ pub const BENCH_DEFAULT_ITERATIONS: usize = 10;
 // Cache - Configuration
 // ============================================================================
 
-/// Max memory cache size (number of entries)
-pub const CACHE_MEMORY_MAX_SIZE: usize = 1000;
-
 /// Default disk cache TTL (seconds)
 pub const CACHE_DISK_TTL_DEFAULT: u64 = 86400; // 24 hours
 
@@ -223,10 +228,37 @@ pub const CACHE_DISK_MAX_SIZE_MB_DEFAULT: u64 = 100;
 // ============================================================================
 
 /// Default optimization level (0-3)
-pub const OPTIMIZATION_LEVEL_DEFAULT: u8 = 2;
+pub const OPTIMIZATION_LEVEL_DEFAULT: u8 = 3;
 
 /// TCO enabled by default
 pub const TCO_ENABLED_DEFAULT: bool = true;
+
+// ============================================================================
+// Executor / Theme
+// ============================================================================
+
+/// Default executor ("vm" or "ast"). Mirrored in catnip/config.py via
+/// DEFAULT_CONFIG (built from ConfigManager defaults).
+pub const EXECUTOR_DEFAULT: &str = "vm";
+
+/// Theme env var name. Mirrored in catnip/_theme.py (no PyO3 at that layer).
+pub const ENV_THEME: &str = "CATNIP_THEME";
+
+/// Valid theme values ("auto" resolves via terminal detection).
+pub const THEME_VALUES: &[&str] = &["auto", "dark", "light"];
+
+/// Default theme.
+pub const THEME_DEFAULT: &str = "auto";
+
+// ============================================================================
+// Module Resolution - Env Vars
+// ============================================================================
+
+/// Module search path env var. Mirrored in catnip/loader.py (no PyO3 at that layer).
+pub const ENV_CATNIP_PATH: &str = "CATNIP_PATH";
+
+/// Native stdlib plugin search path env var (colon-separated).
+pub const ENV_STDLIB_PATH: &str = "CATNIP_STDLIB_PATH";
 
 // ============================================================================
 // JIT - Pure Builtins

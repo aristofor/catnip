@@ -7,11 +7,14 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::diagnostics;
-use crate::symbols;
+use crate::encoding::PositionEncoding;
+use crate::symbols::{self, SymbolRef};
 
 pub struct CatnipLsp {
     client: Client,
     documents: Mutex<HashMap<Url, String>>,
+    /// Negotiated during `initialize`; UTF-16 until then (the LSP default).
+    encoding: Mutex<PositionEncoding>,
 }
 
 impl CatnipLsp {
@@ -19,20 +22,48 @@ impl CatnipLsp {
         Self {
             client,
             documents: Mutex::new(HashMap::new()),
+            encoding: Mutex::new(PositionEncoding::default()),
         }
     }
 
+    fn encoding(&self) -> PositionEncoding {
+        *self.encoding.lock().unwrap()
+    }
+
     async fn publish_diagnostics(&self, uri: &Url, source: &str) {
-        let diags = diagnostics::lint_to_diagnostics(source);
+        let diags = diagnostics::lint_to_diagnostics(source, self.encoding());
         self.client.publish_diagnostics(uri.clone(), diags, None).await;
+    }
+}
+
+/// Line text for a 0-indexed line within `source`, or empty when out of range.
+fn line_text(source: &str, line: u32) -> &str {
+    source.lines().nth(line as usize).unwrap_or("")
+}
+
+/// Convert a byte-column `SymbolRef` to an LSP `Range` in the negotiated encoding.
+fn ref_to_range(source: &str, r: &SymbolRef, enc: PositionEncoding) -> Range {
+    Range {
+        start: Position::new(
+            r.start_line,
+            enc.encode_column(line_text(source, r.start_line), r.start_col as usize),
+        ),
+        end: Position::new(
+            r.end_line,
+            enc.encode_column(line_text(source, r.end_line), r.end_col as usize),
+        ),
     }
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for CatnipLsp {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let encoding = PositionEncoding::negotiate(&params.capabilities);
+        *self.encoding.lock().unwrap() = encoding;
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                position_encoding: Some(encoding.kind()),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
@@ -97,7 +128,9 @@ impl LanguageServer for CatnipLsp {
                 if formatted == source {
                     return Ok(None);
                 }
-                // Replace the entire document
+                // Replace the entire document. The end position is past any real
+                // line/column, which clients clamp to the document end; it is
+                // encoding-independent.
                 Ok(Some(vec![TextEdit {
                     range: Range {
                         start: Position::new(0, 0),
@@ -119,21 +152,21 @@ impl LanguageServer for CatnipLsp {
         };
         drop(docs);
 
+        let enc = self.encoding();
         let line = params.position.line;
-        let col = params.position.character;
+        // The client's character is in the negotiated encoding; tree-sitter wants
+        // a byte column.
+        let byte_col = enc.decode_column(line_text(&source, line), params.position.character) as u32;
 
-        match symbols::find_references(&source, line, col) {
+        match symbols::find_references(&source, line, byte_col) {
             Some((name, refs)) => {
-                // Find the ref that contains the cursor position
+                // Find the ref that contains the cursor position (byte columns).
                 let r = refs
                     .iter()
-                    .find(|r| r.start_line == line && r.start_col <= col && col <= r.end_col);
+                    .find(|r| r.start_line == line && r.start_col <= byte_col && byte_col <= r.end_col);
                 match r {
                     Some(r) => Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                        range: Range {
-                            start: Position::new(r.start_line, r.start_col),
-                            end: Position::new(r.end_line, r.end_col),
-                        },
+                        range: ref_to_range(&source, r, enc),
                         placeholder: name,
                     })),
                     None => Ok(None),
@@ -152,19 +185,20 @@ impl LanguageServer for CatnipLsp {
         };
         drop(docs);
 
+        let enc = self.encoding();
         let line = params.text_document_position.position.line;
-        let col = params.text_document_position.position.character;
+        let byte_col = enc.decode_column(
+            line_text(&source, line),
+            params.text_document_position.position.character,
+        ) as u32;
         let new_name = &params.new_name;
 
-        match symbols::find_references(&source, line, col) {
+        match symbols::find_references(&source, line, byte_col) {
             Some((_name, refs)) => {
                 let edits: Vec<TextEdit> = refs
                     .iter()
                     .map(|r| TextEdit {
-                        range: Range {
-                            start: Position::new(r.start_line, r.start_col),
-                            end: Position::new(r.end_line, r.end_col),
-                        },
+                        range: ref_to_range(&source, r, enc),
                         new_text: new_name.clone(),
                     })
                     .collect();

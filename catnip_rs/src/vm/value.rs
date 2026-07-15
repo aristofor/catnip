@@ -32,11 +32,10 @@
 //! Regular floats are stored directly. Detection via quiet NaN pattern.
 
 use super::frame::{CodeObject, NativeClosureScope, PyCodeObject, VMFunction};
-use super::structs::{CatnipStructProxy, StructRegistry, cascade_decref_fields};
-use catnip_core::nanbox::{
-    CANON_NAN, PAYLOAD_MASK, QNAN_BASE, SMALLINT_MAX, SMALLINT_MIN, SMALLINT_SIGN_BIT, SMALLINT_SIGN_EXT, TAG_BIGINT,
-    TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SHIFT, TAG_SMALLINT, TAG_SYMBOL, TAG_VMFUNC,
-};
+use super::structs::{CatnipStructProxy, StructRegistry};
+use catnip_core::nanbox::{PAYLOAD_MASK, QNAN_BASE, TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SHIFT, TAG_VMFUNC};
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyComplex, PyFloat, PyInt};
 use rug::Integer;
@@ -45,52 +44,84 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
-// GmpInt -- Sync wrapper for rug::Integer
+// Live-allocation ledger -- manually refcounted heap values
 // ---------------------------------------------------------------------------
 
-/// Wrapper around `rug::Integer` that implements `Sync`.
-///
-/// `rug::Integer` is `Send` but not `Sync` (GMP limitation). Since all access
-/// happens under the GIL (single-threaded), sharing via `Arc` is safe.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct GmpInt(pub Integer);
+/// Live-allocation counters for the heap values whose refs are managed by
+/// hand in the dispatch loop (invisible to both the borrow checker and the
+/// Python GC). Incremented at construction, decremented in `Drop`, so a
+/// forgotten operand release shows up as a non-zero delta across a full
+/// pipeline lifecycle -- the exact class of the operand-audit leaks. Always
+/// compiled: the Python suite runs on the release extension, and the cost is
+/// one Relaxed `fetch_add` per allocation (dominated by the allocation
+/// itself), nothing on incref/decref. Read via [`debug_live_counts`].
+pub(crate) use catnip_core::scalar::LIVE_BIGINT;
+pub(crate) static LIVE_COMPLEX: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-// SAFETY: All access to GmpInt is serialized by the GIL. The underlying GMP
-// memory is never accessed concurrently from multiple threads.
-unsafe impl Sync for GmpInt {}
+// GmpInt and its live ledger are shared with the pure VM (Phase 5):
+// both Value types wrap the same scalar heap type, one counter observes both.
+pub use catnip_core::scalar::GmpInt;
+use catnip_core::scalar::ScalarValue;
 
-impl std::ops::Deref for GmpInt {
-    type Target = Integer;
-    #[inline]
-    fn deref(&self) -> &Integer {
-        &self.0
-    }
-}
+/// The map of nullary-union-method bindings, keyed by qualified name
+/// ("Union.Variant").
+type UnionNullaryMethodMap = std::collections::HashMap<String, Arc<indexmap::IndexMap<String, Py<PyAny>>>>;
 
-impl std::ops::DerefMut for GmpInt {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Integer {
-        &mut self.0
-    }
-}
+/// A thread's nullary-union-method bindings behind an `Arc` for copy-on-write
+/// sharing: it is read-mostly (looked up at every `TAG_SYMBOL -> variant`
+/// round-trip) and written only at union-type build, so snapshot/install is one
+/// atomic incref rather than a deep map clone. `Send` (every `Py` is `Send`), so
+/// the `Arc` can be installed on another thread -- ND workers inherit the
+/// parent's bindings.
+pub type UnionNullaryMethodTable = Arc<UnionNullaryMethodMap>;
 
-impl fmt::Debug for GmpInt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Display for GmpInt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Method tables for nullary union variants, keyed by qualified name ("Union.Variant").
+type UnionNullaryMethods = std::cell::RefCell<UnionNullaryMethodTable>;
 
 thread_local! {
     static STRUCT_REGISTRY: Cell<*const StructRegistry> = const { Cell::new(std::ptr::null()) };
     static SYMBOL_TABLE: Cell<*mut catnip_core::symbols::SymbolTable> = const { Cell::new(std::ptr::null_mut()) };
     static ENUM_REGISTRY: Cell<*mut super::enums::EnumRegistry> = const { Cell::new(std::ptr::null_mut()) };
+    /// Union methods for nullary variants, keyed by qualified name
+    /// ("Union.Variant"). Populated by `build_union_type` so the symbol
+    /// round-trip (TAG_SYMBOL -> CatnipEnumVariant) restores method
+    /// bindings -- the NaN-boxed symbol itself cannot carry them.
+    static UNION_NULLARY_METHODS: UnionNullaryMethods = std::cell::RefCell::new(Arc::new(std::collections::HashMap::new()));
+}
+
+/// Register the shared method map for a nullary union variant.
+pub fn register_union_nullary_methods(qualified: &str, methods: Arc<indexmap::IndexMap<String, Py<PyAny>>>) {
+    UNION_NULLARY_METHODS.with(|cell| {
+        // Copy-on-write: `make_mut` clones the map only if an `Arc` snapshot is
+        // currently shared (a worker mid-broadcast). At build time the `Arc` is
+        // unique -- the main thread isn't parked in `py.detach` -- so this is an
+        // in-place insert.
+        let mut table = cell.borrow_mut();
+        Arc::make_mut(&mut table).insert(qualified.to_string(), methods);
+    });
+}
+
+/// Look up the method map for a nullary union variant, if any.
+pub(crate) fn union_nullary_methods_for(qualified: &str) -> Option<Arc<indexmap::IndexMap<String, Py<PyAny>>>> {
+    UNION_NULLARY_METHODS.with(|cell| cell.borrow().get(qualified).cloned())
+}
+
+/// Clone the `Arc` handle to the current thread's nullary-union-method bindings
+/// -- one atomic incref, independent of table size. `Send`, so it can be
+/// propagated to an ND worker thread.
+pub fn snapshot_union_nullary_methods() -> UnionNullaryMethodTable {
+    UNION_NULLARY_METHODS.with(|cell| Arc::clone(&cell.borrow()))
+}
+
+/// Replace the current thread's nullary-union-method bindings. Used by ND
+/// workers to install the parent's bindings and to restore the prior table.
+pub fn set_union_nullary_methods(table: UnionNullaryMethodTable) {
+    // `replace` drops the previous `Arc` (and, if it was the last ref, its `Py`
+    // values) AFTER the borrow ends, so a `Py` finalizer that re-enters union
+    // registration can't trip a RefCell double-borrow.
+    UNION_NULLARY_METHODS.with(|cell| {
+        let _prev = cell.replace(table);
+    });
 }
 
 /// Global ObjectTable shared across all threads.
@@ -100,6 +131,98 @@ thread_local! {
 /// boundaries (e.g. ND recursion workers).  Under the GIL the Mutex is never
 /// contended, so the lock is a single uncontended CAS (essentially free).
 static OBJECT_TABLE: Mutex<ObjectTable> = Mutex::new(ObjectTable::new_const());
+
+/// Permanent debug tracing of one object's handle life (leak hunts).
+/// `CATNIP_TABLE_TRACE_PTR=<hex id(obj)>` traces every insert/clone/release
+/// of EVERY slot that ever held that object (several slots can hold the same
+/// pyobj simultaneously: one `Py` each), with a short backtrace. A slot
+/// recycled to another object is evicted from the traced set (logged as
+/// `recycle`), so the per-idx event balance is exact. Off = one atomic load
+/// on the hot paths (the env is read once).
+pub(crate) mod table_trace {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, Once};
+
+    /// Traced object pointer; 0 = disarmed. Events match on the SLOT's current
+    /// pointer (not on the idx seen at insert), so the ledger can be armed
+    /// mid-run -- from Python via `_rs._debug_set_table_trace_ptr(id(obj))` --
+    /// after the object already entered the table. The env var still arms it
+    /// at first use for whole-run ledgers.
+    static TARGET: AtomicUsize = AtomicUsize::new(0);
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static ENV_INIT: Once = Once::new();
+    static CTX: Mutex<String> = Mutex::new(String::new());
+
+    /// Whether tracing is armed (one relaxed load after the one-time env
+    /// check; callers gate their formatting work on this).
+    #[inline]
+    pub(crate) fn active() -> bool {
+        ENV_INIT.call_once(|| {
+            if let Some(t) = std::env::var("CATNIP_TABLE_TRACE_PTR")
+                .ok()
+                .and_then(|p| usize::from_str_radix(p.trim_start_matches("0x"), 16).ok())
+            {
+                set_target(t);
+            }
+        });
+        ACTIVE.load(Ordering::Relaxed)
+    }
+
+    /// Arm (ptr = id(obj)) or disarm (ptr = 0) the ledger at runtime.
+    pub(crate) fn set_target(ptr: usize) {
+        TARGET.store(ptr, Ordering::Relaxed);
+        ACTIVE.store(ptr != 0, Ordering::Relaxed);
+    }
+
+    /// Publish the execution context shown by the next events (the VM loop
+    /// posts "Op ip=N"; teardown paths post a label). Backtraces through the
+    /// optimized cdylib resolve to <unknown>, an opcode ledger does not.
+    pub(crate) fn set_ctx(ctx: String) {
+        *CTX.lock().unwrap() = ctx;
+    }
+
+    fn ctx_string() -> String {
+        CTX.lock().unwrap().clone()
+    }
+
+    fn matched(ptr: usize) -> bool {
+        active() && TARGET.load(Ordering::Relaxed) == ptr
+    }
+
+    pub(super) fn on_insert(idx: u32, ptr: usize) {
+        if matched(ptr) {
+            eprintln!("TBLT insert idx={idx} at [{}]\n{}", ctx_string(), short_backtrace());
+        }
+    }
+
+    #[inline]
+    pub(super) fn on_clone(idx: u32, ptr: usize) {
+        if matched(ptr) {
+            eprintln!("TBLT clone idx={idx} at [{}]\n{}", ctx_string(), short_backtrace());
+        }
+    }
+
+    #[inline]
+    pub(super) fn on_release(idx: u32, ptr: usize) {
+        if matched(ptr) {
+            eprintln!("TBLT release idx={idx} at [{}]\n{}", ctx_string(), short_backtrace());
+        }
+    }
+
+    fn short_backtrace() -> String {
+        // Wide mode for leak hunts: CATNIP_TABLE_TRACE_WIDE=1 keeps non-catnip
+        // frames and goes deeper (who ultimately holds the handle).
+        let wide = std::env::var_os("CATNIP_TABLE_TRACE_WIDE").is_some();
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let take = if wide { 60 } else { 8 };
+        bt.lines()
+            .filter(|l| wide || l.contains("catnip"))
+            .filter(|l| l.trim_start().starts_with("at ") || l.contains("catnip") || wide)
+            .take(take)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
 
 /// Install a pointer to the active StructRegistry for the current thread.
 ///
@@ -118,6 +241,11 @@ pub fn clear_struct_registry() {
 }
 
 /// Save the current registry pointer (for reentrant VM calls).
+///
+/// Set-and-leave like `func_table`: a non-null leftover can name an `Executor`
+/// that already returned. See [`save_func_table`] for the use-after-free hazard
+/// and the `vm_depth() > 0` rule before capturing this pointer at top level and
+/// writing through it later (e.g. a struct transplant in the import path).
 pub fn save_struct_registry() -> *const StructRegistry {
     STRUCT_REGISTRY.with(|cell| cell.get())
 }
@@ -156,12 +284,13 @@ pub fn restore_symbol_table(ptr: *mut catnip_core::symbols::SymbolTable) {
 }
 
 /// Resolve a symbol index to its interned string via the thread-local table.
-fn resolve_symbol(idx: u32) -> Option<String> {
+pub(crate) fn resolve_symbol(idx: u32) -> Option<String> {
     SYMBOL_TABLE.with(|cell| {
         let ptr = cell.get();
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: ptr is non-null (checked above) and names the live thread-local SymbolTable installed by the active VM; access is single-threaded under the GIL and the borrow does not outlive this call.
             let table = unsafe { &*ptr };
             table.resolve(idx).map(|s| s.to_string())
         }
@@ -175,6 +304,7 @@ pub fn resolve_symbol_by_name(name: &str) -> Option<u32> {
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: ptr is non-null (checked above) and names the live thread-local SymbolTable; read-only access, single-threaded under the GIL, borrow does not outlive this call.
             let table = unsafe { &*ptr };
             table.lookup(name)
         }
@@ -189,6 +319,7 @@ pub fn intern_symbol(name: &str) -> Option<u32> {
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: ptr is non-null (checked above) and names the live thread-local SymbolTable; the &mut is unique because access is single-threaded under the GIL.
             let table = unsafe { &mut *ptr };
             Some(table.intern(name))
         }
@@ -226,7 +357,9 @@ pub fn lazy_register_enum_variant(enum_name: &str, variant_name: &str) -> Option
             if sym_ptr.is_null() || reg_ptr.is_null() {
                 return None;
             }
+            // SAFETY: sym_ptr is non-null (checked above) and names the live thread-local SymbolTable; the &mut is unique under the single-threaded GIL.
             let symbols = unsafe { &mut *sym_ptr };
+            // SAFETY: reg_ptr is non-null (checked above) and names the live thread-local EnumRegistry; the &mut is unique under the single-threaded GIL.
             let registry = unsafe { &mut *reg_ptr };
 
             let qname = catnip_core::symbols::qualified_name(enum_name, variant_name);
@@ -263,51 +396,128 @@ pub fn struct_registry_incref(idx: u32) {
     STRUCT_REGISTRY.with(|cell| {
         let ptr = cell.get();
         if !ptr.is_null() {
+            // SAFETY: ptr is non-null (checked above) and names the live thread-local StructRegistry; single-threaded under the GIL.
             let registry = unsafe { &*ptr };
             registry.incref(idx);
         }
     });
 }
 
-/// Decref a struct instance via the thread-local registry, cascade-freeing fields if needed.
-/// No-op if registry is not installed.
-pub fn struct_registry_release(idx: u32) {
-    STRUCT_REGISTRY.with(|cell| {
-        let ptr = cell.get();
-        if !ptr.is_null() {
-            // Safe: original pointer comes from &mut self.struct_registry in execute()
-            let registry = unsafe { &mut *(ptr as *mut StructRegistry) };
-            if let Some(fields) = registry.decref(idx) {
-                cascade_decref_fields(registry, fields);
-            }
-        }
+// ---------------------------------------------------------------------------
+// Registry identity table -- proxies resolve *their own* registry, not the TL
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Maps every live `StructRegistry` id to its address. A Python
+    /// `CatnipStruct` proxy outlives the execution that created it, so it
+    /// cannot trust the set-and-leave `STRUCT_REGISTRY` thread-local (which may
+    /// name a sibling VM's registry). It stores its origin registry id and
+    /// resolves through this table instead. Entries are added when a proxy is
+    /// materialized and removed by `StructRegistry::drop`, so a present pointer
+    /// always names a live registry. See [`save_struct_registry`].
+    static REGISTRY_TABLE: std::cell::RefCell<std::collections::HashMap<u64, *const StructRegistry>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Record a registry's address under its id (idempotent). Called when a proxy
+/// is materialized, so any registry a proxy can reach is resolvable.
+pub fn register_struct_registry(id: u64, ptr: *const StructRegistry) {
+    if id == 0 || ptr.is_null() {
+        return;
+    }
+    REGISTRY_TABLE.with(|t| {
+        t.borrow_mut().insert(id, ptr);
     });
 }
 
-/// Mark a struct instance as frozen (called from the proxy's __hash__ in VM mode).
-/// No-op if registry is not installed.
-pub fn struct_registry_freeze(idx: u32) {
-    STRUCT_REGISTRY.with(|cell| {
-        let ptr = cell.get();
-        if !ptr.is_null() {
-            let registry = unsafe { &*ptr };
-            registry.freeze(idx);
-        }
+/// Forget a registry's address. Called from `StructRegistry::drop` so a stale
+/// pointer is never resolved. Uses `try_with` because a registry may be dropped
+/// during thread teardown, after this thread-local is already destroyed.
+pub fn unregister_struct_registry(id: u64) {
+    if id == 0 {
+        return;
+    }
+    let _ = REGISTRY_TABLE.try_with(|t| {
+        t.borrow_mut().remove(&id);
     });
 }
 
-/// True if a struct instance is frozen in the thread-local registry.
-/// Returns false if the registry is not installed.
-pub fn struct_registry_is_frozen(idx: u32) -> bool {
-    STRUCT_REGISTRY.with(|cell| {
-        let ptr = cell.get();
-        if !ptr.is_null() {
-            let registry = unsafe { &*ptr };
-            registry.is_frozen(idx)
-        } else {
-            false
+/// Run `f` against the registry identified by `id`, if it is still alive.
+/// The table pointer is copied out before `f` runs so the entry borrow does
+/// not overlap a reentrant decref cascade.
+///
+/// Passes a SHARED `&StructRegistry`: the registry's mutable state lives behind
+/// a `RefCell`, so a reentrant call here (a pyobj `__del__` dropping another
+/// proxy of the same registry mid-cascade) takes another shared borrow instead
+/// of a second `&mut *ptr` -- the old aliasing UB is gone by construction.
+fn with_proxy_registry<R>(id: u64, f: impl FnOnce(&StructRegistry) -> R) -> Option<R> {
+    if id == 0 {
+        return None;
+    }
+    // `try_with`: a proxy can decref during thread teardown, after this
+    // thread-local is destroyed (same guard as `unregister_struct_registry`).
+    // Reachable since `StructRegistry::drop` now releases recorded proxies.
+    let ptr = REGISTRY_TABLE
+        .try_with(|t| t.borrow().get(&id).copied())
+        .ok()
+        .flatten()?;
+    // SAFETY: the entry is removed by `StructRegistry::drop`, so a present
+    // pointer names a live registry. Single-threaded under the GIL. The shared
+    // `&*ptr` never aliases a `&mut` -- all registry mutation goes through the
+    // interior `RefCell`.
+    Some(f(unsafe { &*ptr }))
+}
+
+/// Incref a struct slot in the proxy's own registry (no-op if it is gone).
+pub fn proxy_registry_incref(registry_id: u64, idx: u32) {
+    with_proxy_registry(registry_id, |reg| reg.incref(idx));
+}
+
+/// Freeze a struct slot in the proxy's own registry (no-op if it is gone).
+pub fn proxy_registry_freeze(registry_id: u64, idx: u32) {
+    with_proxy_registry(registry_id, |reg| reg.freeze(idx));
+}
+
+/// True if the slot is frozen in the proxy's own registry.
+pub fn proxy_registry_is_frozen(registry_id: u64, idx: u32) -> bool {
+    with_proxy_registry(registry_id, |reg| reg.is_frozen(idx)).unwrap_or(false)
+}
+
+/// Decref a struct slot in the proxy's own registry, releasing the reference a
+/// `CatnipStructProxy` held. No-op if the registry is already gone (a proxy
+/// outliving its broadcast child) or the slot was already freed. Cascades into
+/// struct fields when the slot reaches zero.
+pub fn proxy_registry_decref(registry_id: u64, idx: u32) {
+    with_proxy_registry(registry_id, |reg| super::structs::decref_slot(reg, idx));
+}
+
+/// Run `f` with the registry named by `id` installed as the thread-local
+/// `STRUCT_REGISTRY`, restoring the previous one afterwards. `id == 0` or a
+/// registry already gone installs nothing (f runs against the ambient
+/// thread-local).
+///
+/// A Python-facing proxy that converts values (`from_pyobject` on write) must
+/// index struct instances into ITS OWN registry, not whatever registry a prior
+/// execution left in the set-and-leave thread-local -- otherwise the stored
+/// `TAG_STRUCT` carries an index from a foreign registry, and a later
+/// struct-aware release against the proxy's id would decref an unrelated
+/// instance. Same discipline as `Executor::export_to_pydict`.
+pub fn with_struct_registry_installed<R>(id: u64, f: impl FnOnce() -> R) -> R {
+    let ptr = if id == 0 {
+        None
+    } else {
+        REGISTRY_TABLE.try_with(|t| t.borrow().get(&id).copied()).ok().flatten()
+    };
+    match ptr {
+        Some(ptr) => {
+            let prev = save_struct_registry();
+            set_struct_registry(ptr as *const _);
+            let r = f();
+            restore_struct_registry(prev);
+            r
         }
-    })
+        None => f(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,14 +555,17 @@ impl ObjectTable {
 
     /// Insert a `Py<PyAny>` and return its handle.
     pub fn insert(&mut self, obj: Py<PyAny>) -> u32 {
-        if let Some(idx) = self.free_list.pop() {
+        let ptr = obj.as_ptr() as usize;
+        let idx = if let Some(idx) = self.free_list.pop() {
             self.slots[idx as usize] = Some(ObjSlot { obj, refcount: 1 });
             idx
         } else {
             let idx = self.slots.len() as u32;
             self.slots.push(Some(ObjSlot { obj, refcount: 1 }));
             idx
-        }
+        };
+        table_trace::on_insert(idx, ptr);
+        idx
     }
 
     /// Get a reference to the stored `Py<PyAny>`.
@@ -365,18 +578,28 @@ impl ObjectTable {
     #[inline]
     pub fn clone_handle(&mut self, idx: u32) {
         let slot = self.slots[idx as usize].as_mut().expect("ObjectTable: dead handle");
+        if table_trace::active() {
+            table_trace::on_clone(idx, slot.obj.as_ptr() as usize);
+        }
         slot.refcount += 1;
     }
 
-    /// Decrement the handle refcount; drop `Py<PyAny>` when it reaches 0.
+    /// Decrement the handle refcount; when it reaches 0 the slot is freed and
+    /// the `Py<PyAny>` is returned so the CALLER drops it after the table lock
+    /// is released -- a Python decref can run arbitrary code (`__del__`, GC)
+    /// that re-enters this table, and the Mutex is not reentrant.
     #[inline]
-    pub fn release_handle(&mut self, idx: u32) {
+    pub fn release_handle(&mut self, idx: u32) -> Option<Py<PyAny>> {
         let slot = self.slots[idx as usize].as_mut().expect("ObjectTable: dead handle");
+        if table_trace::active() {
+            table_trace::on_release(idx, slot.obj.as_ptr() as usize);
+        }
         slot.refcount -= 1;
         if slot.refcount == 0 {
-            self.slots[idx as usize] = None;
             self.free_list.push(idx);
+            return self.slots[idx as usize].take().map(|s| s.obj);
         }
+        None
     }
 
     /// Clone the `Py<PyAny>` (Python refcount bump) for handing to Python.
@@ -392,6 +615,51 @@ impl Default for ObjectTable {
     }
 }
 
+/// Surface, for CPython's cyclic GC, the `Py<PyAny>` a PyObject-handle `Value`
+/// points to. The global `OBJECT_TABLE` holds a strong reference on behalf of
+/// every PyObject handle, and that reference is invisible to the collector. A
+/// pyclass that owns such handles (e.g. the VM globals kept alive by
+/// `ImportLoader`) must report them from `__traverse__`, or the objects they
+/// pin -- and any reference cycle running through them -- can never be
+/// collected. No-op for non-PyObject values. `try_lock` keeps it panic-free if
+/// a re-entrant GC fires while the table is momentarily borrowed.
+pub fn visit_obj_handle(value: Value, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+    if let Some(handle) = value.as_obj_handle() {
+        if let Ok(table) = OBJECT_TABLE.try_lock() {
+            if let Some(Some(slot)) = table.slots.get(handle as usize) {
+                visit.call(&slot.obj)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Surface a collection of handle-bearing `Value`s for the cyclic GC,
+/// deduplicating by handle index. An `ObjectTable` slot owns a **single** strong
+/// `Py` reference shared by every `Value` handle that points to it (a pyobj
+/// bound under several names -- `v = P` -- yields the same index more than
+/// once). Reporting that one reference once per handle over-counts it; the
+/// resulting negative `gc_refs` makes the collector treat the object as
+/// externally rooted, pinning it and every cycle through it. Visiting each
+/// distinct index exactly once matches the one reference the table actually
+/// owns. This is the only correct way to traverse a `Value` collection -- a
+/// bare `for v in .. { visit_obj_handle(v) }` loop reintroduces the over-count.
+pub fn visit_obj_handles<I>(values: I, visit: &PyVisit<'_>) -> Result<(), PyTraverseError>
+where
+    I: IntoIterator<Item = Value>,
+{
+    let iter = values.into_iter();
+    let mut seen = std::collections::HashSet::with_capacity(iter.size_hint().0);
+    for value in iter {
+        if let Some(idx) = value.as_obj_handle() {
+            if seen.insert(idx) {
+                visit_obj_handle(value, visit)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Access the global ObjectTable mutably.
 ///
 /// Under the GIL the Mutex is never contended; `lock()` is a single
@@ -403,8 +671,88 @@ fn with_object_table<R>(f: impl FnOnce(&mut ObjectTable) -> R) -> R {
 
 /// Read-only access to the global ObjectTable.
 #[inline]
+/// Debug: count live slots pointing at `ptr` and their total handle refcount.
+/// Returns `(slot_count, total_refcount)`. Leak-hunt only.
+pub fn debug_slots_for_ptr(ptr: usize) -> (usize, u32) {
+    with_object_table_ref(|table| {
+        let mut n = 0;
+        let mut rc = 0;
+        for slot in table.slots.iter().flatten() {
+            if slot.obj.as_ptr() as usize == ptr {
+                n += 1;
+                rc += slot.refcount;
+            }
+        }
+        (n, rc)
+    })
+}
+
 fn with_object_table_ref<R>(f: impl FnOnce(&ObjectTable) -> R) -> R {
     f(&OBJECT_TABLE.lock().unwrap())
+}
+
+/// Ledger probe companion: (idx, refcount, truncated repr) of every live
+/// OBJECT_TABLE slot, so a non-zero slot delta can be attributed without
+/// knowing the leaked object's identity in advance (TBLT needs a ptr).
+///
+/// The repr/get_type work runs OUTSIDE the table lock: `repr()` can run
+/// arbitrary Python (a `__repr__`, or an allocation that triggers cyclic GC ->
+/// `PyPipeline::__clear__` -> `Value::decref` -> `OBJECT_TABLE.lock()`), and
+/// the mutex is not reentrant -- doing it under the lock self-deadlocks. So
+/// snapshot `(idx, rc, owned handle)` under the lock, drop it, then format.
+pub fn debug_live_slot_types(py: Python<'_>) -> Vec<(u32, u32, String)> {
+    let snapshot: Vec<(u32, u32, Py<PyAny>)> = with_object_table_ref(|table| {
+        table
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, slot)| slot.as_ref().map(|s| (idx as u32, s.refcount, s.obj.clone_ref(py))))
+            .collect()
+    });
+    snapshot
+        .into_iter()
+        .map(|(idx, rc, obj)| {
+            let bound = obj.bind(py);
+            let ty = bound
+                .get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "<?>".into());
+            let mut r = bound
+                .repr()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|_| "<repr failed>".into());
+            r.truncate(120);
+            (idx, rc, format!("{ty}: {r}"))
+        })
+        .collect()
+}
+
+/// Ledger probe: live counts of the manually refcounted heap classes --
+/// (occupied `OBJECT_TABLE` slots, their summed handle refcounts, live BigInt
+/// allocations, live Complex allocations, live struct instance slots). The
+/// refcount-ledger tests assert a zero delta of this tuple across a full
+/// pipeline lifecycle -- and, for struct instances (whose registry dies with
+/// the pipeline), across repeated runs on a REUSED pipeline; a leaked operand
+/// release surfaces here as an exact per-class count instead of an RSS
+/// threshold.
+pub fn debug_live_counts() -> (usize, u64, isize, isize, isize) {
+    let (slots, refs) = with_object_table_ref(|table| {
+        let mut n = 0usize;
+        let mut rc = 0u64;
+        for slot in table.slots.iter().flatten() {
+            n += 1;
+            rc += slot.refcount as u64;
+        }
+        (n, rc)
+    });
+    (
+        slots,
+        refs,
+        LIVE_BIGINT.load(std::sync::atomic::Ordering::Relaxed),
+        LIVE_COMPLEX.load(std::sync::atomic::Ordering::Relaxed),
+        crate::vm::structs::LIVE_STRUCT_INSTANCES.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +819,24 @@ pub fn clear_func_table() {
 }
 
 /// Save the current FunctionTable pointer (for reentrant VM calls).
+///
+/// Hazard -- read before reusing this pattern. `func_table` (like
+/// `struct_registry`, unlike `symbol_table`/`enum_registry`) is set-and-leave:
+/// `execute*` installs it but never restores the previous one on return, so the
+/// pointer can outlive the `Executor` it names. A non-null leftover is normally
+/// still a live owner because `Executor::drop` clears the TL only when it still
+/// names that VM's table (clears-if-mine), nulling it when the owner is dropped.
+///
+/// The exception that caused a use-after-free: a second top-level `execute`
+/// captured this leftover into a local before overwriting the TL with its own,
+/// then wrote through it later (the import func_table transplant). There the
+/// clears-if-mine guard cannot help -- the live copy is in a local, not the TL
+/// -- and the sibling `Executor` (Python-owned, GC-eligible, not on the stack)
+/// can be freed mid-run. Rule for any caller that captures this pointer at a
+/// possible top level and dereferences it later: only trust it when
+/// `vm_depth() > 0`, i.e. a genuine parent hosting the nested call is suspended
+/// on the stack and therefore alive. Mid-dispatch readers (broadcast callbacks
+/// in `frame.rs`, ND workers in `host.rs`) are already in that regime.
 pub fn save_func_table() -> *const FunctionTable {
     FUNC_TABLE.with(|cell| cell.get())
 }
@@ -480,18 +846,92 @@ pub fn restore_func_table(ptr: *const FunctionTable) {
     FUNC_TABLE.with(|cell| cell.set(ptr));
 }
 
+thread_local! {
+    static VM_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Number of VM dispatch loops currently active on this thread.
+///
+/// `func_table` is installed by `execute*` and never restored on return
+/// (unlike `symbol_table`/`enum_registry`), so its thread-local pointer can
+/// outlive the `Executor` it names. A genuine parent VM hosting an `import`
+/// is always suspended in its own dispatch on the stack, so depth > 0 marks
+/// the only case where reading `save_func_table()` yields a live parent;
+/// at depth 0 the pointer may be a stale leftover the GC is about to free.
+pub fn vm_depth() -> u32 {
+    VM_DEPTH.with(|cell| cell.get())
+}
+
+/// RAII guard that increments the VM dispatch depth for its lifetime.
+pub struct VmDepthGuard;
+
+impl VmDepthGuard {
+    pub fn enter() -> Self {
+        VM_DEPTH.with(|cell| cell.set(cell.get() + 1));
+        VmDepthGuard
+    }
+}
+
+impl Drop for VmDepthGuard {
+    fn drop(&mut self) {
+        VM_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
+    }
+}
+
 // PyO3-specific tags (catnip_rs only)
 const TAG_PYOBJ: u64 = 4 << TAG_SHIFT;
 const TAG_STRUCT: u64 = 5 << TAG_SHIFT;
 const TAG_COMPLEX: u64 = 8 << TAG_SHIFT;
 
 /// Native complex number for NaN-box storage.
+///
+/// Construct via [`NativeComplex::new`] so the live ledger stays exact
+/// (`Drop` decrements it).
 pub struct NativeComplex(pub f64, pub f64);
+
+impl NativeComplex {
+    #[inline]
+    pub fn new(real: f64, imag: f64) -> Self {
+        LIVE_COMPLEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        NativeComplex(real, imag)
+    }
+}
+
+impl Drop for NativeComplex {
+    fn drop(&mut self) {
+        LIVE_COMPLEX.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// NaN-boxed value. Fits in 8 bytes.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct Value(u64);
+
+impl catnip_core::scalar::ScalarValue for Value {
+    #[inline]
+    fn bits(self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn from_bits(bits: u64) -> Self {
+        Value(bits)
+    }
+    #[inline]
+    fn scalar_is_complex(self) -> bool {
+        self.is_complex()
+    }
+    #[inline]
+    unsafe fn scalar_as_complex_parts(&self) -> Option<(f64, f64)> {
+        // SAFETY: same contract as the trait method -- the caller guarantees
+        // the heap payload outlives the read; forwarded verbatim.
+        unsafe { self.as_complex_parts() }
+    }
+    #[inline]
+    fn scalar_from_complex(real: f64, imag: f64) -> Self {
+        Self::from_complex(real, imag)
+    }
+}
 
 impl Value {
     /// Nil constant (Python None)
@@ -513,26 +953,13 @@ impl Value {
     /// to avoid collision with the quiet NaN tagging scheme.
     #[inline]
     pub fn from_float(f: f64) -> Self {
-        let bits = f.to_bits();
-        // Any quiet NaN (bits 62-52 all 1s + quiet bit 51) would collide with
-        // our tagged value space. Redirect to CANON_NAN (a signaling NaN whose
-        // quiet bit is 0, so is_float() returns true).
-        if (bits & 0x7FF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
-            Value(CANON_NAN)
-        } else {
-            Value(bits)
-        }
+        <Self as ScalarValue>::scalar_from_float(f)
     }
 
     /// Create a small integer value. Panics if out of 48-bit range.
     #[inline]
     pub fn from_int(i: i64) -> Self {
-        debug_assert!(
-            (SMALLINT_MIN..=SMALLINT_MAX).contains(&i),
-            "integer out of small int range"
-        );
-        let payload = (i as u64) & PAYLOAD_MASK;
-        Value(QNAN_BASE | TAG_SMALLINT | payload)
+        <Self as ScalarValue>::scalar_from_int(i)
     }
 
     /// Safe creation from any i64. Uses SmallInt when in range, BigInt otherwise.
@@ -544,23 +971,19 @@ impl Value {
     /// Try to create a small integer. Returns None if out of range.
     #[inline]
     pub fn try_from_int(i: i64) -> Option<Self> {
-        if (SMALLINT_MIN..=SMALLINT_MAX).contains(&i) {
-            Some(Self::from_int(i))
-        } else {
-            None
-        }
+        <Self as ScalarValue>::scalar_try_from_int(i)
     }
 
     /// Create a boolean value.
     #[inline]
     pub fn from_bool(b: bool) -> Self {
-        if b { Self::TRUE } else { Self::FALSE }
+        <Self as ScalarValue>::scalar_from_bool(b)
     }
 
     /// Create a symbol value (interned string index).
     #[inline]
     pub fn from_symbol(idx: u32) -> Self {
-        Value(QNAN_BASE | TAG_SYMBOL | (idx as u64))
+        <Self as ScalarValue>::scalar_from_symbol(idx)
     }
 
     /// Create a TAG_PYOBJ value from an ObjectTable handle.
@@ -601,30 +1024,19 @@ impl Value {
     /// Create a BigInt value from an Arc<GmpInt> pointer.
     #[inline]
     pub fn from_bigint(n: Integer) -> Self {
-        let arc = Arc::new(GmpInt(n));
-        let ptr = Arc::into_raw(arc) as u64;
-        debug_assert!(
-            ptr & !PAYLOAD_MASK == 0,
-            "BigInt Arc pointer exceeds 47-bit address space"
-        );
-        Value(QNAN_BASE | TAG_BIGINT | (ptr & PAYLOAD_MASK))
+        <Self as ScalarValue>::scalar_from_bigint(n)
     }
 
     /// Create a BigInt or demote to SmallInt if it fits.
     #[inline]
     pub fn from_bigint_or_demote(n: Integer) -> Self {
-        if let Some(i) = n.to_i64() {
-            if let Some(v) = Self::try_from_int(i) {
-                return v;
-            }
-        }
-        Self::from_bigint(n)
+        <Self as ScalarValue>::scalar_from_bigint_or_demote(n)
     }
 
     /// Create a complex number value.
     #[inline]
     pub fn from_complex(real: f64, imag: f64) -> Self {
-        let arc = Arc::new(NativeComplex(real, imag));
+        let arc = Arc::new(NativeComplex::new(real, imag));
         let ptr = Arc::into_raw(arc) as u64;
         debug_assert!(
             ptr & !PAYLOAD_MASK == 0,
@@ -645,37 +1057,51 @@ impl Value {
         Value(bits)
     }
 
+    /// Boundary-safe reconstruction of a JIT-produced word. The Cranelift
+    /// codegen only boxes inline scalars (int/float/bool), so a scalar passes
+    /// through; any pointer/index tag -- which the codegen never emits -- maps
+    /// to the INVALID canary instead of reconstructing an unvalidated pointer.
+    /// A codegen regression then surfaces as a contained canary (caught by the
+    /// `to_pyobject` debug assert) rather than a silent deref of garbage.
+    /// See `catnip_core::nanbox::from_raw_scalar` / `CatnipBoundaryProof`.
+    #[inline]
+    pub fn from_raw_scalar(bits: u64) -> Self {
+        match catnip_core::nanbox::from_raw_scalar(bits) {
+            Some(b) => Value(b),
+            None => Value::INVALID,
+        }
+    }
+
     // --- Type checks ---
 
     /// Check if this is a float (not a boxed value).
     #[inline]
     pub fn is_float(self) -> bool {
-        // Not a quiet NaN with our pattern
-        (self.0 & 0x7FF8_0000_0000_0000) != QNAN_BASE
+        ScalarValue::scalar_is_float(self)
     }
 
     /// Check if this is a small integer.
     #[inline]
     pub fn is_int(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_SMALLINT)
+        ScalarValue::scalar_is_int(self)
     }
 
     /// Check if this is a boolean.
     #[inline]
     pub fn is_bool(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_BOOL)
+        ScalarValue::scalar_is_bool(self)
     }
 
     /// Check if this is nil (None).
     #[inline]
     pub fn is_nil(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_NIL)
+        ScalarValue::scalar_is_nil(self)
     }
 
     /// Check if this is a symbol.
     #[inline]
     pub fn is_symbol(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_SYMBOL)
+        ScalarValue::scalar_is_symbol(self)
     }
 
     /// Check if this is a PyObject pointer.
@@ -693,13 +1119,13 @@ impl Value {
     /// Check if this is a BigInt.
     #[inline]
     pub fn is_bigint(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_BIGINT)
+        ScalarValue::scalar_is_bigint(self)
     }
 
     /// Check if this is a native VM function.
     #[inline]
     pub fn is_vmfunc(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_VMFUNC)
+        ScalarValue::scalar_is_vmfunc(self)
     }
 
     /// Check if this is the INVALID canary (debug-only sentinel for uninitialized slots).
@@ -741,44 +1167,25 @@ impl Value {
     /// Extract as float. Returns None if not a float.
     #[inline]
     pub fn as_float(self) -> Option<f64> {
-        if self.is_float() {
-            Some(f64::from_bits(self.0))
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_float(self)
     }
 
     /// Extract as integer. Returns None if not an integer.
     #[inline]
     pub fn as_int(self) -> Option<i64> {
-        if self.is_int() {
-            let payload = self.0 & PAYLOAD_MASK;
-            // Sign extend from 48 bits
-            let result = if payload & SMALLINT_SIGN_BIT != 0 {
-                (payload | SMALLINT_SIGN_EXT) as i64
-            } else {
-                payload as i64
-            };
-            Some(result)
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_int(self)
     }
 
     /// Extract as boolean. Returns None if not a boolean.
     #[inline]
     pub fn as_bool(self) -> Option<bool> {
-        if self.is_bool() { Some((self.0 & 1) != 0) } else { None }
+        ScalarValue::scalar_as_bool(self)
     }
 
     /// Extract as symbol index. Returns None if not a symbol.
     #[inline]
     pub fn as_symbol(self) -> Option<u32> {
-        if self.is_symbol() {
-            Some((self.0 & PAYLOAD_MASK) as u32)
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_symbol(self)
     }
 
     /// Retrieve the `Py<PyAny>` from the ObjectTable (clone_ref for Python).
@@ -830,9 +1237,11 @@ impl Value {
     pub fn clone_refcount(self) {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: the BigInt tag was checked, so the payload is a live Arc<GmpInt>; this increment is balanced by a matching decref.
             unsafe { Arc::increment_strong_count(ptr) };
         } else if self.is_complex() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
+            // SAFETY: the complex tag was checked, so the payload is a live Arc<NativeComplex>; this increment is balanced by a matching decref.
             unsafe { Arc::increment_strong_count(ptr) };
         } else if self.is_pyobj() {
             let handle = (self.0 & PAYLOAD_MASK) as u32;
@@ -849,10 +1258,25 @@ impl Value {
     pub fn clone_refcount_bigint(self) {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: the BigInt tag was checked, so the payload is a live Arc<GmpInt>; this increment is balanced by a matching decref.
             unsafe { Arc::increment_strong_count(ptr) };
         } else if self.is_complex() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
+            // SAFETY: the complex tag was checked, so the payload is a live Arc<NativeComplex>; this increment is balanced by a matching decref.
             unsafe { Arc::increment_strong_count(ptr) };
+        }
+    }
+
+    /// Increment the ObjectTable handle refcount for a PyObject value; no-op
+    /// otherwise. The PyObject counterpart of [`clone_refcount_bigint`], for
+    /// callers that already manage struct refcounts via the local registry but
+    /// must keep a duplicated PyObject handle alive on its own (e.g. a struct
+    /// field returned by `GetAttr`, which must survive the receiver's decref).
+    #[inline]
+    pub fn clone_refcount_pyobj(self) {
+        if self.is_pyobj() {
+            let handle = (self.0 & PAYLOAD_MASK) as u32;
+            with_object_table(|table| table.clone_handle(handle));
         }
     }
 
@@ -876,6 +1300,7 @@ impl Value {
             // SAFETY: value is alive (we just checked the tag)
             unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
         } else if self.is_complex() {
+            // SAFETY: is_complex() was checked above, so the payload is a live Arc<NativeComplex> owned by self; the borrow does not outlive it.
             let (r, i) = unsafe { self.as_complex_parts().unwrap() };
             r != 0.0 || i != 0.0
         } else if self.is_struct_instance() {
@@ -901,6 +1326,7 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             f != 0.0
         } else if self.is_bigint() {
+            // SAFETY: is_bigint() was checked above, so the payload is a live Arc<GmpInt> owned by self; the borrow does not outlive it.
             unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
         } else if self.is_struct_instance() || self.is_vmfunc() {
             true
@@ -1036,6 +1462,7 @@ impl Value {
                     if ptr.is_null() {
                         return false;
                     }
+                    // SAFETY: ptr is non-null (checked above) and names the live thread-local FunctionTable; single-threaded under the GIL, borrow does not outlive this closure.
                     let table = unsafe { &*ptr };
                     (idx as usize) < table.slots.len()
                 });
@@ -1048,14 +1475,21 @@ impl Value {
         // Recognize CatnipStructProxy -> restore native TAG_STRUCT for VM round-trip.
         if let Ok(proxy) = obj.cast::<CatnipStructProxy>() {
             let proxy_frozen = proxy.borrow().frozen;
+            let proxy_registry_id = proxy.borrow().native_registry_id;
             if let Some(idx) = proxy.borrow().native_instance_idx {
                 let restored = STRUCT_REGISTRY.with(|cell| {
                     let ptr = cell.get();
                     if ptr.is_null() {
                         return false;
                     }
+                    // SAFETY: ptr is non-null (checked above) and names the live thread-local StructRegistry; single-threaded under the GIL.
                     let registry = unsafe { &*ptr };
-                    if registry.get_instance(idx).is_some() {
+                    // Trust the proxy's idx only within its own clone lineage: the
+                    // proxy's registry or a clone of it (broadcast child) shares the
+                    // index space, so a live slot is the same instance. A foreign
+                    // registry may hold an unrelated instance at that index, so fall
+                    // through to value re-creation below.
+                    if registry.origin_id() == proxy_registry_id && registry.has_instance(idx) {
                         registry.incref(idx);
                         // If the proxy was hashed (possibly outside the VM), the
                         // native slot must also become frozen so VM SetAttr can't
@@ -1077,6 +1511,7 @@ impl Value {
             // Step 1: look up type_id (read-only registry access, no aliasing)
             let p = proxy.borrow();
             let type_name = p.type_name.clone();
+            let old_native_idx = p.native_instance_idx;
             let field_py_values: Vec<pyo3::Py<PyAny>> = p.field_values.iter().map(|v| v.clone_ref(_py)).collect();
             drop(p);
 
@@ -1085,6 +1520,7 @@ impl Value {
                 if ptr.is_null() {
                     return None;
                 }
+                // SAFETY: ptr is non-null (checked above) and names the live thread-local StructRegistry; read-only access, single-threaded under the GIL.
                 let registry = unsafe { &*ptr };
                 registry.find_type_by_name(&type_name).map(|ty| ty.id)
             });
@@ -1095,17 +1531,37 @@ impl Value {
                 for fv in &field_py_values {
                     fields.push(Value::from_pyobject(_py, fv.bind(_py))?);
                 }
-                // Step 3: create instance (mutable registry access, no aliasing)
-                let new_idx = STRUCT_REGISTRY.with(|cell| {
+                // Step 3: create instance (mutable registry access, no aliasing).
+                // The proxy now belongs to the current registry, so retarget its
+                // identity and make that registry reachable by its later Drop.
+                let (new_idx, new_registry_id) = STRUCT_REGISTRY.with(|cell| {
                     let ptr = cell.get();
-                    let registry_mut = unsafe { &mut *(ptr as *mut StructRegistry) };
-                    let idx = registry_mut.create_instance(type_id, fields);
+                    // SAFETY: reaching this branch means type_id was resolved through the same non-null thread-local StructRegistry (checked above), still installed on this thread; single-threaded under the GIL. A shared `&` (never `&mut`) so a reentrant `with_proxy_registry` on the same registry cannot alias an exclusive borrow -- all mutation goes through the interior RefCell.
+                    let registry = unsafe { &*ptr };
+                    let idx = registry.create_instance(type_id, fields);
                     if proxy_frozen {
-                        registry_mut.freeze(idx);
+                        registry.freeze(idx);
                     }
-                    idx
+                    // create_instance gives rc=1 for the returned VM value; the
+                    // retargeted proxy claims its own ref, released by its Drop.
+                    registry.incref(idx);
+                    let rid = registry.id();
+                    register_struct_registry(rid, ptr);
+                    (idx, rid)
                 });
-                proxy.borrow_mut().native_instance_idx = Some(new_idx);
+                // The proxy abandons its old slot for the freshly created one.
+                // Release the reference it still held on its previous registry: a
+                // live sibling (a separate VM, or a nested execution) would
+                // otherwise keep that slot pinned for its whole life. No-op if the
+                // old registry is already gone (table miss) or the slot was freed.
+                if let Some(old_idx) = old_native_idx {
+                    proxy_registry_decref(proxy_registry_id, old_idx);
+                }
+                {
+                    let mut pm = proxy.borrow_mut();
+                    pm.native_instance_idx = Some(new_idx);
+                    pm.native_registry_id = new_registry_id;
+                }
                 return Ok(Value::from_struct_instance(new_idx));
             }
         }
@@ -1143,6 +1599,7 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             f.into_pyobject(py).unwrap().unbind().into_any()
         } else if self.is_bigint() {
+            // SAFETY: is_bigint() was checked above, so the payload is a live Arc<GmpInt> owned by self; the borrow does not outlive it.
             let n = unsafe { self.as_bigint_ref().unwrap() };
             integer_to_pyobject(py, n)
         } else if self.is_struct_instance() {
@@ -1152,10 +1609,12 @@ impl Value {
                 if ptr.is_null() {
                     return py.None();
                 }
+                // SAFETY: ptr is non-null (checked above) and names the live thread-local StructRegistry; single-threaded under the GIL.
                 let registry = unsafe { &*ptr };
                 registry.instance_to_pyobject(py, idx).unwrap_or_else(|_| py.None())
             })
         } else if self.is_complex() {
+            // SAFETY: is_complex() was checked above, so the payload is a live Arc<NativeComplex> owned by self; the borrow does not outlive it.
             let (r, i) = unsafe { self.as_complex_parts().unwrap() };
             PyComplex::from_doubles(py, r, i).into_any().unbind()
         } else if self.is_pyobj() {
@@ -1168,6 +1627,7 @@ impl Value {
                 if ptr.is_null() {
                     return py.None();
                 }
+                // SAFETY: ptr is non-null (checked above) and names the live thread-local FunctionTable; single-threaded under the GIL.
                 let table = unsafe { &*ptr };
                 match table.get(idx) {
                     Some(slot) => {
@@ -1190,13 +1650,17 @@ impl Value {
                 Some(qualified) => {
                     // qualified = "EnumName.variant"
                     if let Some(dot) = qualified.find('.') {
-                        let enum_name = &qualified[..dot];
-                        let variant_name = &qualified[dot + 1..];
-                        let variant = super::enums::CatnipEnumVariant::new_from_parts(
-                            enum_name.to_string(),
-                            variant_name.to_string(),
-                            qualified,
-                        );
+                        let enum_name = qualified[..dot].to_string();
+                        let variant_name = qualified[dot + 1..].to_string();
+                        let variant = match union_nullary_methods_for(&qualified) {
+                            Some(methods) => super::enums::CatnipEnumVariant::new_with_methods(
+                                enum_name,
+                                variant_name,
+                                qualified,
+                                methods,
+                            ),
+                            None => super::enums::CatnipEnumVariant::new_from_parts(enum_name, variant_name, qualified),
+                        };
                         Py::new(py, variant).unwrap().into_any()
                     } else {
                         qualified.into_pyobject(py).unwrap().unbind().into_any()
@@ -1207,17 +1671,27 @@ impl Value {
         }
     }
 
-    /// Decrement refcount if this is a PyObject, BigInt, or Complex.
-    /// Call when value is no longer needed.
+    /// Decrement refcount for a PyObject, BigInt, or Complex value. **NO-OP on a
+    /// TAG_STRUCT** (a struct instance is refcounted in a `StructRegistry`, out
+    /// of reach of a bare `Value`). That silent no-op is a leak footgun: a
+    /// stack / local / field value that COULD be a struct must be released with
+    /// `core::decref_discard(registry, v)` (struct-aware), never this method.
+    /// Call this directly ONLY when the value is provably non-struct (e.g. a
+    /// BigInt arithmetic intermediate) or from a scoped helper that already split
+    /// off the struct case (`decref_discard`, `decref_pyobj`).
     pub fn decref(self) {
         if self.is_pyobj() {
             let handle = (self.0 & PAYLOAD_MASK) as u32;
-            with_object_table(|table| table.release_handle(handle));
+            let released = with_object_table(|table| table.release_handle(handle));
+            // Dropped outside the table lock (see release_handle).
+            drop(released);
         } else if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: the BigInt tag was checked, so the payload is a live Arc<GmpInt>; this decrement balances the incref made when the Value was duplicated.
             unsafe { Arc::decrement_strong_count(ptr) };
         } else if self.is_complex() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const NativeComplex;
+            // SAFETY: the complex tag was checked, so the payload is a live Arc<NativeComplex>; this decrement balances the incref made when the Value was duplicated.
             unsafe { Arc::decrement_strong_count(ptr) };
         }
     }
@@ -1229,8 +1703,25 @@ impl Value {
     pub fn decref_bigint(self) {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: the BigInt tag was checked, so the payload is a live Arc<GmpInt>; this decrement balances a prior incref.
             unsafe { Arc::decrement_strong_count(ptr) };
         }
+    }
+
+    /// Test-only: strong count of the underlying BigInt Arc, read without
+    /// touching it (`from_raw`/`into_raw` round-trip is refcount-neutral).
+    /// Mirrors the catnip_vm probe of the same name.
+    #[cfg(test)]
+    pub fn bigint_strong_count(self) -> usize {
+        debug_assert!(self.is_bigint());
+        let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+        // SAFETY: ptr was produced by Arc::into_raw on the same GmpInt (from_bigint); from_raw
+        // reconstructs it exactly once here, and into_raw below re-leaks it, leaving the strong
+        // count unchanged.
+        let arc = unsafe { Arc::from_raw(ptr) };
+        let count = Arc::strong_count(&arc);
+        let _ = Arc::into_raw(arc);
+        count
     }
 }
 
@@ -1245,6 +1736,7 @@ impl fmt::Debug for Value {
         } else if let Some(fl) = self.as_float() {
             write!(f, "{}", fl)
         } else if self.is_bigint() {
+            // SAFETY: is_bigint() was checked above, so the payload is a live Arc<GmpInt> owned by self; the borrow does not outlive it.
             let n = unsafe { self.as_bigint_ref().unwrap() };
             write!(f, "{}n", n)
         } else if let Some(sym) = self.as_symbol() {
@@ -1276,8 +1768,10 @@ impl PartialEq for Value {
             self.as_float() == other.as_float()
         } else if self.is_bigint() && other.is_bigint() {
             // Compare BigInt by value, not by pointer
+            // SAFETY: both operands' BigInt tags were checked above, so each payload is a live Arc<GmpInt>; the borrows do not outlive them.
             unsafe { self.as_bigint_ref().unwrap() == other.as_bigint_ref().unwrap() }
         } else if self.is_complex() && other.is_complex() {
+            // SAFETY: both operands' complex tags were checked above, so each payload is a live Arc<NativeComplex>; the borrows do not outlive them.
             unsafe {
                 let (ar, ai) = self.as_complex_parts().unwrap();
                 let (br, bi) = other.as_complex_parts().unwrap();
@@ -1292,6 +1786,36 @@ impl PartialEq for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catnip_core::nanbox::{SMALLINT_MAX, SMALLINT_MIN, TAG_BIGINT, TAG_SMALLINT, TAG_SYMBOL};
+
+    // Conformance mirror for the boundary lock (CatnipBoundaryProof): this
+    // crate's scalar tags are exactly {0,1,2,3}, and from_raw_scalar rejects
+    // every index/pointer-backed tag this Value uses.
+    #[test]
+    fn boundary_classification_conforms() {
+        use catnip_core::nanbox::{from_raw_scalar, is_scalar_tag};
+        let tagged = |tag: u64, p: u64| QNAN_BASE | tag | (p & PAYLOAD_MASK);
+
+        // Scalar tags and floats pass.
+        for tag in [TAG_SMALLINT, TAG_BOOL, TAG_NIL, TAG_SYMBOL] {
+            let w = tagged(tag, 1);
+            assert!(is_scalar_tag(tag >> TAG_SHIFT));
+            assert_eq!(from_raw_scalar(w), Some(w));
+        }
+        let fb = 2.5f64.to_bits();
+        assert_eq!(from_raw_scalar(fb), Some(fb));
+
+        // Index (PyObj, Struct, VMFunc) and Pointer (BigInt, Complex) rejected.
+        for tag in [TAG_PYOBJ, TAG_STRUCT, TAG_VMFUNC, TAG_BIGINT, TAG_COMPLEX] {
+            assert!(!is_scalar_tag(tag >> TAG_SHIFT));
+            assert_eq!(
+                from_raw_scalar(tagged(tag, 1)),
+                None,
+                "tag {} must be rejected",
+                tag >> TAG_SHIFT
+            );
+        }
+    }
 
     #[test]
     fn test_smallint() {
@@ -1460,6 +1984,7 @@ mod tests {
             let v = Value::from_pyobject(py, &huge).unwrap();
             assert!(v.is_bigint());
             let expected = (Integer::from(1_u8) << 512_u32) + Integer::from(123_456_789_u64);
+            // SAFETY: v is a live BigInt created just above and not yet decref'd, so its Arc is alive.
             assert_eq!(unsafe { v.as_bigint_ref().unwrap() }, &expected);
             v.decref();
         });
@@ -1473,6 +1998,7 @@ mod tests {
             let py_obj = v.to_pyobject(py);
             let back = Value::from_pyobject(py, py_obj.bind(py)).unwrap();
             assert!(back.is_bigint());
+            // SAFETY: back is a live BigInt created just above and not yet decref'd, so its Arc is alive.
             assert_eq!(unsafe { back.as_bigint_ref().unwrap() }, &n);
             v.decref();
             back.decref();

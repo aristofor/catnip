@@ -201,3 +201,54 @@ o.inner.x
 """
     cat.parse(code)
     assert cat.execute() == 2
+
+
+def test_temp_struct_list_field_direct_access(cat):
+    """Accessing a PyObject (list) field on a temporary struct must not free the
+    field handle when the receiver is dropped (UAF: ObjectTable dead handle)."""
+    code = """
+struct S { items; }
+S([1, 2, 3]).items
+"""
+    cat.parse(code)
+    assert cat.execute() == [1, 2, 3]
+
+
+def test_temp_struct_dict_field_direct_access(cat):
+    """Same UAF with a dict field on a temporary instance."""
+    code = """
+struct S { m; }
+S({1: 2}).m
+"""
+    cat.parse(code)
+    assert cat.execute() == {1: 2}
+
+
+def test_temp_struct_string_field_direct_access(cat):
+    """Same UAF class with a string (also a PyObject handle) field."""
+    code = """
+struct S { name; }
+S("hello").name
+"""
+    cat.parse(code)
+    assert cat.execute() == "hello"
+
+
+def test_temp_struct_list_field_used_after_access(cat):
+    """The returned field must stay alive long enough to be operated on."""
+    code = """
+struct S { items; }
+len(S([1, 2, 3]).items)
+"""
+    cat.parse(code)
+    assert cat.execute() == 3
+
+
+def test_temp_struct_typed_list_field_direct_access(cat):
+    """Same path with a typed composite field (boundary + UAF interaction)."""
+    code = """
+struct S { items: list; }
+S([1, 2, 3]).items
+"""
+    cat.parse(code)
+    assert cat.execute() == [1, 2, 3]

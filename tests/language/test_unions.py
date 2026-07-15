@@ -47,6 +47,13 @@ class TestUnionDeclaration:
         with pytest.raises(Exception):
             cat.execute()
 
+    def test_typeof_nullary_variant_is_union_name(self):
+        # Nullary union variants live in the symbol table, not the enum
+        # registry; typeof must still report the declaring union name.
+        cat = _ast_cat()
+        cat.parse("union Color { red; green; blue }\ntypeof(Color.red)")
+        assert cat.execute() == "Color"
+
 
 class TestUnionConstruction:
     """Constructing values of union variants."""
@@ -359,3 +366,163 @@ s.add(Event.Quit)
 Event.Quit in s
 """)
         assert cat.execute() is True
+
+
+OPTION_WITH_METHODS = """
+union Option {
+    Some(value);
+    None;
+    map(self, f) => {
+        match self {
+            Option.Some{value} => { Option.Some(f(value)) }
+            Option.None => { Option.None }
+        }
+    }
+    unwrap_or(self, default) => {
+        match self {
+            Option.Some{value} => { value }
+            Option.None => { default }
+        }
+    }
+}
+"""
+
+
+class TestUnionMethods:
+    """Methods declared on the union, dispatched on every variant.
+
+    `self` receives whichever variant the method is called on; the body
+    discriminates with `match`. Methods never mutate `self` (unions are
+    immutable) -- they return values.
+    """
+
+    def test_method_on_payload_variant(self):
+        cat = _ast_cat()
+        cat.parse(OPTION_WITH_METHODS + "Option.Some(21).map((x) => { x * 2 }).unwrap_or(0)")
+        assert cat.execute() == 42
+
+    def test_method_on_nullary_variant(self):
+        cat = _ast_cat()
+        cat.parse(OPTION_WITH_METHODS + "Option.None.unwrap_or(-1)")
+        assert cat.execute() == -1
+
+    def test_method_chain_through_nullary(self):
+        cat = _ast_cat()
+        cat.parse(OPTION_WITH_METHODS + "Option.None.map((x) => { x }).unwrap_or(-2)")
+        assert cat.execute() == -2
+
+    def test_method_on_stored_nullary(self):
+        cat = _ast_cat()
+        cat.parse(OPTION_WITH_METHODS + "x = Option.None\nx.unwrap_or(-3)")
+        assert cat.execute() == -3
+
+    def test_unknown_method_raises(self):
+        cat = _ast_cat()
+        cat.parse(OPTION_WITH_METHODS + "Option.Some(1).nope()")
+        with pytest.raises(Exception):
+            cat.execute()
+
+    def test_method_variant_collision_rejected(self):
+        cat = _ast_cat()
+        with pytest.raises(Exception, match="collides"):
+            cat.parse("union U { A; A(self) => { 1 } }\nU")
+            cat.execute()
+
+    def test_init_method_rejected(self):
+        cat = _ast_cat()
+        with pytest.raises(Exception, match="no init"):
+            cat.parse("union V { A; init(self) => { 1 } }\nV")
+            cat.execute()
+
+    def test_duplicate_method_rejected(self):
+        cat = _ast_cat()
+        with pytest.raises(Exception, match="duplicate method"):
+            cat.parse("union W { A; m(self) => { 1 } m(self) => { 2 } }\nW")
+            cat.execute()
+
+
+class TestUnionMethodsInBroadcast:
+    """Union variants must survive the ND-broadcast (`.[]`) boundary.
+
+    A `.[]` lambda runs in a nested VM. That VM inherits the parent's
+    symbol table and enum registry, so a variant keeps its identity:
+    calling a union method inside the lambda works, and a struct holding
+    a variant built inside a `.[]` keeps the live variant in its field.
+    Without that inheritance the variant would be demoted to its tag int.
+    """
+
+    FLAG = (
+        "union Flag {\n"
+        "    on; off\n"
+        '    label(self) => { match self { Flag.on => { "on" } Flag.off => { "off" } } }\n'
+        "}\n"
+    )
+
+    def test_method_call_in_broadcast(self):
+        cat = _ast_cat()
+        cat.parse(self.FLAG + "list(Flag.on, Flag.off).[(v) => { v.label() }]")
+        assert cat.execute() == ["on", "off"]
+
+    def test_variant_field_constructed_in_broadcast(self):
+        cat = _ast_cat()
+        code = (
+            "union Flag { on; off }\n"
+            "struct Box { flag }\n"
+            "boxes = list(Flag.on, Flag.off).[(f) => { Box(f) }]\n"
+            "list(boxes[0].flag == Flag.on, boxes[1].flag == Flag.off)\n"
+        )
+        cat.parse(code)
+        assert cat.execute() == [True, True]
+
+    def test_variant_created_inside_broadcast(self):
+        # The variant is produced *inside* the `.[]` lambda (not passed in),
+        # so its symbol must already live in the shared table -- it is interned
+        # when the union is declared, not lazily on the first crossing.
+        cat = _ast_cat()
+        code = (
+            self.FLAG + "pick = (n) => { match True { _ if n > 0 => { Flag.on } _ => { Flag.off } } }\n"
+            "list(1, -1).[(n) => { pick(n).label() }]\n"
+        )
+        cat.parse(code)
+        assert cat.execute() == ["on", "off"]
+
+
+class TestTypedVariantPayload:
+    """Concrete payload field types are enforced at a variant constructor
+    (`U.A(...)`), exactly like struct fields: a provable mismatch is a static
+    E300, a non-provable one a runtime TypeError. A type-parameter field
+    (`Some(v: T)`) is not fixed at construction and never fires."""
+
+    def test_literal_mismatch_is_static_error(self):
+        cat = _ast_cat()
+        with pytest.raises(Exception, match='E300'):
+            cat.parse("union U { A(x: int) }\nU.A(1.5)\n")
+
+    @pytest.mark.parametrize('vm_mode', ['on', 'off'])
+    def test_runtime_mismatch_rejected(self, vm_mode):
+        # `get()` return type is unknown statically, so this is caught at
+        # construction time on both executors (fused `U.A(...)` call path).
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("get = () => { 1.5 }\nunion U { A(x: int) }\nr = U.A(get())\n")
+        with pytest.raises(Exception, match="field 'x' of 'U.A'"):
+            cat.execute()
+
+    @pytest.mark.parametrize('vm_mode', ['on', 'off'])
+    def test_conforming_construction_passes(self, vm_mode):
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("union U { A(x: int) }\nr = U.A(3)\nr.x\n")
+        assert cat.execute() == 3
+
+    @pytest.mark.parametrize('vm_mode', ['on', 'off'])
+    def test_int_coerced_into_float_field(self, vm_mode):
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("union U { A(x: float) }\nr = U.A(3)\nr.x\n")
+        assert cat.execute() == 3.0
+
+    @pytest.mark.parametrize('vm_mode', ['on', 'off'])
+    def test_generic_type_param_field_not_checked(self, vm_mode):
+        # `Some(v: T)` accepts any argument -- `T` binds at the use-site
+        # boundary, not at construction.
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("union Opt[T] { Some(v: T)\n None }\nr = Opt.Some(1.5)\nr.v\n")
+        assert cat.execute() == 1.5

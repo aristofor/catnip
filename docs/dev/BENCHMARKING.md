@@ -642,60 +642,6 @@ print(f"Résultat: {avg:.2f}ms ± {margin:.2f}ms (IC 95%)")
 
 ## Comparaison de Pipelines
 
-### Scénario : IR passes vs CFG optimizations
-
-Hypothèse : comparer pipeline actuel (5 passes IR) vs futur pipeline (CFG).
-
-```python
-import time
-from catnip import Catnip
-import catnip._rs as rs
-
-code = """
-x = 2 + 3
-if True {
-    y = x * 2
-} else {
-    y = 0
-}
-z = y + 1
-z
-"""
-
-# Pipeline actuel (IR passes)
-cat_ir = Catnip(optimize=3, vm_mode='on')
-start = time.perf_counter()
-result_ir = cat_ir(code)
-time_ir = (time.perf_counter() - start) * 1000
-
-# Pipeline CFG (intégré quand optimize>=3; analyse manuelle via catnip._rs.cfg)
-cat_cfg = Catnip(optimize=0, vm_mode='on')  # Désactiver IR passes
-ast = cat_cfg.parse(code, semantic=False)
-
-start = time.perf_counter()
-
-# Construire CFG
-cfg = rs.cfg.build_cfg_from_ir(ast, 'test')
-
-# Optimisations CFG
-cfg.compute_dominators()
-stats = cfg.optimize()
-dead, merged, empty, branches = stats
-
-# Reconstruction (intégrée via optimize=3; non exposée dans l'API cfg)
-# optimized = cfg.reconstruct()
-# time_cfg = ...
-
-print(f"Pipeline IR:  {time_ir:.2f}ms")
-print(f"IR passes:    5 (BluntCode, ConstFold, StrengthRed, BlockFlat, DeadCode)")
-
-print(f"\nPipeline CFG: [Non intégré]")
-print(f"CFG passes:   4 (dead code, merge blocks, empty blocks, const branches)")
-print(f"CFG stats:    dead={dead}, merged={merged}, empty={empty}, branches={branches}")
-print(f"Blocs:        {cfg.num_blocks}")
-print(f"Edges:        {cfg.num_edges}")
-```
-
 ### Scénario : Impact de chaque passe
 
 Mesurer l'impact individuel de chaque passe :

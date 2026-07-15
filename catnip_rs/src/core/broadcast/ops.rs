@@ -12,6 +12,25 @@ use pyo3::PyTypeInfo;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
+/// Broadcast mutation semantics: a user callback receives a private shallow
+/// copy of a struct element, so field mutations do not escape to the parent
+/// collection (same visibility rule as closure capture-copy). The VM path
+/// already isolates through the broadcast child VM -- a `VMFunction` callback
+/// snapshots the parent registry -- so only non-VMFunction callables (AST
+/// functions, bound methods) receive the copy here. Non-struct elements pass
+/// through untouched.
+fn leaf_arg<'py>(py: Python<'py>, func: &Bound<'py, PyAny>, elem: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    use crate::vm::frame::VMFunction;
+    use crate::vm::structs::CatnipStructProxy;
+    if func.cast::<VMFunction>().is_ok() {
+        return Ok(elem.clone());
+    }
+    if let Ok(proxy) = elem.cast::<CatnipStructProxy>() {
+        return Ok(proxy.borrow().detached_copy(py)?.into_bound(py));
+    }
+    Ok(elem.clone())
+}
+
 /// Check if operand is a boolean mask (list/tuple of booleans).
 ///
 /// Port of: catnip/core/broadcast_ops.pyx::is_boolean_mask()
@@ -169,7 +188,7 @@ pub fn filter_conditional(
         // Filter elements using iteration
         for item in target.try_iter()? {
             let item = item?;
-            let cond_result = condition_func.call1((&item,))?;
+            let cond_result = condition_func.call1((leaf_arg(py, condition_func, &item)?,))?;
             if cond_result.is_truthy()? {
                 result_list.append(&item)?;
             }
@@ -180,7 +199,7 @@ pub fn filter_conditional(
             Ok(iter) => {
                 for item in iter {
                     let item = item?;
-                    let cond_result = condition_func.call1((item.clone(),))?;
+                    let cond_result = condition_func.call1((leaf_arg(py, condition_func, &item)?,))?;
                     if cond_result.is_truthy()? {
                         result_list.append(item)?;
                     }
@@ -188,7 +207,7 @@ pub fn filter_conditional(
             }
             Err(_) => {
                 // Not iterable, treat as scalar
-                let result = condition_func.call1((target,))?;
+                let result = condition_func.call1((leaf_arg(py, condition_func, target)?,))?;
                 if result.is_truthy()? {
                     result_list.append(target)?;
                 }
@@ -304,7 +323,7 @@ pub fn nd_map(py: Python<'_>, data: &Bound<'_, PyAny>, func: &Bound<'_, PyAny>) 
             let result_list = PyList::empty(py);
             for item in iter {
                 let item = item?;
-                result_list.append(func.call1((&item,))?)?;
+                result_list.append(func.call1((leaf_arg(py, func, &item)?,))?)?;
             }
             if type_str == "tuple" {
                 Ok(PyTuple::new(py, &result_list)?.into_any().unbind())
@@ -314,7 +333,7 @@ pub fn nd_map(py: Python<'_>, data: &Bound<'_, PyAny>, func: &Bound<'_, PyAny>) 
         }
         Err(_) => {
             // Non-iterable: apply directly
-            func.call1((data,)).map(|r| r.unbind())
+            func.call1((leaf_arg(py, func, data)?,)).map(|r| r.unbind())
         }
     }
 }
@@ -383,7 +402,7 @@ pub fn broadcast_map(py: Python<'_>, target: &Bound<'_, PyAny>, func: &Bound<'_,
         }
         Err(_) => {
             // Not iterable, non-scalar (struct, etc.): treat as leaf
-            func.call1((target,)).map(|r| r.into())
+            func.call1((leaf_arg(py, func, target)?,)).map(|r| r.into())
         }
     }
 }

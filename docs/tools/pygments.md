@@ -607,7 +607,7 @@ Voir : [CodeMirror Language Modes](https://codemirror.net/docs/ref/#language)
 ### Script complet avec coloration
 
 ```python
-# Fibonacci avec memoization
+# Fibonacci avec mémoïsation
 fib_cache = dict()
 
 fib = (n) => {
@@ -639,7 +639,7 @@ for i in range(len(numbers)) {
 
 Tokens reconnus :
 
-- **Comments** : `# Fibonacci avec memoization`, `# Calcul`, `# Affichage`
+- **Comments** : `# Fibonacci avec mémoïsation`, `# Calcul`, `# Affichage`
 - **Identifiers** : `fib_cache`, `fib`, `n`, `result`, `numbers`, `results`, `i`, `f`
 - **Keywords** : `if`, `else`, `for`, `in`, `return`
 - **Types** : `dict`, `list`

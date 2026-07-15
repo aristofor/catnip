@@ -3,12 +3,14 @@
 //!
 //! Mirrors catnip/vm/frame.pyx structure for compatibility.
 
-use super::opcode::{Instruction, VMOpCode};
+use super::opcode::{Instruction, ParamCheck, VMOpCode};
 use super::pattern::VMPattern;
-use super::structs::{StructRegistry, cascade_decref_fields};
+use super::structs::StructRegistry;
 use super::value::Value;
 use crate::constants::*;
 use indexmap::IndexMap;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use std::cell::RefCell;
@@ -50,9 +52,15 @@ pub struct CodeObject {
     pub line_table: Vec<u32>,
     /// Pre-compiled VM-native patterns for match expressions
     pub patterns: Vec<VMPattern>,
+    /// Pre-classified type-union member specs, indexed by the `CheckUnion` arg.
+    pub union_checks: Vec<Box<[ParamCheck]>>,
+    /// Pre-classified composite specs, indexed by the `CheckComposite` arg.
+    pub composite_checks: Vec<ParamCheck>,
+    /// Pre-classified generic-nominal specs, indexed by the `CheckGeneric` arg.
+    pub generic_checks: Vec<ParamCheck>,
     /// Cached bytecode hash for JIT trace cache (computed once on demand)
     pub(crate) bytecode_hash: std::sync::OnceLock<u64>,
-    /// Bincode-encoded IR body for ND worker IPC transport.
+    /// Postcard-encoded IR body for ND worker IPC transport.
     /// Populated during compile_lambda/compile_fn_def; None for top-level code.
     pub encoded_ir: Option<Arc<Vec<u8>>>,
 }
@@ -76,6 +84,9 @@ impl CodeObject {
             complexity: 0,
             line_table: Vec::new(),
             patterns: Vec::new(),
+            union_checks: Vec::new(),
+            composite_checks: Vec::new(),
+            generic_checks: Vec::new(),
             bytecode_hash: std::sync::OnceLock::new(),
             encoded_ir: None,
         }
@@ -111,30 +122,26 @@ impl std::fmt::Debug for CodeObject {
     }
 }
 
-impl CodeObject {
-    /// Clone with Python GIL for PyObject fields.
-    pub fn clone_with_py(&self, _py: Python<'_>) -> Self {
-        Self {
-            instructions: self.instructions.clone(),
-            constants: self.constants.clone(),
-            names: self.names.clone(),
-            nlocals: self.nlocals,
-            varnames: self.varnames.clone(),
-            slotmap: self.slotmap.clone(),
-            nargs: self.nargs,
-            defaults: self.defaults.clone(),
-            name: self.name.clone(),
-            freevars: self.freevars.clone(),
-            vararg_idx: self.vararg_idx,
-            is_pure: self.is_pure,
-            complexity: self.complexity,
-            line_table: self.line_table.clone(),
-            patterns: self.patterns.clone(),
-            bytecode_hash: std::sync::OnceLock::new(),
-            encoded_ir: self.encoded_ir.clone(),
+/// The pools own one reference per slot: producers insert freshly-built
+/// `Value`s, consumers (`LoadConst`, default binding, the match engine)
+/// borrow or incref, never decrement. Releasing here is the counterpart.
+/// Struct/vmfunc tags never reach a pool (the compiler only emits literals);
+/// `decref` ignores them, same as before this Drop existed.
+impl Drop for CodeObject {
+    fn drop(&mut self) {
+        for v in self.constants.drain(..) {
+            v.decref();
+        }
+        for v in self.defaults.drain(..) {
+            v.decref();
+        }
+        for p in self.patterns.drain(..) {
+            p.decref_values();
         }
     }
+}
 
+impl CodeObject {
     /// Generate unique function ID for JIT profiling.
     ///
     /// Uses fast hash of bytecode + function name for stable identification.
@@ -505,6 +512,9 @@ impl PyCodeObject {
             complexity: init.complexity,
             line_table: Vec::new(),
             patterns: init.patterns,
+            union_checks: Vec::new(),
+            composite_checks: Vec::new(),
+            generic_checks: Vec::new(),
             bytecode_hash: std::sync::OnceLock::new(),
             encoded_ir: None,
         })
@@ -544,6 +554,23 @@ struct ClosureScopeInner {
     letrec_names: RefCell<std::collections::HashSet<String>>,
 }
 
+/// The captured map OWNS one ref per entry (MakeFunction clones at capture,
+/// set/set_with_py release the overwritten one): release them when the last
+/// scope handle dies. `Value::decref` covers pyobj/bigint/complex without a
+/// registry; a captured struct instance has no registry access here and its
+/// registry ref is deliberately left (narrow, traced in
+/// wip/GLOBALS_OWNERSHIP.md -- draining it at Drop through the thread-local
+/// registry pointer would be unsound at teardown).
+impl Drop for ClosureScopeInner {
+    fn drop(&mut self) {
+        for (_, v) in self.captured.borrow_mut().drain(..) {
+            if v.is_pyobj() || v.is_bigint() || v.is_complex() {
+                v.decref();
+            }
+        }
+    }
+}
+
 /// Pure-Rust closure scope eliminating Python boundary crossings for
 /// captured variable access. Uses `Rc` because sharing is single-threaded
 /// only, and `RefCell` for interior mutability.
@@ -553,6 +580,56 @@ pub struct NativeClosureScope {
 }
 
 impl NativeClosureScope {
+    /// Report this scope's Python references to the cyclic GC: the captured
+    /// pyobj handles and a PyGlobals parent terminal. Shared Rc scopes are
+    /// reported once per holder (the GC tolerates over-reporting; the
+    /// under-reporting was the invisible-cycle leak).
+    pub(crate) fn gc_traverse(&self, visit: &pyo3::gc::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Ok(captured) = self.inner.captured.try_borrow() {
+            super::value::visit_obj_handles(captured.values().copied(), visit)?;
+        }
+        if let ClosureParent::PyGlobals(ref g) = self.inner.parent {
+            visit.call(g)?;
+        }
+        Ok(())
+    }
+
+    /// Release the captured entries (same coverage as the Drop: pyobj/bigint/
+    /// complex, no registry here). Idempotent -- the Drop drains whatever is
+    /// left of an already-drained map.
+    pub(crate) fn gc_clear(&self) {
+        if let Ok(mut captured) = self.inner.captured.try_borrow_mut() {
+            for (_, v) in captured.drain(..) {
+                if v.is_pyobj() || v.is_bigint() || v.is_complex() {
+                    v.decref();
+                }
+            }
+        }
+    }
+
+    /// Release the struct-instance captures against `registry`. The `Drop`
+    /// covers pyobj/bigint/complex but deliberately leaves struct captures (no
+    /// registry access there). A caller that owns the registry (the ND process
+    /// worker, which thaws a fresh scope per task) uses this to reclaim them.
+    /// Collects out of the borrow first (a cascade release can run `__del__`
+    /// that re-enters this scope) and NILs each slot so a second call and the
+    /// `Drop` are no-ops.
+    pub(crate) fn release_captured_structs(&self, registry: &StructRegistry) {
+        let mut structs: Vec<Value> = Vec::new();
+        {
+            let mut captured = self.inner.captured.borrow_mut();
+            for (_, v) in captured.iter_mut() {
+                if v.is_struct_instance() {
+                    structs.push(*v);
+                    *v = Value::NIL;
+                }
+            }
+        }
+        for v in structs {
+            super::core::decref_discard(registry, v);
+        }
+    }
+
     pub(crate) fn new(captured: IndexMap<String, Value>, parent: ClosureParent) -> Self {
         Self {
             inner: Rc::new(ClosureScopeInner {
@@ -618,77 +695,106 @@ impl NativeClosureScope {
         }
     }
 
-    /// Resolve only from captured vars (no parent chain). O(1) HashMap lookup.
-    #[inline]
-    pub fn resolve_captured_only(&self, name: &str) -> Option<Value> {
+    /// Resolve from the captured vars of this scope and every enclosing closure,
+    /// stopping before the globals terminal. This is the lexical (enclosing)
+    /// portion of LEGB: an enclosing closure's binding must shadow a global
+    /// homonym, so it has to be consulted before VM/host globals. A doubly
+    /// nested closure that does not itself capture a name reaches the enclosing
+    /// binding through its parent chain here (no GIL, captured maps only).
+    pub fn resolve_captured_chain(&self, name: &str) -> Option<Value> {
         let captured = self.inner.captured.borrow();
         if let Some(&val) = captured.get(name) {
             if !val.is_nil() {
+                // Voie A: return a fully owned value (pyobj handle, bigint Arc,
+                // struct registry slot) so every resolver path matches the
+                // from_pyobject paths; the captured map keeps its own ref and
+                // the caller must not add another.
+                val.clone_refcount();
                 return Some(val);
             }
         }
-        None
+        drop(captured);
+        match &self.inner.parent {
+            ClosureParent::Native(parent) => parent.resolve_captured_chain(name),
+            _ => None,
+        }
     }
 
     /// Resolve with PyGlobals fallback (needs GIL).
+    ///
+    /// Ownership: every return path hands back a fully owned value (pyobj
+    /// handle, bigint Arc, struct registry slot). Callers push or consume it
+    /// without adding a reference of their own.
     pub fn resolve_with_py(&self, py: Python<'_>, name: &str) -> Option<Value> {
         let captured = self.inner.captured.borrow();
         if let Some(&val) = captured.get(name) {
             if !val.is_nil() {
+                val.clone_refcount();
                 return Some(val);
             }
         }
         drop(captured);
         match &self.inner.parent {
             ClosureParent::Native(parent) => parent.resolve_with_py(py, name),
+            // PyGlobals re-boxes via from_pyobject -> already owned.
             ClosureParent::PyGlobals(globals) => globals
                 .bind(py)
                 .get_item(name)
                 .ok()
                 .flatten()
                 .and_then(|v| Value::from_pyobject(py, &v).ok()),
-            ClosureParent::Globals(globals) => globals.borrow().get(name).copied(),
+            ClosureParent::Globals(globals) => globals.borrow().get(name).copied().inspect(|v| {
+                v.clone_refcount();
+            }),
             ClosureParent::None => None,
         }
     }
 
-    /// Pure Rust set. Returns `false` when the name lives in PyGlobals.
-    pub fn set(&self, name: &str, value: Value) -> bool {
-        let mut captured = self.inner.captured.borrow_mut();
-        if captured.contains_key(name) {
-            captured.insert(name.to_string(), value);
-            return true;
+    /// Existence check with PyGlobals fallback (needs GIL). Same walk as
+    /// [`resolve_with_py`] but builds no value: no refcount side effect, so
+    /// callers that only need to know whether a name is bound (StoreScope)
+    /// don't have to release an owned result they never use.
+    pub fn contains_with_py(&self, py: Python<'_>, name: &str) -> bool {
+        let captured = self.inner.captured.borrow();
+        if let Some(&val) = captured.get(name) {
+            if !val.is_nil() {
+                return true;
+            }
         }
         drop(captured);
         match &self.inner.parent {
-            ClosureParent::Native(parent) => parent.set(name, value),
-            ClosureParent::Globals(globals) => {
-                let mut g = globals.borrow_mut();
-                if g.contains_key(name) {
-                    g.insert(name.to_string(), value);
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
+            ClosureParent::Native(parent) => parent.contains_with_py(py, name),
+            ClosureParent::PyGlobals(globals) => matches!(globals.bind(py).get_item(name), Ok(Some(_))),
+            // No nil filter: mirrors resolve_with_py, which returns Some(nil) here.
+            ClosureParent::Globals(globals) => globals.borrow().get(name).is_some(),
+            ClosureParent::None => false,
         }
     }
 
     /// Set with PyGlobals fallback (needs GIL).
-    pub fn set_with_py(&self, py: Python<'_>, name: &str, value: Value) -> bool {
+    pub fn set_with_py(&self, py: Python<'_>, name: &str, value: Value, registry: &StructRegistry) -> bool {
         let mut captured = self.inner.captured.borrow_mut();
         if captured.contains_key(name) {
-            captured.insert(name.to_string(), value);
+            // Owned-in on success (wip/GLOBALS_OWNERSHIP.md): the map takes
+            // the incoming ref, the overwritten entry releases hers.
+            if let Some(old) = captured.insert(name.to_string(), value) {
+                old.decref();
+            }
             return true;
         }
         drop(captured);
         match &self.inner.parent {
-            ClosureParent::Native(parent) => parent.set_with_py(py, name, value),
+            ClosureParent::Native(parent) => parent.set_with_py(py, name, value, registry),
             ClosureParent::PyGlobals(globals) => {
                 if let Ok(Some(_)) = globals.bind(py).get_item(name) {
                     let py_value = value.to_pyobject(py);
-                    globals.bind(py).set_item(name, py_value).is_ok()
+                    let stored = globals.bind(py).set_item(name, py_value).is_ok();
+                    if stored {
+                        // The dict holds a CPython ref, not the handle: the
+                        // incoming ref is consumed here (owned-in on success).
+                        value.decref();
+                    }
+                    stored
                 } else {
                     false
                 }
@@ -696,7 +802,12 @@ impl NativeClosureScope {
             ClosureParent::Globals(globals) => {
                 let mut g = globals.borrow_mut();
                 if g.contains_key(name) {
-                    g.insert(name.to_string(), value);
+                    if let Some(old) = g.insert(name.to_string(), value) {
+                        // Registry-aware: the host globals map owns struct counts
+                        // and bigint refs; a plain decref is a struct no-op and
+                        // skips decref_bigint (same bug store_global documents).
+                        decref_frame_value(old, registry);
+                    }
                     true
                 } else {
                     false
@@ -717,6 +828,23 @@ impl NativeClosureScope {
                         *value = Value::from_symbol(parent_sym);
                     }
                 }
+            }
+        }
+    }
+
+    /// Shift VMFunc Values in this scope's captured vars by `func_base` (for
+    /// cross-VM function transplant). Captures hold letrec self/sibling
+    /// references as raw child func_table indices; after the child table is
+    /// appended to the parent at offset `func_base`, those indices move too.
+    /// Does NOT recurse into parents -- the parent Globals Rc is remapped separately.
+    pub fn remap_vmfuncs(&self, func_base: u32) {
+        if func_base == 0 {
+            return;
+        }
+        let mut captured = self.inner.captured.borrow_mut();
+        for (_, value) in captured.iter_mut() {
+            if value.is_vmfunc() && !value.is_invalid() {
+                *value = Value::from_vmfunc(value.as_vmfunc_idx() + func_base);
             }
         }
     }
@@ -746,6 +874,8 @@ impl NativeClosureScope {
 // The Rc is for shared ownership within the same thread (closures sharing captures).
 // Send+Sync needed because Frame lives inside #[pyclass] PyRustVM (PyO3 requirement).
 unsafe impl Send for NativeClosureScope {}
+// SAFETY: same invariant as the Send impl above -- the Rc/RefCell never crosses
+// threads (single VM thread); the bound exists only for the PyO3 #[pyclass] requirement.
 unsafe impl Sync for NativeClosureScope {}
 
 impl std::fmt::Debug for NativeClosureScope {
@@ -905,7 +1035,8 @@ impl Frame {
         }
     }
 
-    /// Reset frame for reuse.
+    /// Reset frame for reuse. The sole caller (`FramePool::free`) has already
+    /// released stack/locals/block_stack refs; this only clears containers.
     pub fn reset(&mut self) {
         self.stack.clear();
         self.locals.clear();
@@ -974,7 +1105,14 @@ impl Frame {
     }
 
     /// Bind function arguments to local slots.
-    pub fn bind_args(&mut self, py: Python<'_>, args: &[Value], kwargs: Option<&Bound<'_, PyDict>>) {
+    pub fn bind_args(
+        &mut self,
+        py: Python<'_>,
+        registry: &super::structs::StructRegistry,
+        args: &[Value],
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) {
+        use super::core::decref_discard;
         let code = match &self.code {
             Some(c) => c,
             None => return,
@@ -993,6 +1131,11 @@ impl Frame {
             // Collect excess args into vararg slot
             if nargs_given > vararg_idx {
                 let excess: Vec<Py<PyAny>> = args[vararg_idx..].iter().map(|v| v.to_pyobject(py)).collect();
+                // Voie A: the caller moves every arg into this frame; the excess
+                // ones live on only through the PyList (independent refs).
+                for &a in &args[vararg_idx..] {
+                    decref_discard(registry, a);
+                }
                 let list = PyList::new(py, excess).unwrap();
                 self.locals[vararg_idx] = Value::from_pyobject(py, &list.into_any()).unwrap_or(Value::NIL);
             } else {
@@ -1005,6 +1148,9 @@ impl Frame {
                 for (key, value) in kw.iter() {
                     if let Ok(k) = key.extract::<String>() {
                         if let Some(&slot) = code.slotmap.get(&k) {
+                            // A kwarg naming an already-bound slot displaces an
+                            // owned value (positional arg); release it.
+                            decref_discard(registry, self.locals[slot]);
                             self.locals[slot] = Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
                         }
                     }
@@ -1031,12 +1177,19 @@ impl Frame {
         } else {
             // No variadic parameter
             self.locals[..nargs_given.min(nparams)].copy_from_slice(&args[..nargs_given.min(nparams)]);
+            // Voie A: excess args beyond the parameter count are accepted and
+            // discarded -- release their moved refs.
+            for &a in &args[nargs_given.min(nparams)..] {
+                decref_discard(registry, a);
+            }
 
             // Bind kwargs
             if let Some(kw) = kwargs {
                 for (key, value) in kw.iter() {
                     if let Ok(k) = key.extract::<String>() {
                         if let Some(&slot) = code.slotmap.get(&k) {
+                            // Displaced owned value (positional arg) on overwrite.
+                            decref_discard(registry, self.locals[slot]);
                             self.locals[slot] = Value::from_pyobject(py, &value).unwrap_or(Value::NIL);
                         }
                     }
@@ -1066,20 +1219,31 @@ impl Frame {
     // --- Block stack operations ---
 
     pub fn push_block(&mut self, slot_start: usize) {
-        let saved: Vec<Value> = self.locals[slot_start..].to_vec();
+        let mut saved: Vec<Value> = self.locals[slot_start..].to_vec();
+        for val in &mut saved {
+            val.clone_refcount();
+        }
         self.block_stack.push((slot_start, saved));
     }
 
-    pub fn pop_block(&mut self) {
+    /// Restore the pre-block slot values, NILing block-local slots.
+    ///
+    /// Each snapshot entry holds an independent refcount (taken at push_block),
+    /// so every overwritten current local and every NILed block-local slot is
+    /// decref'd before the snapshot value is transferred.
+    pub fn pop_block(&mut self, registry: &StructRegistry) {
         if let Some((slot_start, saved)) = self.block_stack.pop() {
             let saved_len = saved.len();
             for (i, val) in saved.into_iter().enumerate() {
                 if slot_start + i < self.locals.len() {
+                    let old = self.locals[slot_start + i];
+                    decref_frame_value(old, registry);
                     self.locals[slot_start + i] = val;
                 }
             }
-            // Reset remaining slots to NIL
             for i in (slot_start + saved_len)..self.locals.len() {
+                let old = self.locals[i];
+                decref_frame_value(old, registry);
                 self.locals[i] = Value::NIL;
             }
         }
@@ -1141,8 +1305,24 @@ impl FramePool {
         }
     }
 
-    pub fn free(&mut self, mut frame: Frame, registry: &mut StructRegistry) {
+    pub fn free(&mut self, mut frame: Frame, registry: &StructRegistry) {
         decref_frame_values(&frame, registry);
+        // block_stack entries hold independent refcounts (taken at push_block).
+        // Release them unconditionally here, pooled or not: a frame freed with
+        // a non-empty block_stack would otherwise leak its snapshot refs.
+        for (_slot_start, saved) in frame.block_stack.drain(..) {
+            for val in saved {
+                decref_frame_value(val, registry);
+            }
+        }
+        // Same for pending match bindings: they own independent refs (BindMatch
+        // clones into slots), released here when the frame dies with an arm's
+        // bindings still live.
+        if let Some(bindings) = frame.match_bindings.take() {
+            for (_slot, val) in bindings {
+                decref_frame_value(val, registry);
+            }
+        }
         if self.frames.len() < self.max_size {
             frame.reset();
             self.frames.push(frame);
@@ -1150,31 +1330,23 @@ impl FramePool {
     }
 }
 
-/// Decref all heap values (BigInt, Complex, Struct) in a frame's stack and locals.
-pub fn decref_frame_values(frame: &Frame, registry: &mut StructRegistry) {
+/// Release one owned heap value (PyObject handle, BigInt, Complex, Struct).
+/// Thin alias over `core::decref_discard`: frame teardown and opcode discards
+/// share one release implementation so the ownership contract cannot drift.
+#[inline]
+pub fn decref_frame_value(val: Value, registry: &StructRegistry) {
+    super::core::decref_discard(registry, val);
+}
+
+/// Decref all heap values (PyObject, BigInt, Complex, Struct) in a frame's
+/// stack and locals. block_stack entries hold independent refcounts (taken at
+/// push_block) and are handled separately by reset/pop_block/truncate.
+pub fn decref_frame_values(frame: &Frame, registry: &StructRegistry) {
     for &val in &frame.stack {
-        if val.is_bigint() {
-            val.decref_bigint();
-        } else if val.is_complex() {
-            val.decref();
-        } else if val.is_struct_instance() {
-            let idx = val.as_struct_instance_idx().unwrap();
-            if let Some(fields) = registry.decref(idx) {
-                cascade_decref_fields(registry, fields);
-            }
-        }
+        decref_frame_value(val, registry);
     }
     for &val in &frame.locals {
-        if val.is_bigint() {
-            val.decref_bigint();
-        } else if val.is_complex() {
-            val.decref();
-        } else if val.is_struct_instance() {
-            let idx = val.as_struct_instance_idx().unwrap();
-            if let Some(fields) = registry.decref(idx) {
-                cascade_decref_fields(registry, fields);
-            }
-        }
+        decref_frame_value(val, registry);
     }
 }
 
@@ -1191,6 +1363,26 @@ impl Default for FramePool {
 ///
 /// Used by `VMFunction.__call__` when invoked from external code (e.g.
 /// pandas.apply) where no parent VM globals are available.
+/// Drain an EPHEMERAL `VMFunction::__call__` host, struct-aware when the
+/// parent registry is reachable: `build_globals_from_context` re-interns
+/// context proxies with an incref on their PARENT slot (the thread-local
+/// still points at the parent when the map is built), so the plain
+/// struct-blind drain leaked one registry count per re-entrant call. With no
+/// parent registry, `from_pyobject` cannot restore TAG_STRUCT (the proxy
+/// falls back to a pyobj), so the plain drain is complete.
+fn drain_ephemeral_host(host: &super::host::VMHost, saved_registry: *const super::structs::StructRegistry) {
+    if saved_registry.is_null() {
+        host.drain_globals(None);
+    } else {
+        // SAFETY: saved_registry points to the parent VM's StructRegistry,
+        // live on the stack for this synchronous, GIL-held nested call. A shared
+        // `&` (never `&mut`): mutation goes through the interior RefCell, so this
+        // never aliases the thread-local raw pointer to the same registry.
+        let parent = unsafe { &*saved_registry };
+        host.drain_globals(Some(parent));
+    }
+}
+
 fn build_globals_from_context(py: Python<'_>, ctx: &Py<PyAny>) -> PyResult<Globals> {
     let globals: Globals = Rc::new(RefCell::new(IndexMap::new()));
     let ctx_globals = ctx.bind(py).getattr("globals")?;
@@ -1285,6 +1477,43 @@ impl VMFunction {
         })
     }
 
+    /// Participate in CPython's cyclic GC. A `VMFunction` stored in
+    /// `ctx.globals` holds the context back via its `context` field, closing a
+    /// `ctx.globals -> VMFunction -> ctx` cycle the collector cannot see (a Rust
+    /// pyclass is opaque to it). Without this, every session that defines a
+    /// function leaks its context.
+    ///
+    /// The captured handles of `native_closure` ARE reported (dedup by
+    /// slot): a letrec self-reference injects the function's own pyobj
+    /// handle into its captured map (handle -> VMFunction -> Rc -> captured
+    /// -> handle), a cycle the GC cannot see without this leg -- it pinned
+    /// the whole capture set for the life of the process.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.vm_code)?;
+        if let Some(ref scope) = self.py_closure_scope {
+            visit.call(scope)?;
+        }
+        if let Some(ref ctx) = self.context {
+            visit.call(ctx)?;
+        }
+        if let Some(ref closure) = self.native_closure {
+            closure.gc_traverse(&visit)?;
+        }
+        Ok(())
+    }
+
+    /// Break the `ctx.globals <-> VMFunction` and letrec self-reference
+    /// cycles by dropping the references reported by `__traverse__`. Only
+    /// called by the GC on an otherwise-unreachable function; the closure
+    /// drain is idempotent with the Rc Drop (which drains what is left).
+    fn __clear__(&mut self) {
+        self.context = None;
+        self.py_closure_scope = None;
+        if let Some(ref closure) = self.native_closure {
+            closure.gc_clear();
+        }
+    }
+
     /// Lazy getter: converts native closure to Python ClosureScope on demand.
     #[getter]
     fn closure_scope(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
@@ -1358,13 +1587,22 @@ impl VMFunction {
 
             let code = std::sync::Arc::clone(&self.vm_code.borrow(py).inner);
 
-            // Resolve globals: parent VM > Python context > fresh builtins
+            // Resolve globals: parent VM > Python context > fresh builtins.
+            // A host built on a FRESH map (context snapshot or new builtins)
+            // owns its handles and dies with this call: drain it on the way
+            // out, or every re-entrant callback leaks its whole globals map
+            // (no GC hook ever fires for it). The parent-globals case shares
+            // the parent's Rc and must NOT be drained here.
+            let ephemeral_host;
             let mut host = if let Some(globals) = parent_globals {
+                ephemeral_host = false;
                 VMHost::with_globals(py, globals)
             } else if let Some(ctx) = &self.context {
+                ephemeral_host = true;
                 let globals = build_globals_from_context(py, ctx)?;
                 VMHost::with_globals(py, globals)
             } else {
+                ephemeral_host = true;
                 VMHost::new(py)
             }
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?;
@@ -1377,11 +1615,16 @@ impl VMFunction {
             // Save parent's thread-local pointers (nested call must not clobber them)
             let saved_registry = super::value::save_struct_registry();
             let saved_func_table = super::value::save_func_table();
+            let saved_symbol_table = super::value::save_symbol_table();
+            let saved_enum_registry = super::value::save_enum_registry();
 
             let mut vm = super::core::VM::new();
 
             // Copy parent's func_table entries so VmFunc indices in closures remain valid
             if !saved_func_table.is_null() {
+                // SAFETY: saved_func_table is the thread-local pointer captured above and
+                // checked non-null; it points to the parent VM's FunctionTable, which stays
+                // live on the stack for this synchronous, GIL-held nested call.
                 let parent_table = unsafe { &*saved_func_table };
                 for slot in &parent_table.slots {
                     vm.func_table.insert(FuncSlot {
@@ -1395,8 +1638,29 @@ impl VMFunction {
 
             // Copy parent's struct types and instances so struct indices remain valid
             if !saved_registry.is_null() {
+                // SAFETY: saved_registry is the thread-local pointer captured above and
+                // checked non-null; it points to the parent VM's StructRegistry, live on
+                // the stack for the duration of this synchronous, GIL-held nested call.
                 let parent_registry = unsafe { &*saved_registry };
                 vm.struct_registry.clone_from_parent(py, parent_registry);
+            }
+
+            // Inherit parent's symbol table + enum registry so enum/union variants
+            // keep their identity inside the callback. execute_with_host points the
+            // thread-local at this VM's own tables; without the copy they would be
+            // empty and `resolve_symbol` would fail, demoting variants to raw ids
+            // (str gives the index, method dispatch and match break).
+            if !saved_symbol_table.is_null() {
+                // SAFETY: saved_symbol_table is the thread-local pointer captured above and
+                // checked non-null; it points to the parent VM's live SymbolTable, only read
+                // (cloned) here under the GIL.
+                vm.symbol_table = unsafe { (*saved_symbol_table).clone() };
+            }
+            if !saved_enum_registry.is_null() {
+                // SAFETY: saved_enum_registry is the thread-local pointer captured above and
+                // checked non-null; it points to the parent VM's live EnumRegistry, only read
+                // (cloned) here under the GIL.
+                vm.enum_registry = unsafe { (*saved_enum_registry).clone() };
             }
             super::value::set_struct_registry(&vm.struct_registry as *const _);
             // Set func_table AFTER copying parent entries so new VmFunc indices
@@ -1410,10 +1674,13 @@ impl VMFunction {
             }
 
             let closure = self.native_closure.clone();
-            let result = vm
+            let mut result = vm
                 .execute_with_host(py, code, &arg_values, &host, closure)
                 .map_err(|e| {
                     // Restore parent pointers on error
+                    if ephemeral_host {
+                        drain_ephemeral_host(&host, saved_registry);
+                    }
                     super::value::restore_struct_registry(saved_registry);
                     super::value::restore_func_table(saved_func_table);
                     // During ND abort, skip Debug formatting to avoid quadratic
@@ -1427,16 +1694,97 @@ impl VMFunction {
 
             // Transplant new struct instances from child VM to parent registry
             // so they survive after the child is dropped.
-            if !saved_registry.is_null() {
-                let parent_registry = unsafe { &mut *(saved_registry as *mut super::structs::StructRegistry) };
-                vm.struct_registry.transplant_to_parent(parent_registry);
+            let transplanted: Vec<u32> = if !saved_registry.is_null() {
+                // SAFETY: saved_registry was checked non-null; it points to the parent VM's
+                // StructRegistry, still live on the stack. Shared `&` (never `&mut`): the
+                // transplant mutates the parent through its interior RefCell, so it cannot
+                // alias the thread-local raw pointer to the same registry, GIL-held throughout.
+                let parent_registry = unsafe { &*saved_registry };
+                vm.struct_registry.transplant_to_parent(py, parent_registry)
+            } else {
+                Vec::new()
+            };
+
+            // Drain BEFORE restoring the thread-locals: the shared borrow taken
+            // on the parent registry stays on a different registry than the
+            // active TL (still the child's), keeping the two access paths apart.
+            if ephemeral_host {
+                drain_ephemeral_host(&host, saved_registry);
             }
 
             // Restore parent pointers
             super::value::restore_struct_registry(saved_registry);
             super::value::restore_func_table(saved_func_table);
 
-            Ok(result.to_pyobject(py))
+            // Broadcast mutation semantics: a pass-through result struct is the
+            // child's snapshot (possibly mutated by the callback), whose slot
+            // collides with the parent's original and is never transplanted.
+            // Materialize the child's field state as a NEW parent instance --
+            // shallow, mirroring the AST-side element copy -- so the returned
+            // element is the callback's private copy, not the untouched parent
+            // original.
+            let mut materialized_idx: Option<u32> = None;
+            if !saved_registry.is_null() {
+                if let Some(idx) = result.as_struct_instance_idx() {
+                    if !transplanted.contains(&idx) {
+                        // Snapshot type + field bits under the borrow (Value is Copy,
+                        // so the clone is refcount-neutral); take the field increfs
+                        // AFTER the borrow drops -- clone_refcount on a struct field
+                        // re-enters the registry (incref borrows), which must not nest
+                        // inside with_instance.
+                        let snapshot = vm
+                            .struct_registry
+                            .with_instance(idx, |inst| (inst.type_id, inst.fields.clone()));
+                        if let Some((type_id, fields)) = snapshot {
+                            for f in &fields {
+                                f.clone_refcount();
+                            }
+                            // SAFETY: saved_registry was checked non-null and points to the
+                            // parent VM's StructRegistry, live on the stack. Shared `&` (never
+                            // `&mut`): create_instance mutates through the interior RefCell, so
+                            // it cannot alias the thread-local raw pointer to the same registry.
+                            let parent = unsafe { &*saved_registry };
+                            let new_idx = parent.create_instance(type_id, fields);
+                            // The child slot keeps its own counts (released with the
+                            // child); the new instance owns the cloned field refs, and
+                            // its create rc is transferred to the proxy below (struct
+                            // decref on the old result Value is a deliberate no-op).
+                            materialized_idx = Some(new_idx);
+                            result = super::value::Value::from_struct_instance(new_idx);
+                        }
+                    }
+                }
+            }
+
+            let py_result = result.to_pyobject(py);
+            // Transfer the result struct's VM-internal count to its proxy: a
+            // transplanted slot carries the child's copied refcount, and a
+            // materialized private copy carries its create rc -- in both cases
+            // the proxy above took its own ref, so the VM-side count must be
+            // released here or it lingers as a phantom no proxy decref ever
+            // clears (CatnipOwnershipProof::copy_leaks; the materialized case
+            // leaked one instance per re-entrant call, found by the
+            // intra-session ledger on a pass-through broadcast).
+            if !saved_registry.is_null() {
+                if let Some(idx) = result.as_struct_instance_idx() {
+                    if transplanted.contains(&idx) || materialized_idx == Some(idx) {
+                        // SAFETY: saved_registry was checked non-null and points to the parent
+                        // VM's StructRegistry, live on the stack. Shared `&` (never `&mut`): the
+                        // decref cascades through the interior RefCell, so it cannot alias the
+                        // thread-local raw pointer to the same registry, GIL-held throughout.
+                        let parent = unsafe { &*saved_registry };
+                        super::structs::decref_slot(parent, idx);
+                    }
+                }
+            }
+            // The execute result is owned and to_pyobject above only reads it:
+            // release the non-struct heap count (pyobj handle, bigint/complex
+            // Arc) or it survives the callback -- one count per invocation
+            // (+1 pinned Py per broadcast when the result is a pyobj). The
+            // struct case is the registry decref just above; Value::decref is
+            // a deliberate no-op on TAG_STRUCT.
+            result.decref();
+            Ok(py_result)
         }
     }
 }
@@ -1758,14 +2106,84 @@ mod tests {
     #[test]
     fn test_frame_pool() {
         let mut pool = FramePool::new(2);
-        let mut registry = StructRegistry::new();
+        let registry = StructRegistry::new();
 
         let frame1 = pool.alloc();
         let frame2 = pool.alloc();
 
-        pool.free(frame1, &mut registry);
-        pool.free(frame2, &mut registry);
+        pool.free(frame1, &registry);
+        pool.free(frame2, &registry);
 
         assert_eq!(pool.frames.len(), 2);
+    }
+
+    // --- Resolver ownership contract (owned in every return path) ---
+    //
+    // resolve_captured_chain / resolve_with_py must hand back a fully owned
+    // value on the borrow paths (captured map, native Globals), matching the
+    // from_pyobject paths that are owned by construction. The LoadScope
+    // callers push the result without adding a reference, so a borrowed
+    // return here would be an under-count (double release downstream).
+
+    #[test]
+    fn resolve_captured_chain_returns_owned_bigint() {
+        use rug::Integer;
+        use rug::ops::Pow;
+
+        let big = Value::from_bigint(Integer::from(10).pow(40));
+        assert_eq!(big.bigint_strong_count(), 1);
+
+        let mut captured = IndexMap::new();
+        captured.insert("x".to_string(), big);
+        let scope = NativeClosureScope::without_parent(captured);
+
+        let resolved = scope.resolve_captured_chain("x").expect("captured name resolves");
+        assert_eq!(resolved.bits(), big.bits());
+        assert_eq!(
+            big.bigint_strong_count(),
+            2,
+            "resolver must return an owned bigint (captured map ref + returned ref)"
+        );
+
+        resolved.decref_bigint();
+        assert_eq!(big.bigint_strong_count(), 1, "release balances the resolver incref");
+    }
+
+    #[test]
+    fn release_captured_structs_reclaims_struct_slots() {
+        use crate::vm::structs::StructField;
+        use catnip_core::vm::opcode::ParamCheck;
+
+        let mut reg = StructRegistry::new();
+        let tid = reg.register_type(
+            "P".into(),
+            vec![StructField {
+                name: "x".into(),
+                has_default: false,
+                default: Value::NIL,
+                check: ParamCheck::None,
+            }],
+            IndexMap::new(),
+            vec![],
+            vec!["P".into()],
+        );
+        let idx = reg.create_instance(tid, vec![Value::from_int(1)]);
+        assert_eq!(reg.live_count(), 1);
+
+        let mut captured = IndexMap::new();
+        captured.insert("p".to_string(), Value::from_struct_instance(idx));
+        let scope = NativeClosureScope::without_parent(captured);
+        assert_eq!(reg.live_count(), 1, "scope holds the struct capture");
+
+        // ClosureScopeInner::Drop is a no-op on struct captures (no registry in
+        // hand); the explicit release reclaims the slot -- without it the count
+        // would stay 1. This is the worker's per-task struct-capture leak.
+        scope.release_captured_structs(&reg);
+        assert_eq!(reg.live_count(), 0, "struct capture reclaimed");
+
+        // Idempotent: a second call and the eventual Drop are no-ops (slot NILed).
+        scope.release_captured_structs(&reg);
+        drop(scope);
+        assert_eq!(reg.live_count(), 0);
     }
 }

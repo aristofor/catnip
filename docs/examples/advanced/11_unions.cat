@@ -1,11 +1,11 @@
 #!/usr/bin/env catnip
-# Unions taggees (ADT)
+# Unions taggées (ADT)
 #
-# Lancer via le CLI Python (mode VM par defaut ou -x ast) :
+# Lancer via le CLI Python (mode VM par défaut ou -x ast) :
 #     python -m catnip docs/examples/advanced/11_unions.cat
 # Le binaire standalone catnip-run ne supporte pas encore les unions.
 
-print("=> Declaration et construction")
+print("⇒ Déclaration et construction")
 
 union Option {
     Some(value);
@@ -19,7 +19,7 @@ print("Option.Some(42).value =", x.value)
 print("Option.None =", y)
 
 print()
-print("=> Pattern matching avec payload")
+print("⇒ Pattern matching avec payload")
 
 describe = (opt) => {
     match opt {
@@ -32,7 +32,7 @@ print(describe(Option.Some(7)))
 print(describe(Option.None))
 
 print()
-print("=> Variantes nullaires + payload melangees")
+print("⇒ Variantes nullaires + payload mélangées")
 
 union Event {
     Click(x, y);
@@ -53,7 +53,7 @@ print(handle(Event.KeyPress(65)))
 print(handle(Event.Quit))
 
 print()
-print("=> Egalite structurelle")
+print("⇒ Égalité structurelle")
 
 print("Option.Some(1) == Option.Some(1):", Option.Some(1) == Option.Some(1))
 print("Option.Some(1) == Option.Some(2):", Option.Some(1) == Option.Some(2))
@@ -62,7 +62,7 @@ union Box { A(v); B(v) }
 print("Box.A(1) == Box.B(1):", Box.A(1) == Box.B(1))
 
 print()
-print("=> Generiques (parses, non verifies)")
+print("⇒ Génériques (parsés, non vérifiés)")
 
 union Result[T, E] {
     Ok(value: T);
@@ -85,7 +85,7 @@ print("divide(10, 2):", unwrap(divide(10, 2), 0))
 print("divide(10, 0):", unwrap(divide(10, 0), -1))
 
 print()
-print("=> Machine a etats avec donnees")
+print("⇒ Machine à états avec données")
 
 union State {
     Idle;
@@ -115,14 +115,14 @@ s = State.Idle
 s = step(s, "start")
 s = step(s, "tick")
 s = step(s, "tick")
-print("apres start+tick+tick:")
+print("après start+tick+tick:")
 match s {
     State.Loading{progress} => { print("  loading", progress, "%") }
     _ => { print("  autre") }
 }
 
 s = step(s, "done")
-print("apres done:")
+print("après done:")
 match s {
     State.Ready{data} => { print("  ready:", data) }
     _ => { print("  autre") }

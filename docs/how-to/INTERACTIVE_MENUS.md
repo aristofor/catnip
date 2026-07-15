@@ -293,8 +293,7 @@ if (ok) {
 }
 ```
 
-> Un wizard en 30 lignes. Le ratio information/boilerplate est conforme aux accords de Genève sur les interfaces
-> utilisateur.
+> Un wizard en 30 lignes. Le ratio information/boilerplate reste du bon côté de la maintenance.
 
 ______________________________________________________________________
 

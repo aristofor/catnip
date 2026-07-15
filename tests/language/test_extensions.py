@@ -218,6 +218,52 @@ class TestLoaderDetection:
             sys.modules.pop(mod_name, None)
 
 
+class TestExtensionRegisterSideEffects:
+    """Finding #1: a register() hook's side-effects (globals it sets directly,
+    real-context attributes it reads) must be consistent in VM and AST modes."""
+
+    def _make_ext(self, mod_name):
+        m = types.ModuleType(mod_name)
+
+        def register(ctx):
+            # Side-effect: set a global directly, not via exports. Must reach
+            # both the VM IndexMap and the Python context globals.
+            ctx.globals['reg_global'] = 42
+            # Delegation: read a real Context attribute. On the old stripped
+            # SimpleNamespace this raised AttributeError; here it must resolve.
+            ctx.globals['has_logger'] = ctx.logger is not None
+
+        m.__catnip_extension__ = {
+            'name': 'side-effect-test',
+            'version': '0.1.0',
+            'register': register,
+            'exports': {'ext_const': 7},
+        }
+        return m
+
+    @pytest.mark.parametrize('mode', ['on', 'off'])
+    def test_register_side_effects_visible(self, mode):
+        from catnip import Catnip
+
+        mod_name = '_catnip_test_ext_sidefx'
+        sys.modules[mod_name] = self._make_ext(mod_name)
+        try:
+            c = Catnip(vm_mode=mode)
+            c.parse(f'import("{mod_name}"); reg_global')
+            assert c.execute() == 42
+
+            c2 = Catnip(vm_mode=mode)
+            c2.parse(f'import("{mod_name}"); has_logger')
+            assert c2.execute() is True
+
+            # Exports keep working alongside register side-effects.
+            c3 = Catnip(vm_mode=mode)
+            c3.parse(f'import("{mod_name}"); ext_const')
+            assert c3.execute() == 7
+        finally:
+            sys.modules.pop(mod_name, None)
+
+
 # ---------------------------------------------------------------------------
 # Runtime introspection (catnip.extensions)
 # ---------------------------------------------------------------------------

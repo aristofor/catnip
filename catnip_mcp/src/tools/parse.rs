@@ -19,10 +19,10 @@ pub fn handle(server: &CatnipMcpServer, code: &str, level: i32) -> Result<CallTo
     });
 
     match result {
-        Ok(json) => Ok(CallToolResult::success(vec![rmcp::model::Content::text(json)])),
+        Ok(json) => Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(json)])),
         Err(e) => {
             let payload = serde_json::json!({"error": e});
-            Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+            Ok(CallToolResult::error(vec![rmcp::model::ContentBlock::text(
                 payload.to_string(),
             )]))
         }

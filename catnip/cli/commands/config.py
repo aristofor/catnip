@@ -113,6 +113,13 @@ def config_show(ctx, debug):
                 p = config_manager.get_module_policy(name)
                 click.echo(f"[modules.policies.{name}] {p.summary()}")
 
+        # Lint section
+        lint_disable = config_manager.get_lint_disable()
+        if lint_disable:
+            click.echo("")
+            click.echo("[lint]")
+            click.echo(f"disable = {lint_disable}")
+
 
 @cmd_config.command('get')
 @click.argument('key')

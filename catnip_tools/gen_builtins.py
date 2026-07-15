@@ -2,19 +2,23 @@
 # FILE: catnip_tools/gen_builtins.py
 """Generate builtin name lists from context.py (source of truth).
 
-Flow: Python context.py (source) → Rust targets (generated)
+Flow: context.py (globals) + catnip_core constants.rs (pure builtins) → Rust targets (generated)
 
 Targets:
-- catnip_tools/src/linter.rs       BUILTINS (scope analysis)
-- catnip_tools/src/lint_cfg.rs     BUILTINS (CFG definite-assignment)
+- catnip_tools/src/linter/semantic.rs  BUILTINS (scope analysis)
+- catnip_tools/src/lint_cfg/mod.rs     BUILTINS (CFG definite-assignment)
 - catnip_repl/src/completer.rs     BUILTINS (completion suggestions)
-- catnip_core/src/constants.rs     JIT_PURE_BUILTINS (pure function tracking)
 
 Each target uses its own marker pair for replacement.
+
+Note: JIT_PURE_BUILTINS flows the other way since context.py imports it from
+catnip._rs (constants.rs is the source of truth, no generation needed).
 """
 
 import re
 from pathlib import Path
+
+from _genutil import replace_between_markers
 
 # Runtime names not in context.py globals but always available at execution.
 # Used by both linter (E200 scope) and CFG (W310 definite-assignment).
@@ -59,18 +63,20 @@ def extract_context_builtins(context_path: Path) -> list[str]:
     return re.findall(r'["\'](\w+)["\'](?:\s*:)', block)
 
 
-def extract_pure_builtins(context_path: Path) -> list[str]:
-    """Extract KNOWN_PURE_FUNCTIONS names from context.py."""
-    content = context_path.read_text()
+def extract_pure_builtins(constants_path: Path) -> list[str]:
+    """Extract JIT_PURE_BUILTINS from catnip_core constants.rs (source of truth).
 
-    # Match the fallback tuple in KNOWN_PURE_FUNCTIONS (after `or (`)
-    pattern = r'KNOWN_PURE_FUNCTIONS\s*=\s*frozenset\(\s*_RUST_JIT_PURE_BUILTINS\s*or\s*\((.*?)\)\s*\)'
+    context.py's KNOWN_PURE_FUNCTIONS is a runtime reflection of this array
+    (its literal fallback tuple was removed), so the generator reads the Rust
+    source directly, like gen_opcodes does.
+    """
+    content = constants_path.read_text()
+    pattern = r'pub const JIT_PURE_BUILTINS: &\[&str\] = &\[(.*?)\];'
     match = re.search(pattern, content, re.DOTALL)
     if not match:
-        raise ValueError(f"KNOWN_PURE_FUNCTIONS not found in {context_path}")
+        raise ValueError(f"JIT_PURE_BUILTINS not found in {constants_path}")
 
-    block = match.group(1)
-    return re.findall(r"['\"](\w+)['\"]", block)
+    return re.findall(r'"(\w+)"', match.group(1))
 
 
 def generate_rust_array(names: list[str], const_decl: str) -> list[str]:
@@ -82,27 +88,6 @@ def generate_rust_array(names: list[str], const_decl: str) -> list[str]:
     return lines
 
 
-def replace_between_markers(path: Path, start_marker: str, end_marker: str, new_lines: list[str]) -> bool:
-    """Replace content between markers in file. Returns True if changed."""
-    content = path.read_text()
-
-    pattern = re.compile(
-        rf'^{re.escape(start_marker)}$.*?^{re.escape(end_marker)}$',
-        re.MULTILINE | re.DOTALL,
-    )
-    match = pattern.search(content)
-    if not match:
-        raise ValueError(f"Markers {start_marker} not found in {path}")
-
-    new_block = "\n".join([start_marker] + new_lines + [end_marker])
-    if match.group(0) == new_block:
-        return False
-
-    new_content = content[:match.start()] + new_block + content[match.end():]
-    path.write_text(new_content)
-    return True
-
-
 def main():
     base = Path(__file__).parent.parent
     context_path = base / "catnip" / "context.py"
@@ -110,12 +95,12 @@ def main():
     # ── Extract from source of truth ──────────────────────────────────
     print("Extracting from context.py...")
     globals_names = extract_context_builtins(context_path)
-    pure_names = extract_pure_builtins(context_path)
+    pure_names = extract_pure_builtins(base / "catnip_core" / "src" / "constants.rs")
     print(f"  globals: {len(globals_names)} names")
     print(f"  pure:    {len(pure_names)} names")
 
     # ── 1. Linter builtins ────────────────────────────────────────────
-    linter_path = base / "catnip_tools" / "src" / "linter.rs"
+    linter_path = base / "catnip_tools" / "src" / "linter" / "semantic.rs"
     linter_names = globals_names + EXTRA_RUNTIME_NAMES + EXTRA_LINTER_ONLY_NAMES
     linter_lines = generate_rust_array(linter_names, "const BUILTINS: &[&str]")
 
@@ -129,7 +114,7 @@ def main():
 
     # ── 2. CFG linter builtins ────────────────────────────────────────
     # Runtime names only (no decorator/syntax-only pseudo builtins).
-    cfg_path = base / "catnip_tools" / "src" / "lint_cfg.rs"
+    cfg_path = base / "catnip_tools" / "src" / "lint_cfg" / "mod.rs"
     cfg_names = globals_names + EXTRA_RUNTIME_NAMES
     cfg_lines = generate_rust_array(cfg_names, "const BUILTINS: &[&str]")
 
@@ -167,7 +152,7 @@ def main():
     )
     print(f"  jit pure:  {'updated' if changed else 'up to date'} ({len(sorted(set(pure_names)))} names)")
 
-    print("\nDone! Flow: context.py (source) -> linter.rs + lint_cfg.rs + completer.rs + constants.rs")
+    print("\nDone! Flow: context.py (globals) + catnip_core constants.rs (pure) -> linter + completer + constants")
 
 
 if __name__ == "__main__":

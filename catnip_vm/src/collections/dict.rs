@@ -155,6 +155,14 @@ impl NativeDict {
     pub fn keys_cloned(&self) -> Vec<ValueKey> {
         self.inner.borrow().keys().cloned().collect()
     }
+
+    /// Snapshot the values without touching refcounts, for a read-only pass (e.g.
+    /// a boundary type check). `Value` is `Copy`, so this duplicates pointers
+    /// only; the returned values are valid while the dict is alive and must not be
+    /// stored past it or decref'd.
+    pub fn snapshot_values(&self) -> Vec<Value> {
+        self.inner.borrow().values().copied().collect()
+    }
 }
 
 impl Drop for NativeDict {

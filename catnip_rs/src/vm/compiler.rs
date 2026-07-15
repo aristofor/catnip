@@ -59,6 +59,7 @@ impl PyCompiler {
             body,
             FunctionCompileMeta {
                 params,
+                param_types: Vec::new(),
                 name,
                 defaults: defaults_vec,
                 vararg_idx: -1,

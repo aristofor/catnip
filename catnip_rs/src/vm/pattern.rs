@@ -39,3 +39,23 @@ pub enum VMPatternElement {
     /// Star pattern (*rest): captures remaining elements into slot (usize::MAX = no binding)
     Star(usize),
 }
+
+impl VMPattern {
+    /// Release the refcounted `Value`s embedded in literals (recursively).
+    /// Called by the owning pool's teardown (`CodeObject::drop`); the match
+    /// engine only borrows literals, so the pool holds their single reference.
+    pub fn decref_values(&self) {
+        match self {
+            VMPattern::Literal(v) => v.decref(),
+            VMPattern::Or(subs) => subs.iter().for_each(Self::decref_values),
+            VMPattern::Tuple(elems) => {
+                for e in elems {
+                    if let VMPatternElement::Pattern(p) = e {
+                        p.decref_values();
+                    }
+                }
+            }
+            VMPattern::Wildcard | VMPattern::Var(_) | VMPattern::Struct { .. } | VMPattern::Enum { .. } => {}
+        }
+    }
+}

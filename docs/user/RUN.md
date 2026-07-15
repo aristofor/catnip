@@ -211,4 +211,4 @@ Coloration live en temps réel :
 ## Couverture du langage
 
 Le mode standalone couvre 100% des features du langage Catnip : variables, fonctions, closures, structs, traits, pattern
-matching, broadcasting, pragmas, imports, memoization, runtime introspection, extensions et module policies.
+matching, broadcasting, pragmas, imports, mémoïsation, runtime introspection, extensions et module policies.

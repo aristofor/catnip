@@ -2,7 +2,7 @@
 name = "catnip-sys"
 version.workspace = true
 edition.workspace = true
-description = "Catnip sys stdlib plugin (native ABI v2 + optional PyO3)"
+description = "Catnip sys stdlib plugin (native ABI v3 + optional PyO3)"
 
 [lib]
 name = "catnip_sys"

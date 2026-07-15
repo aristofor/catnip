@@ -43,7 +43,7 @@ pub struct ReplConfig {
 /// Cascade: CATNIP_THEME env -> COLORFGBG -> default dark.
 fn detect_is_dark() -> bool {
     // CATNIP_THEME explicit override
-    if let Ok(theme) = std::env::var("CATNIP_THEME") {
+    if let Ok(theme) = std::env::var(catnip_rs::constants::ENV_THEME) {
         match theme.to_lowercase().as_str() {
             "dark" => return true,
             "light" => return false,
@@ -82,7 +82,7 @@ impl Default for ReplConfig {
 
             show_parse_time: false,
             show_exec_time: false,
-            enable_jit: constants::JIT_ENABLED_DEFAULT,
+            enable_jit: constants::JIT_DEFAULT_STANDALONE,
             jit_threshold: constants::JIT_THRESHOLD_DEFAULT,
             debug_mode: false,
 

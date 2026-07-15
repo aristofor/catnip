@@ -6,6 +6,7 @@
 -Q vm Catnip
 -Q cache Catnip
 -Q struct Catnip
+-Q delta Catnip
 
 core/GrammarProof.v
 core/CatnipIR.v
@@ -40,8 +41,16 @@ analysis/CatnipDominanceProof.v
 analysis/CatnipCFGSSABase.v
 analysis/CatnipCFGSSACorrectness.v
 analysis/CatnipCFGSSAProof.v
+analysis/CatnipParallelCopyProof.v
+analysis/CatnipTrivialPhiProof.v
+analysis/CatnipRegionMergeProof.v
+analysis/CatnipDestructionBridge.v
 
 vm/CatnipNanBoxProof.v
+vm/CatnipValueClassProof.v
+vm/CatnipBoundaryProof.v
+vm/CatnipPluginBoundaryProof.v
+vm/CatnipOwnershipProof.v
 vm/CatnipVMOpCode.v
 vm/CatnipVMState.v
 vm/CatnipVMStackSafety.v
@@ -72,3 +81,6 @@ struct/CatnipOpDesugarProps.v
 struct/CatnipOpDesugarExamples.v
 struct/CatnipOpDesugarSemantics.v
 struct/CatnipMROProof.v
+delta/DeltaCollection.v
+delta/DeltaStateless.v
+delta/DeltaProof.v

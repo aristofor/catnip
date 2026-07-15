@@ -1,0 +1,13 @@
+#!/usr/bin/env catnip
+# RUN: cd docs/examples/module-loading && catnip 14_cat_library.cat
+# Importer une bibliothèque écrite en Catnip dont les fonctions s'appellent
+# entre elles (et appellent un helper privé).
+
+lib = import('mathlib')
+
+print(lib.quad(5))       # → 20   (quad appelle le helper privé _double)
+print(lib.factorial(5))  # → 120  (récursion)
+print(lib.combo(3))      # → 18   (combo appelle quad et factorial, ses sœurs)
+
+# Le helper privé n'est pas exporté (préfixe _) :
+# lib._double(3)  → AttributeError

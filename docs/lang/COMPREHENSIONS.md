@@ -168,7 +168,7 @@ ______________________________________________________________________
 <!-- check: no-check -->
 
 ```catnip
-# Catnip : fold + concatenation
+# Catnip : fold + concaténation
 fold(nested, list(), (acc, x) => { acc + x })
 ```
 

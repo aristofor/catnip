@@ -91,8 +91,8 @@ catnip --parsing 0/1/2 file.cat  # Inspect parse tree / IR / executable IR
 **OpCode synchronization**: Rust is the source of truth. Python files are generated from Rust.
 
 ```bash
-make gen-opcodes        # After modifying catnip_rs/src/ir/opcode.rs or vm/opcode.rs
-make check-opcodes      # Verify sync (CI check)
+# The opcode generator ships with the source repo; the `make` wrappers are dev-only.
+python catnip_rs/gen_opcodes.py   # After modifying ir/opcode.rs or vm/opcode.rs
 ```
 
 Always use `IROpCode` enum, never hardcode opcode numbers.
@@ -101,7 +101,8 @@ Always use `IROpCode` enum, never hardcode opcode numbers.
 
 1. Modify Rust code
 1. `make test-rust-fast` (~5s)
-1. `make compile` (includes gen-opcodes)
+1. `python catnip_rs/gen_opcodes.py` if you changed an opcode enum
+1. `make compile` (rebuilds the extension)
 1. `make test` (~25s)
 
 **Adding new syntax**:
@@ -109,7 +110,7 @@ Always use `IROpCode` enum, never hardcode opcode numbers.
 1. Modify `catnip_grammar/grammar.js`
 1. `make grammar-deps`
 1. Add transformer in `catnip_rs/src/parser/`
-1. If new opcode: `catnip_rs/src/ir/opcode.rs` then `make gen-opcodes`
+1. If new opcode: `catnip_rs/src/ir/opcode.rs` then `python catnip_rs/gen_opcodes.py`
 1. `make compile && make test`
 
 ## Architecture

@@ -13,7 +13,7 @@ code = { type = "string", required = true }
 level = { type = "integer", default = 1, minimum = 0, maximum = 2 }
 
 [tools.eval_catnip]
-description = "Evaluate Catnip code and return result."
+description = "Evaluate Catnip code and return the result (result_repr, result_type) plus any stdout the program produced (print/write captured, not leaked to the transport). stdin is empty, so input() raises EOFError. Optionally pass initial variables via context."
 
 [tools.eval_catnip.params]
 code = { type = "string", required = true }
@@ -85,15 +85,15 @@ mime_type = "application/json"
 
 [resource_templates.codex]
 uri_template = "catnip://codex/{category}/{module}"
-description = "Catnip integration examples (data-analytics, files-formats, geometry, geospatial, images-media, persistence, symbolic-graphs, utils, visualization, web)."
+description = "Catnip integration examples (data-analytics, files-formats, geometry, geospatial, images-media, machine-learning, nlp-text, optimization, persistence, structural-biology, symbolic-graphs, utils, visualization, web)."
 mime_type = "text/plain"
 
 [resource_templates.docs-topic]
 uri_template = "catnip://docs/{section}/{topic}"
-description = "Language documentation by section and topic. Use catnip://docs/{section} to list available topics. Sections: dev (architecture, vm, optimizations, jit, etc.), how-to (cheatsheet, etc.), lang (syntax, control-flow, functions, structures, enums, unions, pattern-matching, broadcast, expressions, types, pragmas, etc.), tools (format, lint, debug, etc.), tuto (quickstarts), user (cli, repl, config, module-loading, etc.)."
+description = "Language documentation by section and topic. Use catnip://docs/{section} to list available topics. Sections: changelog (one topic per version, e.g. 0.1.2), dev (architecture, vm, optimizations, jit, etc.), how-to (cheatsheet, etc.), lang (syntax, control-flow, functions, structures, enums, unions, pattern-matching, broadcast, expressions, types, pragmas, etc.), tools (format, lint, debug, etc.), tuto (quickstarts), user (cli, repl, config, module-loading, etc.)."
 mime_type = "text/markdown"
 
 [resource_templates.docs-section]
 uri_template = "catnip://docs/{section}"
-description = "List available topics for a documentation section (dev, how-to, lang, tools, tuto, user)."
+description = "List available topics for a documentation section (changelog, dev, how-to, lang, tools, tuto, user)."
 mime_type = "application/json"

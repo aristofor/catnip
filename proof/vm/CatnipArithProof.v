@@ -2,10 +2,13 @@
 (* CatnipArithProof.v - Pure numeric arithmetic correctness
  *
  * Source of truth:
- *   catnip_vm/src/ops/arith.rs
+ *   catnip_core/src/arith.rs (generic bodies, Phase 5; catnip_vm and
+ *   catnip_rs monomorphize them and keep thin wrappers)
  *
  * Proves correctness of floor division, floor modulo, and equality
  * operations shared between catnip_vm (PureHost) and catnip_rs (VM dispatch).
+ * The promotion lemmas (to_bigint totality, fast/slow path coherence)
+ * live with the NaN-box model in CatnipNanBoxProof.v.
  *
  * 12 theorems, 0 Admitted.
  *)
@@ -21,7 +24,7 @@ Open Scope Z_scope.
 (*   - floor division rounds toward negative infinity                 *)
 (*   - modulo result has the sign of the divisor                     *)
 (*                                                                    *)
-(* Rust code (catnip_vm/src/ops/arith.rs):                           *)
+(* Rust code (catnip_core/src/arith.rs):                             *)
 (*   fn i64_div_floor(a, b) -> i64 {                                 *)
 (*       let d = a / b;                                               *)
 (*       let r = a % b;                                               *)

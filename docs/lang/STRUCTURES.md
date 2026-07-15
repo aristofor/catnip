@@ -60,6 +60,14 @@ Point(1, 2)     # Point(x=1, y=2)
 Point(x=3)      # Point(x=3, y=0)
 ```
 
+Un argument nommé qui vise un champ déjà rempli par un argument positionnel est une erreur (même règle qu'en Python) :
+
+<!-- check: expect-error -->
+
+```catnip
+Point(5, x=3)   # TypeError: Point() got multiple values for argument 'x'
+```
+
 Les champs sans défaut doivent précéder ceux avec défaut :
 
 ```catnip
@@ -173,11 +181,13 @@ P(3).shifted()   # 13
 
 ## Résolution de méthodes
 
-Quand une méthode est appelée sur une instance, le dispatch suit cette chaîne :
+Quand `instance.nom(...)` est appelé, le dispatch suit cette chaîne :
 
 ```mermaid
 flowchart LR
-    CALL["instance.method()"] --> OWN{"Méthodes propres ?"}
+    CALL["instance.nom()"] --> FIELD{"Champ appelable ?"}
+    FIELD -->|Trouvé| CALLF["Appel sans self"]
+    FIELD -->|Non| OWN{"Méthodes propres ?"}
     OWN -->|Trouvé| EXEC["Exécution"]
     OWN -->|Non| MRO{"Héritage (MRO) ?"}
     MRO -->|Trouvé| EXEC
@@ -186,8 +196,24 @@ flowchart LR
     TRAIT -->|Non| ERR["AttributeError"]
 ```
 
-Les méthodes propres de la structure ont toujours priorité. L'héritage suit l'ordre C3 (MRO). Les traits sont intégrés
-après les parents directs. En cas de conflit entre traits, un override explicite est requis.
+Si `nom` désigne un **champ** dont la valeur est appelable (une lambda stockée à la construction), il est appelé
+directement, sans liaison de `self` : un champ appelable a priorité sur une méthode de même nom. Sinon le dispatch
+cherche une méthode. Les méthodes propres de la structure ont priorité sur l'héritage, qui suit l'ordre C3 (MRO). Les
+traits sont intégrés après les parents directs. En cas de conflit entre traits, un override explicite est requis.
+
+```catnip
+struct Handler {
+    on_click    # champ tenant une fonction
+    label(self) => { "handler" }
+}
+
+h = Handler((event) => { event + 1 })
+h.on_click(41)   # 42 — le champ est appelé, sans self
+h.label()        # "handler" — la méthode reçoit self
+```
+
+> Un champ qui tient une fonction n'est pas une méthode déguisée : personne ne lui passe l'instance, il ne sait rien
+> d'elle.
 
 ## Surcharge d'opérateurs
 
@@ -384,6 +410,10 @@ d[Box(42)] = "answer"   # op_hash retourne 42
 La règle s'applique à toutes les variantes payload des `union` (qui sont des structs derrière) : `Status.Ok(200)` est
 hashable, et figé une fois hashé.
 
+Les deux runtimes (CLI Python et runtime pur MCP/LSP) appliquent le même contrat : hash structural par défaut,
+interdiction `op ==` sans hash, freeze-on-hash, et `op_hash` honoré quand il est défini -- à tout niveau d'imbrication
+(le hash d'un champ struct passe par son propre `op_hash`).
+
 ## Méthodes statiques
 
 Le décorateur `@static` déclare une méthode sans `self`, appelable directement sur le type :
@@ -528,8 +558,7 @@ Config("localhost").host   # "localhost:auto"
 Config("localhost").port   # 8080
 ```
 
-> `init` s'exécute automatiquement après l'initialisation des champs. Elle commence avant même que vous pensiez à
-> l'appeler.
+> `init` s'exécute automatiquement après l'initialisation des champs. Elle commence avant même un appel explicite.
 
 ## Héritage
 

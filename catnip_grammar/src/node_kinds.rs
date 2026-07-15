@@ -22,6 +22,8 @@ pub const MATCH_EXPR: &str = "match_expr";
 pub const MATCH_CASE: &str = "match_case";
 pub const ENUM_STMT: &str = "enum_stmt";
 pub const ENUM_VARIANT: &str = "enum_variant";
+pub const UNION_STMT: &str = "union_stmt";
+pub const UNION_METHOD: &str = "union_method";
 pub const TRY_STMT: &str = "try_stmt";
 pub const EXCEPT_BLOCK: &str = "except_block";
 pub const EXCEPT_CLAUSE: &str = "except_clause";
@@ -30,6 +32,8 @@ pub const EXCEPT_TYPES: &str = "except_types";
 pub const FINALLY_CLAUSE: &str = "finally_clause";
 pub const RAISE_STMT: &str = "raise_stmt";
 pub const WITH_STMT: &str = "with_stmt";
+pub const PRAGMA_STMT: &str = "pragma_stmt";
+pub const PRAGMA_QUALIFIED: &str = "pragma_qualified";
 pub const BLOCK: &str = "block";
 pub const STATEMENT: &str = "statement";
 
@@ -88,6 +92,7 @@ pub const COMPARISON: &str = "comparison";
 pub const COMP_OP: &str = "comp_op";
 pub const BOOL_AND: &str = "bool_and";
 pub const BOOL_OR: &str = "bool_or";
+pub const NULL_COALESCE: &str = "null_coalesce";
 
 // Unpack
 pub const LVALUE: &str = "lvalue";

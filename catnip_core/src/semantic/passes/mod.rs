@@ -230,9 +230,136 @@ pub fn collect_refs(ir: &IR, f: &mut dyn FnMut(String)) {
     }
 }
 
+/// Mutable mirror of [`collect_refs`]: visit every `IR::Ref` name in the SAME
+/// traversal order and let `f` rewrite it in place.
+///
+/// The lockstep with `collect_refs` is the contract: the SSA builder's
+/// `scan_uses` records one `SSAValue` per var-Ref in `collect_refs` order, so a
+/// caller can rename the k-th visited Ref to the name of the k-th resolved SSA
+/// value. Any change to `collect_refs`'s traversal MUST be mirrored here.
+pub fn rewrite_refs(ir: &mut IR, f: &mut dyn FnMut(&mut String)) {
+    match ir {
+        IR::Ref(name, _, _) => f(name),
+        IR::Op { args, kwargs, .. } => {
+            for arg in args {
+                rewrite_refs(arg, f);
+            }
+            for (_, v) in kwargs {
+                rewrite_refs(v, f);
+            }
+        }
+        IR::Call { func, args, kwargs, .. } => {
+            rewrite_refs(func, f);
+            for arg in args {
+                rewrite_refs(arg, f);
+            }
+            for (_, v) in kwargs {
+                rewrite_refs(v, f);
+            }
+        }
+        IR::Program(items) | IR::List(items) | IR::Tuple(items) | IR::Set(items) => {
+            for item in items {
+                rewrite_refs(item, f);
+            }
+        }
+        IR::Dict(pairs) => {
+            for (k, v) in pairs {
+                rewrite_refs(k, f);
+                rewrite_refs(v, f);
+            }
+        }
+        IR::PatternLiteral(v) => rewrite_refs(v, f),
+        IR::PatternOr(ps) | IR::PatternTuple(ps) => {
+            for p in ps {
+                rewrite_refs(p, f);
+            }
+        }
+        IR::Slice { start, stop, step } => {
+            rewrite_refs(start, f);
+            rewrite_refs(stop, f);
+            rewrite_refs(step, f);
+        }
+        IR::Broadcast {
+            target,
+            operator,
+            operand,
+            ..
+        } => {
+            if let Some(t) = target {
+                rewrite_refs(t, f);
+            }
+            rewrite_refs(operator, f);
+            if let Some(o) = operand {
+                rewrite_refs(o, f);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_rewrite_refs_renames_matching() {
+        // Refs to "x" become "x#1"; other refs untouched.
+        let mut ir = IR::op(
+            IROpCode::Add,
+            vec![
+                IR::Ref("x".to_string(), -1, -1),
+                IR::op(
+                    IROpCode::Mul,
+                    vec![IR::Ref("y".to_string(), -1, -1), IR::Ref("x".to_string(), -1, -1)],
+                ),
+            ],
+        );
+        rewrite_refs(&mut ir, &mut |name| {
+            if name == "x" {
+                *name = "x#1".to_string();
+            }
+        });
+        let mut names = Vec::new();
+        collect_refs(&ir, &mut |n| names.push(n));
+        assert_eq!(names, vec!["x#1".to_string(), "y".to_string(), "x#1".to_string()]);
+    }
+
+    #[test]
+    fn test_rewrite_refs_order_matches_collect_refs() {
+        // rewrite_refs must visit Refs in the exact order collect_refs does, so
+        // the k-th Ref can be zipped with the k-th SSA value from scan_uses.
+        let build = || {
+            IR::op(
+                IROpCode::Add,
+                vec![
+                    IR::Ref("a".to_string(), -1, -1),
+                    IR::op(
+                        IROpCode::Mul,
+                        vec![IR::Ref("b".to_string(), -1, -1), IR::Ref("c".to_string(), -1, -1)],
+                    ),
+                    IR::Ref("d".to_string(), -1, -1),
+                ],
+            )
+        };
+        let mut collect_order = Vec::new();
+        collect_refs(&build(), &mut |n| collect_order.push(n));
+
+        let mut ir_mut = build();
+        let mut i = 0usize;
+        rewrite_refs(&mut ir_mut, &mut |name| {
+            *name = format!("{name}#{i}");
+            i += 1;
+        });
+        let mut rewrite_order = Vec::new();
+        collect_refs(&ir_mut, &mut |n| rewrite_order.push(n));
+
+        let expected: Vec<String> = collect_order
+            .iter()
+            .enumerate()
+            .map(|(k, n)| format!("{n}#{k}"))
+            .collect();
+        assert_eq!(rewrite_order, expected);
+    }
 
     #[test]
     fn test_map_children_leaf() {

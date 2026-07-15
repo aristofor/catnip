@@ -52,7 +52,7 @@ Pas d'overhead. Pas de surprise. Le plus rapide pour les petits calculs.
 - On debug
 - On ne sait pas quel mode choisir
 
-### `thread` - I/O et memoization partagée
+### `thread` - I/O et mémoïsation partagée
 
 ```catnip
 pragma("nd_mode", ND.thread)
@@ -65,13 +65,13 @@ pragma("nd_memoize", True)
 })
 ```
 
-Les threads partagent la mémoire du processus. Le cache de memoization est commun à tous les workers. Un résultat
+Les threads partagent la mémoire du processus. Le cache de mémoïsation est commun à tous les workers. Un résultat
 calculé par un thread est immédiatement disponible pour les autres.
 
 **Utiliser quand** :
 
 - La lambda fait de l'I/O (lecture fichier, requêtes réseau, base de données)
-- La memoization est activée et les valeurs se recoupent (Fibonacci, DP)
+- La mémoïsation est activée et les valeurs se recoupent (Fibonacci, DP)
 - On veut le cache partagé sans payer le coût de la sérialisation
 
 **Ne pas utiliser quand** :
@@ -102,7 +102,7 @@ Chaque worker est un processus séparé avec son propre interpréteur Python. Le
 **Ne pas utiliser quand** :
 
 - Les items sont petits ou le calcul est rapide (overhead > gain)
-- La memoization croisée est critique (chaque processus a son propre cache)
+- La mémoïsation croisée est critique (chaque processus a son propre cache)
 - Les lambdas capturent des objets non sérialisables
 
 ## Compromis résumés
@@ -112,37 +112,42 @@ Chaque worker est un processus séparé avec son propre interpréteur Python. Le
 | Overhead             | Aucun        | Faible    | Faible (IPC postcard) [^1] |
 | Parallélisme CPU     | Non          | Non (GIL) | Oui                        |
 | Parallélisme I/O     | Non          | Oui       | Oui                        |
-| Memoization partagée | N/A          | Oui       | Non                        |
+| Mémoïsation partagée | N/A          | Oui       | Non                        |
 | Sérialisation        | Aucune       | Aucune    | Freeze postcard [^1]       |
 | Debug                | Trivial      | Correct   | Difficile                  |
 
-\[^1\]: Quand la lambda et ses captures sont des types natifs (int, float, bool, string, list, tuple, dict), le mode
-process utilise un pool persistant de workers Rust (`catnip worker`) avec IPC postcard -- pas de pickle, pas de startup
-Python par worker. Si les captures contiennent des types non-freezables (struct instance, callback Python), fallback
-automatique vers `ProcessPoolExecutor` avec pickle.
+\[^1\]: Quand la lambda et ses captures/seeds sont freezables (int, float, bool, string, list, tuple, dict, set, et
+structs plats -- frontière v1), le mode process utilise un pool persistant de workers Rust (`catnip worker`) avec IPC
+postcard : parallélisme CPU réel, pas de pickle, pas de startup Python par worker. Sinon (callback Python, struct
+`extends`/`implements`/abstract, grand entier en champ, global non freezable référencé, builtin redéfini par une
+fonction), l'exécution retombe automatiquement sur le mode `thread`.
 
 ## Sérialisation et processus
 
 En mode `process`, deux chemins sont possibles :
 
-**Chemin natif (Rust workers)** -- utilisé quand la lambda et ses captures sont freezables (types primitifs, listes,
-dicts, tuples, strings) :
+**Chemin natif (Rust workers)** -- utilisé quand la lambda, ses captures et ses seeds sont freezables (types primitifs,
+listes, dicts, tuples, strings, sets, et **structs plats** -- frontière v1) :
 
 - La lambda est compilée avec son IR source encodé (`encoded_ir` dans le CodeObject)
-- Les captures et seeds sont converties en `FrozenValue` (postcard, pas pickle)
+- Les captures, seeds et définitions de type struct sont converties en `FrozenValue`/`FrozenStructType` (postcard, pas
+  pickle) ; le worker reconstruit les types struct par nom
 - Un pool persistant de workers `catnip worker` traite les tâches via IPC stdin/stdout
 - Pas de startup Python par worker, pas de pickle, pas de GIL sur l'orchestration
 
-**Chemin Python (fallback)** -- utilisé quand les captures contiennent des types non-freezables (struct instances,
-callbacks Python, etc.) :
+**Chemin thread (fallback)** -- utilisé quand quelque chose que la lambda touche ne peut pas voyager jusqu'au worker :
 
-- La lambda et la seed sont envoyées au worker via `pickle`
-- Chaque worker initialise son propre registry Catnip au démarrage (`_worker_init`)
+- captures ou seeds non freezables (callback Python, struct hors frontière v1 -- `extends`/`implements`/abstract, grand
+  entier en champ) ;
+- un global du parent référencé par la lambda et non freezable (fonction helper, struct hors frontière) : le worker
+  vierge ne le reconstruit pas et lèverait `NameError` ;
+- un builtin redéfini par une fonction (`str = (x) => {...}`) : le worker résoudrait *son* builtin pré-installé, pas la
+  redéfinition -- détecté en amont, sinon la divergence serait silencieuse (aucune erreur à intercepter).
 
-Dans les deux cas :
+Dans tous ces cas, l'exécution retombe sur le mode `thread` (rayon, in-process) : correct pour tout, mais le GIL
+sérialise le calcul CPU. Pas de sérialisation, pas de pickle.
 
-- Le cache de memoization n'est **pas** partagé entre workers
-- Si tout échoue, le scheduler fallback silencieusement en mode `sequential`
+Dans les deux cas, le cache de mémoïsation n'est **pas** partagé entre workers.
 
 ## Patterns courants
 
@@ -161,7 +166,7 @@ fib(30)
 # Cache partagé : O(n) appels au lieu de O(2^n)
 ```
 
-Le mode `thread` est le bon choix ici : la memoization partagée transforme un algorithme exponentiel en linéaire. Le GIL
+Le mode `thread` est le bon choix ici : la mémoïsation partagée transforme un algorithme exponentiel en linéaire. Le GIL
 n'est pas un problème car le gain vient du cache, pas du parallélisme.
 
 ### Broadcast CPU-bound (process)
@@ -206,5 +211,5 @@ Les options CLI ont priorité sur les pragmas du fichier.
 ## Références
 
 - [PRAGMAS](../lang/PRAGMAS.md) - spec complète des pragmas ND
-- [nd_recursion](../examples/advanced/nd_recursion.md) - exemples d'usage
+- [nd_recursion](../examples/advanced/05_nd_recursion.cat) - exemples d'usage
 - [scheduler.rs](../../catnip_rs/src/nd/scheduler.rs) - implémentation du scheduler

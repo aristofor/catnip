@@ -5,6 +5,7 @@ use super::super::ir::IR;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticSeverity {
+    Error,
     Warning,
     Hint,
 }

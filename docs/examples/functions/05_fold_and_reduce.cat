@@ -1,7 +1,7 @@
 #!/usr/bin/env catnip
 # fold et reduce
 
-print("⇒ fold : agregation avec valeur initiale")
+print("⇒ fold : agrégation avec valeur initiale")
 
 # Somme
 total = fold(list(1, 2, 3, 4, 5), 0, (acc, x) => { acc + x })
@@ -11,7 +11,7 @@ print("Somme 1..5:", total)
 produit = fold(list(1, 2, 3, 4), 1, (acc, x) => { acc * x })
 print("Produit 1..4:", produit)
 
-# Concatenation
+# Concaténation
 mot = fold(list("c", "a", "t"), "", (acc, x) => { acc + x })
 print("Concat:", mot)
 
@@ -58,6 +58,6 @@ print("⇒ Composition broadcast + fold")
 resultat = fold(list(1, 2, 3).[* 10], 0, (acc, x) => { acc + x })
 print("list(1,2,3).[*10] puis fold +:", resultat)
 
-# Pipeline complet : transformer puis agreger
+# Pipeline complet : transformer puis agréger
 cubes = fold(list(1, 2, 3, 4).[** 3], 0, (acc, x) => { acc + x })
 print("Somme des cubes 1..4:", cubes)

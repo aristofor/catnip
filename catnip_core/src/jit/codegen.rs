@@ -5,8 +5,8 @@
 
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
-    AbiParam, BlockArg, Function, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Type, UserFuncName,
-    condcodes::IntCC, types,
+    AbiParam, BlockArg, Function, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind, Type,
+    UserFuncName, condcodes::IntCC, types,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -421,6 +421,9 @@ pub struct JITCodegen {
     memo_store_fn: Option<FuncId>,
     /// Cranelift stencil cache (incremental compilation)
     native_cache: NativeCodeCache,
+    /// Monotonic counter versioning compiled symbol names (JITModule cannot
+    /// redefine a symbol, and a type-flip recompile reuses the same key).
+    compile_seq: u64,
 }
 
 /// Result of JIT compilation - a callable function pointer.
@@ -480,14 +483,19 @@ fn compile_simple_op(
         // silent-overflow footgun for any future caller, so they're omitted and
         // fall to the "unexpected op" error below.
         TraceOp::DivInt => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().sdiv(a, b));
+            // Unreachable: nothing emits DivInt anymore. True division (`/`)
+            // yields a float and is kept interpreted (see trace.rs); `//` is not
+            // JIT-traced. Refusing here keeps the unsound `sdiv` (integer
+            // truncation + SIGFPE on /0) out of codegen entirely.
+            return Err("DivInt must not be JIT-compiled (true division is float; /0 must raise)".into());
         }
         TraceOp::ModInt => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().srem(a, b));
+            // Unreachable: the main loop handles ModInt with a zero-divisor
+            // side-exit before falling through to compile_simple_op. An unguarded
+            // `srem` arm here would be a SIGFPE footgun (native srem traps on a
+            // zero divisor, where the interpreter raises ZeroDivisionError), so
+            // this arm hard-errors instead (like DivInt above).
+            return Err("ModInt must not reach compile_simple_op (zero-divisor guard is in the main loop)".into());
         }
         TraceOp::LtInt => {
             let b = stack.pop().ok_or("Stack underflow")?;
@@ -575,9 +583,11 @@ fn compile_simple_op(
             stack.push(builder.ins().fmul(a, b));
         }
         TraceOp::DivFloat => {
-            let b = stack.pop().ok_or("Stack underflow")?;
-            let a = stack.pop().ok_or("Stack underflow")?;
-            stack.push(builder.ins().fdiv(a, b));
+            // Unreachable: the tracer emits a Fallback for float division so the
+            // trace never compiles (see trace.rs). Refusing here keeps the unsound
+            // unguarded `fdiv` (inf on /0, losing ZeroDivisionError) out of codegen
+            // entirely -- a zero-check side-exit must be added before re-enabling.
+            return Err("DivFloat must not be JIT-compiled (zero-division semantics)".into());
         }
         TraceOp::LtFloat => {
             let b = stack.pop().ok_or("Stack underflow")?;
@@ -662,6 +672,7 @@ impl JITCodegen {
             memo_lookup_fn: None,
             memo_store_fn: None,
             native_cache,
+            compile_seq: 0,
         })
     }
 
@@ -748,7 +759,7 @@ impl JITCodegen {
     }
 
     /// Compile a trace to native code.
-    pub fn compile(&mut self, trace: &Trace) -> Result<CompiledFn, String> {
+    pub fn compile(&mut self, trace: &Trace, bytecode_hash: u64) -> Result<CompiledFn, String> {
         if !trace.is_compilable() {
             return Err("Trace is not compilable".into());
         }
@@ -761,12 +772,24 @@ impl JITCodegen {
         sig.params.push(AbiParam::new(types::I32)); // depth counter (Phase 3)
         sig.returns.push(AbiParam::new(types::I64)); // return value
 
-        // Generate function name based on trace type
+        // Generate function name based on trace type. The Cranelift module is
+        // shared across all traces for the lifetime of a reused VM (REPL/
+        // embedding). A loop symbol must be unique per code object: two programs
+        // with a hot loop at the same offset would otherwise both declare
+        // `trace_{offset}` -> "Duplicate definition of identifier". Keying the
+        // loop symbol by bytecode_hash disambiguates them (mirrors the
+        // (bytecode_hash, offset) keying of the compiled/guard maps). Function
+        // traces are already unique by func_id and compiled at most once (gated
+        // by func_id in compiled_functions), so they keep the bare name.
+        // Version suffix: JITModule refuses to redefine a symbol, so a
+        // recompile of the same (hash, offset) -- e.g. after a type flip made
+        // the loop hot again -- needs a fresh name each time.
+        self.compile_seq += 1;
         let func_name = match trace.trace_type {
-            TraceType::Loop => format!("trace_{}", trace.loop_offset),
+            TraceType::Loop => format!("trace_{}_{}_v{}", bytecode_hash, trace.loop_offset, self.compile_seq),
             TraceType::Function => {
                 if let Some(ref func_id) = trace.func_id {
-                    format!("trace_{}", func_id)
+                    format!("trace_{}_v{}", func_id, self.compile_seq)
                 } else {
                     return Err("Function trace missing func_id".into());
                 }
@@ -819,6 +842,9 @@ impl JITCodegen {
         // Get function pointer
         let code_ptr = self.module.get_finalized_function(func_id);
 
+        // SAFETY: `code_ptr` is the entry of a finalized Cranelift function whose
+        // CLIF signature was built to match the `CompiledFn` ABI; the JIT module
+        // keeps the code mapped executable for its lifetime.
         Ok(unsafe { std::mem::transmute::<*const u8, CompiledFn>(code_ptr) })
     }
 
@@ -973,7 +999,7 @@ impl JITCodegen {
         ));
         let slot_addr = builder.ins().stack_addr(types::I64, locals_ptr_slot, 0);
         builder.ins().store(
-            cranelift_codegen::ir::MemFlags::new(),
+            cranelift_codegen::ir::MemFlagsData::new(),
             incoming_locals_ptr,
             slot_addr,
             0,
@@ -990,12 +1016,12 @@ impl JITCodegen {
             // Always load as I64 from memory (NaN-boxed representation)
             let val_i64 = builder
                 .ins()
-                .load(types::I64, cranelift_codegen::ir::MemFlags::new(), addr, 0);
+                .load(types::I64, cranelift_codegen::ir::MemFlagsData::new(), addr, 0);
 
             let ty = slot_types.get(&slot).copied().unwrap_or(types::I64);
             let val = if ty == types::F64 {
                 // For floats: bitcast to F64 (they're stored as raw f64 bits in NaN-box)
-                let flags = cranelift_codegen::ir::MemFlags::new();
+                let flags = cranelift_codegen::ir::MemFlagsData::new();
                 builder.ins().bitcast(types::F64, flags, val_i64)
             } else {
                 // For ints: unbox by extracting payload (48 bits) and sign-extending
@@ -1044,6 +1070,13 @@ impl JITCodegen {
             builder.append_block_param(exit_block, types::I64);
             builder.append_block_param(guard_fail_block, types::I64);
         }
+
+        // Iteration-start locals = the loop-header block params (locals portion).
+        // The header dominates `guard_fail_block`, so these values are usable
+        // there to roll every local back to the state at the start of the
+        // faulting iteration (see the guard_fail_block epilogue for why).
+        let iteration_start_locals: Vec<cranelift_codegen::ir::Value> =
+            builder.block_params(cl_blocks[loop_header_block])[..locals_order.len()].to_vec();
 
         let entry_target = cl_blocks[loop_header_block];
         let block_args = to_block_args(&initial_locals);
@@ -1345,7 +1378,7 @@ impl JITCodegen {
                             stack.push(payload);
                         } else {
                             // float() returns a float -> bitcast
-                            let flags = MemFlags::new();
+                            let flags = MemFlagsData::new();
                             let float_val = builder.ins().bitcast(types::F64, flags, boxed_result);
                             // Convert back to I64 for stack (comparison-compatible)
                             let int_val = builder.ins().bitcast(types::I64, flags, float_val);
@@ -1443,7 +1476,7 @@ impl JITCodegen {
                                 // Re-box to NaN-boxing format
                                 let boxed_arg = if arg_ty == types::F64 {
                                     // For floats: bitcast to I64 (raw bits are correct for NaN-box)
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg)
+                                    builder.ins().bitcast(types::I64, MemFlagsData::new(), arg)
                                 } else {
                                     // For ints: re-box by combining QNAN_BASE | TAG_SMALLINT | (val & PAYLOAD_MASK)
                                     let payload_mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_CALL);
@@ -1458,7 +1491,7 @@ impl JITCodegen {
 
                                 let offset = (i * 8) as i32;
                                 let slot_addr = builder.ins().stack_addr(types::I64, locals_array_slot, offset);
-                                builder.ins().store(MemFlags::new(), boxed_arg, slot_addr, 0);
+                                builder.ins().store(MemFlagsData::new(), boxed_arg, slot_addr, 0);
                             }
 
                             // Get pointer to locals array
@@ -1650,6 +1683,84 @@ impl JITCodegen {
                             stack.push(*param);
                         }
                     }
+                    // ModInt with a zero-divisor side-exit. A native `srem` traps
+                    // (SIGFPE) on a zero divisor, where the interpreter raises
+                    // ZeroDivisionError. Guard `b != 0` before the srem and bail to
+                    // the interpreter (which replays the modulo and raises) on a
+                    // zero divisor. The op hasn't committed at the guard (operands
+                    // popped, result not pushed, no StoreLocal yet), so the VM
+                    // resumes the iteration cleanly. Same deopt shape as the
+                    // overflow guard above, but the srem is computed in the
+                    // continuation -- it must not execute on the zero path.
+                    TraceOp::ModInt => {
+                        let b = stack.pop().ok_or("Stack underflow")?;
+                        let a = stack.pop().ok_or("Stack underflow")?;
+
+                        let zero = builder.ins().iconst(types::I64, 0);
+                        let is_zero = builder.ins().icmp(IntCC::Equal, b, zero);
+
+                        // guard_fail_block args: current locals + zero-padded stack
+                        // to exit height (the VM replays the op; stack slots unused).
+                        let mut fail_args = Vec::with_capacity(locals_order.len() + exit_stack_height);
+                        for &slot in &locals_order {
+                            fail_args.push(builder.use_var(slot_vars[&slot]));
+                        }
+                        for _ in 0..exit_stack_height {
+                            fail_args.push(zero);
+                        }
+                        let fail_block_args = to_block_args(&fail_args);
+
+                        // Continuation carries locals + the stack with a, b popped.
+                        let cont = builder.create_block();
+                        for &slot in &locals_order {
+                            let ty = slot_types.get(&slot).copied().unwrap_or(types::I64);
+                            builder.append_block_param(cont, ty);
+                        }
+                        for _ in 0..stack.len() {
+                            builder.append_block_param(cont, types::I64);
+                        }
+                        let mut cont_args = Vec::with_capacity(locals_order.len() + stack.len());
+                        for &slot in &locals_order {
+                            cont_args.push(builder.use_var(slot_vars[&slot]));
+                        }
+                        cont_args.extend_from_slice(&stack);
+                        let cont_block_args = to_block_args(&cont_args);
+
+                        builder
+                            .ins()
+                            .brif(is_zero, guard_fail_block, &fail_block_args, cont, &cont_block_args);
+                        builder.switch_to_block(cont);
+                        builder.seal_block(cont);
+
+                        // Restore SSA state from block params.
+                        let params: Vec<_> = builder.block_params(cont).to_vec();
+                        let mut pidx = 0;
+                        for &slot in &locals_order {
+                            builder.def_var(slot_vars[&slot], params[pidx]);
+                            pidx += 1;
+                        }
+                        stack.clear();
+                        for param in &params[pidx..] {
+                            stack.push(*param);
+                        }
+
+                        // b != 0 on this path (a, b dominate cont), so srem won't
+                        // trap. But native srem is truncated (result takes the sign
+                        // of the dividend); Catnip `%` is Python floored (sign of
+                        // the divisor, see i64_mod_floor in catnip_vm/ops/arith).
+                        // Apply the same fixup so the compiled loop matches the
+                        // interpreter: r = a % b; if r != 0 && (r ^ b) < 0 { r + b }
+                        // else { r }. Operands are SmallInts in +/-2^46 and |r| <
+                        // |b|, so r + b stays in range (no overflow deopt needed).
+                        let r = builder.ins().srem(a, b);
+                        let r_nonzero = builder.ins().icmp(IntCC::NotEqual, r, zero);
+                        let r_xor_b = builder.ins().bxor(r, b);
+                        let opposite_sign = builder.ins().icmp(IntCC::SignedLessThan, r_xor_b, zero);
+                        let need_fixup = builder.ins().band(r_nonzero, opposite_sign);
+                        let r_plus_b = builder.ins().iadd(r, b);
+                        let result = builder.ins().select(need_fixup, r_plus_b, r);
+                        stack.push(result);
+                    }
                     _ => {
                         compile_simple_op(&mut builder, op, &mut stack, &slot_vars, &slot_types)?;
                     }
@@ -1705,7 +1816,7 @@ impl JITCodegen {
         let slot_addr = builder.ins().stack_addr(types::I64, locals_ptr_slot, 0);
         let locals_ptr = builder
             .ins()
-            .load(types::I64, cranelift_codegen::ir::MemFlags::new(), slot_addr, 0);
+            .load(types::I64, cranelift_codegen::ir::MemFlagsData::new(), slot_addr, 0);
 
         // Store locals back to memory, re-boxing them to NaN-boxed format
 
@@ -1715,7 +1826,7 @@ impl JITCodegen {
 
             let val_i64 = if ty == types::F64 {
                 // For floats: bitcast to I64 (raw bits are already correct for NaN-box)
-                let flags = cranelift_codegen::ir::MemFlags::new();
+                let flags = cranelift_codegen::ir::MemFlagsData::new();
                 builder.ins().bitcast(types::I64, flags, val)
             } else {
                 // For ints: re-box by combining QNAN_BASE | TAG_SMALLINT | (val & PAYLOAD_MASK)
@@ -1733,7 +1844,7 @@ impl JITCodegen {
             let addr = builder.ins().iadd_imm(locals_ptr, offset as i64);
             builder
                 .ins()
-                .store(cranelift_codegen::ir::MemFlags::new(), val_i64, addr, 0);
+                .store(cranelift_codegen::ir::MemFlagsData::new(), val_i64, addr, 0);
         }
 
         // Return value depends on trace type
@@ -1764,27 +1875,30 @@ impl JITCodegen {
         };
         builder.ins().return_(&[ret_val]);
 
-        // guard_fail_block: handle guard failure based on trace type
+        // guard_fail_block: side exit. The interpreter resumes by re-running the
+        // entire faulting iteration from the loop header (`frame.ip = loop_offset`),
+        // so every local must be rolled back to its iteration-start value -- the
+        // loop-header block params, which dominate this block. Writing the current
+        // (mid-iteration) values would double-apply any StoreLocal that committed
+        // before the guard (e.g. `total += i` then a branch guard) once the
+        // interpreter replays the iteration. For function traces the written-back
+        // locals are discarded by the caller (it re-invokes with the original
+        // args), so this is a no-op there.
         builder.switch_to_block(guard_fail_block);
-        let guard_params: Vec<_> = builder.block_params(guard_fail_block).to_vec();
-        for (guard_param_idx, &slot) in locals_order.iter().enumerate() {
-            let var = slot_vars[&slot];
-            let val = guard_params[guard_param_idx];
-            builder.def_var(var, val);
-        }
 
         // Load locals pointer from stack slot
         let slot_addr = builder.ins().stack_addr(types::I64, locals_ptr_slot, 0);
         let locals_ptr = builder
             .ins()
-            .load(types::I64, cranelift_codegen::ir::MemFlags::new(), slot_addr, 0);
+            .load(types::I64, cranelift_codegen::ir::MemFlagsData::new(), slot_addr, 0);
 
-        // Store locals back to memory (re-box to NaN-boxed format, same as exit_block)
-        for (&slot, &var) in &slot_vars {
-            let val = builder.use_var(var);
+        // Store iteration-start locals back to memory (re-box to NaN-boxed format,
+        // same encoding as exit_block).
+        for (idx, &slot) in locals_order.iter().enumerate() {
+            let val = iteration_start_locals[idx];
             let ty = slot_types.get(&slot).copied().unwrap_or(types::I64);
             let val_i64 = if ty == types::F64 {
-                let flags = cranelift_codegen::ir::MemFlags::new();
+                let flags = cranelift_codegen::ir::MemFlagsData::new();
                 builder.ins().bitcast(types::I64, flags, val)
             } else {
                 // Re-box int: QNAN_BASE | TAG_SMALLINT | (val & PAYLOAD_MASK)
@@ -1799,7 +1913,7 @@ impl JITCodegen {
             let addr = builder.ins().iadd_imm(locals_ptr, offset as i64);
             builder
                 .ins()
-                .store(cranelift_codegen::ir::MemFlags::new(), val_i64, addr, 0);
+                .store(cranelift_codegen::ir::MemFlagsData::new(), val_i64, addr, 0);
         }
 
         // Return -1 = guard failure (side exit)
@@ -1862,7 +1976,7 @@ mod tests {
         trace.op_offsets.push(108);
         trace.iterations = 1;
 
-        let result = codegen.compile(&trace);
+        let result = codegen.compile(&trace, 0);
         assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
     }
 
@@ -1883,7 +1997,7 @@ mod tests {
         trace.op_offsets.push(103);
         trace.iterations = 1;
 
-        let result = codegen.compile(&trace);
+        let result = codegen.compile(&trace, 0);
         assert!(result.is_ok(), "AbsInt compilation failed: {:?}", result.err());
     }
 
@@ -1915,7 +2029,7 @@ mod tests {
         trace.op_offsets.push(208);
         trace.iterations = 1;
 
-        let result = codegen.compile(&trace);
+        let result = codegen.compile(&trace, 0);
         assert!(result.is_ok(), "MinInt/MaxInt compilation failed: {:?}", result.err());
     }
 
@@ -1936,7 +2050,7 @@ mod tests {
         trace.op_offsets.push(103);
         trace.iterations = 1;
 
-        let result = codegen.compile(&trace);
+        let result = codegen.compile(&trace, 0);
         assert!(result.is_ok(), "RoundInt compilation failed: {:?}", result.err());
     }
 
@@ -1957,7 +2071,7 @@ mod tests {
         trace.op_offsets.push(103);
         trace.iterations = 1;
 
-        let result = codegen.compile(&trace);
+        let result = codegen.compile(&trace, 0);
         assert!(result.is_ok(), "BoolInt compilation failed: {:?}", result.err());
     }
 }

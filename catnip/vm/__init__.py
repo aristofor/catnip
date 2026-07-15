@@ -6,10 +6,6 @@ Provides a stack-based VM that eliminates Python stack growth
 during deep recursion by using an explicit operand stack.
 """
 
-from .opcodes import STACK_EFFECT, VMOp
-
-__all__ = ('STACK_EFFECT', 'VMOp')
-
 
 # Lazy imports (used by Rust debug modules via py.import)
 def __getattr__(name):

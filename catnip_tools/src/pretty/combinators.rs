@@ -96,7 +96,7 @@ impl Arena {
     }
 
     /// `text(",") <> line` - comma then soft break.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // algebra primitive, exercised by tests only
     pub fn comma_line(&mut self) -> Doc {
         let comma = self.text(",");
         let ln = self.line();

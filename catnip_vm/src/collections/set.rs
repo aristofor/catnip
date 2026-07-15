@@ -94,6 +94,12 @@ impl NativeSet {
     pub fn to_values(&self) -> Vec<Value> {
         self.inner.borrow().iter().map(|k| k.to_value()).collect()
     }
+
+    /// Clone the raw keys (short-lived). Lets the VM materialize struct keys
+    /// through the registry, which `to_values` cannot reach.
+    pub fn keys_cloned(&self) -> Vec<ValueKey> {
+        self.inner.borrow().iter().cloned().collect()
+    }
 }
 
 // NativeSet doesn't need Drop cascade because ValueKey owns its Arcs

@@ -3,6 +3,8 @@
 //!
 //! Python `Context` subclasses `ContextBase` to add wrappers (JIT, import, etc.).
 
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySet};
 
@@ -37,8 +39,6 @@ pub struct ContextBase {
     #[pyo3(get, set)]
     pub(crate) jit_all: bool,
     #[pyo3(get, set)]
-    pub(crate) jit_detector: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
     pub(crate) jit_executor: Option<Py<PyAny>>,
     #[pyo3(get, set)]
     pub(crate) jit_matcher: Option<Py<PyAny>>,
@@ -72,6 +72,14 @@ pub struct ContextBase {
     // Extensions
     #[pyo3(get, set)]
     pub(crate) _extensions: Py<PyDict>,
+
+    /// Back-reference to the Registry (set from Python as `ctx._registry`). Held
+    /// as a native field rather than an instance-`__dict__` attribute so it is
+    /// reachable from `__traverse__`: a `__dict__` attribute would close a
+    /// `Context <-> Registry` cycle that the collector cannot see (PyO3's manual
+    /// `__traverse__` does not visit the instance dict), leaking every session.
+    #[pyo3(get, set, name = "_registry")]
+    pub(crate) registry_obj: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -91,7 +99,6 @@ impl ContextBase {
             tco_enabled: true,
             jit_enabled: false,
             jit_all: false,
-            jit_detector: None,
             jit_executor: None,
             jit_matcher: None,
             jit_codegen: None,
@@ -104,7 +111,62 @@ impl ContextBase {
             memoization: py.None(),
             module_policy: None,
             _extensions: PyDict::new(py).unbind(),
+            registry_obj: None,
         })
+    }
+
+    /// Participate in CPython's cyclic GC. The context stores its wrappers
+    /// (`_JitWrapper`, `_PureWrapper`, ...) in `globals`, and each wrapper holds
+    /// `self.ctx` back -- a `Context <-> globals -> wrapper` cycle. `globals` is a
+    /// native `ContextBase` field, invisible to the collector unless traversed, so
+    /// without this every `Context` (hence every `Catnip()` session) leaks.
+    /// Visiting all owned Python references lets the collector see the cycle;
+    /// `__clear__` breaks it. (PyO3 visits the instance `__dict__`/`__weakref__`
+    /// automatically.)
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.globals)?;
+        visit.call(&self.locals)?;
+        visit.call(&self.pure_functions)?;
+        visit.call(&self.call_stack)?;
+        visit.call(&self.logger)?;
+        visit.call(&self.memoization)?;
+        visit.call(&self._extensions)?;
+        for v in [
+            &self.result,
+            &self.jit_executor,
+            &self.jit_matcher,
+            &self.jit_codegen,
+            &self.nd_scheduler,
+            &self.sourcemap,
+            &self.module_policy,
+            &self.registry_obj,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit.call(v)?;
+        }
+        Ok(())
+    }
+
+    /// Break the wrapper cycle by dropping the strong references that close it.
+    /// Only called by the GC on an otherwise-unreachable context. Replacing
+    /// `globals`/`_extensions` with fresh empty dicts severs `Context -> wrapper`
+    /// (proven sufficient on its own); the `Option` fields are also cleared for
+    /// robustness against other reference paths (jit/nd executors).
+    fn __clear__(&mut self) {
+        Python::attach(|py| {
+            self.globals = PyDict::new(py).unbind();
+            self._extensions = PyDict::new(py).unbind();
+        });
+        self.result = None;
+        self.jit_executor = None;
+        self.jit_matcher = None;
+        self.jit_codegen = None;
+        self.nd_scheduler = None;
+        self.sourcemap = None;
+        self.module_policy = None;
+        self.registry_obj = None;
     }
 
     /// Push a new scope.
@@ -195,16 +257,12 @@ impl ContextBase {
             }
         };
 
-        // Propagate modified captures to parent scope
-        for (name, old_value) in &before {
-            if let Some(new_value) = captured.get_item(name)? {
-                let changed = !new_value.is(old_value.bind(py));
-                if changed {
-                    let mut locals = self.locals.borrow_mut(py);
-                    locals.set(py, name.clone(), new_value.unbind());
-                }
-            }
-        }
+        // No propagation to the parent scope: a closure is a private mutable
+        // snapshot (wip/CLOSURE_SEMANTICS.md, settled 2026-07-04) -- the sync
+        // above persists the writes into the closure's OWN captured dict
+        // (the canonical counter), and nothing leaks upward. Module globals
+        // are not captured at all (live resolution, handled in Scope).
+        let _ = before;
 
         Ok(result)
     }
@@ -225,23 +283,5 @@ impl ContextBase {
         }
 
         Ok(func.clone().unbind())
-    }
-
-    /// Lazy initialization of JIT subsystem.
-    fn _init_jit(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.jit_detector.is_none() {
-            match py.import(PY_MOD_JIT) {
-                Ok(jit_mod) => {
-                    let detector_cls = jit_mod.getattr("HotLoopDetector")?;
-                    let detector = detector_cls.call1((crate::constants::JIT_THRESHOLD_DEFAULT,))?;
-                    self.jit_detector = Some(detector.unbind());
-                }
-                Err(_) => {
-                    // JIT not available
-                    self.jit_enabled = false;
-                }
-            }
-        }
-        Ok(())
     }
 }

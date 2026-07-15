@@ -123,8 +123,48 @@ pub(crate) fn call_binary_op(
 ) -> Result<Value, super::core::VMError> {
     let py_a = a.to_pyobject(py);
     let py_b = b.to_pyobject(py);
+    // Voie A: operands are owned and discarded by this op; `py_a`/`py_b` now
+    // hold their own Python refs, so release the operand handles (even on the
+    // error path below). Callers are exclusively owned-discard binop arms.
+    if a.is_pyobj() {
+        a.decref();
+    }
+    if b.is_pyobj() {
+        b.decref();
+    }
     let py_result = op.call1(py, (&py_a, &py_b)).to_vm(py)?;
     Value::from_pyobject(py, py_result.bind(py)).to_vm(py)
+}
+
+/// Python fallback for the binary bitwise ops (`&`, `|`, `^`) on non-integer
+/// operands (numpy arrays, sets, types with custom `__and__`/`__or__`). The
+/// native fast paths in `value_ops` only cover Catnip ints/bigints; this mirrors
+/// the arithmetic ops' `host.binary_op` fallback for a family that has no
+/// `BinaryOp` variant. `fn_name` is an `operator` module name (`and_`/`or_`/`xor`).
+///
+/// Consumes the owned pyobj operand refs like [`call_binary_op`] (Voie A), so the
+/// caller must release the leftover operands with the non-pyobj variant
+/// (`release_binop_operands`), never `release_operands`.
+#[inline]
+pub(crate) fn bitwise_binary_fallback(
+    py: Python<'_>,
+    fn_name: &str,
+    a: Value,
+    b: Value,
+) -> Result<Value, super::core::VMError> {
+    let op_fn = py.import("operator").and_then(|m| m.getattr(fn_name)).to_vm(py)?;
+    call_binary_op(py, &op_fn.unbind(), a, b)
+}
+
+/// Python fallback for unary bitwise not (`~`) on non-integer operands. Borrows
+/// `a` (does not decref it), so the caller keeps its existing single-operand
+/// release (`decref_discard`).
+#[inline]
+pub(crate) fn bitwise_unary_fallback(py: Python<'_>, a: Value) -> Result<Value, super::core::VMError> {
+    let py_a = a.to_pyobject(py);
+    let invert = py.import("operator").and_then(|m| m.getattr("invert")).to_vm(py)?;
+    let py_result = invert.call1((&py_a,)).to_vm(py)?;
+    Value::from_pyobject(py, &py_result).to_vm(py)
 }
 
 /// Delete a name from Python context.globals.
@@ -175,7 +215,7 @@ pub(crate) fn cast_tuple<'a, 'py>(obj: &'a Bound<'py, PyAny>) -> Result<&'a Boun
 pub(crate) fn portabilize_struct_values(
     py: Python<'_>,
     captured: &mut IndexMap<String, Value>,
-    registry: &mut super::structs::StructRegistry,
+    registry: &super::structs::StructRegistry,
 ) {
     for val in captured.values_mut() {
         if val.is_struct_instance() {
@@ -251,161 +291,6 @@ pub(crate) fn append_constants_from_tuple(
     }
 
     Ok(())
-}
-
-/// Python context wrapper for VM callbacks.
-#[pyclass(module = "catnip._rs")]
-pub struct PyVMContext {
-    /// Reference to Catnip context.locals for scope resolution
-    pub locals: Py<PyAny>,
-    /// Reference to Catnip context.globals
-    pub globals: Py<PyAny>,
-    /// Registry for function execution
-    pub registry: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyVMContext {
-    #[new]
-    fn new(locals: Py<PyAny>, globals: Py<PyAny>) -> Self {
-        Self {
-            locals,
-            globals,
-            registry: None,
-        }
-    }
-
-    /// Set the registry for function calls.
-    fn set_registry(&mut self, registry: Py<PyAny>) {
-        self.registry = Some(registry);
-    }
-}
-
-impl PyVMContext {
-    /// Resolve a name via the scope chain.
-    pub fn resolve_name(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        // Try locals._resolve(name) first
-        let locals = self.locals.bind(py);
-        if let Ok(resolve) = locals.getattr("_resolve") {
-            if let Ok(result) = resolve.call1((name,)) {
-                return Ok(result.unbind());
-            }
-        }
-
-        // Try globals
-        let globals = self.globals.bind(py);
-        if let Ok(result) = globals.get_item(name) {
-            if !result.is_none() {
-                return Ok(result.unbind());
-            }
-        }
-
-        Err(pyo3::exceptions::PyNameError::new_err(
-            catnip_core::constants::format_name_error(name),
-        ))
-    }
-
-    /// Store a name via the scope chain.
-    pub fn store_name(&self, py: Python<'_>, name: &str, value: Py<PyAny>) -> PyResult<()> {
-        // Try locals._set(name, value)
-        let locals = self.locals.bind(py);
-        if let Ok(set_fn) = locals.getattr("_set") {
-            set_fn.call1((name, &value))?;
-            return Ok(());
-        }
-
-        // Fall back to globals
-        let globals = self.globals.bind(py);
-        if let Ok(dict) = globals.cast::<PyDict>() {
-            dict.set_item(name, value)?;
-            return Ok(());
-        }
-
-        // Neither locals._set nor globals dict worked
-        Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "cannot store name '{name}': locals has no _set method and globals is not a dict"
-        )))
-    }
-
-    /// Call a Python function with arguments.
-    pub fn call_function(
-        &self,
-        py: Python<'_>,
-        func: &Bound<'_, PyAny>,
-        args: Vec<Value>,
-        kwargs: Option<IndexMap<String, Value>>,
-    ) -> PyResult<Value> {
-        // Convert args to PyObjects
-        let py_args: Vec<Py<PyAny>> = args.iter().map(|v| v.to_pyobject(py)).collect();
-        let py_args_tuple = PyTuple::new(py, py_args)?;
-
-        let result = if let Some(kw) = kwargs {
-            let py_kwargs = PyDict::new(py);
-            for (k, v) in kw {
-                py_kwargs.set_item(k, v.to_pyobject(py))?;
-            }
-            func.call(py_args_tuple, Some(&py_kwargs))?
-        } else {
-            func.call1(py_args_tuple)?
-        };
-
-        Value::from_pyobject(py, &result)
-    }
-
-    /// Get an attribute from an object.
-    pub fn getattr(&self, py: Python<'_>, obj: Value, name: &str) -> PyResult<Value> {
-        let py_obj = obj.to_pyobject(py);
-        let result = py_obj.bind(py).getattr(name)?;
-        Value::from_pyobject(py, &result)
-    }
-
-    /// Set an attribute on an object.
-    pub fn setattr(&self, py: Python<'_>, obj: Value, name: &str, value: Value) -> PyResult<()> {
-        let py_obj = obj.to_pyobject(py);
-        py_obj.bind(py).setattr(name, value.to_pyobject(py))?;
-        Ok(())
-    }
-
-    /// Get an item from a collection.
-    pub fn getitem(&self, py: Python<'_>, obj: Value, key: Value) -> PyResult<Value> {
-        let py_obj = obj.to_pyobject(py);
-        let py_key = key.to_pyobject(py);
-        let result = py_obj.bind(py).get_item(py_key)?;
-        Value::from_pyobject(py, &result)
-    }
-
-    /// Set an item in a collection.
-    pub fn setitem(&self, py: Python<'_>, obj: Value, key: Value, value: Value) -> PyResult<()> {
-        let py_obj = obj.to_pyobject(py);
-        let py_key = key.to_pyobject(py);
-        py_obj.bind(py).set_item(py_key, value.to_pyobject(py))?;
-        Ok(())
-    }
-
-    /// Get an iterator from an object.
-    pub fn get_iter(&self, py: Python<'_>, obj: Value) -> PyResult<Value> {
-        let py_obj = obj.to_pyobject(py);
-        let iter = py_obj.bind(py).try_iter()?;
-        Value::from_pyobject(py, iter.as_any())
-    }
-
-    /// Get next value from an iterator, or None if exhausted.
-    pub fn next_iter(&self, py: Python<'_>, iter: Value) -> PyResult<Option<Value>> {
-        let py_iter = iter.to_pyobject(py);
-        let iter_bound = py_iter.bind(py);
-
-        // Try to call __next__
-        match iter_bound.call_method0("__next__") {
-            Ok(result) => Ok(Some(Value::from_pyobject(py, &result)?)),
-            Err(e) => {
-                if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        }
-    }
 }
 
 /// Convert a Python CodeObject to a Rust CodeObject.
@@ -557,6 +442,22 @@ pub fn convert_args(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Vec<V
 
 use super::pattern::{VMPattern as RsVMPattern, VMPatternElement as RsVMPatternElement};
 
+/// Convert a catnip_vm value into a fresh Python reference. The intermediate
+/// catnip_rs Value is only a carrier: its owned ref (an ObjectTable handle for
+/// composite elements) is released here, the returned Python reference is the
+/// only thing kept -- keeping the carrier leaked one slot per sub-object of
+/// every composite constant (found by the ledger grid on `struct P { a }`).
+fn convert_vm_value_to_py(
+    py: Python<'_>,
+    vm_val: catnip_vm::Value,
+    sub_functions: &[catnip_vm::compiler::CodeObject],
+) -> PyResult<Py<PyAny>> {
+    let v = convert_vm_value(py, vm_val, sub_functions)?;
+    let obj = v.to_pyobject(py);
+    v.decref();
+    Ok(obj)
+}
+
 /// Convert a catnip_vm::Value constant to a catnip_rs::Value.
 ///
 /// Tags 0-3 and 6-7 share the same bit layout between both crates,
@@ -590,66 +491,87 @@ fn convert_vm_value(
         return Ok(Value::from_vmfunc(idx));
     }
     if vm_val.is_bigint() {
+        // SAFETY: is_bigint() checked the tag above, so the payload is a live GMP
+        // Integer owned by vm_val; the borrow does not outlive this scope.
         let n = unsafe { vm_val.as_bigint_ref() }.unwrap();
         return Ok(Value::from_bigint(n.clone()));
     }
     if vm_val.is_native_str() {
+        // SAFETY: is_native_str() checked the tag above, so the payload is a live
+        // native string owned by vm_val; the borrow does not outlive it.
         let s = unsafe { vm_val.as_native_str_ref() }.unwrap();
         let py_str = s.into_pyobject(py)?.into_any();
         return Value::from_pyobject(py, &py_str);
     }
     if vm_val.is_native_tuple() {
+        // SAFETY: is_native_tuple() checked the tag above, so the payload is a live
+        // native tuple owned by vm_val; the borrow does not outlive it.
         let t = unsafe { vm_val.as_native_tuple_ref() }.unwrap();
         let slice = t.as_slice();
         let mut py_items: Vec<Py<pyo3::PyAny>> = Vec::with_capacity(slice.len());
         for &item in slice {
-            let v = convert_vm_value(py, item, sub_functions)?;
-            py_items.push(v.to_pyobject(py));
+            py_items.push(convert_vm_value_to_py(py, item, sub_functions)?);
         }
         let py_tuple = PyTuple::new(py, &py_items)?;
         return Value::from_pyobject(py, &py_tuple.into_any());
     }
     if vm_val.is_native_list() {
+        // SAFETY: is_native_list() checked the tag above, so the payload is a live
+        // native list owned by vm_val; the borrow does not outlive it.
         let l = unsafe { vm_val.as_native_list_ref() }.unwrap();
         let items = l.as_slice_cloned();
         let mut py_items: Vec<Py<pyo3::PyAny>> = Vec::with_capacity(items.len());
         for &item in &items {
-            let v = convert_vm_value(py, item, sub_functions)?;
-            py_items.push(v.to_pyobject(py));
+            py_items.push(convert_vm_value_to_py(py, item, sub_functions)?);
             item.decref();
         }
         let py_list = pyo3::types::PyList::new(py, &py_items)?;
         return Value::from_pyobject(py, &py_list.into_any());
     }
     if vm_val.is_native_dict() {
+        // SAFETY: is_native_dict() checked the tag above, so the payload is a live
+        // native dict owned by vm_val; the borrow does not outlive it.
         let d = unsafe { vm_val.as_native_dict_ref() }.unwrap();
         let keys = d.keys();
         let values = d.values();
         let py_dict = PyDict::new(py);
         for (k, v) in keys.into_iter().zip(values.into_iter()) {
-            let py_k = convert_vm_value(py, k, sub_functions)?;
-            let py_v = convert_vm_value(py, v, sub_functions)?;
-            py_dict.set_item(py_k.to_pyobject(py), py_v.to_pyobject(py))?;
+            let py_k = convert_vm_value_to_py(py, k, sub_functions)?;
+            let py_v = convert_vm_value_to_py(py, v, sub_functions)?;
+            py_dict.set_item(py_k, py_v)?;
+            // Both `keys()` (to_value) and `values()` (clone_refcount) hand back
+            // OWNED values; convert_vm_value_to_py releases only the RS carrier,
+            // not the catnip_vm source, so release both here (a heap key leaked
+            // its Arc otherwise -- the value path already did this).
+            k.decref();
             v.decref();
         }
         return Value::from_pyobject(py, &py_dict.into_any());
     }
     if vm_val.is_native_set() {
+        // SAFETY: is_native_set() checked the tag above, so the payload is a live
+        // native set owned by vm_val; the borrow does not outlive it.
         let s = unsafe { vm_val.as_native_set_ref() }.unwrap();
         let items = s.to_values();
         let py_set = pyo3::types::PySet::empty(py)?;
         for item in &items {
-            let v = convert_vm_value(py, *item, sub_functions)?;
-            py_set.add(v.to_pyobject(py))?;
+            py_set.add(convert_vm_value_to_py(py, *item, sub_functions)?)?;
+            // `to_values` (to_value per element) hands back OWNED values; the
+            // carrier release inside the conversion does not free the source.
+            item.decref();
         }
         return Value::from_pyobject(py, &py_set.into_any());
     }
     if vm_val.is_native_bytes() {
+        // SAFETY: is_native_bytes() checked the tag above, so the payload is a live
+        // native bytes buffer owned by vm_val; the borrow does not outlive it.
         let b = unsafe { vm_val.as_native_bytes_ref() }.unwrap();
         let py_bytes = pyo3::types::PyBytes::new(py, b.as_bytes());
         return Value::from_pyobject(py, &py_bytes.into_any());
     }
     if vm_val.is_complex() {
+        // SAFETY: is_complex() checked the tag above, so the payload is a live
+        // complex value owned by vm_val; the read does not outlive it.
         let (r, i) = unsafe { vm_val.as_complex_parts() }.unwrap();
         return Ok(Value::from_complex(r, i));
     }
@@ -675,25 +597,23 @@ pub(crate) fn vm_value_to_py(py: Python<'_>, vm_val: catnip_vm::Value) -> PyResu
         let obj = NativePluginObject::from_vm(vm_val);
         return Ok(Py::new(py, obj)?.into_any());
     }
-    let rs_val = convert_vm_value(py, vm_val, &[])?;
-    let py_obj = rs_val.to_pyobject(py);
+    let py_obj = convert_vm_value_to_py(py, vm_val, &[])?;
     vm_val.decref();
     Ok(py_obj)
 }
 
 /// Convert a *borrowed* `catnip_vm::Value` into a PyObject without releasing
-/// any reference. Used for plugin module static attributes, whose values stay
-/// owned by the plugin's namespace.
+/// the SOURCE reference (the value stays owned by the plugin's namespace).
+/// The intermediate catnip_rs carrier is still released.
 pub(crate) fn vm_value_to_py_borrowed(py: Python<'_>, vm_val: catnip_vm::Value) -> PyResult<Py<PyAny>> {
-    let rs_val = convert_vm_value(py, vm_val, &[])?;
-    Ok(rs_val.to_pyobject(py))
+    convert_vm_value_to_py(py, vm_val, &[])
 }
 
 /// Convert a PyObject into a fresh, owned `catnip_vm::Value` (an argument for a
 /// plugin call). Callers must `decref` the returned value once the call
 /// completes. A `NativePluginObject` is passed through by incrementing its
 /// refcount so the post-call decref balances out.
-pub(crate) fn convert_py_to_vm_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<catnip_vm::Value> {
+pub(crate) fn convert_py_to_vm_value(obj: &Bound<'_, PyAny>) -> PyResult<catnip_vm::Value> {
     use catnip_vm::Value as VmValue;
     use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyList};
 
@@ -729,26 +649,26 @@ pub(crate) fn convert_py_to_vm_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> 
     if let Ok(list) = obj.cast::<PyList>() {
         let mut items = Vec::with_capacity(list.len());
         for it in list.iter() {
-            items.push(convert_py_to_vm_value(py, &it)?);
+            items.push(convert_py_to_vm_value(&it)?);
         }
         return Ok(VmValue::from_list(items));
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
         let mut items = Vec::with_capacity(tuple.len());
         for it in tuple.iter() {
-            items.push(convert_py_to_vm_value(py, &it)?);
+            items.push(convert_py_to_vm_value(&it)?);
         }
         return Ok(VmValue::from_tuple(items));
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
         let mut map: IndexMap<catnip_vm::collections::ValueKey, VmValue> = IndexMap::new();
         for (k, v) in dict.iter() {
-            let kv = convert_py_to_vm_value(py, &k)?;
+            let kv = convert_py_to_vm_value(&k)?;
             let key = kv
                 .to_key()
                 .map_err(|e| pyo3::exceptions::PyTypeError::new_err(e.to_string()))?;
             kv.decref();
-            map.insert(key, convert_py_to_vm_value(py, &v)?);
+            map.insert(key, convert_py_to_vm_value(&v)?);
         }
         return Ok(VmValue::from_dict(map));
     }
@@ -861,6 +781,9 @@ fn convert_code_object_from_pure(
         complexity: vm_code.complexity,
         line_table: vm_code.line_table.clone(),
         patterns: rs_patterns,
+        union_checks: vm_code.union_checks.clone(),
+        composite_checks: vm_code.composite_checks.clone(),
+        generic_checks: vm_code.generic_checks.clone(),
         bytecode_hash: std::sync::OnceLock::new(),
         encoded_ir: vm_code.encoded_ir.clone(),
     })
@@ -872,20 +795,4 @@ pub fn convert_pure_compile_output(
     output: &catnip_vm::compiler::CompileOutput,
 ) -> PyResult<CodeObject> {
     convert_code_object_from_pure(py, &output.code, &output.functions)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_context_creation() {
-        Python::initialize();
-        Python::attach(|py| {
-            let locals = PyDict::new(py).into_any().unbind();
-            let globals = PyDict::new(py).into_any().unbind();
-            let ctx = PyVMContext::new(locals, globals);
-            assert!(ctx.registry.is_none());
-        });
-    }
 }

@@ -5,7 +5,7 @@ recursive-include catnip_tools *.rs *.toml
 recursive-include catnip_grammar *.rs *.toml *.js *.json *.c *.h
 recursive-include catnip_repl *.rs *.toml
 recursive-include catnip_libs *.rs *.toml
-include README.md LICENSE Cargo.toml
+include README.md LICENSE Cargo.toml rust-toolchain.toml
 graft tests
 prune tests/serial/jit/.pytest_cache
 global-exclude __pycache__

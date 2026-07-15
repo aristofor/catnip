@@ -13,7 +13,7 @@ t = Tag("hello")
 print("t.repr() =", t.repr())
 
 print()
-print("⇒ Méthode de trait accede a self")
+print("⇒ Méthode de trait accède à self")
 
 trait HasArea {
     area(self) => { self.w * self.h }
@@ -25,7 +25,7 @@ r = Rect(3, 4)
 print("Rect(3, 4).area() =", r.area())
 
 print()
-print("⇒ Heritage de trait (extends)")
+print("⇒ Héritage de trait (extends)")
 
 trait Named {
     name(self) => { "anonymous" }
@@ -76,7 +76,7 @@ print("s.move() =", s.move())
 print("s.draw() =", s.draw())
 
 print()
-print("⇒ Conflit resolu par override")
+print("⇒ Conflit résolu par override")
 
 trait X { f(self) => { 1 } }
 trait Y { f(self) => { 2 } }

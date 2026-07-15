@@ -2,7 +2,7 @@
 # Decimal exact type (base-10, suffix d/D)
 # Arithmetic exacte : 0.1d + 0.2d == 0.3d
 
-# Litteraux
+# Littéraux
 prix = 99.99d
 taxe = 0.08d
 total = prix + prix * taxe

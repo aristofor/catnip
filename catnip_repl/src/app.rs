@@ -1918,6 +1918,8 @@ struct CapturedExec<T> {
 fn capture_stdout<T, F: FnOnce() -> T>(f: F) -> CapturedExec<T> {
     use std::os::unix::io::{FromRawFd, RawFd};
 
+    // SAFETY: standard POSIX fd manipulation (dup/dup2/close around fd 1) on the
+    // single REPL thread; every dup'd fd is closed or restored on each return path.
     unsafe {
         // Save original stdout fd
         let saved_fd: RawFd = libc::dup(1);

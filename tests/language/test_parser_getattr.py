@@ -5,7 +5,7 @@ from catnip._rs import Op
 
 from catnip.nodes import Ref
 from catnip.parser import Parser
-from catnip.transformer import OpCode
+from catnip.semantic.opcode import OpCode
 
 parser = Parser()
 parse = parser.parse

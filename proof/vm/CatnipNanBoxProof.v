@@ -2,7 +2,9 @@
 (* CatnipNanBoxProof.v - NaN-boxing value representation correctness
  *
  * Source of truth:
- *   catnip_rs/src/vm/value.rs
+ *   catnip_rs/src/vm/value.rs (PyO3 tags 4-7)
+ *   catnip_core/src/nanbox.rs + catnip_core/src/scalar.rs (shared
+ *   layout, ScalarValue accessors and constructors -- Phase 5)
  *
  * Proves tag discrimination, encoding injectivity, and round-trip
  * correctness for the VM's NaN-boxed value representation:
@@ -14,13 +16,18 @@
  *         PyObj(4), Struct(5), BigInt(6), VMFunc(7).
  *
  * Complete proofs for all 8 tags (0-7), including BigInt
- * promotion/demotion invariants (SmallInt <-> BigInt).
+ * promotion/demotion invariants (SmallInt <-> BigInt) and the
+ * Phase 5 promotion lemmas: to_bigint totality/exactness and
+ * fast-path/slow-path coherence of the generic int arithmetic
+ * (catnip_core::arith).
  *
  * Models bitwise encoding as arithmetic (tag * 2^47 + payload)
  * since Z arithmetic is cleaner for Coq proofs than Z.land/Z.lor
  * on 64-bit constants.
  *
  * Standalone: no dependencies on other Catnip proofs.
+ *
+ * 37 theorems + 24 examples, 0 Admitted.
  *)
 
 From Coq Require Import ZArith Bool Lia.
@@ -435,6 +442,120 @@ Theorem truthy_invariant : forall n,
   int_truthy n = int_truthy (sign_extend (extract_payload (encode_int n))).
 Proof.
   intros n Hs. rewrite demotion_preserves_value by exact Hs. reflexivity.
+Qed.
+
+
+(* ================================================================ *)
+(* I''''. Promotion Totality and Path Coherence (Phase 5)            *)
+(*                                                                    *)
+(* Source: catnip_core/src/arith.rs (generic numeric_* int path)     *)
+(*         catnip_core/src/scalar.rs (scalar_from_bigint_or_demote,  *)
+(*         scalar_as_int with sign extension)                        *)
+(*                                                                    *)
+(* The generic int path of numeric_add/sub/mul has two branches:     *)
+(*   fast: i64 checked_op, then scalar_try_from_int (small only)     *)
+(*   slow: exact Z op, then scalar_from_bigint_or_demote             *)
+(* Both must denote the same mathematical value and pick the same    *)
+(* representation (small iff the value fits the 47-bit range), so    *)
+(* the result never depends on which branch ran. bigint_binop        *)
+(* (mixed small/big operands) is the slow path applied directly.     *)
+(* ================================================================ *)
+
+(* Integer result representation: payload smallint or heap bigint. *)
+Inductive IntRepr : Type :=
+  | RSmall (n : Z)
+  | RBig (n : Z).
+
+Definition denote (r : IntRepr) : Z :=
+  match r with RSmall n => n | RBig n => n end.
+
+(* scalar_from_bigint_or_demote: demote iff the value is small. *)
+Definition from_bigint_or_demote (n : Z) : IntRepr :=
+  if needs_bigint n then RBig n else RSmall n.
+
+(* The shared constructor never changes the mathematical value. *)
+Theorem from_bigint_or_demote_preserves : forall n,
+  denote (from_bigint_or_demote n) = n.
+Proof.
+  intro n. unfold from_bigint_or_demote.
+  destruct (needs_bigint n); reflexivity.
+Qed.
+
+(* The representation it picks is canonical: small iff in range. *)
+Theorem from_bigint_or_demote_small_iff : forall n,
+  (exists m, from_bigint_or_demote n = RSmall m) <-> is_small n.
+Proof.
+  intro n. unfold from_bigint_or_demote. split.
+  - intros [m Hm]. destruct (needs_bigint n) eqn:E; [discriminate|].
+    apply needs_bigint_false_iff_small. exact E.
+  - intro Hs. apply needs_bigint_false_iff_small in Hs. rewrite Hs.
+    exists n. reflexivity.
+Qed.
+
+(* to_bigint (arith.rs) is total and exact on the small form: it     *)
+(* reads the payload back through sign extension (scalar_as_int).    *)
+(* On the big form it borrows the heap Integer directly (identity).  *)
+Definition to_bigint_small (v : Z) : option Z :=
+  Some (sign_extend (extract_payload v)).
+
+Theorem to_bigint_small_exact : forall n,
+  is_small n -> to_bigint_small (encode_int n) = Some n.
+Proof.
+  intros n Hs. unfold to_bigint_small.
+  rewrite int_roundtrip_signed by exact Hs. reflexivity.
+Qed.
+
+(* i64 domain of the fast path (checked_add/checked_sub/checked_mul). *)
+Definition I64_MIN := -(2 ^ 63).
+Definition I64_MAX := 2 ^ 63 - 1.
+
+Definition in_i64 (n : Z) : bool := (I64_MIN <=? n) && (n <=? I64_MAX).
+
+(* Fast path on the mathematical result v = op a b: checked_op       *)
+(* succeeds iff v fits i64, scalar_try_from_int accepts iff v is     *)
+(* small; anything else falls through to the slow path (None).       *)
+Definition int_fast_path (v : Z) : option IntRepr :=
+  if in_i64 v
+  then (if needs_bigint v then None else Some (RSmall v))
+  else None.
+
+(* Agreement: whenever the fast path answers, the slow path would    *)
+(* have produced the same representation (value and form).           *)
+Theorem int_paths_agree : forall v r,
+  int_fast_path v = Some r -> from_bigint_or_demote v = r.
+Proof.
+  intros v r H. unfold int_fast_path in H.
+  destruct (in_i64 v); [|discriminate].
+  destruct (needs_bigint v) eqn:E; [discriminate|].
+  injection H as <-. unfold from_bigint_or_demote. rewrite E. reflexivity.
+Qed.
+
+(* Completeness on the common domain: a small result never escapes   *)
+(* to the slow path (2^46 < 2^63, a small value always fits i64).    *)
+Theorem int_fast_path_complete_on_small : forall v,
+  is_small v -> int_fast_path v = Some (RSmall v).
+Proof.
+  intros v Hs.
+  assert (Hrange : -HALF_W <= v < HALF_W) by exact Hs.
+  unfold int_fast_path.
+  assert (Hi : in_i64 v = true).
+  { unfold in_i64, I64_MIN, I64_MAX. apply Bool.andb_true_iff.
+    unfold HALF_W in Hrange.
+    split; apply Z.leb_le; lia. }
+  rewrite Hi.
+  apply needs_bigint_false_iff_small in Hs. rewrite Hs. reflexivity.
+Qed.
+
+(* An i64 overflow can never demote: after a failed checked_op the   *)
+(* slow path always keeps the bigint form (|v| > 2^63-1 > 2^46-1).   *)
+Theorem i64_overflow_never_demotes : forall v,
+  in_i64 v = false -> needs_bigint v = true.
+Proof.
+  intros v H. apply needs_bigint_true_iff_not_small.
+  intro Hs. unfold is_small, HALF_W in Hs.
+  unfold in_i64, I64_MIN, I64_MAX in H.
+  apply Bool.andb_false_iff in H.
+  destruct H as [H|H]; apply Z.leb_gt in H; lia.
 Qed.
 
 

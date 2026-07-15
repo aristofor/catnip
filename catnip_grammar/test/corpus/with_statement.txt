@@ -1,0 +1,68 @@
+================================================================================
+With statement binding
+================================================================================
+
+with f = g() { f }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (with_stmt
+      (with_binding
+        name: (identifier)
+        value: (call
+          (identifier)
+          (arguments)))
+      body: (block
+        (statement
+          (identifier))))))
+
+================================================================================
+With multiple bindings
+================================================================================
+
+with a = f(), b = g() {
+  a
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (with_stmt
+      (with_binding
+        name: (identifier)
+        value: (call
+          (identifier)
+          (arguments)))
+      (with_binding
+        name: (identifier)
+        value: (call
+          (identifier)
+          (arguments)))
+      body: (block
+        (statement
+          (identifier))))))
+
+================================================================================
+With trailing comma
+================================================================================
+
+with a = f(), {
+  a
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (with_stmt
+      (with_binding
+        name: (identifier)
+        value: (call
+          (identifier)
+          (arguments)))
+      body: (block
+        (statement
+          (identifier))))))

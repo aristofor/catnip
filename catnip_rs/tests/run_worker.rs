@@ -54,7 +54,9 @@ fn test_worker_execute_simple_int() {
             encoded_ir: body_ir,
             captures: vec![],
             param_names: vec!["n".into()],
+            globals: vec![],
             seed: FrozenValue::Int(42),
+            type_defs: vec![],
         },
     )
     .unwrap();
@@ -63,6 +65,59 @@ fn test_worker_execute_simple_int() {
     match result {
         WorkerResult::Ok(FrozenValue::Int(42)) => {} // expected
         other => panic!("expected Ok(Int(42)), got {:?}", other),
+    }
+
+    write_message(&mut writer, &WorkerCommand::Shutdown).unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn test_worker_execute_struct_seed() {
+    use catnip_core::freeze::{FrozenField, FrozenStructType};
+    use catnip_core::vm::opcode::ParamCheck;
+    let (mut writer, mut reader, mut child) = spawn_worker();
+
+    // Identity lambda (p) => p. The worker must register type P from type_defs,
+    // thaw the struct seed against it, run the body, and re-freeze the struct
+    // result -- the full step D/E worker path.
+    let body_ir = freeze::encode(&vec![IR::Identifier("p".into())]).unwrap();
+    let type_defs = vec![FrozenStructType {
+        name: "P".into(),
+        fields: vec![FrozenField {
+            name: "x".into(),
+            has_default: false,
+            default: FrozenValue::None,
+            check: ParamCheck::None,
+        }],
+        methods: vec![],
+    }];
+    let seed = FrozenValue::Struct {
+        type_name: "P".into(),
+        fields: vec![("x".into(), FrozenValue::Int(42))],
+    };
+
+    write_message(
+        &mut writer,
+        &WorkerCommand::Execute {
+            encoded_ir: body_ir,
+            captures: vec![],
+            param_names: vec!["p".into()],
+            seed,
+            type_defs,
+            globals: vec![],
+        },
+    )
+    .unwrap();
+
+    let result: WorkerResult = read_message(&mut reader).unwrap().unwrap();
+    match result {
+        WorkerResult::Ok(FrozenValue::Struct { type_name, fields }) => {
+            assert_eq!(type_name, "P");
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].0, "x");
+            assert_eq!(fields[0].1, FrozenValue::Int(42));
+        }
+        other => panic!("expected Ok(Struct P {{x:42}}), got {:?}", other),
     }
 
     write_message(&mut writer, &WorkerCommand::Shutdown).unwrap();
@@ -83,7 +138,9 @@ fn test_worker_execute_arithmetic() {
             encoded_ir: body_ir,
             captures: vec![],
             param_names: vec!["n".into()],
+            globals: vec![],
             seed: FrozenValue::Int(5),
+            type_defs: vec![],
         },
     )
     .unwrap();
@@ -115,7 +172,9 @@ fn test_worker_execute_with_captures() {
             encoded_ir: body_ir,
             captures: vec![("factor".into(), FrozenValue::Int(100))],
             param_names: vec!["n".into()],
+            globals: vec![],
             seed: FrozenValue::Int(7),
+            type_defs: vec![],
         },
     )
     .unwrap();
@@ -144,7 +203,9 @@ fn test_worker_multiple_execute() {
                 encoded_ir: body_ir.clone(),
                 captures: vec![],
                 param_names: vec!["n".into()],
+                globals: vec![],
                 seed: FrozenValue::Int(i),
+                type_defs: vec![],
             },
         )
         .unwrap();
@@ -174,7 +235,9 @@ fn test_worker_float_result() {
             encoded_ir: body_ir,
             captures: vec![],
             param_names: vec!["n".into()],
+            globals: vec![],
             seed: FrozenValue::Int(7),
+            type_defs: vec![],
         },
     )
     .unwrap();

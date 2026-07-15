@@ -241,6 +241,29 @@ class TestEnumImport:
             cat.parse('m = import("colors"); m.describe(m.Color.red)')
             assert cat.execute() == "r"
 
+    def test_pattern_enum_type_out_of_scope_raises(self):
+        """An enum pattern whose type is not resolvable in scope raises
+        NameError in both executors, instead of the VM silently matching by
+        interned qualified name while the AST wildcards (a VM/AST divergence).
+        The module is imported namespaced, so bare `Color` is not in scope."""
+        from catnip.exc import CatnipNameError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "colors.cat").write_text('enum Color { red; green; blue }\nfirst = Color.red\n')
+            cat = self._catnip_in(tmpdir)
+            cat.parse('m = import("colors")\nmatch m.first { Color.red => { "r" } _ => { "o" } }')
+            with pytest.raises(CatnipNameError):
+                cat.execute()
+
+    def test_pattern_enum_type_in_scope_via_alias_matches(self):
+        """The same pattern matches once the enum type is brought into scope
+        (alias), confirming the raise is scope-driven, not a blanket refusal."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "colors.cat").write_text('enum Color { red; green; blue }\nfirst = Color.red\n')
+            cat = self._catnip_in(tmpdir)
+            cat.parse('m = import("colors")\nColor = m.Color\nmatch m.first { Color.red => { "r" } _ => { "o" } }')
+            assert cat.execute() == "r"
+
     def test_import_closure_capturing_enum(self):
         """Closure exported from module captures an enum variant."""
         with tempfile.TemporaryDirectory() as tmpdir:

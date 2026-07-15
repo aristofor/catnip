@@ -1,23 +1,21 @@
 # Système de cache
 
-Système de cache multi-niveaux, écrit en Rust, avec un protocole simple pour brancher d'autres backends.
+Système de cache pluggable, écrit en Rust, avec un protocole simple pour brancher d'autres backends.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
     REQ["Requête (source, options)"] --> KEY["CacheKey (xxhash)"]
-    KEY --> CC["CatnipCache"]
-    CC --> MEM{"MemoryCache ?"}
-    MEM -->|Hit| RET["Retour immédiat"]
-    MEM -->|Miss| DISK{"DiskCache ?"}
-    DISK -->|Hit| FILL_MEM["Remplir MemoryCache"] --> RET
-    DISK -->|Miss| COMPILE["Compilation (parse/semantic/bytecode)"]
-    COMPILE --> STORE["Store MemoryCache + DiskCache"]
+    KEY --> CC["CatnipCache (backend unique)"]
+    CC --> B{"backend.get(key)<br/>MemoryCache (défaut) ou DiskCache ou backend custom"}
+    B -->|Hit| RET["Retour immédiat"]
+    B -->|Miss| COMPILE["Compilation (parse/semantic/bytecode)"]
+    COMPILE --> STORE["backend.set(key, value)"]
     STORE --> RET
 
     JIT["JIT trace/stencil"] -.->|Fichiers séparés| JITC["~/.cache/catnip/jit_v*/jit_nv*"]
-    DISK -.->|Fichiers séparés| DISKC["~/.cache/catnip/catnip_*"]
+    CC -.->|Si backend = DiskCache| DISKC["~/.cache/catnip/catnip_*"]
 ```
 
 ### Composants Rust
@@ -57,6 +55,8 @@ flowchart TD
 **`catnip/cachesys/memoization.py`** - Wrapper Python :
 
 - `CachedWrapper` : utilisé par `context.py` pour le décorateur `cached()`
+- `standalone_cached` : le builtin `cached()` du host standalone -- `VMHost` le cherche par nom au seed des globals
+  (`vm/host.rs`) ; adossé à une instance `Memoization` Rust unique par process
 - Utilise `get_entry()` pour distinguer un cache miss d'une valeur cached `None`
 - Passe `args` et `kwargs` séparément au backend pour bénéficier de la canonicalisation des kwargs
 
@@ -236,11 +236,19 @@ Cache unifié pour les traces JIT et les stencils Cranelift, colocalisé avec le
 **Fichiers** :
 
 - `jit_v{V}_{HASH}_{OFFSET}` -- traces (postcard), clé = FNV-1a du bytecode + offset de boucle
-- `jit_nv{V}_{SHA256}` -- stencils Cranelift natifs, clé = hash du IR + triple ISA + flags CPU
+- `jit_nv{V}_cl{CRANELIFT}_{SHA256}` -- stencils Cranelift natifs, clé = hash du IR + triple ISA + flags CPU
 
 `V = VMOpCode::MAX + COMPILER_SALT` dans les deux cas. Les traces persistent les enregistrements JIT pour éliminer le
-warm-up (100+ itérations). Les stencils persistent le code machine non relocaté pour éliminer la recompilation
-Cranelift. L'invalidation se fait par version (les anciennes entrées sont nettoyées au démarrage).
+warm-up (100+ itérations) et sont recompilées par le Cranelift courant à la lecture (donc Cranelift-indépendantes). Les
+stencils persistent le code machine non relocaté pour éliminer la recompilation Cranelift.
+
+L'invalidation se fait par version (anciennes entrées nettoyées au démarrage). Pour les stencils, le préfixe inclut en
+plus `cl{CRANELIFT}` = `cranelift_codegen::VERSION` : le hash que Cranelift calcule pour le nom de fichier **n'encode
+pas sa propre version** (`VersionMarker` est un type unité, sa `Hash` ne hashe rien -- la version n'est vérifiée qu'à la
+désérialisation du blob), si bien que deux releases de Cranelift produisent des noms de fichiers en collision pour le
+même IR. Les stencils n'étant pas portables entre releases, sans ce segment un binaire lié à un Cranelift plus récent
+chargerait du code machine émis par un plus ancien (miscompilation silencieuse). `cleanup_stale` purge alors les
+artefacts d'une autre version, et la lecture ne regarde que le préfixe courant.
 
 Les écritures sont atomiques (temp + rename), ce qui permet l'utilisation concurrente par les workers ND sans lock.
 
@@ -288,4 +296,4 @@ catnip config show --debug
 pytest tests/ -k cache -v
 ```
 
-Couverture : CacheKey, MemoryCache FIFO, DiskCache TTL/max_size, CatnipCache adapter, memoization, itération CacheType.
+Couverture : CacheKey, MemoryCache FIFO, DiskCache TTL/max_size, CatnipCache adapter, mémoïsation, itération CacheType.

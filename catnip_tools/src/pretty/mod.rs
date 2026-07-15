@@ -282,6 +282,77 @@ mod tests {
         assert_eq!(fmt("f = (x, y=0) => { x + y }"), "f = (x, y=0) => { x + y }\n");
     }
 
+    // -- Type annotations: the round-trip must preserve them, never drop --
+
+    #[test]
+    fn test_lambda_param_type_preserved() {
+        assert_eq!(fmt("f = (x: int) => { x }"), "f = (x: int) => { x }\n");
+    }
+
+    #[test]
+    fn test_lambda_return_type_preserved() {
+        assert_eq!(fmt("f = (x): int => { x }"), "f = (x): int => { x }\n");
+    }
+
+    #[test]
+    fn test_lambda_typed_param_with_default() {
+        // Typed param uses spaced ` = `; bare param stays compact (see above).
+        assert_eq!(fmt("f = (x: int = 5) => { x }"), "f = (x: int = 5) => { x }\n");
+    }
+
+    #[test]
+    fn test_lambda_function_type_param() {
+        assert_eq!(
+            fmt("f = (cb: (int, int) -> int) => { cb(1, 2) }"),
+            "f = (cb: (int, int) -> int) => { cb(1, 2) }\n"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_type_preserved() {
+        let result = fmt("struct P {\n    x: int\n    y: float\n}");
+        assert!(result.contains("x: int"), "field type dropped: {result:?}");
+        assert!(result.contains("y: float"), "field type dropped: {result:?}");
+    }
+
+    #[test]
+    fn test_struct_method_return_type_preserved() {
+        let result = fmt("struct P {\n    x\n    get(self): int => { self.x }\n}");
+        assert!(
+            result.contains("get(self): int =>"),
+            "method return type dropped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_idempotent() {
+        let once = fmt("f = (cb: (int) -> int, v: int = 0): int => { cb(v) }");
+        assert_eq!(fmt(&once), once, "formatting must be idempotent on type annotations");
+    }
+
+    #[test]
+    fn test_type_expr_internals_normalized() {
+        // The type_expr is canonicalized, not echoed raw: fn-type and union get
+        // their internal spacing normalized; already-canonical composites are stable.
+        assert_eq!(
+            fmt("f = (cb: (int,int)->bool) => { cb }"),
+            "f = (cb: (int, int) -> bool) => { cb }\n"
+        );
+        assert_eq!(fmt("f = (x: int|str) => { x }"), "f = (x: int | str) => { x }\n");
+        assert_eq!(fmt("f = (x: list[int]) => { x }"), "f = (x: list[int]) => { x }\n");
+        // Grammar edge cases: nullary and curried function types (the split_last
+        // boundaries), and nested composites.
+        assert_eq!(fmt("f = (cb: ()->int) => { cb }"), "f = (cb: () -> int) => { cb }\n");
+        assert_eq!(
+            fmt("f = (cb: (int)->(str)->bool) => { cb }"),
+            "f = (cb: (int) -> (str) -> bool) => { cb }\n"
+        );
+        assert_eq!(
+            fmt("f = (m: dict[str,list[int]]) => { m }"),
+            "f = (m: dict[str, list[int]]) => { m }\n"
+        );
+    }
+
     // -- Chained --
 
     #[test]

@@ -310,8 +310,8 @@ disponibles.
 
 ## Context Managers (`with`)
 
-Le bloc `with` garantit l'appel de `__exit__` en sortie, qu'elle soit normale ou provoquee par une erreur. La syntaxe
-est sans parentheses, coherente avec `if`, `while` et `for` :
+Le bloc `with` garantit l'appel de `__exit__` en sortie, qu'elle soit normale ou provoquée par une erreur. La syntaxe
+est sans parenthèses, cohérente avec `if`, `while` et `for` :
 
 <!-- check: no-check -->
 
@@ -321,8 +321,8 @@ with f = open("data.csv") {
 }
 ```
 
-Le binding (`f`) recoit la valeur retournee par `__enter__()`. A la sortie du bloc, `__exit__()` est appele
-automatiquement, meme si une exception a ete levee.
+Le binding (`f`) reçoit la valeur retournée par `__enter__()`. À la sortie du bloc, `__exit__()` est appelé
+automatiquement, même si une exception a été levée.
 
 ### Multi-binding
 
@@ -334,14 +334,14 @@ Plusieurs context managers sont séparés par des virgules. Le cleanup se fait e
 with a = open("input"), b = open("output") {
     b.write(a.read())
 }
-# b.__exit__() appele en premier, puis a.__exit__()
+# b.__exit__() appelé en premier, puis a.__exit__()
 ```
 
 Chaque binding est visible pour les suivants : `with a = expr1, b = use(a) { ... }`.
 
 ### Suppression d'exception
 
-Si `__exit__` retourne une valeur truthy, l'exception est supprimee :
+Si `__exit__` retourne une valeur truthy, l'exception est supprimée :
 
 <!-- check: no-check -->
 
@@ -350,10 +350,10 @@ import('contextlib')
 with _ = contextlib.suppress(ValueError) {
     raise ValueError("ignored")
 }
-# Pas d'exception : suppress a retourne True dans __exit__
+# Pas d'exception : suppress retourne True dans __exit__
 ```
 
-### Semantique
+### Sémantique
 
-Le `with` est un desugaring pur vers `try`/`except`/`finally`. L'exception active est passee a `__exit__` sous forme
-`(type, value, None)` -- le traceback est toujours `None` (ecart documente avec Python).
+Le `with` est un desugaring pur vers `try`/`except`/`finally`. L'exception active est passée à `__exit__` sous forme
+`(type, value, None)` -- le traceback est toujours `None` (écart documenté avec Python).

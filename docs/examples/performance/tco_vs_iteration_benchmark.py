@@ -124,11 +124,11 @@ def print_result(run: RunResult, baseline_ms: float | None) -> None:
 
 
 @click.command()
-@click.option("-n", "--workload-n", "n", default=20000, show_default=True, help="Borne superieure pour sum(1..n).")
-@click.option("-i", "--iterations", default=10, show_default=True, help="Iterations de mesure.")
-@click.option("-w", "--warmup", default=3, show_default=True, help="Iterations de chauffe.")
+@click.option("-n", "--workload-n", "n", default=20000, show_default=True, help="Borne supérieure pour sum(1..n).")
+@click.option("-i", "--iterations", default=10, show_default=True, help="Itérations de mesure.")
+@click.option("-w", "--warmup", default=3, show_default=True, help="Itérations de chauffe.")
 @click.option("-o", "--optimize", default=1, show_default=True, help="Niveau d'optimisation Catnip.")
-@click.option("--fast", is_flag=True, help="Preset rapide: n<=5000, iterations=6, warmup=2.")
+@click.option("--fast", is_flag=True, help="Preset rapide: n<=5000, itérations=6, warmup=2.")
 def main(n: int, iterations: int, warmup: int, optimize: int, fast: bool) -> None:
     """Compare boucle impérative vs tail recursion avec TCO on/off."""
     if fast:

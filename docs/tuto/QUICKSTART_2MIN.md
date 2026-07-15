@@ -12,9 +12,9 @@ entropy = voltage * 2
 print(entropy)  # → 84
 ```
 
-Catnip applique exactement ce que tu écris : valeur, opération, résultat. Pas d'esthétique superflue, juste le flow.
+Catnip applique exactement ce que tu écris : valeur, opération, résultat. Pas de détour, juste le flux.
 
-> La beauté vient après, jamais avant.
+> La forme vient après les invariants, jamais avant.
 
 ______________________________________________________________________
 

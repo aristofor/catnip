@@ -1,0 +1,15 @@
+# A small library written in Catnip.
+# Its exported functions call each other -- and a private helper -- so the
+# loader transplants the module's function table into the importer; those
+# calls keep resolving after the module is loaded.
+
+_double = (x) => { x * 2 }                 # private: leading _ → not exported
+
+quad = (x) => { _double(_double(x)) }      # calls the private helper
+factorial = (n) => {                       # recursion (calls itself)
+    match n {
+        0 => { 1 }
+        _ => { n * factorial(n - 1) }
+    }
+}
+combo = (x) => { quad(x) + factorial(x) }  # calls two sibling functions

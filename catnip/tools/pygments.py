@@ -122,7 +122,7 @@ class CatnipLexer(RegexLexer):
             # Broadcast operations
             (r'\.\[', Punctuation, 'broadcast'),
             # Operators (sorted by length for correct matching)
-            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\->|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
             # Builtin functions
             (
                 words(
@@ -271,7 +271,7 @@ class CatnipLexer(RegexLexer):
             # Lambda arrow
             (r'=>', Operator),
             # Operators
-            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
+            (r'(\~\[\]|\~\~|\~>|\?\?|>>|>=|==|<=|<<|//|\->|\*\*|!=|\~|\||\^|@|>|=|<|/|\-|\+|\*|\&|%|!)', Operator),
             # Builtin functions
             (
                 words(

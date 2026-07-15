@@ -159,3 +159,57 @@ f(a=1, b=2)
             value: (literal
               (number
                 (integer)))))))))
+
+================================================================================
+Lambda param with union type
+================================================================================
+
+f = (x: int | str) => { x }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (lambda_expr
+        (lambda_params
+          (lambda_param
+            (identifier)
+            (type_expr
+              (type_atom
+                (identifier))
+              (type_atom
+                (identifier)))))
+        (block
+          (statement
+            (identifier)))))))
+
+================================================================================
+Lambda param with optional nominal type
+================================================================================
+
+f = (p: Point | None) => { p }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (lambda_expr
+        (lambda_params
+          (lambda_param
+            (identifier)
+            (type_expr
+              (type_atom
+                (identifier))
+              (type_atom
+                (identifier)))))
+        (block
+          (statement
+            (identifier)))))))

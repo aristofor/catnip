@@ -130,21 +130,6 @@ pub(crate) fn convert(arena: &mut Arena, node: Node, source: &[u8], indent: i32)
                 arena.text(node_text(node, source))
             }
         }
-        "broadcast_nd_map" => {
-            if let Some(expr) = node.named_child(0) {
-                let expr_doc = convert(arena, expr, source, indent);
-                let starts_paren =
-                    matches!(expr.kind(), "group" | "arguments") || expr.child(0).is_some_and(|c| c.kind() == "(");
-                let prefix = if starts_paren {
-                    arena.text("~>")
-                } else {
-                    arena.text("~> ")
-                };
-                arena.concat(prefix, expr_doc)
-            } else {
-                arena.text(node_text(node, source))
-            }
-        }
         "broadcast_unary" | "bcast_unary_op" | "bcast_op" => arena.text(node_text(node, source)),
         // Slice: normalize `1 : 3 : 2` → `1:3:2`
         "slice_range" => {

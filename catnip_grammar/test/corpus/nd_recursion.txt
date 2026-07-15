@@ -1,0 +1,139 @@
+================================================================================
+ND-recursion declaration form
+================================================================================
+
+countdown = ~~(n, recur) => { n }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (nd_recursion
+        (lambda_expr
+          (lambda_params
+            (lambda_param
+              name: (identifier))
+            (lambda_param
+              name: (identifier)))
+          (block
+            (statement
+              (identifier))))))))
+
+================================================================================
+ND-map operator
+================================================================================
+
+lifted = ~> abs
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (nd_map
+        (identifier)))))
+
+================================================================================
+ND empty topos literal
+================================================================================
+
+empty = ~[]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (literal
+        (nd_empty_topos)))))
+
+================================================================================
+ND-recursion combinator form
+================================================================================
+
+result = ~~(seed, (n, recur) => { n })
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (nd_recursion
+        (arguments
+          (args
+            (identifier)
+            (lambda_expr
+              (lambda_params
+                (lambda_param
+                  name: (identifier))
+                (lambda_param
+                  name: (identifier)))
+              (block
+                (statement
+                  (identifier))))))))))
+
+================================================================================
+ND-map applicative form
+================================================================================
+
+result = ~>(data, abs)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (nd_map
+        (arguments
+          (args
+            (identifier)
+            (identifier)))))))
+
+================================================================================
+Broadcast ND-recursion
+================================================================================
+
+result = data.[~~ (n, recur) => { recur(n) }]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (assignment
+      (lvalue
+        (unpack_target
+          (identifier)))
+      (chained
+        (identifier)
+        (broadcast
+          (broadcast_op
+            (broadcast_nd_recursion
+              (lambda_expr
+                (lambda_params
+                  (lambda_param
+                    name: (identifier))
+                  (lambda_param
+                    name: (identifier)))
+                (block
+                  (statement
+                    (call
+                      (identifier)
+                      (arguments
+                        (args
+                          (identifier))))))))))))))

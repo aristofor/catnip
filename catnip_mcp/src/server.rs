@@ -114,12 +114,9 @@ impl CatnipMcpServer {
             .resource_templates
             .iter()
             .map(|(name, def)| {
-                Annotated::new(
-                    RawResourceTemplate::new(&def.uri_template, name.as_str())
-                        .with_description(&def.description)
-                        .with_mime_type(&def.mime_type),
-                    None,
-                )
+                ResourceTemplate::new(&def.uri_template, name.as_str())
+                    .with_description(&def.description)
+                    .with_mime_type(&def.mime_type)
             })
             .collect();
 
@@ -207,24 +204,24 @@ pub struct DebugBreakpointParams {
 
 #[tool_router]
 impl CatnipMcpServer {
-    #[tool(
-        description = "Parse Catnip code and return structured IR as JSON. Levels: 0=parse tree (text), 1=IR (default), 2=executable IR after semantic analysis."
-    )]
+    // Tool descriptions live in mcp.toml; load_mcp_defs() patches them onto the
+    // stored router, which #[tool_handler(router = self.tool_router)] then serves.
+    #[tool]
     fn parse_catnip(&self, Parameters(p): Parameters<ParseParams>) -> Result<CallToolResult, ErrorData> {
         tools::parse::handle(self, &p.code, p.level.unwrap_or(1))
     }
 
-    #[tool(description = "Evaluate Catnip code and return result. Optionally pass initial variables via context.")]
+    #[tool]
     fn eval_catnip(&self, Parameters(p): Parameters<EvalParams>) -> Result<CallToolResult, ErrorData> {
         tools::eval::handle(self, &p.code, p.context.as_ref())
     }
 
-    #[tool(description = "Validate Catnip syntax without execution.")]
+    #[tool]
     fn check_syntax(&self, Parameters(p): Parameters<CheckParams>) -> Result<CallToolResult, ErrorData> {
         tools::check::handle(self, &p.code)
     }
 
-    #[tool(description = "Format Catnip code with configurable style.")]
+    #[tool]
     fn format_code(&self, Parameters(p): Parameters<FormatParams>) -> Result<CallToolResult, ErrorData> {
         tools::format::handle(
             &p.code,
@@ -233,32 +230,32 @@ impl CatnipMcpServer {
         )
     }
 
-    #[tool(description = "Start a debug session. Returns state at first breakpoint or end of execution.")]
+    #[tool]
     fn debug_start(&self, Parameters(p): Parameters<DebugStartParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_start(self, &p.code, p.breakpoints.as_deref())
     }
 
-    #[tool(description = "Continue execution until next breakpoint.")]
+    #[tool]
     fn debug_continue(&self, Parameters(p): Parameters<DebugSessionParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_continue(self, &p.session_id)
     }
 
-    #[tool(description = "Step execution. Mode: 'into' (default), 'over', or 'out'.")]
+    #[tool]
     fn debug_step(&self, Parameters(p): Parameters<DebugStepParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_step(self, &p.session_id, p.mode.as_deref().unwrap_or("into"))
     }
 
-    #[tool(description = "Inspect local variables at current pause point.")]
+    #[tool]
     fn debug_inspect(&self, Parameters(p): Parameters<DebugSessionParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_inspect(self, &p.session_id)
     }
 
-    #[tool(description = "Evaluate an expression in the current debug scope.")]
+    #[tool]
     fn debug_eval(&self, Parameters(p): Parameters<DebugEvalParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_eval(self, &p.session_id, &p.expr)
     }
 
-    #[tool(description = "Add or remove a breakpoint at a line.")]
+    #[tool]
     fn debug_breakpoint(&self, Parameters(p): Parameters<DebugBreakpointParams>) -> Result<CallToolResult, ErrorData> {
         tools::debug::handle_breakpoint(self, &p.session_id, p.line, p.action.as_deref().unwrap_or("add"))
     }
@@ -266,7 +263,7 @@ impl CatnipMcpServer {
 
 // -- ServerHandler impl --
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for CatnipMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())

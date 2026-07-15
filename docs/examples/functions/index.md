@@ -8,3 +8,5 @@ Fonctions, lambdas et closures, en version courte.
 - [04_tail_recursion.cat](04_tail_recursion.cat) - Tail recursion (auto et mutuelle) et transformation automatique en
   boucles
 - [05_fold_and_reduce.cat](05_fold_and_reduce.cat) - Agrégation avec fold et reduce, composition avec broadcast
+- [06_typed_callbacks.cat](06_typed_callbacks.cat) - Types de fonctions : contrat d'un callback (arité, retour vérifié à
+  l'appel, flèche absorbante, curry)

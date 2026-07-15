@@ -1,6 +1,6 @@
 # Catnip <img alt="Catnip" class="inline size-14" src="assets/catnip-logo.svg"/>
 
-version <!-- catnip:version -->0.1.1<!-- /catnip:version -->
+version <!-- catnip:version -->0.1.2<!-- /catnip:version -->
 
 Né comme langage de script embeddable pour Python.
 
@@ -10,7 +10,7 @@ conception.
 <!-- doc-snapshot: index/repl-ieee754 -->
 
 ```console
-Catnip REPL v0.1.1
+Catnip REPL v0.1.2
 Type /help for help, /exit to quit
 ▸ 0.1 + 0.2
 0.30000000000000004
@@ -22,12 +22,6 @@ Type /help for help, /exit to quit
 > Si tu sens ta conscience boucler sans condition d'arrêt, c'est une feature.
 >
 > Respire. Reprends ton café froid. Ce n'est pas encore classé "incident".
-
-### Turfu
-
-- Blinder le side-project `codex`
-- Un dataflow delta
-- Un QNN
 
 ### Repos
 
@@ -50,7 +44,13 @@ ______________________________________________________________________
 ## Origine
 
 - [INTRODUCTION](INTRODUCTION.md) - Ambition, sources d'inspiration et philosophie de Catnip
-- [CHANGELOG](CHANGELOG.md) - Changements par rapport à la prerelease précédente
+
+- [CHANGELOG](changelog/index.md) - Changements par rapport à la release précédente, un fichier par version
+
+  **Note 0.1.2** — Les types de fonctions sont complets : `(int, str) -> bool` vérifié de la grammaire au runtime. Côté
+  mémoire, une famille de fuites de refcount est fermée dans les deux runtimes — dont la refonte sur `Arc` du stockage
+  des instances de structs de la VM pure.
+
 - [META](META.md) - Conventions transverses de lecture et d'écriture de la doc
 
 ## Primitives
@@ -109,6 +109,8 @@ Référence complète de la syntaxe et des concepts du langage.
 - [CONTROL_FLOW](lang/CONTROL_FLOW.md) - Structures de contrôle (`if`, `while`, `for`, `break`, `continue`)
 - [FUNCTIONS](lang/FUNCTIONS.md) - Fonctions, lambdas, décorateurs, appels terminaux et fonctions intégrées
 - [STRUCTURES](lang/STRUCTURES.md) - Structures, méthodes, traits, héritage et abstractions
+- [ENUMS](lang/ENUMS.md) - Types énumérés : variantes nommées, pattern matching et sémantique d'égalité
+- [UNIONS](lang/UNIONS.md) - Unions taggées (ADT) : variantes avec ou sans payload, destructuration dans `match`
 - [PATTERN_MATCHING](lang/PATTERN_MATCHING.md) - Référence complète du pattern matching
 - [BROADCAST](lang/BROADCAST.md) - Notation vectorielle sur collections
   - [BROADCAST_SPEC](lang/BROADCAST_SPEC.md) - Spécification normative (syntaxe et sémantique)
@@ -132,7 +134,6 @@ Exemples **[examples/](examples/)**
 - [pattern-matching/](examples/pattern-matching/) - Pattern matching
 - [control-flow/](examples/control-flow/) - Break et continue
 - [broadcast/](examples/broadcast/) - Broadcasting
-- [cfg/](examples/cfg/) - Control Flow Graph (analyse et optimisations)
 - [module-loading/](examples/module-loading/) - Module loading (bases)
 - [run/](examples/run/) - Exemples standalone (CLI)
 - [advanced/](examples/advanced/) - Techniques avancées

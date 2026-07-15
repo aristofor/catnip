@@ -2,7 +2,7 @@
 name = "catnip-http"
 version.workspace = true
 edition.workspace = true
-description = "Catnip http stdlib plugin (native ABI v2, tiny_http server + ureq client)"
+description = "Catnip http stdlib plugin (native ABI v3, tiny_http server + ureq client)"
 
 [lib]
 name = "catnip_http"

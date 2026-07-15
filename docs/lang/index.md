@@ -27,7 +27,7 @@ Documentation de référence du langage Catnip, du plus accessible au plus avanc
   structures imbriquées
 
 - [COMPREHENSIONS](COMPREHENSIONS.md) - Comprehensions Python vers Catnip : traduction des patterns map, filter, flatmap
-  et produit cartesien
+  et produit cartésien
 
 - [SCOPES_AND_VARIABLES](SCOPES_AND_VARIABLES.md) - Affectation, scope des variables et closures : résolution de scope,
   shadowing, captures et durée de vie

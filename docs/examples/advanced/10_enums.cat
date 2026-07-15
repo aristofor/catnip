@@ -1,7 +1,7 @@
 #!/usr/bin/env catnip
-# Types enumeres
+# Types énumérés
 
-print("⇒ Declaration et acces aux variantes")
+print("⇒ Déclaration et accès aux variantes")
 
 enum Color { red; green; blue }
 
@@ -10,7 +10,7 @@ print("Color.green =", Color.green)
 print("Color.blue =", Color.blue)
 
 print()
-print("⇒ Egalite et inegalite")
+print("⇒ Égalité et inégalité")
 
 c1 = Color.red
 c2 = Color.red
@@ -49,7 +49,7 @@ print("is_red(Color.red):", is_red(Color.red))
 print("is_red(Color.blue):", is_red(Color.blue))
 
 print()
-print("⇒ Plusieurs types enumeres")
+print("⇒ Plusieurs types énumérés")
 
 enum Direction { north; south; east; west }
 
@@ -59,8 +59,8 @@ move = (d) => {
     match d {
         Direction.north => { "on monte" }
         Direction.south => { "on descend" }
-        Direction.east  => { "on va a droite" }
-        Direction.west  => { "on va a gauche" }
+        Direction.east  => { "on va à droite" }
+        Direction.west  => { "on va à gauche" }
     }
 }
 
@@ -68,7 +68,7 @@ print("Direction.north =>", move(Direction.north))
 print("Direction.west =>", move(Direction.west))
 
 print()
-print("⇒ Meme nom de variante, types distincts")
+print("⇒ Même nom de variante, types distincts")
 
 enum A { x; y }
 enum B { x; y }
@@ -77,7 +77,7 @@ print("A.x == A.x:", A.x == A.x)
 print("A.x == B.x:", A.x == B.x)
 
 print()
-print("⇒ Machine a etats")
+print("⇒ Machine à états")
 
 enum State { idle; loading; ready; error }
 
@@ -108,20 +108,20 @@ s = State.idle
 print("initial:", s)
 
 s = transition(s, "start")
-print("apres start:", s)
+print("après start:", s)
 
 s = transition(s, "success")
-print("apres success:", s)
+print("après success:", s)
 
 s = transition(s, "reset")
-print("apres reset:", s)
+print("après reset:", s)
 
 s = transition(s, "start")
 s = transition(s, "fail")
-print("apres start+fail:", s)
+print("après start+fail:", s)
 
 s = transition(s, "retry")
-print("apres retry:", s)
+print("après retry:", s)
 
 print()
 print("⇒ Truthiness")

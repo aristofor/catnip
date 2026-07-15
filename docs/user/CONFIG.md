@@ -34,6 +34,9 @@ cache_ttl_seconds = 86400   # TTL 24 heures ("unlimited" pour pas d'expiration)
 
 [modules]
 auto = []                    # Modules chargés automatiquement au démarrage
+
+[lint]
+disable = []                 # Codes de diagnostic désactivés globalement
 ```
 
 ## Configuration Par Mode
@@ -70,8 +73,8 @@ Catnip détecte automatiquement 3 modes d'exécution et applique des overrides s
 
 ```toml
 [mode.standalone]
-jit = false      # Pas de JIT : startup instant
-optimize = 1     # Compilation rapide
+jit = false      # Pas de JIT : startup instant (le startup vient d'ici, pas du niveau optimize)
+optimize = 3     # Passes on (défaut) : compile cheap, gain runtime ; passe à 0 pour les scripts jetables
 tco = true       # TCO utile pour récursion
 ```
 
@@ -92,7 +95,7 @@ tco = true       # TCO utile pour récursion
 ```toml
 [mode.repl]
 jit = true       # JIT pour perf runtime
-optimize = 2     # Équilibre perf/compilation
+optimize = 3     # Passes on (défaut ; 1/2/3 équivalents aujourd'hui)
 tco = true       # TCO pour expérimentation
 ```
 
@@ -142,27 +145,31 @@ Ordre de priorité (du plus faible au plus fort) :
 # catnip.toml
 [optimize]
 jit = false
-optimize = 3
+optimize = 3     # passes on
 
 [mode.standalone]
-optimize = 1
+optimize = 0     # passes off pour les scripts
 ```
 
 ```bash
 # Base
-$ catnip -c "42"              # jit=false, optimize=3 (base config)
+$ catnip -c "42"              # jit=false, optimize=3 (passes on)
 
 # Mode override
-$ catnip script.cat           # jit=false, optimize=1 (mode.standalone)
+$ catnip script.cat           # jit=false, optimize=0 (mode.standalone, passes off)
 
 # Env var override
 $ CATNIP_OPTIMIZE=jit catnip script.cat
-                              # jit=true, optimize=1 (env > mode)
+                              # jit=true, optimize=0 (env active le JIT, niveau inchangé)
 
 # CLI override (highest)
-$ catnip -o jit:off -o level:2 script.cat
-                              # jit=false, optimize=2 (cli > all)
+$ catnip -o level:3 script.cat
+                              # optimize=3 (cli > all, passes on)
 ```
+
+> **Note sur `optimize`** : le niveau accepte `0`-`3` mais l'effet est un **seuil** — `0` désactive les passes, `≥1` les
+> active toutes (les niveaux `1`/`2`/`3` sont équivalents aujourd'hui). Voir
+> [dev/OPTIMIZATIONS](../dev/OPTIMIZATIONS.md) pour le détail.
 
 ## Modules
 
@@ -232,6 +239,22 @@ max_weird_logs = 50         # Rotation automatique
 
 Le logging est silencieux : une erreur I/O lors de l'écriture du rapport ne masque jamais l'erreur originale. Fonctionne
 dans les deux contextes : Python (via PyO3) et standalone Rust.
+
+## Linter
+
+La section `[lint]` désactive globalement des codes de diagnostic, là où `# noqa` n'agit que sur une ligne.
+
+```toml
+[lint]
+disable = ["W401", "I200"]   # Codes tus pour toute l'analyse
+```
+
+Les flags CLI surchargent le fichier : `--disable CODE` ajoute des codes, `--enable CODE` en réactive un (annule un
+`disable` du fichier ou de la même commande). L'ensemble effectif des codes tus est `(fichier ∪ --disable) \ --enable`.
+`--enable` n'allume pas une phase opt-in : `--check-names` et `--deep` restent les leviers des règles désactivées par
+défaut.
+
+Voir [tools/lint](../tools/lint.md) pour la liste des codes.
 
 ## Variables d'Environnement
 

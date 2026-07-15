@@ -57,7 +57,7 @@ Parse du code Catnip et retourne la représentation structurée.
 
 ### eval_catnip
 
-Evalue du code et retourne le résultat.
+Évalue du code et retourne le résultat.
 
 | Paramètre | Type   | Défaut | Description                                  |
 | --------- | ------ | ------ | -------------------------------------------- |
@@ -158,7 +158,7 @@ Inspecte les variables locales au point de pause courant. N'avance pas l'exécut
 
 ### debug_eval
 
-Evalue une expression dans le scope de la pause courante. L'évaluation se fait dans un contexte isolé : les effets de
+Évalue une expression dans le scope de la pause courante. L'évaluation se fait dans un contexte isolé : les effets de
 bord ne se propagent pas à la session.
 
 | Paramètre    | Type   | Défaut | Description          |

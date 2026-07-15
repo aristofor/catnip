@@ -256,14 +256,15 @@ catnip -o jit:off script.cat      # Désactive JIT
 
 Les valeurs booléennes acceptées pour `tco` et `jit` : `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`.
 
-**Niveau d'optimisation** (défaut: `3` - optimisations complètes) :
+**Niveau d'optimisation** (défaut: `3`) :
 
 ```bash
-catnip -o level:0 script.cat      # Aucune optimisation
-catnip -o level:3 script.cat      # Toutes (défaut)
+catnip -o level:0 script.cat      # Désactive les passes
+catnip -o level:3 script.cat      # Active les passes (défaut)
 ```
 
-Niveaux, alias et détails : voir [Pragmas](../lang/PRAGMAS.md).
+Le niveau est un **seuil** : `0` désactive les passes, `≥1` les active toutes (les niveaux `1`/`2`/`3` sont équivalents
+aujourd'hui). Niveaux, alias et détails : voir [Pragmas](../lang/PRAGMAS.md).
 
 Les options `-o level:N` et `-o tco:...` (ou leurs équivalents `CATNIP_OPTIMIZE`) l'emportent sur les
 `pragma("optimize", ...)` et `pragma("tco", ...)` écrits dans le fichier.
@@ -499,11 +500,11 @@ Affiche la version de Catnip. `-V` donne la version courte, `--version` inclut l
 
 ```console
 $ catnip -V
-catnip 0.1.1
+catnip 0.1.2
 $ catnip --version
-catnip 0.1.1
-  commit  7056f27b
-  build   2026-06-10-11:37:50
+catnip 0.1.2
+  commit  30f95113
+  build   2026-06-20-09:44:28
 ```
 
 #### `--help`
@@ -640,10 +641,20 @@ catnip lint --max-depth 8 script.cat       # I200: nesting (défaut: 5)
 catnip lint --max-complexity 15 script.cat  # I201: cyclomatique (défaut: 10)
 catnip lint --max-length 50 script.cat      # I202: longueur fn (défaut: 30)
 catnip lint --max-params 8 script.cat       # I203: paramètres (défaut: 6)
+
+# Désactivation globale par code (répétable ou séparé par virgules)
+catnip lint --disable W401 script.cat
+catnip lint --disable W401,I200 script.cat
+catnip lint --enable W401 script.cat        # réactive un code éteint par la config
+
+# Gate CI : les warnings deviennent fatals (Info/Hint restent consultatifs)
+catnip lint --deep --strict src/
 ```
 
-Suppression inline par commentaire `# noqa` (bare ou avec codes spécifiques). Voir [docs/tools/lint](../tools/lint.md)
-pour les codes de diagnostic et la syntaxe noqa.
+Suppression inline par commentaire `# noqa` (bare ou avec codes spécifiques) ; désactivation globale par `--disable` /
+`--enable` ou la section `[lint] disable` de `catnip.toml` (effectif = `(fichier ∪ --disable) \ --enable`). Voir
+[docs/tools/lint](../tools/lint.md) pour les codes de diagnostic et la syntaxe noqa, et [CONFIG](CONFIG.md#linter) pour
+la config persistante.
 
 ### `commands`
 
@@ -809,7 +820,7 @@ enable_cache = true         # Activé par défaut
 [optimize]
 jit = false
 tco = true
-optimize = 3        # 0=none, 1=low, 2=medium, 3=high
+optimize = 3        # seuil : 0=off, ≥1=on (1/2/3 équivalents aujourd'hui)
 executor = "vm"     # vm, ast
 memory_limit = 2048 # RSS limit in MB (0 = disabled, Linux only)
 
@@ -834,7 +845,7 @@ Voir `catnip.toml.example` dans le dépôt pour un fichier exemple commenté.
 - `theme` (str) : Thème de couleurs (`auto`/`dark`/`light`, défaut: `auto`)
 - `jit` (bool) : Active JIT (expérimental)
 - `tco` (bool) : Active tail-call optimization
-- `optimize` (int) : Niveau optimisation (0-3)
+- `optimize` (int) : Niveau optimisation (0-3, seuil : `0`=off, `≥1`=on)
 - `executor` (str) : Mode exécution (vm/ast)
 - `enable_cache` (bool) : Active le cache disque (défaut: `true`, via fichier)
 - `cache_max_size_mb` (int|"unlimited") : Taille max cache en Mo
@@ -1055,8 +1066,8 @@ dans le scope du point d'arrêt (voir [Debugger](../tools/debug.md#sous-mode-rep
 
 ### `completion`
 
-Genere un script de completion pour le shell courant. Les completions sont synchronisees automatiquement avec les
-sous-commandes, options et valeurs -- rien a maintenir manuellement.
+Génère un script de completion pour le shell courant. Les completions sont synchronisées automatiquement avec les
+sous-commandes, options et valeurs -- rien à maintenir manuellement.
 
 ```bash
 # Bash
@@ -1222,7 +1233,7 @@ $ catnip -c 'class Foo { x }'
 Unexpected token 'class Foo' at line 1, column 1. Did you mean 'struct'?
 ```
 
-**Stack traces imbriquees** :
+**Stack traces imbriquées** :
 
 <!-- doc-snapshot: cli/error-division-by-zero -->
 
@@ -1257,13 +1268,13 @@ flowchart TD
     B -->|Oui| C["Délégation CLI Python<br/>(embedded PyO3)"]
     B -->|Non| D{"Sous-commande Rust ?<br/>(info/bench)"}
     D -->|Oui| E["Exécution Rust directe"]
-    D -->|Non| F{"Option -c présente ?"}
+    D -->|Non| M{"Fichier, -c ou --stdin explicite fourni ?"}
+    M -->|Non| C2["Délégation complète au CLI Python<br/>(REPL ou pipe via isatty(), sans --stdin)"]
+    M -->|Oui| F{"Option -c présente ?"}
     F -->|Oui| G["Évaluer expression inline"]
-    F -->|Non| H{"Entrée stdin pipée ?"}
-    H -->|Oui| I["Lire depuis stdin"]
-    H -->|Non| J{"Argument fichier présent ?"}
-    J -->|Oui| K["Exécuter script (VM Rust)"]
-    J -->|Non| L["Erreur : pas d'input"]
+    F -->|Non| H{"Flag --stdin explicite ?"}
+    H -->|Oui| I["Lire stdin (--stdin)"]
+    H -->|Non| K["Exécuter script (VM Rust)"]
 ```
 
 L'ordre recommandé pour la clarté :

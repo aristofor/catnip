@@ -116,3 +116,15 @@ fn test_syntax_error() {
 fn test_undefined_variable() {
     assert_error("undefined_var");
 }
+
+#[test]
+fn test_cached_builtin_available() {
+    // The standalone host seeds `cached` from catnip.cachesys.memoization::
+    // standalone_cached -- a lookup that silently failed for as long as the
+    // function did not exist (audit 2026-07-13 B13).
+    assert_output(
+        r#"square = cached((x) => { x * x }, "square")
+list(square(4), square(4))"#,
+        "[16, 16]",
+    );
+}

@@ -139,7 +139,7 @@ ______________________________________________________________________
 ```catnip
 match value {
     0 => { "zero" }
-    n if n < 0 => { "negatif" }
+    n if n < 0 => { "négatif" }
     n => { "positif" }
 }
 ```
@@ -198,7 +198,7 @@ ajustable sans modifier le code source. 🐙
 
 > Même script, plusieurs vitesses: tu changes le mode, pas la logique.
 
-Voir [exemples ND-récursion](examples/advanced/nd_recursion.md) pour `~~`, `~>` et `~[]`.
+Voir [exemples ND-récursion](examples/advanced/05_nd_recursion.cat) pour `~~`, `~>` et `~[]`.
 
 ______________________________________________________________________
 

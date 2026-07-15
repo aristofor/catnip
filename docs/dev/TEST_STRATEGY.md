@@ -22,7 +22,7 @@ systématique des **tests internes de passes**.
 - transformations IR/Op (passes d'optimisation)
 - structures internes (CFG, SSA, sérialisation pure, helpers bas niveau)
 
-Exemples : `catnip_core/src/semantic/passes/` (passes d'optimisation, tests inline), `catnip_rs/src/cfg/tests.rs`
+Exemples : `catnip_core/src/semantic/passes/` (passes d'optimisation, tests inline), `catnip_core/src/cfg/tests.rs`
 (CFG/SSA).
 
 ### 2. Tests d'intégration Python

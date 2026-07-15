@@ -199,11 +199,14 @@ impl Registry {
                 // Resolve EnumName via the same path as Ref nodes (locals
                 // first, then globals). The context wrapper does not expose
                 // a `get_local` method, so we go through the dual lookup
-                // here instead.
-                let enum_obj = match self.resolve_ident_impl(py, &enum_name, false)? {
-                    Some(v) => v.into_bound(py),
-                    None => return Ok(None),
-                };
+                // here instead. An unresolvable enum type in a pattern is a
+                // programmer error (unimported type), so `check=true` raises
+                // CatnipNameError rather than silently falling through to the
+                // wildcard -- keeps the VM and AST executors in agreement.
+                let enum_obj = self
+                    .resolve_ident_impl(py, &enum_name, true)?
+                    .expect("resolve_ident_impl(check=true) raises on a missing name")
+                    .into_bound(py);
                 let variant_val = enum_obj.getattr(variant_name.as_str())?;
                 let is_equal = variant_val.eq(value.bind(py))?;
                 if is_equal { Ok(Some(Vec::new())) } else { Ok(None) }

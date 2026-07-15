@@ -1,6 +1,6 @@
 # Module loading - bases
 
-Exemples courts pour comprendre le module loading Python.
+Exemples courts pour comprendre le module loading : modules Python, stdlib, et bibliothèques écrites en Catnip.
 
 ## Fichiers
 
@@ -17,6 +17,8 @@ Exemples courts pour comprendre le module loading Python.
 - [`11_selective_import.cat`](11_selective_import.cat) - Import sélectif avec alias
 - [`12_io_module.cat`](12_io_module.cat) - Module IO builtin (print, write, eprint)
 - [`13_relative_import_dots.cat`](13_relative_import_dots.cat) - Import relatif avec dots (`.module`)
+- [`mathlib.cat`](mathlib.cat) - Bibliothèque Catnip dont les fonctions s'appellent entre elles
+- [`14_cat_library.cat`](14_cat_library.cat) - Importer une bibliothèque `.cat` (appels inter-fonctions, helper privé)
 
 ## Aller plus loin
 

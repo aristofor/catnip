@@ -121,11 +121,16 @@ impl McpDebugSession {
             match pipeline.execute(&source_clone) {
                 Ok(val) => {
                     let _ = event_tx.send(DebugEvent::Finished(val.repr_string()));
+                    // execute() returns an owned ref -- release it.
+                    val.decref();
                 }
                 Err(e) => {
                     let _ = event_tx.send(DebugEvent::Error(e.to_string()));
                 }
             }
+            // The pipeline is a one-shot: its globals must be drained before
+            // drop, otherwise every heap value in them leaks.
+            pipeline.host().clear_globals();
         });
 
         // Receive breakpoint handle from VM thread
@@ -196,13 +201,23 @@ impl McpDebugSession {
                 // literals for primitives. Complex types (structs, functions) may
                 // fail to parse -- silently skipped.
                 let assign = format!("{name} = {repr}");
-                let _ = pipeline.execute(&assign);
+                // execute() returns an owned ref -- release it.
+                if let Ok(v) = pipeline.execute(&assign) {
+                    v.decref();
+                }
             }
         }
-        match pipeline.execute(expr) {
-            Ok(val) => Ok(val.repr_string()),
+        let result = match pipeline.execute(expr) {
+            Ok(val) => {
+                let repr = val.repr_string();
+                val.decref();
+                Ok(repr)
+            }
             Err(e) => Err(e.to_string()),
-        }
+        };
+        // One-shot pipeline: drain globals before drop.
+        pipeline.host().clear_globals();
+        result
     }
 
     /// Add a breakpoint at runtime (thread-safe, takes effect on next instruction check).

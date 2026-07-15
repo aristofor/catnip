@@ -108,6 +108,15 @@ class TestIORust:
         finally:
             sys.stdin = old
 
+    def test_input_strips_crlf(self, io_rust):
+        # CRLF endings are stripped too, matching the native ABI backend.
+        old = sys.stdin
+        sys.stdin = io.StringIO("line\r\n")
+        try:
+            assert io_rust.input() == "line"
+        finally:
+            sys.stdin = old
+
     def test_open_read(self, io_rust):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
             tmp.write("hello catnip")

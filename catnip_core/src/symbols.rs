@@ -13,7 +13,7 @@ pub fn qualified_name(enum_name: &str, variant_name: &str) -> String {
 }
 
 /// Global symbol table for interning strings to u32 indices.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SymbolTable {
     names: Vec<String>,
     index: HashMap<String, u32>,

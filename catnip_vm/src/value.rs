@@ -34,62 +34,31 @@
 //! Regular floats are stored directly. Detection via quiet NaN pattern.
 
 use crate::collections::{NativeBytes, NativeDict, NativeList, NativeSet, NativeTuple};
-use catnip_core::nanbox::{
-    CANON_NAN, PAYLOAD_MASK, QNAN_BASE, SMALLINT_MAX, SMALLINT_MIN, SMALLINT_SIGN_BIT, SMALLINT_SIGN_EXT, TAG_BIGINT,
-    TAG_BOOL, TAG_MASK, TAG_NIL, TAG_SMALLINT, TAG_SYMBOL, TAG_VMFUNC,
-};
+use crate::vm::func_table::PureFuncSlot;
+use crate::vm::structs::StructCell;
+use catnip_core::nanbox::{PAYLOAD_MASK, QNAN_BASE, TAG_BIGINT, TAG_BOOL, TAG_MASK, TAG_NIL, TAG_VMFUNC};
 use indexmap::IndexMap;
 use rug::Integer;
 use std::fmt;
 use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// GmpInt -- Sync wrapper for rug::Integer
-// ---------------------------------------------------------------------------
-
-/// Wrapper around `rug::Integer` that implements `Sync`.
-///
-/// `rug::Integer` is `Send` but not `Sync` (GMP limitation). In the pure-Rust
-/// VM context, the VM is single-threaded so sharing via `Arc` is safe.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct GmpInt(pub Integer);
-
-// SAFETY: In catnip_vm the VM is single-threaded. The Arc is used for
-// refcounted sharing within one thread, never across threads.
-unsafe impl Sync for GmpInt {}
-
-impl std::ops::Deref for GmpInt {
-    type Target = Integer;
-    #[inline]
-    fn deref(&self) -> &Integer {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for GmpInt {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Integer {
-        &mut self.0
-    }
-}
-
-impl fmt::Debug for GmpInt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Display for GmpInt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// GmpInt is shared with the PyO3 VM (Phase 5): same scalar heap type, and
+// its constructors feed the live-bigint ledger both sides observe.
+pub use catnip_core::scalar::GmpInt;
+use catnip_core::scalar::ScalarValue;
 
 // Struct tags (catnip_vm only)
 use catnip_core::nanbox::TAG_SHIFT;
 pub(crate) const TAG_STRUCT: u64 = 5 << TAG_SHIFT;
 pub(crate) const TAG_STRUCTTYPE: u64 = 14 << TAG_SHIFT;
+
+// Runtime closure tag (catnip_vm only). Tag 4 is unused here (reserved for
+// PyObject in catnip_rs). A `TAG_CLOSURE` value is a thin Arc pointer to a
+// runtime `PureFuncSlot` (a `MakeFunction` closure or a `m = p.get` bound
+// method), exactly like `TAG_STRUCT` -> `Arc<StructCell>`; the Arc strong count
+// is the slot's refcount, so the slot frees as soon as no `Value` references it.
+// Template function slots stay index-based under `TAG_VMFUNC`.
+pub(crate) const TAG_CLOSURE: u64 = 4 << TAG_SHIFT;
 
 // Native collection tags (catnip_vm only, 8-13)
 pub(crate) const TAG_NATIVESTR: u64 = 8 << TAG_SHIFT;
@@ -111,6 +80,29 @@ pub struct ModuleNamespace {
     /// Child pipeline's globals Rc, kept alive so closure scopes
     /// in exported functions can still resolve module-level names.
     pub module_globals: crate::host::Globals,
+}
+
+impl Drop for ModuleNamespace {
+    /// Release the strong ref each exported value carries. The loader/plugin
+    /// path incref's every value before inserting it into `attrs`, and `Value`
+    /// is `Copy` with no `Drop`, so dropping the map alone would leak the heap
+    /// payloads (e.g. `sys.argv`, a `NativeList`).
+    ///
+    /// Also drain `module_globals`: the child pipeline's host dropped without
+    /// releasing its per-entry refs (only the *parent* host's `clear_globals`
+    /// runs at reset), so this map is the sole remaining owner -- skipping it
+    /// leaks one ref per module-level heap value (a `StructCell` per exported
+    /// instance, a runtime slot per exported closure). The drain is also the
+    /// cycle-break for a module closure whose scope chain holds this same
+    /// `Rc` while the map holds the closure. The map is taken out of the
+    /// `RefCell` before any decref so a cascading `Drop` (nested module
+    /// namespace, closure) can never re-borrow it.
+    fn drop(&mut self) {
+        for val in self.attrs.values() {
+            val.decref();
+        }
+        crate::host::drain_globals(&self.module_globals);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,12 +142,35 @@ impl NativeMeta {
     }
 }
 
+/// Tagged union namespace: maps variant names to their constructor values.
+///
+/// Payload variants bind a struct type (`TAG_STRUCTTYPE`) registered under
+/// the qualified name `"Union.Variant"`; nullary variants bind the interned
+/// symbol of the same qualified name. Both flavors are immediates, so the
+/// namespace holds plain `Value`s with no refcount management.
+pub struct UnionNamespace {
+    pub name: String,
+    /// Type parameters declared on the union (e.g. `[T]`). Parsed but not
+    /// enforced -- kept for display and diagnostics.
+    pub type_params: Vec<String>,
+    /// (variant_name, binding) in declaration order.
+    pub variants: Vec<(String, Value)>,
+}
+
+impl UnionNamespace {
+    pub fn variant(&self, name: &str) -> Option<Value> {
+        self.variants.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
+    }
+}
+
 /// Extended value types sharing tag 15.
 /// Single tag slot, unlimited future variants.
 pub enum ExtendedValue {
     Module(ModuleNamespace),
     /// Enum type marker (type_id into EnumRegistry).
     EnumType(u32),
+    /// Tagged union type namespace (variant constructors).
+    Union(UnionNamespace),
     /// META object for module metadata.
     Meta(NativeMeta),
     /// Opaque plugin object with method/attr/drop callbacks.
@@ -171,6 +186,9 @@ impl Drop for ExtendedValue {
     fn drop(&mut self) {
         if let ExtendedValue::PluginObject { handle, callbacks } = self {
             if let Some(drop_fn) = callbacks.drop {
+                // SAFETY: drop_fn is the destructor the plugin registered alongside this
+                // handle; this is the sole owner being dropped, so it runs exactly once, and
+                // catch_unwind keeps a panic from unwinding across the FFI boundary.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                     drop_fn(*handle);
                 }));
@@ -195,6 +213,31 @@ unsafe impl Send for ExtendedValue {}
 #[repr(transparent)]
 pub struct Value(u64);
 
+impl catnip_core::scalar::ScalarValue for Value {
+    #[inline]
+    fn bits(self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn from_bits(bits: u64) -> Self {
+        Value(bits)
+    }
+    #[inline]
+    fn scalar_is_complex(self) -> bool {
+        self.is_complex()
+    }
+    #[inline]
+    unsafe fn scalar_as_complex_parts(&self) -> Option<(f64, f64)> {
+        // SAFETY: same contract as the trait method -- the caller guarantees
+        // the heap payload outlives the read; forwarded verbatim.
+        unsafe { self.as_complex_parts() }
+    }
+    #[inline]
+    fn scalar_from_complex(real: f64, imag: f64) -> Self {
+        Self::from_complex(real, imag)
+    }
+}
+
 impl Value {
     /// Nil constant (None)
     pub const NIL: Value = Value(QNAN_BASE | TAG_NIL);
@@ -214,68 +257,43 @@ impl Value {
     /// to avoid collision with the quiet NaN tagging scheme.
     #[inline]
     pub fn from_float(f: f64) -> Self {
-        let bits = f.to_bits();
-        if (bits & 0x7FF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 {
-            Value(CANON_NAN)
-        } else {
-            Value(bits)
-        }
+        <Self as ScalarValue>::scalar_from_float(f)
     }
 
     /// Create a small integer value. Panics if out of 47-bit range.
     #[inline]
     pub fn from_int(i: i64) -> Self {
-        debug_assert!(
-            (SMALLINT_MIN..=SMALLINT_MAX).contains(&i),
-            "integer out of small int range"
-        );
-        let payload = (i as u64) & PAYLOAD_MASK;
-        Value(QNAN_BASE | TAG_SMALLINT | payload)
+        <Self as ScalarValue>::scalar_from_int(i)
     }
 
     /// Try to create a small integer. Returns None if out of range.
     #[inline]
     pub fn try_from_int(i: i64) -> Option<Self> {
-        if (SMALLINT_MIN..=SMALLINT_MAX).contains(&i) {
-            Some(Self::from_int(i))
-        } else {
-            None
-        }
+        <Self as ScalarValue>::scalar_try_from_int(i)
     }
 
     /// Create a boolean value.
     #[inline]
     pub fn from_bool(b: bool) -> Self {
-        if b { Self::TRUE } else { Self::FALSE }
+        <Self as ScalarValue>::scalar_from_bool(b)
     }
 
     /// Create a symbol value (interned string index).
     #[inline]
     pub fn from_symbol(idx: u32) -> Self {
-        Value(QNAN_BASE | TAG_SYMBOL | (idx as u64))
+        <Self as ScalarValue>::scalar_from_symbol(idx)
     }
 
     /// Create a BigInt value from an Arc<GmpInt> pointer.
     #[inline]
     pub fn from_bigint(n: Integer) -> Self {
-        let arc = Arc::new(GmpInt(n));
-        let ptr = Arc::into_raw(arc) as u64;
-        debug_assert!(
-            ptr & !PAYLOAD_MASK == 0,
-            "BigInt Arc pointer exceeds 47-bit address space"
-        );
-        Value(QNAN_BASE | TAG_BIGINT | (ptr & PAYLOAD_MASK))
+        <Self as ScalarValue>::scalar_from_bigint(n)
     }
 
     /// Create a BigInt or demote to SmallInt if it fits.
     #[inline]
     pub fn from_bigint_or_demote(n: Integer) -> Self {
-        if let Some(i) = n.to_i64() {
-            if let Some(v) = Self::try_from_int(i) {
-                return v;
-            }
-        }
-        Self::from_bigint(n)
+        <Self as ScalarValue>::scalar_from_bigint_or_demote(n)
     }
 
     /// Create an integer value from any i64 (SmallInt if it fits, BigInt otherwise).
@@ -290,10 +308,18 @@ impl Value {
         Value(QNAN_BASE | TAG_VMFUNC | (idx as u64))
     }
 
-    /// Create a struct instance value from its index in PureStructRegistry.
+    /// Create a struct instance value from an owned `StructCell`.
+    ///
+    /// Stores `Arc<StructCell>` (thin pointer) in the 47-bit payload, exactly
+    /// like the native collections. The Arc strong count is the instance
+    /// refcount; `clone_refcount`/`decref` manage it.
     #[inline]
-    pub fn from_struct_instance(idx: u32) -> Self {
-        Value(QNAN_BASE | TAG_STRUCT | (idx as u64))
+    #[allow(clippy::arc_with_non_send_sync)] // VM is single-threaded, Arc for refcounting only
+    pub fn from_struct_instance(cell: StructCell) -> Self {
+        let arc = Arc::new(cell);
+        let ptr = Arc::into_raw(arc) as u64;
+        debug_assert!(ptr & !PAYLOAD_MASK == 0, "StructCell pointer exceeds 47-bit");
+        Value(QNAN_BASE | TAG_STRUCT | (ptr & PAYLOAD_MASK))
     }
 
     /// Create a callable struct type value from its type_id.
@@ -302,8 +328,52 @@ impl Value {
         Value(QNAN_BASE | TAG_STRUCTTYPE | (type_id as u64))
     }
 
+    /// Wrap a runtime closure slot in a `TAG_CLOSURE` value. The caller passes an
+    /// already-built `Arc` (so the VM can register a `Weak` for the reset drain
+    /// first); this transfers one strong ref into the NaN box, balanced by
+    /// `clone_refcount`/`decref`. Mirrors `from_struct_instance`.
+    #[inline]
+    #[allow(clippy::arc_with_non_send_sync)] // VM is single-threaded, Arc for refcounting only
+    pub fn from_arc_closure(slot: Arc<PureFuncSlot>) -> Self {
+        let ptr = Arc::into_raw(slot) as u64;
+        debug_assert!(ptr & !PAYLOAD_MASK == 0, "PureFuncSlot pointer exceeds 47-bit");
+        Value(QNAN_BASE | TAG_CLOSURE | (ptr & PAYLOAD_MASK))
+    }
+
+    /// A refcount-neutral closure `Value` from a live Arc (does *not* transfer a
+    /// ref). For resolve-style readers that `clone_refcount` before use; the Arc
+    /// must stay alive until the reader takes its own ref. Used by the letrec
+    /// weak self-ref path.
+    #[inline]
+    pub fn from_closure_neutral(slot: &Arc<PureFuncSlot>) -> Self {
+        let ptr = Arc::as_ptr(slot) as u64;
+        Value(QNAN_BASE | TAG_CLOSURE | (ptr & PAYLOAD_MASK))
+    }
+
+    /// A `Weak` handle to this closure's slot, without disturbing the strong
+    /// count. Used by the VM's reset drain to break letrec mutual cycles. Returns
+    /// `None` for a non-closure value.
+    #[inline]
+    pub fn closure_weak(self) -> Option<std::sync::Weak<PureFuncSlot>> {
+        if self.is_closure() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const PureFuncSlot;
+            // SAFETY: is_closure() guards a live Arc<PureFuncSlot>. from_raw adopts
+            // the existing ref (no strong change), downgrade bumps only the weak
+            // count, into_raw hands the strong ref back -- net strong unchanged.
+            unsafe {
+                let arc = Arc::from_raw(ptr);
+                let weak = Arc::downgrade(&arc);
+                let _ = Arc::into_raw(arc);
+                Some(weak)
+            }
+        } else {
+            None
+        }
+    }
+
     /// Create an Extended value (module, future: enum, union, ...).
     #[inline]
+    #[allow(clippy::arc_with_non_send_sync)] // VM is single-threaded, Arc for refcounting only
     pub fn from_extended(ext: ExtendedValue) -> Self {
         let arc = Arc::new(ext);
         let ptr = Arc::into_raw(arc) as u64;
@@ -324,6 +394,11 @@ impl Value {
     #[inline]
     pub fn from_enum_type(type_id: u32) -> Self {
         Self::from_extended(ExtendedValue::EnumType(type_id))
+    }
+
+    /// Create a tagged union type value.
+    pub fn from_union_type(ns: UnionNamespace) -> Self {
+        Self::from_extended(ExtendedValue::Union(ns))
     }
 
     /// Create a META object value.
@@ -364,43 +439,43 @@ impl Value {
     /// Check if this is a float (not a boxed value).
     #[inline]
     pub fn is_float(self) -> bool {
-        (self.0 & 0x7FF8_0000_0000_0000) != QNAN_BASE
+        ScalarValue::scalar_is_float(self)
     }
 
     /// Check if this is a small integer.
     #[inline]
     pub fn is_int(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_SMALLINT)
+        ScalarValue::scalar_is_int(self)
     }
 
     /// Check if this is a boolean.
     #[inline]
     pub fn is_bool(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_BOOL)
+        ScalarValue::scalar_is_bool(self)
     }
 
     /// Check if this is nil (None).
     #[inline]
     pub fn is_nil(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_NIL)
+        ScalarValue::scalar_is_nil(self)
     }
 
     /// Check if this is a symbol.
     #[inline]
     pub fn is_symbol(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_SYMBOL)
+        ScalarValue::scalar_is_symbol(self)
     }
 
     /// Check if this is a BigInt.
     #[inline]
     pub fn is_bigint(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_BIGINT)
+        ScalarValue::scalar_is_bigint(self)
     }
 
     /// Check if this is a native VM function.
     #[inline]
     pub fn is_vmfunc(self) -> bool {
-        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_VMFUNC)
+        ScalarValue::scalar_is_vmfunc(self)
     }
 
     /// Check if this is a native string.
@@ -445,6 +520,12 @@ impl Value {
         (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_STRUCT)
     }
 
+    /// Check if this is a runtime closure (`TAG_CLOSURE`, Arc-backed).
+    #[inline]
+    pub fn is_closure(self) -> bool {
+        (self.0 & (0x7FF8_0000_0000_0000 | TAG_MASK)) == (QNAN_BASE | TAG_CLOSURE)
+    }
+
     /// Check if this is a callable struct type.
     #[inline]
     pub fn is_struct_type(self) -> bool {
@@ -468,43 +549,25 @@ impl Value {
     /// Extract as float. Returns None if not a float.
     #[inline]
     pub fn as_float(self) -> Option<f64> {
-        if self.is_float() {
-            Some(f64::from_bits(self.0))
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_float(self)
     }
 
     /// Extract as integer. Returns None if not an integer.
     #[inline]
     pub fn as_int(self) -> Option<i64> {
-        if self.is_int() {
-            let payload = self.0 & PAYLOAD_MASK;
-            let result = if payload & SMALLINT_SIGN_BIT != 0 {
-                (payload | SMALLINT_SIGN_EXT) as i64
-            } else {
-                payload as i64
-            };
-            Some(result)
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_int(self)
     }
 
     /// Extract as boolean. Returns None if not a boolean.
     #[inline]
     pub fn as_bool(self) -> Option<bool> {
-        if self.is_bool() { Some((self.0 & 1) != 0) } else { None }
+        ScalarValue::scalar_as_bool(self)
     }
 
     /// Extract as symbol index. Returns None if not a symbol.
     #[inline]
     pub fn as_symbol(self) -> Option<u32> {
-        if self.is_symbol() {
-            Some((self.0 & PAYLOAD_MASK) as u32)
-        } else {
-            None
-        }
+        ScalarValue::scalar_as_symbol(self)
     }
 
     /// Extract VM function table index.
@@ -514,11 +577,39 @@ impl Value {
         (self.0 & PAYLOAD_MASK) as u32
     }
 
-    /// Extract struct instance index from PureStructRegistry.
+    /// Borrow the `StructCell` behind the Arc without cloning.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the Arc is still alive for the duration of the borrow
+    /// -- in particular, must not `decref` this `Value` (which is `Copy`) while
+    /// the returned reference is live. Same discipline as `as_native_list_ref`.
     #[inline]
-    pub fn as_struct_instance_idx(self) -> Option<u32> {
+    pub unsafe fn as_struct_ref(&self) -> Option<&StructCell> {
         if self.is_struct_instance() {
-            Some((self.0 & PAYLOAD_MASK) as u32)
+            let ptr = (self.0 & PAYLOAD_MASK) as *const StructCell;
+            // SAFETY: the is_struct_instance() guard proves a live Arc<StructCell>;
+            // the caller upholds that the Arc outlives the returned borrow.
+            Some(unsafe { &*ptr })
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the runtime `PureFuncSlot` behind the Arc without cloning.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the Arc is still alive for the duration of the borrow
+    /// -- in particular, must not `decref` this `Value` (which is `Copy`) while
+    /// the returned reference is live. Same discipline as `as_struct_ref`.
+    #[inline]
+    pub unsafe fn as_closure_ref(&self) -> Option<&PureFuncSlot> {
+        if self.is_closure() {
+            let ptr = (self.0 & PAYLOAD_MASK) as *const PureFuncSlot;
+            // SAFETY: the is_closure() guard proves a live Arc<PureFuncSlot>; the
+            // caller upholds that the Arc outlives the returned borrow.
+            Some(unsafe { &*ptr })
         } else {
             None
         }
@@ -684,6 +775,8 @@ impl Value {
         if !self.is_extended() {
             return false;
         }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
         matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Module(_)))
     }
 
@@ -693,6 +786,8 @@ impl Value {
         if !self.is_extended() {
             return false;
         }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
         matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::EnumType(_)))
     }
 
@@ -702,8 +797,33 @@ impl Value {
         if !self.is_extended() {
             return None;
         }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
         match unsafe { self.as_extended_ref()? } {
             ExtendedValue::EnumType(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a tagged union type.
+    #[inline]
+    pub fn is_union_type(self) -> bool {
+        if !self.is_extended() {
+            return false;
+        }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
+        matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Union(_)))
+    }
+
+    /// Borrow the UnionNamespace behind the Arc.
+    ///
+    /// # Safety
+    /// Caller must ensure the Arc is still alive and the value is a Union.
+    #[inline]
+    pub unsafe fn as_union_ref(&self) -> Option<&UnionNamespace> {
+        match self.as_extended_ref()? {
+            ExtendedValue::Union(ns) => Some(ns),
             _ => None,
         }
     }
@@ -714,6 +834,8 @@ impl Value {
         if !self.is_extended() {
             return false;
         }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
         matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Meta(_)))
     }
 
@@ -736,6 +858,8 @@ impl Value {
             return false;
         }
         matches!(
+            // SAFETY: is_extended() was verified above, so the payload is a live
+            // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
             unsafe { self.as_extended_ref() },
             Some(ExtendedValue::PluginObject { .. })
         )
@@ -759,6 +883,8 @@ impl Value {
         if !self.is_extended() {
             return false;
         }
+        // SAFETY: is_extended() was verified above, so the payload is a live
+        // Arc<ExtendedValue>; as_extended_ref() borrows it without outliving it.
         matches!(unsafe { self.as_extended_ref() }, Some(ExtendedValue::Complex(_, _)))
     }
 
@@ -784,14 +910,26 @@ impl Value {
         }
         let tag = self.0 & TAG_MASK;
         match tag {
+            // SAFETY: BIGINT tag => the payload is a live Arc<GmpInt>; this incref is balanced by a matching decref (NaN-box refcount discipline).
             TAG_BIGINT => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const GmpInt) },
+            // SAFETY: NATIVESTR tag => a live Arc<NativeString>; this incref is balanced by a matching decref.
             TAG_NATIVESTR => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeString) },
+            // SAFETY: NATIVELIST tag => a live Arc<NativeList>; this incref is balanced by a matching decref.
             TAG_NATIVELIST => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeList) },
+            // SAFETY: NATIVEDICT tag => a live Arc<NativeDict>; this incref is balanced by a matching decref.
             TAG_NATIVEDICT => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeDict) },
+            // SAFETY: NATIVETUPLE tag => a live Arc<NativeTuple>; this incref is balanced by a matching decref.
             TAG_NATIVETUPLE => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeTuple) },
+            // SAFETY: NATIVESET tag => a live Arc<NativeSet>; this incref is balanced by a matching decref.
             TAG_NATIVESET => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeSet) },
+            // SAFETY: NATIVEBYTES tag => a live Arc<NativeBytes>; this incref is balanced by a matching decref.
             TAG_NATIVEBYTES => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const NativeBytes) },
+            // SAFETY: EXTENDED tag => a live Arc<ExtendedValue>; this incref is balanced by a matching decref.
             TAG_EXTENDED => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const ExtendedValue) },
+            // SAFETY: STRUCT tag => a live Arc<StructCell>; this incref is balanced by a matching decref.
+            TAG_STRUCT => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const StructCell) },
+            // SAFETY: CLOSURE tag => a live Arc<PureFuncSlot>; this incref is balanced by a matching decref.
+            TAG_CLOSURE => unsafe { Arc::increment_strong_count((self.0 & PAYLOAD_MASK) as *const PureFuncSlot) },
             _ => {}
         }
     }
@@ -803,14 +941,28 @@ impl Value {
         }
         let tag = self.0 & TAG_MASK;
         match tag {
+            // SAFETY: BIGINT tag => the payload is a live Arc<GmpInt>; this decref balances the incref that created/cloned it (NaN-box refcount discipline).
             TAG_BIGINT => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const GmpInt) },
+            // SAFETY: NATIVESTR tag => a live Arc<NativeString>; this decref balances the incref that created/cloned it.
             TAG_NATIVESTR => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeString) },
+            // SAFETY: NATIVELIST tag => a live Arc<NativeList>; this decref balances the incref that created/cloned it.
             TAG_NATIVELIST => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeList) },
+            // SAFETY: NATIVEDICT tag => a live Arc<NativeDict>; this decref balances the incref that created/cloned it.
             TAG_NATIVEDICT => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeDict) },
+            // SAFETY: NATIVETUPLE tag => a live Arc<NativeTuple>; this decref balances the incref that created/cloned it.
             TAG_NATIVETUPLE => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeTuple) },
+            // SAFETY: NATIVESET tag => a live Arc<NativeSet>; this decref balances the incref that created/cloned it.
             TAG_NATIVESET => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeSet) },
+            // SAFETY: NATIVEBYTES tag => a live Arc<NativeBytes>; this decref balances the incref that created/cloned it.
             TAG_NATIVEBYTES => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const NativeBytes) },
+            // SAFETY: EXTENDED tag => a live Arc<ExtendedValue>; this decref balances the incref that created/cloned it.
             TAG_EXTENDED => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const ExtendedValue) },
+            // SAFETY: STRUCT tag => a live Arc<StructCell>; this decref balances the incref that created/cloned it.
+            // At strong count 0 the StructCell's Drop cascades a decref into each field.
+            TAG_STRUCT => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const StructCell) },
+            // SAFETY: CLOSURE tag => a live Arc<PureFuncSlot>; this decref balances the incref that created/cloned it.
+            // At strong count 0 the slot's Drop releases bound_self and drops its PureClosureScope (captures decref).
+            TAG_CLOSURE => unsafe { Arc::decrement_strong_count((self.0 & PAYLOAD_MASK) as *const PureFuncSlot) },
             _ => {}
         }
     }
@@ -820,8 +972,57 @@ impl Value {
     pub fn decref_bigint(self) {
         if self.is_bigint() {
             let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: is_bigint() proves the payload is a live Arc<GmpInt>; this decref
+            // balances the incref that created/cloned it (NaN-box refcount discipline).
             unsafe { Arc::decrement_strong_count(ptr) };
         }
+    }
+
+    /// Test-only: strong count of the underlying BigInt Arc, read without
+    /// touching it (`from_raw`/`into_raw` round-trip is refcount-neutral).
+    #[cfg(test)]
+    pub fn bigint_strong_count(self) -> usize {
+        debug_assert!(self.is_bigint());
+        let ptr = (self.0 & PAYLOAD_MASK) as *const GmpInt;
+        // SAFETY: ptr was produced by Arc::into_raw on the same GmpInt (from_bigint); from_raw
+        // reconstructs it exactly once here, and into_raw below re-leaks it, leaving the strong
+        // count unchanged.
+        let arc = unsafe { Arc::from_raw(ptr) };
+        let count = Arc::strong_count(&arc);
+        let _ = Arc::into_raw(arc);
+        count
+    }
+
+    /// Test-only: strong count of the underlying NativeList Arc, read without
+    /// touching it (refcount-neutral round-trip). Same probe as
+    /// `bigint_strong_count`.
+    #[cfg(test)]
+    pub fn native_list_strong_count(self) -> usize {
+        debug_assert!(self.is_native_list());
+        let ptr = (self.0 & PAYLOAD_MASK) as *const NativeList;
+        // SAFETY: ptr was produced by Arc::into_raw on the same NativeList
+        // (from_list); from_raw reconstructs it exactly once here, and into_raw
+        // below re-leaks it, leaving the strong count unchanged.
+        let arc = unsafe { Arc::from_raw(ptr) };
+        let count = Arc::strong_count(&arc);
+        let _ = Arc::into_raw(arc);
+        count
+    }
+
+    /// Test-only: strong count of the underlying ExtendedValue Arc, read
+    /// without touching it (`from_raw`/`into_raw` round-trip is
+    /// refcount-neutral). Same probe as `bigint_strong_count`.
+    #[cfg(test)]
+    pub fn extended_strong_count(self) -> usize {
+        debug_assert!(self.is_extended());
+        let ptr = (self.0 & PAYLOAD_MASK) as *const ExtendedValue;
+        // SAFETY: ptr was produced by Arc::into_raw on the same ExtendedValue
+        // (from_extended); from_raw reconstructs it exactly once here, and
+        // into_raw below re-leaks it, leaving the strong count unchanged.
+        let arc = unsafe { Arc::from_raw(ptr) };
+        let count = Arc::strong_count(&arc);
+        let _ = Arc::into_raw(arc);
+        count
     }
 
     // --- Truthiness ---
@@ -838,20 +1039,28 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             f != 0.0
         } else if self.is_bigint() {
+            // SAFETY: the is_bigint() guard proves a live Arc<GmpInt>; the borrow stays in this branch.
             unsafe { self.as_bigint_ref().unwrap().cmp0() != std::cmp::Ordering::Equal }
         } else if self.is_native_str() {
+            // SAFETY: the is_native_str() guard proves a live Arc<NativeString>; the borrow stays in this branch.
             unsafe { !self.as_native_str_ref().unwrap().is_empty() }
         } else if self.is_native_list() {
+            // SAFETY: the is_native_list() guard proves a live Arc<NativeList>; the borrow stays in this branch.
             unsafe { !self.as_native_list_ref().unwrap().is_empty() }
         } else if self.is_native_dict() {
+            // SAFETY: the is_native_dict() guard proves a live Arc<NativeDict>; the borrow stays in this branch.
             unsafe { !self.as_native_dict_ref().unwrap().is_empty() }
         } else if self.is_native_tuple() {
+            // SAFETY: the is_native_tuple() guard proves a live Arc<NativeTuple>; the borrow stays in this branch.
             unsafe { !self.as_native_tuple_ref().unwrap().is_empty() }
         } else if self.is_native_set() {
+            // SAFETY: the is_native_set() guard proves a live Arc<NativeSet>; the borrow stays in this branch.
             unsafe { !self.as_native_set_ref().unwrap().is_empty() }
         } else if self.is_native_bytes() {
+            // SAFETY: the is_native_bytes() guard proves a live Arc<NativeBytes>; the borrow stays in this branch.
             unsafe { !self.as_native_bytes_ref().unwrap().is_empty() }
         } else if self.is_complex() {
+            // SAFETY: the is_complex() guard proves a live Arc<ExtendedValue>::Complex; the copied parts outlive the borrow.
             let (r, i) = unsafe { self.as_complex_parts().unwrap() };
             r != 0.0 || i != 0.0
         } else {
@@ -878,11 +1087,14 @@ impl Value {
         } else if let Some(f) = self.as_float() {
             format_float(f)
         } else if self.is_bigint() {
+            // SAFETY: the is_bigint() guard proves a live Arc<GmpInt>; the borrow does not outlive this branch.
             let n = unsafe { self.as_bigint_ref().unwrap() };
             n.to_string()
         } else if self.is_native_str() {
+            // SAFETY: the is_native_str() guard proves a live Arc<NativeString>; the borrow does not outlive this branch.
             unsafe { self.as_native_str_ref().unwrap().to_string() }
         } else if self.is_native_list() {
+            // SAFETY: the is_native_list() guard proves a live Arc<NativeList>; the borrow does not outlive this branch.
             let list = unsafe { self.as_native_list_ref().unwrap() };
             let items = list.as_slice_cloned();
             let parts: Vec<String> = items
@@ -895,6 +1107,7 @@ impl Value {
                 .collect();
             format!("[{}]", parts.join(", "))
         } else if self.is_native_tuple() {
+            // SAFETY: the is_native_tuple() guard proves a live Arc<NativeTuple>; the borrow does not outlive this branch.
             let tuple = unsafe { self.as_native_tuple_ref().unwrap() };
             let items = tuple.as_slice();
             let parts: Vec<String> = items.iter().map(|v| v.repr_string()).collect();
@@ -904,6 +1117,7 @@ impl Value {
                 format!("({})", parts.join(", "))
             }
         } else if self.is_native_dict() {
+            // SAFETY: the is_native_dict() guard proves a live Arc<NativeDict>; the borrow does not outlive this branch.
             let dict = unsafe { self.as_native_dict_ref().unwrap() };
             let keys = dict.keys_cloned();
             let parts: Vec<String> = keys
@@ -919,6 +1133,7 @@ impl Value {
                 .collect();
             format!("{{{}}}", parts.join(", "))
         } else if self.is_native_set() {
+            // SAFETY: the is_native_set() guard proves a live Arc<NativeSet>; the borrow does not outlive this branch.
             let set = unsafe { self.as_native_set_ref().unwrap() };
             let vals = set.to_values();
             if vals.is_empty() {
@@ -935,6 +1150,7 @@ impl Value {
                 format!("{{{}}}", parts.join(", "))
             }
         } else if self.is_native_bytes() {
+            // SAFETY: the is_native_bytes() guard proves a live Arc<NativeBytes>; the borrow does not outlive this branch.
             let bytes = unsafe { self.as_native_bytes_ref().unwrap() };
             format!(
                 "b'{}'",
@@ -952,20 +1168,31 @@ impl Value {
             )
         } else if self.is_vmfunc() {
             format!("<function #{}>", (self.0 & PAYLOAD_MASK) as u32)
+        } else if self.is_closure() {
+            "<function>".to_string()
         } else if self.is_struct_instance() {
-            // Detailed display requires registry access -- handled in VM dispatch
-            format!("<struct #{}>", (self.0 & PAYLOAD_MASK) as u32)
+            // Detailed display requires registry access (type name + fields) --
+            // handled in VM dispatch. The bare payload is a pointer, not a name.
+            "<struct>".to_string()
         } else if self.is_struct_type() {
             format!("<type #{}>", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_module() {
+            // SAFETY: the is_module() guard proves a live Arc<ExtendedValue>::Module; the borrow does not outlive this branch.
             let ns = unsafe { self.as_module_ref().unwrap() };
             format!("<module '{}'>", ns.name)
+        } else if self.is_union_type() {
+            // str() form -- the bare union name, like the PyO3 __str__.
+            // SAFETY: the is_union_type() guard proves a live Arc<ExtendedValue>::Union; the borrow does not outlive this branch.
+            let ns = unsafe { self.as_union_ref().unwrap() };
+            ns.name.clone()
         } else if self.is_meta() {
             "<META>".to_string()
         } else if self.is_complex() {
+            // SAFETY: the is_complex() guard proves a live Arc<ExtendedValue>::Complex; the copied parts outlive the borrow.
             let (r, i) = unsafe { self.as_complex_parts().unwrap() };
             format_complex(r, i)
         } else if self.is_plugin_object() {
+            // SAFETY: the is_plugin_object() guard proves a live Arc<ExtendedValue>::PluginObject; the borrow does not outlive this branch.
             let (handle, _) = unsafe { self.as_plugin_object_ref().unwrap() };
             format!("<plugin object {:#x}>", handle)
         } else if self.is_extended() {
@@ -978,8 +1205,17 @@ impl Value {
     /// Convert Value to its repr string (with quotes for strings).
     pub fn repr_string(&self) -> String {
         if self.is_native_str() {
+            // SAFETY: the is_native_str() guard proves a live Arc<NativeString>; the borrow does not outlive this branch.
             let s = unsafe { self.as_native_str_ref().unwrap() };
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+        } else if self.is_union_type() {
+            // SAFETY: the is_union_type() guard proves a live Arc<ExtendedValue>::Union; the borrow does not outlive this branch.
+            let ns = unsafe { self.as_union_ref().unwrap() };
+            if ns.type_params.is_empty() {
+                format!("<union '{}'>", ns.name)
+            } else {
+                format!("<union '{}[{}]'>", ns.name, ns.type_params.join(", "))
+            }
         } else {
             self.display_string()
         }
@@ -1169,22 +1405,29 @@ impl fmt::Debug for Value {
         } else if let Some(fl) = self.as_float() {
             write!(f, "{}", fl)
         } else if self.is_bigint() {
+            // SAFETY: the is_bigint() guard proves a live Arc<GmpInt>; the borrow does not outlive this branch.
             let n = unsafe { self.as_bigint_ref().unwrap() };
             write!(f, "{}n", n)
         } else if self.is_native_str() {
+            // SAFETY: the is_native_str() guard proves a live Arc<NativeString>; the borrow does not outlive this branch.
             let s = unsafe { self.as_native_str_ref().unwrap() };
             write!(f, "\"{}\"", s)
         } else if self.is_native_list() {
+            // SAFETY: the is_native_list() guard proves a live Arc<NativeList>; the borrow does not outlive this branch.
             write!(f, "<list len={}>", unsafe { self.as_native_list_ref().unwrap().len() })
         } else if self.is_native_dict() {
+            // SAFETY: the is_native_dict() guard proves a live Arc<NativeDict>; the borrow does not outlive this branch.
             write!(f, "<dict len={}>", unsafe { self.as_native_dict_ref().unwrap().len() })
         } else if self.is_native_tuple() {
+            // SAFETY: the is_native_tuple() guard proves a live Arc<NativeTuple>; the borrow does not outlive this branch.
             write!(f, "<tuple len={}>", unsafe {
                 self.as_native_tuple_ref().unwrap().len()
             })
         } else if self.is_native_set() {
+            // SAFETY: the is_native_set() guard proves a live Arc<NativeSet>; the borrow does not outlive this branch.
             write!(f, "<set len={}>", unsafe { self.as_native_set_ref().unwrap().len() })
         } else if self.is_native_bytes() {
+            // SAFETY: the is_native_bytes() guard proves a live Arc<NativeBytes>; the borrow does not outlive this branch.
             write!(f, "<bytes len={}>", unsafe {
                 self.as_native_bytes_ref().unwrap().len()
             })
@@ -1194,11 +1437,14 @@ impl fmt::Debug for Value {
             write!(f, "INVALID(canary)")
         } else if self.is_vmfunc() {
             write!(f, "vmfunc#{}", (self.0 & PAYLOAD_MASK) as u32)
+        } else if self.is_closure() {
+            write!(f, "closure@{:x}", self.0 & PAYLOAD_MASK)
         } else if self.is_struct_instance() {
             write!(f, "struct#{}", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_struct_type() {
             write!(f, "structtype#{}", (self.0 & PAYLOAD_MASK) as u32)
         } else if self.is_module() {
+            // SAFETY: the is_module() guard proves a live Arc<ExtendedValue>::Module; the borrow does not outlive this branch.
             let ns = unsafe { self.as_module_ref().unwrap() };
             write!(f, "module({})", ns.name)
         } else if self.is_extended() {
@@ -1215,6 +1461,12 @@ impl Default for Value {
     }
 }
 
+/// Structural equality of native containers (list, tuple, dict, set, bytes) +
+/// identity/bits equality of leaves: struct instances compare by slot, symbols
+/// by bits. This has **no struct registry**, so two distinct instances with
+/// equal fields are *not* equal here. For registry-aware equality (struct
+/// payloads resolved by fields), use `deep_eq` in the VM, which the Eq/Ne,
+/// `in`, and `index`/`count` paths route through.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         // Bitwise match covers immediates (SmallInt, Bool, Nil, Symbol, VMFunc)
@@ -1224,12 +1476,16 @@ impl PartialEq for Value {
         if self.is_float() && other.is_float() {
             self.as_float() == other.as_float()
         } else if self.is_bigint() && other.is_bigint() {
+            // SAFETY: both is_bigint() guards prove a live Arc<GmpInt> on each side; the borrows do not outlive this branch.
             unsafe { self.as_bigint_ref().unwrap() == other.as_bigint_ref().unwrap() }
         } else if self.is_native_str() && other.is_native_str() {
+            // SAFETY: both is_native_str() guards prove a live Arc<NativeString> on each side; the borrows do not outlive this branch.
             unsafe { self.as_native_str_ref().unwrap() == other.as_native_str_ref().unwrap() }
         } else if self.is_native_list() && other.is_native_list() {
             // Compare element-by-element
+            // SAFETY: the is_native_list() guard on self proves a live Arc<NativeList>; the borrow does not outlive this branch.
             let a = unsafe { self.as_native_list_ref().unwrap() };
+            // SAFETY: the is_native_list() guard on other proves a live Arc<NativeList>; the borrow does not outlive this branch.
             let b = unsafe { other.as_native_list_ref().unwrap() };
             let av = a.as_slice_cloned();
             let bv = b.as_slice_cloned();
@@ -1242,19 +1498,53 @@ impl PartialEq for Value {
             }
             eq
         } else if self.is_native_tuple() && other.is_native_tuple() {
+            // SAFETY: the is_native_tuple() guard on self proves a live Arc<NativeTuple>; the borrow does not outlive this branch.
             let a = unsafe { self.as_native_tuple_ref().unwrap() };
+            // SAFETY: the is_native_tuple() guard on other proves a live Arc<NativeTuple>; the borrow does not outlive this branch.
             let b = unsafe { other.as_native_tuple_ref().unwrap() };
             a.as_slice() == b.as_slice()
         } else if self.is_native_bytes() && other.is_native_bytes() {
+            // SAFETY: the is_native_bytes() guard on self proves a live Arc<NativeBytes>; the borrow does not outlive this branch.
             let a = unsafe { self.as_native_bytes_ref().unwrap() };
+            // SAFETY: the is_native_bytes() guard on other proves a live Arc<NativeBytes>; the borrow does not outlive this branch.
             let b = unsafe { other.as_native_bytes_ref().unwrap() };
             a.as_bytes() == b.as_bytes()
         } else if self.is_complex() && other.is_complex() {
+            // SAFETY: both is_complex() guards prove a live Arc<ExtendedValue>::Complex on each side; the copied parts outlive the borrows.
             unsafe {
                 let (ar, ai) = self.as_complex_parts().unwrap();
                 let (br, bi) = other.as_complex_parts().unwrap();
                 ar == br && ai == bi
             }
+        } else if self.is_native_dict() && other.is_native_dict() {
+            // SAFETY: the is_native_dict() guard on self proves a live Arc<NativeDict>; the borrow does not outlive this branch.
+            let a = unsafe { self.as_native_dict_ref().unwrap() };
+            // SAFETY: the is_native_dict() guard on other proves a live Arc<NativeDict>; the borrow does not outlive this branch.
+            let b = unsafe { other.as_native_dict_ref().unwrap() };
+            if a.len() != b.len() {
+                return false;
+            }
+            for k in a.keys_cloned() {
+                if !b.contains_key(&k) {
+                    return false;
+                }
+                let va = a.get_item(&k).unwrap_or(Value::NIL);
+                let vb = b.get_item(&k).unwrap_or(Value::NIL);
+                let eq = va == vb;
+                va.decref();
+                vb.decref();
+                if !eq {
+                    return false;
+                }
+            }
+            true
+        } else if self.is_native_set() && other.is_native_set() {
+            // Set members are ValueKeys (hashables only): key equality suffices.
+            // SAFETY: the is_native_set() guard on self proves a live Arc<NativeSet>; the borrow does not outlive this branch.
+            let a = unsafe { self.as_native_set_ref().unwrap() };
+            // SAFETY: the is_native_set() guard on other proves a live Arc<NativeSet>; the borrow does not outlive this branch.
+            let b = unsafe { other.as_native_set_ref().unwrap() };
+            a.len() == b.len() && a.copy().iter().all(|k| b.contains(k))
         } else {
             false
         }
@@ -1264,6 +1554,49 @@ impl PartialEq for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catnip_core::nanbox::{SMALLINT_MAX, SMALLINT_MIN, TAG_BIGINT, TAG_SMALLINT, TAG_SYMBOL};
+
+    // Conformance mirror for the boundary lock (CatnipBoundaryProof): this
+    // crate's scalar tags are exactly {0,1,2,3}, and from_raw_scalar rejects
+    // every index/pointer-backed tag this Value uses (native collections,
+    // bigint, struct types).
+    #[test]
+    fn boundary_classification_conforms() {
+        use catnip_core::nanbox::{from_raw_scalar, is_scalar_tag};
+        let tagged = |tag: u64, p: u64| QNAN_BASE | tag | (p & PAYLOAD_MASK);
+
+        for tag in [TAG_SMALLINT, TAG_BOOL, TAG_NIL, TAG_SYMBOL] {
+            let w = tagged(tag, 1);
+            assert!(is_scalar_tag(tag >> TAG_SHIFT));
+            assert_eq!(from_raw_scalar(w), Some(w));
+        }
+        let fb = 2.5f64.to_bits();
+        assert_eq!(from_raw_scalar(fb), Some(fb));
+
+        // Index: Struct, VMFunc, StructType. Pointer: Closure, BigInt + native collections + Extended.
+        for tag in [
+            TAG_STRUCT,
+            TAG_VMFUNC,
+            TAG_STRUCTTYPE,
+            TAG_CLOSURE,
+            TAG_BIGINT,
+            TAG_NATIVESTR,
+            TAG_NATIVELIST,
+            TAG_NATIVEDICT,
+            TAG_NATIVETUPLE,
+            TAG_NATIVESET,
+            TAG_NATIVEBYTES,
+            TAG_EXTENDED,
+        ] {
+            assert!(!is_scalar_tag(tag >> TAG_SHIFT));
+            assert_eq!(
+                from_raw_scalar(tagged(tag, 1)),
+                None,
+                "tag {} must be rejected",
+                tag >> TAG_SHIFT
+            );
+        }
+    }
 
     #[test]
     fn test_size() {
@@ -1360,6 +1693,7 @@ mod tests {
     fn test_bigint() {
         let v = Value::from_bigint(Integer::from(42));
         assert!(v.is_bigint());
+        // SAFETY: v is a live BigInt constructed just above and not yet decref'd.
         assert_eq!(unsafe { v.as_bigint_ref() }, Some(&Integer::from(42)));
         v.decref();
     }
@@ -1384,6 +1718,7 @@ mod tests {
         let big = Integer::from(1_u64 << 50);
         let v = Value::from_bigint_or_demote(big.clone());
         assert!(v.is_bigint());
+        // SAFETY: v is a live BigInt constructed just above and not yet decref'd.
         assert_eq!(unsafe { v.as_bigint_ref() }, Some(&big));
         v.decref();
     }
@@ -1404,6 +1739,7 @@ mod tests {
         assert!(!v.is_int());
         assert!(!v.is_float());
         assert!(!v.is_nil());
+        // SAFETY: v is a live NativeStr constructed just above and not yet decref'd.
         assert_eq!(unsafe { v.as_native_str_ref() }, Some("hello"));
         v.decref();
     }
@@ -1443,8 +1779,88 @@ mod tests {
         v.clone_refcount();
         v.decref();
         assert!(v.is_native_str());
+        // SAFETY: v is a live NativeStr (strong count >= 1) and not yet fully decref'd.
         assert_eq!(unsafe { v.as_native_str_ref() }, Some("test"));
         v.decref();
+    }
+
+    // A ModuleNamespace owns one strong ref per exported value (incref'd at
+    // insertion in the loader/plugin path). Without a Drop, dropping the map
+    // leaks those heap payloads -- sys.argv being the canonical case.
+    #[test]
+    fn module_namespace_drop_releases_attrs() {
+        use crate::collections::ValueKey;
+
+        let payload = Value::from_str("exported"); // NativeString strong=1
+        let witness = match payload.to_key().unwrap() {
+            ValueKey::Str(a) => a, // strong=2 (attr ref + witness)
+            _ => unreachable!(),
+        };
+        assert_eq!(Arc::strong_count(&witness), 2, "witness setup");
+
+        // Mirror the loader: attrs takes ownership of the value's strong ref.
+        let mut attrs = IndexMap::new();
+        attrs.insert("x".to_string(), payload);
+        let module = Value::from_module(ModuleNamespace {
+            name: "m".to_string(),
+            attrs,
+            module_globals: std::rc::Rc::new(RefCell::new(IndexMap::new())),
+        });
+        assert_eq!(Arc::strong_count(&witness), 2, "module alive: ref held by attrs");
+
+        // Drop the module: ExtendedValue::Module -> ModuleNamespace::drop -> decref.
+        module.decref();
+        assert_eq!(
+            Arc::strong_count(&witness),
+            1,
+            "ModuleNamespace::drop leaked an exported attr"
+        );
+    }
+
+    // Two namespaces aliasing one shared value -- the plugin static-descriptor
+    // pattern, where every load borrows the same attr bits. Each must own its
+    // own ref, so dropping one namespace must not free what the other reads.
+    #[test]
+    fn module_namespace_aliased_attr_survives_sibling_drop() {
+        use crate::collections::ValueKey;
+
+        let shared = Value::from_str("rust"); // strong=1 (the "static descriptor")
+        let witness = match shared.to_key().unwrap() {
+            ValueKey::Str(a) => a, // strong=2
+            _ => unreachable!(),
+        };
+
+        // Each namespace borrows `shared` and takes its own ref (mirrors load()).
+        let make_ns = || {
+            shared.clone_refcount();
+            let mut attrs = IndexMap::new();
+            attrs.insert("PROTOCOL".to_string(), shared);
+            Value::from_module(ModuleNamespace {
+                name: "io".to_string(),
+                attrs,
+                module_globals: std::rc::Rc::new(RefCell::new(IndexMap::new())),
+            })
+        };
+        let ns1 = make_ns(); // strong=3
+        let ns2 = make_ns(); // strong=4
+        assert_eq!(Arc::strong_count(&witness), 4, "each namespace owns its own ref");
+
+        ns1.decref(); // drop ns1 -> releases only its ref
+        assert_eq!(Arc::strong_count(&witness), 3, "sibling drop released exactly one ref");
+
+        // ns2 still reads a valid string -- no use-after-free.
+        // SAFETY: ns2 is a live module; its "PROTOCOL" attr is a live NativeStr held by
+        // ns2's attrs map, so borrowing it here cannot use-after-free.
+        let proto = unsafe {
+            ns2.as_module_ref().unwrap().attrs["PROTOCOL"]
+                .as_native_str_ref()
+                .unwrap()
+        };
+        assert_eq!(proto, "rust");
+
+        ns2.decref(); // strong=2 (shared + witness)
+        shared.decref(); // release the "static" ref -> strong=1 (witness only)
+        assert_eq!(Arc::strong_count(&witness), 1);
     }
 
     #[test]
@@ -1480,7 +1896,7 @@ mod tests {
             Value::from_tuple(vec![]),
             Value::from_set(indexmap::IndexSet::new()),
             Value::from_bytes(vec![]),
-            Value::from_struct_instance(0),
+            Value::from_struct_instance(StructCell::new(0, vec![])),
             Value::from_struct_type(0),
         ];
         for (i, a) in values.iter().enumerate() {
@@ -1508,8 +1924,9 @@ mod tests {
                 a, i, true_count, checks
             );
         }
-        // cleanup heap values (bigint, vmfunc, str, collections -- struct tags are index-based, no decref)
-        for v in &values[5..13] {
+        // cleanup heap values (bigint through bytes, plus the struct instance --
+        // all Arc-backed; vmfunc/struct-type tags are immediates, decref is a no-op)
+        for v in &values[5..14] {
             v.decref();
         }
     }
@@ -1558,6 +1975,7 @@ mod tests {
 
     #[test]
     fn test_collection_equality() {
+        use crate::collections::ValueKey;
         let a = Value::from_list(vec![Value::from_int(1), Value::from_int(2)]);
         let b = Value::from_list(vec![Value::from_int(1), Value::from_int(2)]);
         assert_eq!(a, b);
@@ -1575,6 +1993,37 @@ mod tests {
         assert_eq!(b1, b2);
         b1.decref();
         b2.decref();
+
+        // dict: structural, order-independent
+        let mut m1 = indexmap::IndexMap::new();
+        m1.insert(ValueKey::Int(1), Value::from_int(10));
+        m1.insert(ValueKey::Int(2), Value::from_int(20));
+        let mut m2 = indexmap::IndexMap::new();
+        m2.insert(ValueKey::Int(2), Value::from_int(20));
+        m2.insert(ValueKey::Int(1), Value::from_int(10));
+        let d1 = Value::from_dict(m1);
+        let d2 = Value::from_dict(m2);
+        assert_eq!(d1, d2);
+        let mut m3 = indexmap::IndexMap::new();
+        m3.insert(ValueKey::Int(1), Value::from_int(99));
+        let d3 = Value::from_dict(m3);
+        assert_ne!(d1, d3);
+        d1.decref();
+        d2.decref();
+        d3.decref();
+
+        // set: structural, order-independent
+        let mut s1 = indexmap::IndexSet::new();
+        s1.insert(ValueKey::Int(1));
+        s1.insert(ValueKey::Int(2));
+        let mut s2 = indexmap::IndexSet::new();
+        s2.insert(ValueKey::Int(2));
+        s2.insert(ValueKey::Int(1));
+        let set1 = Value::from_set(s1);
+        let set2 = Value::from_set(s2);
+        assert_eq!(set1, set2);
+        set1.decref();
+        set2.decref();
     }
 
     #[test]

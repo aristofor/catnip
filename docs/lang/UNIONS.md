@@ -66,6 +66,33 @@ enum Color { red; green; blue }
 Critère pratique : `enum` pour des constantes nommées, `union` pour une forme de donnée qui peut transporter une charge
 utile.
 
+## Champs de payload typés
+
+Un champ de payload peut porter une annotation, comme un champ de struct. Le type est un **contrat vérifié à la
+construction** de la variante : un mismatch prouvable est une erreur statique (E300), une valeur non prouvable (issue
+d'un appel, d'une frontière Python) échoue en `TypeError` au moment de la construction.
+
+<!-- check: expect-error -->
+
+```catnip
+union Shape {
+    Circle(radius: int);
+    Rect(w: int, h: int);
+}
+
+Shape.Circle(3)     # accepté
+Shape.Rect(4, 5)    # accepté
+Shape.Circle(1.5)   # E300 : le champ 'radius' attend 'int', reçoit 'float'
+```
+
+La tour numérique s'applique comme pour les struct : un `int` fourni à un champ `: float` est coercé (`Circle(3)` avec
+`radius: float` stocke `3.0`).
+
+Un champ dont le type **est** un paramètre générique (`Some(value: T)`) fait exception : `T` n'est pas fixé à la
+construction, donc le contrat s'applique plus loin, au franchissement d'une frontière typée (voir ci-dessous).
+
+> Un champ annoté mais non vérifié n'est pas typé, il est décoré.
+
 ## Paramètres génériques
 
 Les unions peuvent déclarer des paramètres de type entre crochets :
@@ -82,8 +109,29 @@ union Result[T, E] {
 }
 ```
 
-Les paramètres de type sont **parsés** (et conservés pour les diagnostics) mais ne sont **pas encore vérifiés** au
-runtime. Le type checker arrivera avec les type hints (voir TODO).
+Une annotation générique est un contrat vérifié. `x: Option[int]` exige que la valeur soit une `Option` **et**, si c'est
+un variant à payload dont le champ est le paramètre `T`, que ce payload satisfasse `int` (substitution `T := int`) :
+
+<!-- check: expect-error -->
+
+```catnip
+union Option[T] { Some(value: T); None }
+
+f = (x: Option[int]) => { 1 }
+
+f(Option.Some(42))     # accepté
+f(Option.None)         # accepté (pas de payload à vérifier)
+f(Option.Some("nope")) # TypeError : le payload est str, pas int
+```
+
+La vérification s'applique aux positions annotées : paramètres, champs de struct, champs de payload, type de retour.
+L'arité fait partie du contrat -- `Option[int, str]` (deux arguments pour un seul paramètre) est une erreur statique. Un
+champ **paramètre** (`value: T`) reste non typé à la construction (`Option.Some("x")` construit sans erreur : il vaut
+`Option[str]`) ; `T` n'étant pas fixé, c'est au franchissement d'une frontière typée que son contrat s'applique. Un
+champ **concret** (`x: int`), lui, est vérifié dès la construction (voir « Champs de payload typés »).
+
+> La substitution v1 couvre les champs qui **sont** un paramètre direct (`value: T`). Un paramètre imbriqué dans un
+> composite (`items: list[T]`) vérifie le conteneur, pas encore l'élément.
 
 Les variantes elles-mêmes ne déclarent pas de paramètres : `Some[T](value: T)` est refusé. Le paramétrage décrit l'union
 complète, pas chaque constructeur.
@@ -121,6 +169,57 @@ match Event.Quit {
 
 > Les champs de la variante sont reliés en variables locales du bloc de match : `value` dans `Option.Some{value}`
 > capture la charge utile dans une variable `value`.
+
+## Méthodes
+
+Une union peut déclarer des méthodes, au niveau de l'union -- jamais par variante. `self` reçoit la variante sur
+laquelle la méthode est appelée, quelle qu'elle soit, et le corps discrimine par `match` :
+
+```catnip
+union Option {
+    Some(value);
+    None;
+
+    map(self, f) => {
+        match self {
+            Option.Some{value} => { Option.Some(f(value)) }
+            Option.None => { Option.None }
+        }
+    }
+
+    unwrap_or(self, default) => {
+        match self {
+            Option.Some{value} => { value }
+            Option.None => { default }
+        }
+    }
+}
+
+Option.Some(21).map((x) => { x * 2 }).unwrap_or(0)   # → 42
+Option.None.unwrap_or(-1)                            # → -1
+```
+
+Cette forme donne :
+
+- une seule forme de code pour toutes les variantes, payload ou nullaire ;
+- pas de dispatch caché : la logique par variante est lisible dans le corps, au même endroit ;
+- l'exhaustivité du linter s'applique aux corps -- dans une méthode, le type de `self` est connu, donc un `match self`
+  incomplet émet `I103` avec les variantes manquantes.
+
+Les méthodes ne mutent jamais `self` : les unions sont immutables, une méthode retourne une valeur. `map` ci-dessus ne
+modifie pas l'`Option`, elle en construit une nouvelle.
+
+> `self` est la seule variable du langage qui ne sait pas qui elle est avant de se matcher elle-même.
+
+Différences avec les méthodes de struct :
+
+- **Pas d'`init`** : les constructeurs d'une union sont ses variantes.
+- **Pas d'`@abstract`** : une union n'a pas d'héritage, le corps est toujours obligatoire.
+- **Pas de décorateurs ni d'`op`** : une méthode statique ou un opérateur surchargé introduirait un second espace de
+  noms sur `Union.X` et un second mécanisme de dispatch ; le MVP garde une seule forme.
+
+Méthodes et variantes partagent l'espace de noms `Union.x` : un nom de méthode identique à un nom de variante est rejeté
+à la compilation, comme un nom dupliqué.
 
 ## Égalité
 
@@ -198,27 +297,26 @@ Une `union` entièrement nullaire est autorisée par le parseur, mais le linter 
 
 ## Mode d'exécution
 
-Le runtime des `union` est câblé sur les deux exécuteurs :
+Le runtime des `union` est câblé sur les trois exécuteurs :
 
 - **Mode VM (défaut)** : opcode `MakeUnion` qui matérialise le namespace au démarrage du module.
 - **Mode AST** (`catnip -x ast`) : `op_union` dans le registry, même logique partagée.
-
-Le binaire standalone `catnip-run` (PureVM sans Python) lève `MakeUnion: union runtime not implemented in PureVM` quand
-il rencontre une union. Utiliser le CLI Python (`catnip` / `python -m catnip`) pour exécuter du code union.
+- **PureVM (MCP, runtime pur sans Python)** : même opcode `MakeUnion`, décodé par `handle_make_union` -- variantes à
+  payload en struct types qualifiés, nullaires en symboles internés.
 
 ## Différences avec `enum` et `struct`
 
-| Propriété        | `enum`               | `struct`               | `union`                             |
-| ---------------- | -------------------- | ---------------------- | ----------------------------------- |
-| Contenu          | Variantes nullaires  | Champs typés           | Variantes avec/sans payload         |
-| Instanciation    | `Color.red`          | `Point(1, 2)`          | `Option.Some(42)`, `Option.None`    |
-| Pattern matching | `Color.red => {...}` | `Point{x, y} => {...}` | `Option.Some{value} => {...}`       |
-| Égalité          | Même variante = égal | Même champs = égal     | Variante + champs structurels       |
-| Hash             | Structurel           | Structurel             | Structurel                          |
-| Truthiness       | Toujours truthy      | Toujours truthy        | Toujours truthy                     |
-| Mutation         | Non (valeur fixe)    | Oui (`p.x = 5`)        | Non (variante figée, payload local) |
-| Méthodes         | Non                  | Oui                    | Pas encore                          |
-| Génériques       | Non                  | Pas encore             | Oui (`Option[T]`, parsé)            |
+| Propriété        | `enum`               | `struct`               | `union`                                |
+| ---------------- | -------------------- | ---------------------- | -------------------------------------- |
+| Contenu          | Variantes nullaires  | Champs typés           | Variantes avec/sans payload            |
+| Instanciation    | `Color.red`          | `Point(1, 2)`          | `Option.Some(42)`, `Option.None`       |
+| Pattern matching | `Color.red => {...}` | `Point{x, y} => {...}` | `Option.Some{value} => {...}`          |
+| Égalité          | Même variante = égal | Même champs = égal     | Variante + champs structurels          |
+| Hash             | Structurel           | Structurel             | Structurel                             |
+| Truthiness       | Toujours truthy      | Toujours truthy        | Toujours truthy                        |
+| Mutation         | Non (valeur fixe)    | Oui (`p.x = 5`)        | Non (variante figée, payload local)    |
+| Méthodes         | Non                  | Oui                    | Oui (niveau union, `match self`)       |
+| Génériques       | Non                  | Pas encore             | Oui (`Option[T]`, vérifié au boundary) |
 
 ## Exhaustivité (linter)
 
@@ -231,7 +329,7 @@ union Option { Some(value); None; }
 
 x = Option.Some(1)
 
-# Manque Option.None -- emet I103
+# Manque Option.None -- émet I103
 match x {
     Option.Some{value} => { value }
 }
@@ -242,7 +340,9 @@ final (`_ => { ... }`) supprime l'avertissement.
 
 ## Limitations (MVP)
 
-- **Binaire standalone `catnip-run`** : non supporté (PureVM sans Python). Utiliser le CLI Python.
-- **Type hints** : les annotations `value: T` sont parsées mais ignorées au runtime.
-- **Méthodes sur unions** : non supportées (pas de `union Option { Some(value); None; map(f) => {...} }`).
+- **Champ paramètre non fixé à la construction** : un champ dont le type **est** un paramètre générique
+  (`Some(value: T)`) n'est pas vérifié au constructeur ; son contrat s'applique au franchissement d'une frontière typée
+  (voir « Champs de payload typés » et « Paramètres génériques »). Un champ **concret** (`x: int`) est vérifié dès la
+  construction.
+- **Paramètre imbriqué dans un composite** : `items: list[T]` vérifie le conteneur, pas encore l'élément.
 - **Traits / `implements`** : non supportés.

@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::compiler::code_object::CodeObject;
 use crate::error::{VMError, VMResult};
 use crate::host::{BinaryOp, VmHost};
 use crate::ops::arith;
@@ -22,7 +23,10 @@ pub(crate) const ND_DECL_TAG: &str = "__nd_decl__";
 /// Sentinel tag for ND lift/map wrapper (~>func).
 pub(crate) const ND_LIFT_TAG: &str = "__nd_lift__";
 
-/// Maximum ND recursion depth.
+/// Maximum ND recursion depth. Far above the PyO3 pipeline's
+/// ND_MAX_RECURSION_DEPTH (catnip_core, C-stack bound): here `recur` re-enters
+/// the same iterative VM and depth lives on the heap (`nd_lambda_stack`), so
+/// this bound only caps runaway recursion.
 const ND_MAX_DEPTH: usize = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -51,9 +55,13 @@ fn str_to_binary_op(name: &str) -> Option<BinaryOp> {
 /// Clones refcounts for list items (as_slice_cloned does).
 fn extract_items(val: Value) -> VMResult<Vec<Value>> {
     if val.is_native_list() {
+        // SAFETY: the is_native_list tag was checked above, so the payload is a live
+        // Arc<NativeList> owned by `val`; the borrow does not outlive it.
         let list = unsafe { val.as_native_list_ref().unwrap() };
         Ok(list.as_slice_cloned())
     } else if val.is_native_tuple() {
+        // SAFETY: the is_native_tuple tag was checked above, so the payload is a live
+        // Arc<NativeTuple> owned by `val`; the borrow does not outlive it.
         let tuple = unsafe { val.as_native_tuple_ref().unwrap() };
         let items: Vec<Value> = tuple.as_slice().to_vec();
         for v in &items {
@@ -87,6 +95,8 @@ fn is_collection(val: Value) -> bool {
 /// Check if a value is a boolean mask (list/tuple of all bools).
 fn is_boolean_mask(val: Value) -> bool {
     if val.is_native_list() {
+        // SAFETY: the is_native_list tag was checked above, so the payload is a live
+        // Arc<NativeList> owned by `val`; the borrow does not outlive it.
         let list = unsafe { val.as_native_list_ref().unwrap() };
         if list.is_empty() {
             return false;
@@ -98,6 +108,8 @@ fn is_boolean_mask(val: Value) -> bool {
         }
         result
     } else if val.is_native_tuple() {
+        // SAFETY: the is_native_tuple tag was checked above, so the payload is a live
+        // Arc<NativeTuple> owned by `val`; the borrow does not outlive it.
         let tuple = unsafe { val.as_native_tuple_ref().unwrap() };
         let items = tuple.as_slice();
         !items.is_empty() && items.iter().all(|v| v.as_bool().is_some())
@@ -115,18 +127,28 @@ impl PureVM {
     // Synchronous VMFunc invocation
     // =====================================================================
 
-    /// Call a VMFunc synchronously by running a sub-dispatch.
-    /// Saves and restores the frame stack so the outer dispatch is unaffected.
-    pub(crate) fn call_vmfunc_sync(&mut self, func_idx: u32, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
-        let slot = self
-            .func_table
-            .get(func_idx)
-            .ok_or_else(|| VMError::RuntimeError("invalid function index in broadcast".into()))?;
-        let callee_code = Arc::clone(&slot.code);
-        let closure = slot.closure.clone();
-
+    /// Run a resolved callable synchronously in a fresh sub-dispatch, saving and
+    /// restoring the frame stack so the outer dispatch is unaffected. `args` keep
+    /// their move semantics (bind_args consumes without cloning); a curried
+    /// receiver is cloned in (the slot keeps its ref).
+    fn run_sync(
+        &mut self,
+        callee_code: Arc<CodeObject>,
+        closure: Option<super::closure::PureClosureScope>,
+        bound_self: Option<Value>,
+        args: &[Value],
+        host: &dyn VmHost,
+    ) -> VMResult<Value> {
         let mut new_frame = self.frame_pool.alloc_with_code(callee_code);
-        new_frame.bind_args(args);
+        if let Some(bself) = bound_self {
+            bself.clone_refcount();
+            let mut full = Vec::with_capacity(1 + args.len());
+            full.push(bself);
+            full.extend_from_slice(args);
+            new_frame.bind_args(&full);
+        } else {
+            new_frame.bind_args(args);
+        }
         new_frame.closure_scope = closure;
 
         let saved_stack = std::mem::take(&mut self.frame_stack);
@@ -135,10 +157,23 @@ impl PureVM {
         result
     }
 
-    /// Call a value (VMFunc or host-callable) synchronously.
-    fn call_value_sync(&mut self, func: Value, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
-        if func.is_vmfunc() && !func.is_invalid() {
-            self.call_vmfunc_sync(func.as_vmfunc_idx(), args, host)
+    /// Call a template function synchronously by index (ND recur templates).
+    pub(crate) fn call_vmfunc_sync(&mut self, func_idx: u32, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
+        let slot = self
+            .func_table
+            .get(func_idx)
+            .ok_or_else(|| VMError::RuntimeError("invalid function index in broadcast".into()))?;
+        let callee_code = Arc::clone(&slot.code);
+        let closure = slot.closure.clone();
+        let bound_self = slot.bound_self;
+        self.run_sync(callee_code, closure, bound_self, args, host)
+    }
+
+    /// Call a value (runtime closure, template VMFunc, or host-callable)
+    /// synchronously. `func` is borrowed (the caller owns and releases it).
+    pub(crate) fn call_value_sync(&mut self, func: Value, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
+        if let Some((callee_code, closure, bound_self)) = self.callable_slot_data(func) {
+            self.run_sync(callee_code, closure, bound_self, args, host)
         } else {
             host.call_function(func, args)
         }
@@ -301,6 +336,62 @@ impl PureVM {
     // =====================================================================
 
     /// Apply operator (with optional operand) to a single element.
+    /// Broadcast mutation semantics (option A, deep isolation): a user callback
+    /// receives a DEEP private copy of a struct element -- the element and its
+    /// nested struct fields, recursively -- so field mutations at ANY depth do
+    /// not escape to the parent collection; returning the copy carries the
+    /// mutated state into the result. Identity-preserving (a nested struct
+    /// shared by two fields is copied once) and cycle-safe (a self-referential
+    /// struct is registered before its fields are filled). Non-struct fields
+    /// (lists, dicts, bigints) are shared by refcount, like the source itself
+    /// shares them -- deep isolation covers nominal struct nesting only.
+    fn snapshot_struct_element(element: Value) -> Value {
+        let mut memo: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
+        Self::deep_copy_struct(element, &mut memo)
+    }
+
+    /// Recursive worker for [`snapshot_struct_element`]. `element` must be a
+    /// struct instance. Returns a fresh owned deep copy; `memo` maps a source
+    /// cell address to its copy so shared and cyclic references resolve to a
+    /// single copy instead of duplicating (identity) or looping (cycle).
+    fn deep_copy_struct(element: Value, memo: &mut std::collections::HashMap<u64, Value>) -> Value {
+        // SAFETY: the caller guarantees element is a struct instance; the borrow
+        // does not outlive it (element is a live owned Value here).
+        let cell = unsafe { element.as_struct_ref().unwrap() };
+        let key = std::ptr::from_ref(cell) as u64;
+        if let Some(&existing) = memo.get(&key) {
+            // Already copied (shared or cyclic reference): take a ref for the
+            // field slot that will hold it, reuse the one copy.
+            existing.clone_refcount();
+            return existing;
+        }
+        let type_id = cell.type_id;
+        let n = cell.field_count();
+        // Phase 1: allocate with NIL placeholders and register BEFORE filling,
+        // so a self/back reference encountered during the fill resolves to this
+        // copy (cycle-safe). NIL is not refcounted, so the placeholder set below
+        // needs no decref.
+        let new_val = Value::from_struct_instance(super::structs::StructCell::new(type_id, vec![Value::NIL; n]));
+        memo.insert(key, new_val);
+        // Phase 2: fill -- recurse into struct fields, share the rest by refcount.
+        // SAFETY: new_val is the live struct instance just built above.
+        let new_cell = unsafe { new_val.as_struct_ref().unwrap() };
+        for i in 0..n {
+            let f = cell.field(i);
+            let copied = if f.is_struct_instance() {
+                Self::deep_copy_struct(f, memo)
+            } else {
+                f.clone_refcount();
+                f
+            };
+            new_cell.fields[i].set(copied);
+        }
+        // Preserve the frozen (hashed) flag: a hashed struct rejects mutation to
+        // keep hash/eq stable; the copy must too (converges with AST/PyO3 VM).
+        new_cell.frozen.set(cell.frozen.get());
+        new_val
+    }
+
     fn apply_single(
         &mut self,
         element: Value,
@@ -310,6 +401,8 @@ impl PureVM {
     ) -> VMResult<Value> {
         // String operator: binary/comparison op or builtin name
         if operator.is_native_str() {
+            // SAFETY: the is_native_str tag was checked above, so the payload is a live
+            // Arc<NativeString> owned by `operator`; the borrow does not outlive it.
             let op_name = unsafe { operator.as_native_str_ref().unwrap() };
 
             if let Some(operand) = operand {
@@ -337,21 +430,25 @@ impl PureVM {
             return host.call_function(operator, &[element]);
         }
 
-        // VMFunc operator: call with element (+ operand if present)
-        if operator.is_vmfunc() && !operator.is_invalid() {
-            let idx = operator.as_vmfunc_idx();
-            return if let Some(operand) = operand {
-                self.call_vmfunc_sync(idx, &[element, operand], host)
-            } else {
-                self.call_vmfunc_sync(idx, &[element], host)
-            };
-        }
-
-        // Fallback: host callable
-        if let Some(operand) = operand {
-            host.call_function(operator, &[element, operand])
+        // Callable operator (runtime closure, template VMFunc, or host builtin).
+        // `call_value_sync`/`run_sync` CONSUME their args (bind_args moves them into
+        // the callee frame), so hand them owned clones -- the borrowed element and
+        // operand still belong to the caller (the item cleanup / opcode release
+        // them). The grammar only pairs an operand with a symbolic `bcast_op`
+        // (handled above), so the callable branch is reached without an operand;
+        // the clone stays correct if that ever changes.
+        let arg = if element.is_struct_instance() {
+            // Private copy for the callback (owned, consumed by the call).
+            Self::snapshot_struct_element(element)
         } else {
-            host.call_function(operator, &[element])
+            element.clone_refcount();
+            element
+        };
+        if let Some(operand) = operand {
+            operand.clone_refcount();
+            self.call_value_sync(operator, &[arg, operand], host)
+        } else {
+            self.call_value_sync(operator, &[arg], host)
         }
     }
 
@@ -364,6 +461,8 @@ impl PureVM {
             return Ok(Value::from_float(-f));
         }
         if val.is_bigint() {
+            // SAFETY: the is_bigint tag was checked above, so the payload is a live
+            // Arc<GmpInt> owned by `val`; the borrow does not outlive it.
             let n = unsafe { val.as_bigint_ref().unwrap() };
             let neg = rug::Integer::from(-n);
             return Ok(Value::from_bigint_or_demote(neg));
@@ -394,8 +493,17 @@ impl PureVM {
 
             Ok(wrap_result(result, is_tuple))
         } else {
-            // Leaf: call func(data)
-            self.call_value_sync(func, &[data], host)
+            // Leaf: call func(data). `data` is borrowed (owned by the caller's list
+            // extraction or the opcode's popped target); `call_value_sync` consumes
+            // its args (bind_args moves them), so hand it an owned clone -- a
+            // private shallow copy when the element is a struct.
+            let arg = if data.is_struct_instance() {
+                Self::snapshot_struct_element(data)
+            } else {
+                data.clone_refcount();
+                data
+            };
+            self.call_value_sync(func, &[arg], host)
         }
     }
 
@@ -434,30 +542,33 @@ impl PureVM {
     /// Execute ND recursion: call lambda(seed, recur) where recur is a sentinel
     /// that the Call opcode intercepts for recursive dispatch.
     pub(crate) fn nd_recursion_call(&mut self, seed: Value, lambda: Value, host: &dyn VmHost) -> VMResult<Value> {
-        if !lambda.is_vmfunc() || lambda.is_invalid() {
+        if !(lambda.is_closure() || (lambda.is_vmfunc() && !lambda.is_invalid())) {
             return Err(VMError::TypeError("ND recursion lambda must be a function".into()));
         }
-        let lambda_idx = lambda.as_vmfunc_idx();
 
         // Depth guard
         if self.nd_lambda_stack.len() >= ND_MAX_DEPTH {
             return Err(VMError::RuntimeError("ND recursion depth limit exceeded".into()));
         }
 
-        // Push lambda index so Call can find it when recur sentinel is called
-        self.nd_lambda_stack.push(lambda_idx);
+        // Push the lambda value (holding a strong ref) so `recur` can find it; a
+        // closure lambda must survive the re-entrant boundary.
+        lambda.clone_refcount();
+        self.nd_lambda_stack.push(lambda);
         let recur = Value::from_str(ND_RECUR_SENTINEL);
 
-        let result = self.call_vmfunc_sync(lambda_idx, &[seed, recur], host);
+        let result = self.call_value_sync(lambda, &[seed, recur], host);
 
-        self.nd_lambda_stack.pop();
+        if let Some(v) = self.nd_lambda_stack.pop() {
+            v.decref();
+        }
         result
     }
 
     /// Handle a call to the ND recur sentinel from within the dispatch loop.
     /// Called when the Call opcode detects __nd_recur__.
     pub(crate) fn handle_nd_recur_call(&mut self, args: &[Value], host: &dyn VmHost) -> VMResult<Value> {
-        let lambda_idx = self
+        let lambda = self
             .nd_lambda_stack
             .last()
             .copied()
@@ -467,8 +578,8 @@ impl PureVM {
             return Err(VMError::TypeError("ND recur requires an argument".into()));
         }
         let seed = args[0];
-        let lambda = Value::from_vmfunc(lambda_idx);
-
+        // The stack still holds the strong ref; nd_recursion_call clone_refcounts
+        // when it re-pushes.
         self.nd_recursion_call(seed, lambda, host)
     }
 
@@ -493,6 +604,8 @@ impl PureVM {
     /// Check if a value is the ND recur sentinel.
     pub(crate) fn is_nd_recur_sentinel(val: Value) -> bool {
         if val.is_native_str() {
+            // SAFETY: the is_native_str tag was checked above, so the payload is a live
+            // Arc<NativeString> owned by `val`; the borrow does not outlive it.
             let s = unsafe { val.as_native_str_ref().unwrap() };
             s == ND_RECUR_SENTINEL
         } else {
@@ -506,11 +619,15 @@ impl PureVM {
         if !val.is_native_tuple() {
             return None;
         }
+        // SAFETY: the is_native_tuple tag was checked above, so the payload is a live
+        // Arc<NativeTuple> owned by `val`; the borrow does not outlive it.
         let tuple = unsafe { val.as_native_tuple_ref()? };
         let items = tuple.as_slice();
         if items.len() != 2 || !items[0].is_native_str() {
             return None;
         }
+        // SAFETY: items[0].is_native_str was checked above, so the payload is a live
+        // Arc<NativeString> owned by the tuple; the borrow does not outlive it.
         let tag = unsafe { items[0].as_native_str_ref().unwrap() };
         match tag {
             ND_DECL_TAG => Some((ND_DECL_TAG, items[1])),

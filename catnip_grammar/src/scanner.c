@@ -48,12 +48,13 @@ bool tree_sitter_catnip_external_scanner_scan(void *payload, TSLexer *lexer,
         lexer->result_symbol = NEWLINE;
         lexer->mark_end(lexer);
 
-        // Now check if followed by else/elif (optional lookahead, limited)
-        // Skip whitespace after newline
-        int space_count = 0;
-        while ((lexer->lookahead == ' ' || lexer->lookahead == '\t') && space_count < 50) {
+        // Now check if followed by else/elif (continuation lookahead).
+        // Skip the next line's indentation entirely: mark_end was already called,
+        // so these advances are pure lookahead and terminate at the first
+        // non-whitespace char (or newline/EOF). No fixed bound -- a bound would
+        // misclassify deeply indented `else`/`elif` as a new statement.
+        while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
             lexer->advance(lexer, true);
-            space_count++;
         }
 
         // Check for continuation tokens: line starting with '.' chains

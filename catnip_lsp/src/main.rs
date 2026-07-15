@@ -1,5 +1,6 @@
 // FILE: catnip_lsp/src/main.rs
 mod diagnostics;
+mod encoding;
 mod server;
 mod symbols;
 

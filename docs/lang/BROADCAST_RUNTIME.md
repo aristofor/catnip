@@ -10,14 +10,16 @@ exemples d'usage.
 ```mermaid
 flowchart TD
     BC["target.[op]"] --> EVAL["Évaluer target"]
-    EVAL --> MASK{"Opérande = masque booléen ?"}
+    EVAL --> FILT{"Flag is_filter ?"}
+    FILT -->|Oui| SIMD_F{"Comparaison SIMD-éligible ?"}
+    SIMD_F -->|Oui| SIMD["Fast path Rust SIMD"]
+    SIMD_F -->|Non| FILTER_COND["filter_conditional()"]
+    FILT -->|Non| MASK{"Opérande = masque booléen ?"}
     MASK -->|Oui| FILTER_MASK["filter_by_mask()"]
-    MASK -->|Non| FILT{"Flag is_filter ?"}
-    FILT -->|Oui| FILTER_COND["filter_conditional()"]
-    FILT -->|Non| MAP["broadcast_map()"]
+    MASK -->|Non| MAP["broadcast_map()"]
 
     MAP --> HOMO{"Liste homogène numérique ?"}
-    HOMO -->|Oui| SIMD["Fast path Rust SIMD"]
+    HOMO -->|Oui| SIMD
     HOMO -->|Non| PY["Chemin Python standard"]
 ```
 
@@ -171,7 +173,7 @@ fonctionnent techniquement dans un broadcast mais n'ont pas de sémantique de tr
 - `import` - charge des modules, modifie le contexte
 - `jit` - wrapper de compilation JIT
 - `pure` - décorateur de marquage
-- `cached` - wrapper de memoization
+- `cached` - wrapper de mémoïsation
 - `debug` - introspection
 
 ```catnip

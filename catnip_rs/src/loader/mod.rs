@@ -8,9 +8,11 @@ use cache::ModuleCache;
 use namespace::ModuleNamespace;
 use resolve::{ModuleKind, PROTOCOLS};
 
+use pyo3::PyTraverseError;
 use pyo3::exceptions::{PyAttributeError, PyFileNotFoundError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyTuple};
+use pyo3::types::{PyDict, PyModule, PyTuple};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -31,6 +33,10 @@ pub struct ImportLoader {
     #[allow(dead_code)]
     verbose: bool,
     native_suffix: String,
+    /// Feeder struct registry id, so the extension `context.globals` proxy
+    /// releases a displaced struct global struct-aware (`0` if unknown, e.g. a
+    /// Python-constructed loader over a registry-less proxy).
+    registry_id: u64,
     /// Registry of loaded native catnip_vm plugins (PureVM-only stdlib like
     /// `http`). Kept alive so the raw call pointers held by `NativePluginFn`
     /// stay valid for as long as the loader lives.
@@ -51,6 +57,7 @@ impl ImportLoader {
     ) -> PyResult<Self> {
         // Extract Globals Rc from the proxy
         let globals = globals_proxy.globals_rc();
+        let registry_id = globals_proxy.registry_id();
 
         // Get the platform native extension suffix
         let sysconfig = py.import("sysconfig")?;
@@ -68,7 +75,79 @@ impl ImportLoader {
             verbose,
             native_suffix: suffix,
             plugin_registry: Rc::new(std::cell::RefCell::new(catnip_vm::plugin::PluginRegistry::new())),
+            registry_id,
         })
+    }
+
+    /// Participate in CPython's cyclic GC. The loader is injected as the `import`
+    /// builtin and held by `_ImportWrapper._rust_import` in the context globals,
+    /// while it holds the context back via its `context` field -- a
+    /// `Context <-> ImportLoader` cycle the collector cannot see (a Rust pyclass
+    /// is opaque to it). Visiting the owned `Py` references lets the collector
+    /// detect the cycle; `__clear__` breaks it. Without this, every `Catnip()`
+    /// session leaks its context.
+    ///
+    /// Besides the directly owned `Option<Py<PyAny>>` fields, the VM `globals`
+    /// (shared `Rc`) are surfaced too: `inject_globals` copied the context's
+    /// builtins -- including the wrappers and `RUNTIME` that reference the
+    /// context back -- into that map as `Value` handles, and the global
+    /// `OBJECT_TABLE` holds the matching strong `Py` references invisibly to
+    /// the collector. After the owning session dies, reporting them lets the
+    /// collector see the whole context cycle and detach it -- even while
+    /// leaked constant handles (CodeObject pools, cf. wip/DEFAUTS_SOURNOIS.md)
+    /// still pin some slots. `try_borrow` guards against a re-entrant GC
+    /// mid-execution.
+    ///
+    /// This report alone once cleared a LIVE pipeline's builtins (NameError
+    /// moving with the GC's allocation thresholds, cf. check_doc_assertions on
+    /// FOLD_GUIDE, 2026-07-02): the pipeline reaches the wrapper cluster only
+    /// through the map (opaque Rust), so with no Python reference into it the
+    /// cluster looked like a closed dead cycle. The counterpart is
+    /// `PyPipeline::__traverse__`, which reports the same handles from the
+    /// map's owner: an externally-referenced pipeline marks the cluster
+    /// reachable, so the collector can never clear it under a live pipeline.
+    /// A double report can only over-pin a cluster that is legitimately
+    /// alive during that collection, never free a live one.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(ref policy) = self.policy {
+            visit.call(policy)?;
+        }
+        if let Some(ref cat_loader) = self.cat_loader {
+            visit.call(cat_loader)?;
+        }
+        if let Some(ref context) = self.context {
+            visit.call(context)?;
+        }
+        if let Ok(globals) = self.globals.try_borrow() {
+            // Dedup-by-slot lives in `visit_obj_handles`: several globals may
+            // share one ObjectTable handle (a type bound under two names), and
+            // the slot owns a single `Py` reference -- visiting it once per
+            // handle would over-count and pin the cycle.
+            crate::vm::value::visit_obj_handles(globals.values().copied(), &visit)?;
+        }
+        Ok(())
+    }
+
+    /// Break the `Context <-> ImportLoader` cycle by dropping the strong
+    /// references reported by `__traverse__`. Only reached when the whole
+    /// cluster -- pipeline included, or the pipeline already dead -- is
+    /// unreachable (`PyPipeline::__traverse__` keeps it reachable otherwise).
+    /// `Value` is `Copy` with manual refcounting, so each handle must be
+    /// `decref`'d before the map is cleared, or the `OBJECT_TABLE` slots leak.
+    ///
+    /// Counterpart of the deduped `__traverse__`, but **must not** dedup: a
+    /// slot reached by `k` aliased globals holds `k` handle refcounts, so all
+    /// `k` must be released to reach 0. Idempotent with `VMHost`'s `Drop` /
+    /// `gc_clear` drain (draining an already-drained map is a no-op).
+    fn __clear__(&mut self) {
+        self.policy = None;
+        self.cat_loader = None;
+        self.context = None;
+        if let Ok(mut globals) = self.globals.try_borrow_mut() {
+            for (_, value) in globals.drain(..) {
+                value.decref();
+            }
+        }
     }
 
     /// Main entry point: import(spec, *names, wild=False, protocol=None, caller_dir=None)
@@ -161,12 +240,14 @@ impl ImportLoader {
 }
 
 impl ImportLoader {
-    /// Create an ImportLoader from Rust (bypassing GlobalsProxy).
+    /// Create an ImportLoader from Rust (bypassing GlobalsProxy). `registry_id`
+    /// is the feeder VM's struct registry id (see the struct field).
     pub fn create(
         py: Python<'_>,
         globals: Globals,
         policy: Option<Py<PyAny>>,
         cat_loader: Option<Py<PyAny>>,
+        registry_id: u64,
     ) -> PyResult<Py<Self>> {
         let sysconfig = py.import("sysconfig")?;
         let suffix: String = sysconfig
@@ -185,6 +266,7 @@ impl ImportLoader {
                 verbose: false,
                 native_suffix: suffix,
                 plugin_registry: Rc::new(std::cell::RefCell::new(catnip_vm::plugin::PluginRegistry::new())),
+                registry_id,
             },
         )
     }
@@ -535,50 +617,77 @@ impl ImportLoader {
             Ok(meta) if !meta.is_none() => meta,
             _ => return Ok(()),
         };
-        if !ext_meta.is_instance_of::<pyo3::types::PyDict>() {
+        if !ext_meta.is_instance_of::<PyDict>() {
             return Ok(());
         }
 
         let ext_mod = py.import(constants::PY_MOD_EXTENSIONS)?;
 
-        // Build a proxy context that writes directly to Rust Globals.
-        // This ensures exports and register() side effects land in the VM's
-        // globals (IndexMap), not just in the Python context's PyDict.
-        // The real context is used for _extensions tracking.
-        {
-            let proxy = GlobalsProxy::new(Rc::clone(&self.globals));
-            let proxy_obj = Py::new(py, proxy)?;
-            let types = py.import("types")?;
-            let ctx = types.getattr("SimpleNamespace")?.call0()?;
-            ctx.setattr("globals", proxy_obj)?;
+        // Build the context proxy passed to register(). Its `globals` is a
+        // bidirectional GlobalsProxy: every write lands both in the VM IndexMap
+        // (read by the VM) and in the real `context.globals` (read by the AST
+        // executor), so register-time mutations -- and the exports injected via
+        // `context.globals.update(...)` -- are consistent across both runtimes.
+        // Other attribute reads delegate to the real context.
+        let (proxy_globals, extensions): (GlobalsProxy, Py<PyAny>) = if let Some(ref real_ctx) = self.context {
+            let bound = real_ctx.bind(py);
+            let py_globals = bound.getattr("globals")?;
+            let extensions = match bound.getattr("_extensions") {
+                Ok(ext) => ext.unbind(),
+                Err(_) => PyDict::new(py).into_any().unbind(),
+            };
+            (
+                GlobalsProxy::with_mirror_registry(Rc::clone(&self.globals), py_globals.unbind(), self.registry_id),
+                extensions,
+            )
+        } else {
+            (
+                GlobalsProxy::with_registry(Rc::clone(&self.globals), self.registry_id),
+                PyDict::new(py).into_any().unbind(),
+            )
+        };
 
-            // Share _extensions with the real context if available
-            if let Some(ref real_ctx) = self.context {
-                if let Ok(ext_dict) = real_ctx.bind(py).getattr("_extensions") {
-                    ctx.setattr("_extensions", ext_dict)?;
-                } else {
-                    ctx.setattr("_extensions", pyo3::types::PyDict::new(py))?;
-                }
-            } else {
-                ctx.setattr("_extensions", pyo3::types::PyDict::new(py))?;
-            }
+        let ctx = ExtensionContextProxy {
+            context: self.context.as_ref().map(|c| c.clone_ref(py)),
+            globals: Py::new(py, proxy_globals)?,
+            extensions,
+        };
+        let ctx_obj = Py::new(py, ctx)?;
 
-            ext_mod.call_method1("load_extension", (module, &ctx))?;
-        }
-
-        // Mirror exports into the Python context globals: the AST executor
-        // resolves names there, not in the VM globals the proxy fed
-        if let Some(ref real_ctx) = self.context {
-            let ext_dict = ext_meta.cast::<pyo3::types::PyDict>()?;
-            if let Some(exports) = ext_dict.get_item("exports")? {
-                if !exports.is_none() {
-                    let globals = real_ctx.bind(py).getattr("globals")?;
-                    globals.call_method1("update", (exports,))?;
-                }
-            }
-        }
+        ext_mod.call_method1("load_extension", (module, ctx_obj))?;
 
         Ok(())
+    }
+}
+
+/// Context proxy passed to an extension's `register(context)` hook.
+///
+/// `globals` returns a bidirectional `GlobalsProxy` (writes reach both the VM
+/// IndexMap and the Python `context.globals`); `_extensions` is the tracking
+/// dict (the real context's, or a fresh one when no context is attached); every
+/// other attribute delegates to the real `Context` so register hooks can read
+/// its full API. Without this delegation, register hooks would only see the
+/// stripped-down namespace and diverge between VM and AST execution.
+#[pyclass(unsendable)]
+struct ExtensionContextProxy {
+    context: Option<Py<PyAny>>,
+    globals: Py<GlobalsProxy>,
+    extensions: Py<PyAny>,
+}
+
+#[pymethods]
+impl ExtensionContextProxy {
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        match name {
+            "globals" => Ok(self.globals.clone_ref(py).into_any()),
+            "_extensions" => Ok(self.extensions.clone_ref(py)),
+            _ => match &self.context {
+                Some(ctx) => ctx.bind(py).getattr(name).map(|v| v.unbind()),
+                None => Err(PyAttributeError::new_err(format!(
+                    "'ExtensionContextProxy' object has no attribute '{name}'"
+                ))),
+            },
+        }
     }
 }
 

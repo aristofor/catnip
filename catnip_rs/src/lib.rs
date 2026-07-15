@@ -3,14 +3,17 @@
 //!
 //! This module provides:
 //! - `RustVM`: The main VM class exposed to Python
-//! - `PyVMContext`: Context for Python callbacks
 //! - `Scope`: Shared O(1) scope for both VM and AST modes
 //! - NaN-boxed value representation for compact, efficient execution
 
 #![recursion_limit = "1024"]
+// Every `unsafe` block/impl in production code must carry a `// SAFETY:` justification
+// (NaN-box payload derefs, manual refcount, Python FFI / object table, GIL-bound
+// Send/Sync): these invariants are subtle and were the source of the refcount/UAF
+// cluster. Enforced on non-test code only; test-local `unsafe` is exempt.
+#![cfg_attr(not(test), deny(clippy::undocumented_unsafe_blocks))]
 
 pub mod cache;
-pub mod cfg;
 pub mod cli;
 pub mod config;
 pub mod constants;
@@ -29,6 +32,8 @@ pub mod policy;
 pub mod pragma;
 pub mod repl;
 pub mod runtime;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 pub mod transformer;
 pub mod types;
@@ -56,7 +61,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use vm::py_interop::{append_constants_from_tuple, append_instructions_from_bytecode, convert_args};
 use vm::{
     CatnipStructProxy, CatnipStructType, ClosureScope, CodeObject, Instruction, OpCode, PyCodeObject, PyCompiler,
-    PyVMContext, SuperProxy, TraitRegistry, VM, VMFunction, Value, convert_code_object,
+    SuperProxy, TraitRegistry, VM, VMFunction, Value, convert_code_object,
 };
 
 // VMError -> PyErr conversion at the Python boundary (only used in PyO3 #[pymethods])
@@ -358,8 +363,21 @@ impl PyRustVM {
         // Execute
         let result = self.vm.execute(py, code, &[]).map_err(PyErr::from)?;
 
-        // Convert result back to Python
-        Ok(result.to_pyobject(py))
+        // Convert result back to Python. execute() restored the previous
+        // thread-locals (null at top level), so re-install this VM's tables:
+        // a symbol result would otherwise fail to resolve and convert to an
+        // integer.
+        let prev_sym = vm::value::save_symbol_table();
+        let prev_enum = vm::value::save_enum_registry();
+        vm::value::set_struct_registry(&self.vm.struct_registry as *const _);
+        vm::value::set_func_table(&self.vm.func_table as *const _);
+        vm::value::set_symbol_table(&self.vm.symbol_table as *const _ as *mut _);
+        vm::value::set_enum_registry(&self.vm.enum_registry as *const _ as *mut _);
+        let py_result = result.to_pyobject(py);
+        vm::value::restore_symbol_table(prev_sym);
+        vm::value::restore_enum_registry(prev_enum);
+
+        Ok(py_result)
     }
 
     /// Execute simple bytecode for testing.
@@ -470,6 +488,38 @@ impl PyRustVM {
 }
 
 /// Extract identifier from a NameError message. Returns None if no match.
+/// Debug: (live OBJECT_TABLE slot count, total handle refcount) for a Python
+/// object's address. Leak-hunt tooling.
+#[pyfunction]
+fn _debug_slots_for_ptr(ptr: usize) -> (usize, u32) {
+    crate::vm::value::debug_slots_for_ptr(ptr)
+}
+
+/// Debug: arm (ptr = id(obj)) or disarm (0) the OBJECT_TABLE event ledger at
+/// runtime -- callable mid-run to trace an object whose identity is only known
+/// once execution reaches it. Leak-hunt tooling.
+#[pyfunction]
+fn _debug_set_table_trace_ptr(ptr: usize) {
+    crate::vm::value::table_trace::set_target(ptr);
+}
+
+/// Debug: live counts of the manually refcounted heap classes -- (occupied
+/// OBJECT_TABLE slots, their summed handle refcounts, live BigInt allocations,
+/// live Complex allocations, live struct instance slots). The refcount-ledger
+/// tests assert a zero delta of this tuple across a full pipeline lifecycle,
+/// and across repeated runs on a reused pipeline for the intra-session classes.
+#[pyfunction]
+fn _debug_live_counts() -> (usize, u64, isize, isize, isize) {
+    crate::vm::value::debug_live_counts()
+}
+
+/// Debug: (idx, refcount, type name) of every live OBJECT_TABLE slot --
+/// attributes a slot-count delta to concrete objects. Leak-hunt tooling.
+#[pyfunction]
+fn _debug_live_slot_types(py: Python<'_>) -> Vec<(u32, u32, String)> {
+    crate::vm::value::debug_live_slot_types(py)
+}
+
 #[pyfunction]
 fn extract_name_from_error(msg: &str) -> Option<String> {
     catnip_core::constants::extract_name_from_error(msg).map(|s| s.to_string())
@@ -483,9 +533,8 @@ fn pragma_directives() -> Vec<&'static str> {
 
 /// Python module definition.
 #[pymodule]
-fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRustVM>()?;
-    m.add_class::<PyVMContext>()?;
     m.add_class::<Scope>()?;
     m.add_class::<Op>()?;
     #[cfg(feature = "ast-executor")]
@@ -560,6 +609,10 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(repl::parse_repl_command, m)?)?;
     m.add_function(wrap_pyfunction!(repl::repl_exit_message, m)?)?;
     m.add_function(wrap_pyfunction!(extract_name_from_error, m)?)?;
+    m.add_function(wrap_pyfunction!(_debug_slots_for_ptr, m)?)?;
+    m.add_function(wrap_pyfunction!(_debug_set_table_trace_ptr, m)?)?;
+    m.add_function(wrap_pyfunction!(_debug_live_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(_debug_live_slot_types, m)?)?;
     m.add_function(wrap_pyfunction!(pragma_directives, m)?)?;
 
     // Standalone pipeline
@@ -585,9 +638,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register dispatch functions (process_input)
     dispatch::init_module(m)?;
-
-    // Register CFG module
-    cfg::register_module(m.py(), m)?;
 
     // Register formatting tools (delegated to catnip_tools plugin)
     m.add_class::<FormatConfig>()?;
@@ -720,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_module_initialization() {
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|_py| {
             let vm = PyRustVM::new();
             assert!(vm.context.is_none());

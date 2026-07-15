@@ -1,152 +1,32 @@
 // FILE: catnip_vm/src/ops/arith.rs
-//! Pure numeric arithmetic and comparison operations.
+//! Numeric arithmetic and comparison over the pure `Value`.
 //!
-//! Shared between catnip_vm (PureHost) and catnip_rs (VM dispatch).
-//! Handles SmallInt, BigInt, and Float. No Python dependency.
+//! The generic bodies live in `catnip_core::arith` (Phase 5, step B), shared
+//! with catnip_rs; this module monomorphizes them for the pure Value and maps
+//! `ArithError` into the crate's `VMError`. `eq_native` adds the pure-side
+//! heap extension (NativeStr) on top of the shared scalar core.
 
-use super::errors;
 use crate::error::{VMError, VMResult};
 use crate::value::Value;
-use rug::Integer;
-use rug::ops::{DivRounding, Pow, RemRounding};
+use catnip_core::arith::{self as core_arith, ArithError};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// Shared helpers and promotion utilities: generic, usable as-is.
+pub use catnip_core::arith::{
+    bigint_binop, bigint_cmp, complex_pow as complex_pow_generic, eq_scalar, i64_div_floor, i64_mod_floor, to_bigint,
+    to_complex, to_f64,
+};
 
-/// Python-style integer floor division: result rounds toward negative infinity.
 #[inline]
-pub fn i64_div_floor(a: i64, b: i64) -> i64 {
-    let d = a / b;
-    let r = a % b;
-    if (r != 0) && ((r ^ b) < 0) { d - 1 } else { d }
-}
-
-/// Python-style integer modulo: result has the sign of the divisor.
-#[inline]
-pub fn i64_mod_floor(a: i64, b: i64) -> i64 {
-    let r = a % b;
-    if (r != 0) && ((r ^ b) < 0) { r + b } else { r }
-}
-
-/// Convert a Value (SmallInt, BigInt, or Float) to f64.
-#[inline]
-pub fn to_f64(v: Value) -> Option<f64> {
-    if let Some(f) = v.as_float() {
-        Some(f)
-    } else if let Some(i) = v.as_int() {
-        Some(i as f64)
-    } else if v.is_bigint() {
-        let n = unsafe { v.as_bigint_ref().unwrap() };
-        Some(n.to_f64())
-    } else {
-        None
+fn map_arith(e: ArithError) -> VMError {
+    match e {
+        ArithError::Type(m) => VMError::TypeError(m.into()),
+        ArithError::ZeroDivision(m) => VMError::ZeroDivisionError(m.into()),
     }
-}
-
-/// Promote a Value to complex (real, imag) parts.
-/// Complex → (real, imag), numeric → (value, 0.0), other → None.
-#[inline]
-pub fn to_complex(v: Value) -> Option<(f64, f64)> {
-    if v.is_complex() {
-        return unsafe { v.as_complex_parts() };
-    }
-    to_f64(v).map(|f| (f, 0.0))
 }
 
 /// Complex exponentiation via polar form (De Moivre's theorem).
-/// (ar+ai*j) ** (br+bi*j)
 pub fn complex_pow(ar: f64, ai: f64, br: f64, bi: f64) -> VMResult<Value> {
-    if br == 0.0 && bi == 0.0 {
-        return Ok(Value::from_complex(1.0, 0.0));
-    }
-    if ar == 0.0 && ai == 0.0 {
-        // 0 ** positive_real is 0, everything else is undefined
-        if bi == 0.0 && br > 0.0 {
-            return Ok(Value::from_complex(0.0, 0.0));
-        }
-        return Err(VMError::ZeroDivisionError("0.0 to a negative or complex power".into()));
-    }
-    let r = (ar * ar + ai * ai).sqrt();
-    let theta = ai.atan2(ar);
-    // ln(a) = ln|a| + i*arg(a)
-    let ln_r = r.ln();
-    // b * ln(a) = (br + bi*j) * (ln_r + theta*j)
-    //           = (br*ln_r - bi*theta) + (br*theta + bi*ln_r)*j
-    let exp_r = br * ln_r - bi * theta;
-    let exp_i = br * theta + bi * ln_r;
-    // e^(exp_r + exp_i*j) = e^exp_r * (cos(exp_i) + sin(exp_i)*j)
-    let mag = exp_r.exp();
-    Ok(Value::from_complex(mag * exp_i.cos(), mag * exp_i.sin()))
-}
-
-/// Promote a Value (SmallInt or BigInt) to owned Integer.
-/// Clones when BigInt (needed for cases where we can't borrow).
-#[inline]
-pub fn to_bigint(v: Value) -> Option<Integer> {
-    if let Some(i) = v.as_int() {
-        Some(Integer::from(i))
-    } else if v.is_bigint() {
-        Some(unsafe { v.as_bigint_ref().unwrap().clone() })
-    } else {
-        None
-    }
-}
-
-/// Apply a binary BigInt operation using references (zero-clone).
-/// Handles all combinations: BigInt op BigInt, BigInt op SmallInt,
-/// SmallInt op BigInt.
-#[inline]
-pub fn bigint_binop<F>(a: Value, b: Value, op: F) -> Option<Value>
-where
-    F: FnOnce(&Integer, &Integer) -> Integer,
-{
-    if a.is_bigint() && b.is_bigint() {
-        let (ra, rb) = unsafe { (a.as_bigint_ref().unwrap(), b.as_bigint_ref().unwrap()) };
-        return Some(Value::from_bigint_or_demote(op(ra, rb)));
-    }
-    if a.is_bigint() {
-        if let Some(bi) = b.as_int() {
-            let ra = unsafe { a.as_bigint_ref().unwrap() };
-            let tmp = Integer::from(bi);
-            return Some(Value::from_bigint_or_demote(op(ra, &tmp)));
-        }
-    }
-    if b.is_bigint() {
-        if let Some(ai) = a.as_int() {
-            let rb = unsafe { b.as_bigint_ref().unwrap() };
-            let tmp = Integer::from(ai);
-            return Some(Value::from_bigint_or_demote(op(&tmp, rb)));
-        }
-    }
-    None
-}
-
-/// Apply a BigInt comparison using references (zero-clone).
-#[inline]
-pub fn bigint_cmp<F>(a: Value, b: Value, cmp: F) -> Option<bool>
-where
-    F: FnOnce(&Integer, &Integer) -> bool,
-{
-    if a.is_bigint() && b.is_bigint() {
-        let (ra, rb) = unsafe { (a.as_bigint_ref().unwrap(), b.as_bigint_ref().unwrap()) };
-        return Some(cmp(ra, rb));
-    }
-    if a.is_bigint() {
-        if let Some(bi) = b.as_int() {
-            let ra = unsafe { a.as_bigint_ref().unwrap() };
-            let tmp = Integer::from(bi);
-            return Some(cmp(ra, &tmp));
-        }
-    }
-    if b.is_bigint() {
-        if let Some(ai) = a.as_int() {
-            let rb = unsafe { b.as_bigint_ref().unwrap() };
-            let tmp = Integer::from(ai);
-            return Some(cmp(&tmp, rb));
-        }
-    }
-    None
+    core_arith::complex_pow::<Value>(ar, ai, br, bi).map_err(map_arith)
 }
 
 /// Compare two Values in Rust when possible.
@@ -158,422 +38,86 @@ pub fn eq_native(a: Value, b: Value) -> Option<bool> {
     if a.bits() == b.bits() && !a.is_float() {
         return Some(true);
     }
-    if a.is_nil() || b.is_nil() {
-        return Some(a.is_nil() && b.is_nil());
+    if let Some(r) = eq_scalar(a, b) {
+        return Some(r);
     }
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Some(ai == bi);
-    }
-    if let (Some(ab), Some(bb)) = (a.as_bool(), b.as_bool()) {
-        return Some(ab == bb);
-    }
-    // Complex equality before BigInt (to_complex promotes BigInt via to_f64)
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            return Some(ar == br && ai == bi);
-        }
-    }
-    if a.is_bigint() || b.is_bigint() {
-        return bigint_cmp(a, b, |x, y| x == y);
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Some(af == bf);
-    }
-    // NativeStr equality
+    // NativeStr equality (pure-side heap extension)
     if a.is_native_str() && b.is_native_str() {
-        let sa = unsafe { a.as_native_str_ref().unwrap() };
-        let sb = unsafe { b.as_native_str_ref().unwrap() };
+        // SAFETY: both operands were checked as native strings just above, so
+        // each payload is a live Arc<NativeString> owned by the caller for
+        // this call; the borrows do not outlive it.
+        let (sa, sb) = unsafe { (a.as_native_str_ref().unwrap(), b.as_native_str_ref().unwrap()) };
         return Some(*sa == *sb);
     }
     None
 }
 
-// ---------------------------------------------------------------------------
-// Numeric binary operations (int/float/bigint only, no collections)
-// ---------------------------------------------------------------------------
-
 #[inline]
 pub fn numeric_add(a: Value, b: Value) -> VMResult<Value> {
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            return Ok(Value::from_complex(ar + br, ai + bi));
-        }
-    }
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(sum) = ai.checked_add(bi) {
-            if let Some(v) = Value::try_from_int(sum) {
-                return Ok(v);
-            }
-        }
-        return Ok(Value::from_bigint_or_demote(Integer::from(ai) + Integer::from(bi)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x + y)) {
-            return Ok(v);
-        }
-        if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-            return Ok(Value::from_float(af + bf));
-        }
-    }
-    if let (Some(af), Some(bf)) = (a.as_float(), b.as_float()) {
-        return Ok(Value::from_float(af + bf));
-    }
-    if let (Some(ai), Some(bf)) = (a.as_int(), b.as_float()) {
-        return Ok(Value::from_float(ai as f64 + bf));
-    }
-    if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
-        return Ok(Value::from_float(af + bi as f64));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_ADD.into()))
+    core_arith::numeric_add(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_sub(a: Value, b: Value) -> VMResult<Value> {
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            return Ok(Value::from_complex(ar - br, ai - bi));
-        }
-    }
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(diff) = ai.checked_sub(bi) {
-            if let Some(v) = Value::try_from_int(diff) {
-                return Ok(v);
-            }
-        }
-        return Ok(Value::from_bigint_or_demote(Integer::from(ai) - Integer::from(bi)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x - y)) {
-            return Ok(v);
-        }
-        if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-            return Ok(Value::from_float(af - bf));
-        }
-    }
-    if let (Some(af), Some(bf)) = (a.as_float(), b.as_float()) {
-        return Ok(Value::from_float(af - bf));
-    }
-    if let (Some(ai), Some(bf)) = (a.as_int(), b.as_float()) {
-        return Ok(Value::from_float(ai as f64 - bf));
-    }
-    if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
-        return Ok(Value::from_float(af - bi as f64));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_SUB.into()))
+    core_arith::numeric_sub(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_mul(a: Value, b: Value) -> VMResult<Value> {
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            return Ok(Value::from_complex(ar * br - ai * bi, ar * bi + ai * br));
-        }
-    }
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if let Some(prod) = ai.checked_mul(bi) {
-            if let Some(v) = Value::try_from_int(prod) {
-                return Ok(v);
-            }
-        }
-        return Ok(Value::from_bigint_or_demote(Integer::from(ai) * Integer::from(bi)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x * y)) {
-            return Ok(v);
-        }
-        if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-            return Ok(Value::from_float(af * bf));
-        }
-    }
-    if let (Some(af), Some(bf)) = (a.as_float(), b.as_float()) {
-        return Ok(Value::from_float(af * bf));
-    }
-    if let (Some(ai), Some(bf)) = (a.as_int(), b.as_float()) {
-        return Ok(Value::from_float(ai as f64 * bf));
-    }
-    if let (Some(af), Some(bi)) = (a.as_float(), b.as_int()) {
-        return Ok(Value::from_float(af * bi as f64));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MUL.into()))
+    core_arith::numeric_mul(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_div(a: Value, b: Value) -> VMResult<Value> {
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            let denom = br * br + bi * bi;
-            if denom == 0.0 {
-                return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
-            }
-            return Ok(Value::from_complex(
-                (ar * br + ai * bi) / denom,
-                (ai * br - ar * bi) / denom,
-            ));
-        }
-    }
-    if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-        if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_DIV_ZERO.into()));
-        }
-        return Ok(Value::from_float(af / bf));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_DIV.into()))
+    core_arith::numeric_div(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_floordiv(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if bi == 0 {
-            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-        }
-        return Ok(Value::from_int(i64_div_floor(ai, bi)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if b.is_bigint() {
-            if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-            }
-        } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-        }
-        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).div_floor(y)) {
-            return Ok(v);
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_FLOORDIV_ZERO.into()));
-        }
-        return Ok(Value::from_float((af / bf).floor()));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_FLOORDIV.into()))
+    core_arith::numeric_floordiv(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_mod(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if bi == 0 {
-            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-        }
-        return Ok(Value::from_int(i64_mod_floor(ai, bi)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if b.is_bigint() {
-            if unsafe { b.as_bigint_ref().unwrap().cmp0() == std::cmp::Ordering::Equal } {
-                return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-            }
-        } else if b.as_int() == Some(0) {
-            return Err(VMError::ZeroDivisionError(errors::ERR_INT_DIV_ZERO.into()));
-        }
-        if let Some(v) = bigint_binop(a, b, |x, y| Integer::from(x).rem_floor(y)) {
-            return Ok(v);
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        if bf == 0.0 {
-            return Err(VMError::ZeroDivisionError(errors::ERR_FLOAT_MOD_ZERO.into()));
-        }
-        // Python floored modulo: af - bf * floor(af / bf)
-        return Ok(Value::from_float(af - bf * (af / bf).floor()));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_MOD.into()))
+    core_arith::numeric_mod(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_pow(a: Value, b: Value) -> VMResult<Value> {
-    if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) = (to_complex(a), to_complex(b)) {
-            return complex_pow(ar, ai, br, bi);
-        }
-    }
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        if bi >= 0 {
-            if bi <= 64 {
-                if let Some(result) = ai.checked_pow(bi as u32) {
-                    if let Some(v) = Value::try_from_int(result) {
-                        return Ok(v);
-                    }
-                }
-            }
-            let base = Integer::from(ai);
-            if let Ok(exp) = u32::try_from(bi) {
-                return Ok(Value::from_bigint_or_demote(base.pow(exp)));
-            }
-            return Ok(Value::from_float((ai as f64).powf(bi as f64)));
-        }
-        return Ok(Value::from_float((ai as f64).powf(bi as f64)));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let (Some(base), Some(bi)) = (to_bigint(a), b.as_int()) {
-            if bi >= 0 {
-                if let Ok(exp) = u32::try_from(bi) {
-                    return Ok(Value::from_bigint_or_demote(base.pow(exp)));
-                }
-            }
-            if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-                return Ok(Value::from_float(af.powf(bf)));
-            }
-        }
-        if let (Some(af), Some(bf)) = (to_f64(a), to_f64(b)) {
-            return Ok(Value::from_float(af.powf(bf)));
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Ok(Value::from_float(af.powf(bf)));
-    }
-    Err(VMError::TypeError(errors::ERR_UNSUPPORTED_POW.into()))
+    core_arith::numeric_pow(a, b).map_err(map_arith)
 }
-
-// ---------------------------------------------------------------------------
-// Unary operations
-// ---------------------------------------------------------------------------
-
-#[inline]
-pub fn numeric_neg(a: Value) -> VMResult<Value> {
-    if a.is_complex() {
-        let (r, i) = unsafe { a.as_complex_parts().unwrap() };
-        return Ok(Value::from_complex(-r, -i));
-    }
-    if let Some(i) = a.as_int() {
-        if let Some(v) = Value::try_from_int(-i) {
-            return Ok(v);
-        }
-        return Ok(Value::from_bigint_or_demote(-Integer::from(i)));
-    }
-    if a.is_bigint() {
-        let n = unsafe { a.as_bigint_ref().unwrap() };
-        return Ok(Value::from_bigint_or_demote(Integer::from(-n)));
-    }
-    if let Some(f) = a.as_float() {
-        return Ok(Value::from_float(-f));
-    }
-    Err(VMError::TypeError(errors::ERR_BAD_UNARY_NEG.into()))
-}
-
-// ---------------------------------------------------------------------------
-// Numeric comparisons (int/float/bigint only)
-// ---------------------------------------------------------------------------
 
 #[inline]
 pub fn numeric_lt(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_bool(ai < bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(r) = bigint_cmp(a, b, |x, y| x < y) {
-            return Ok(Value::from_bool(r));
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Ok(Value::from_bool(af < bf));
-    }
-    Err(VMError::TypeError(errors::ERR_CMP_LT.into()))
+    core_arith::numeric_lt(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_le(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_bool(ai <= bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(r) = bigint_cmp(a, b, |x, y| x <= y) {
-            return Ok(Value::from_bool(r));
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Ok(Value::from_bool(af <= bf));
-    }
-    Err(VMError::TypeError(errors::ERR_CMP_LE.into()))
+    core_arith::numeric_le(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_gt(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_bool(ai > bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(r) = bigint_cmp(a, b, |x, y| x > y) {
-            return Ok(Value::from_bool(r));
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Ok(Value::from_bool(af > bf));
-    }
-    Err(VMError::TypeError(errors::ERR_CMP_GT.into()))
+    core_arith::numeric_gt(a, b).map_err(map_arith)
 }
 
 #[inline]
 pub fn numeric_ge(a: Value, b: Value) -> VMResult<Value> {
-    if let (Some(ai), Some(bi)) = (a.as_int(), b.as_int()) {
-        return Ok(Value::from_bool(ai >= bi));
-    }
-    if a.is_bigint() || b.is_bigint() {
-        if let Some(r) = bigint_cmp(a, b, |x, y| x >= y) {
-            return Ok(Value::from_bool(r));
-        }
-    }
-    let af = a.as_float().or_else(|| a.as_int().map(|i| i as f64));
-    let bf = b.as_float().or_else(|| b.as_int().map(|i| i as f64));
-    if let (Some(af), Some(bf)) = (af, bf) {
-        return Ok(Value::from_bool(af >= bf));
-    }
-    Err(VMError::TypeError(errors::ERR_CMP_GE.into()))
+    core_arith::numeric_ge(a, b).map_err(map_arith)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+#[inline]
+pub fn numeric_neg(a: Value) -> VMResult<Value> {
+    core_arith::numeric_neg(a).map_err(map_arith)
+}
 
+// The generic bodies live in catnip_core; these tests exercise them through
+// the real monomorphization on the pure Value (i64_div_floor/i64_mod_floor
+// stay tested in catnip_core, which owns them).
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_floor_div_mod_identity() {
-        // i64_div_floor(a, b) * b + i64_mod_floor(a, b) == a
-        let cases = [
-            (7, 3),
-            (-7, 3),
-            (7, -3),
-            (-7, -3),
-            (0, 1),
-            (1, 1),
-            (-1, 1),
-            (i64::MAX, 1),
-            (i64::MIN + 1, -1),
-            (10, 3),
-            (-10, 3),
-        ];
-        for (a, b) in cases {
-            let d = i64_div_floor(a, b);
-            let m = i64_mod_floor(a, b);
-            assert_eq!(d * b + m, a, "failed for a={a}, b={b}: d={d}, m={m}");
-        }
-    }
-
-    #[test]
-    fn test_floor_mod_sign() {
-        // Result has sign of divisor (or is zero)
-        assert_eq!(i64_mod_floor(7, 3), 1); // positive divisor -> positive
-        assert_eq!(i64_mod_floor(-7, 3), 2); // positive divisor -> positive
-        assert_eq!(i64_mod_floor(7, -3), -2); // negative divisor -> negative
-        assert_eq!(i64_mod_floor(-7, -3), -1); // negative divisor -> negative
-        assert_eq!(i64_mod_floor(6, 3), 0); // exact division -> zero
-    }
 
     #[test]
     fn test_numeric_add_smallint() {

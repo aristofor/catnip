@@ -19,8 +19,10 @@ use std::path::PathBuf;
 
 /// Cache version - derived from max VM opcode + a salt for semantic changes.
 /// Bump COMPILER_SALT when compilation semantics change (e.g. tail-call marking)
-/// without adding new opcodes.
-const COMPILER_SALT: u32 = 4;
+/// or the serialized `Trace` layout changes (e.g. the `func_guards` /
+/// `func_slot_guards` fields) without adding new opcodes, so old on-disk traces
+/// miss on the key instead of being deserialized into a mismatched layout.
+const COMPILER_SALT: u32 = 6;
 const CACHE_VERSION: u32 = VMOpCode::MAX as u32 + COMPILER_SALT;
 
 /// Wrapper that includes version metadata for safe deserialization.
@@ -192,8 +194,17 @@ pub fn hash_bytecode(code: &[u8]) -> u64 {
 ///
 /// Implements `cranelift_codegen::incremental_cache::CacheKvStore`.
 /// Keys are SHA-256 hashes (32 bytes) produced by Cranelift; stored as
-/// `jit_nv{version}_{hex}` files in the shared cache directory.
-/// Version tag ensures stale native code from older opcode layouts is never loaded.
+/// `jit_nv{version}_cl{cranelift}_{hex}` files in the shared cache directory.
+///
+/// The prefix namespaces stored stencils two ways:
+/// - `{version}` (CACHE_VERSION) drops stencils from older opcode layouts.
+/// - `cl{cranelift}` drops stencils from another Cranelift version. This is
+///   required: the cache key Cranelift hashes into the filename does NOT encode
+///   its own version (`VersionMarker` is a unit struct and hashes to nothing),
+///   so two Cranelift releases produce colliding filenames for the same CLIF.
+///   Stencils are not portable across releases, so without this segment a build
+///   linked against a newer Cranelift would load and run machine code emitted by
+///   an older one (silent miscompilation, not a crash).
 pub struct NativeCodeCache {
     directory: PathBuf,
     enabled: bool,
@@ -202,10 +213,15 @@ pub struct NativeCodeCache {
 
 impl NativeCodeCache {
     pub fn new(directory: PathBuf, enabled: bool) -> Self {
+        // Sanitize so the version stays a single filename-safe segment.
+        let cranelift_tag: String = cranelift_codegen::VERSION
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
         Self {
             directory,
             enabled,
-            prefix: format!("jit_nv{}_", CACHE_VERSION),
+            prefix: format!("jit_nv{}_cl{}_", CACHE_VERSION, cranelift_tag),
         }
     }
 

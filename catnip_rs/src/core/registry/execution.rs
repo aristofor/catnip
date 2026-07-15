@@ -153,6 +153,13 @@ impl Registry {
             let val0 = self.exec_stmt_impl(py, arg0)?;
             let val1 = self.exec_stmt_impl(py, arg1)?;
 
+            // FT2-A return check rides the 2-arg fast path: val0 is the
+            // call's result (already evaluated above -- checking here avoids
+            // a second evaluation), val1 the annotation text.
+            if ident == op_cache.check_return {
+                let annotation: String = val1.extract(py)?;
+                return crate::core::function::apply_annotation_check(py, val0, &annotation, &self.ctx);
+            }
             // Fast arithmetic dispatch
             if ident == op_cache.add {
                 return val0.bind(py).call_method1("__add__", (val1,)).map(|r| r.unbind());
@@ -283,13 +290,29 @@ impl Registry {
             }
         }
         // Binary operations (variadic)
-        else if opcode == op.add {
+        else if opcode == op.check_return {
+            // FT2-A: enforce a declared-callback return on the caller side.
+            // Rust-dispatch handlers evaluate their own args (same contract as
+            // fold_left_operator); the 2-arg no-kwargs shape is consumed by the
+            // fast path above, so this only runs for degenerate shapes.
+            if args.len() >= 2 {
+                let value = self.exec_stmt_impl(py, args.get_item(0)?.unbind())?;
+                let annotation: String = args.get_item(1)?.extract()?;
+                return Ok(Some(crate::core::function::apply_annotation_check(
+                    py,
+                    value,
+                    &annotation,
+                    &self.ctx,
+                )?));
+            }
+        } else if opcode == op.add || opcode == op.add_int || opcode == op.add_float {
+            // Typed arithmetic (TH4 canal A) is the generic add in AST mode.
             return Ok(Some(self.op_add(py, args)?));
-        } else if opcode == op.sub {
+        } else if opcode == op.sub || opcode == op.sub_int || opcode == op.sub_float {
             return Ok(Some(self.op_sub(py, args)?));
-        } else if opcode == op.mul {
+        } else if opcode == op.mul || opcode == op.mul_int || opcode == op.mul_float {
             return Ok(Some(self.op_mul(py, args)?));
-        } else if opcode == op.truediv {
+        } else if opcode == op.truediv || opcode == op.div_float {
             return Ok(Some(self.op_truediv(py, args)?));
         } else if opcode == op.floordiv {
             return Ok(Some(self.op_floordiv(py, args)?));

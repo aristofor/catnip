@@ -124,9 +124,17 @@ impl Registry {
                 had_super = true;
             }
         }
-        // Execute the function call
+        // Execute the function call. Internal dispatch: the callee keeps
+        // shared-instance semantics (the boundary copy is only for calls
+        // re-entering from arbitrary Python).
         let args_tuple = PyTuple::new(py, &eval_args)?;
         let kwargs_opt = eval_kwargs.as_ref().map(|d| d as &Bound<'_, PyDict>);
+        if func_bound.is_instance_of::<crate::core::function::Function>()
+            || func_bound.is_instance_of::<crate::core::function::Lambda>()
+            || func_bound.is_instance_of::<crate::core::BoundCatnipMethod>()
+        {
+            crate::core::function::mark_internal_call();
+        }
         let mut result = func.bind(py).call(args_tuple, kwargs_opt).map(|r| r.unbind())?;
 
         // Clean up pending super if it wasn't consumed (e.g. non-Lambda call)
@@ -203,6 +211,7 @@ impl Registry {
             instance: bm.instance.clone_ref(py),
             method_sources,
             native_instance_idx: None,
+            native_registry_id: 0,
         };
         Ok(Some(Py::new(py, proxy)?.into_any()))
     }
@@ -256,12 +265,14 @@ impl Registry {
                     instance: result.clone_ref(py),
                     method_sources,
                     native_instance_idx: None,
+                    native_registry_id: 0,
                 };
                 ctx.setattr("_pending_super", Py::new(py, proxy)?)?;
             }
         }
 
         let args = PyTuple::new(py, &[result.clone_ref(py)])?;
+        crate::core::function::mark_internal_call();
         let _ = init_fn.bind(py).call1(args)?;
 
         if has_parents {

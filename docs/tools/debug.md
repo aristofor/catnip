@@ -290,5 +290,5 @@ La VM travaille en byte offsets (positions dans le source UTF-8). Le `SourceMap`
 1. **VM uniquement** : le debugger nécessite le mode VM (défaut). Le mode est forcé automatiquement au démarrage de la
    session et restauré à la fin
 
-> Le debugger a une patience de 300 secondes. Passé ce délai, il considère que le développeur a abandonné et reprend
-> l'exécution de son propre chef. C'est le seul logiciel qui croit en l'autonomie du code plus que l'utilisateur.
+> Le debugger attend 300 secondes. Passé ce délai, il reprend l'exécution pour éviter de laisser une session suspendue
+> indéfiniment.

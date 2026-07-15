@@ -74,6 +74,14 @@ class TestListIndexing:
 
         assert result == 30
 
+    def test_index_temporary_container_pyobject_element(self):
+        """Indexing a temporary container for a PyObject element must not free it
+        with the container (cousin of the struct-field GetAttr UAF: GetItem goes
+        through the Python API, which returns a new reference, so it is safe)."""
+        catnip = Catnip()
+        catnip.parse('[[1, 2], [3, 4]][0]')
+        assert catnip.execute() == [1, 2]
+
 
 class TestDictIndexing:
     """Tests for l'indexation of dictionaries."""
@@ -568,6 +576,34 @@ class TestBinarySearchExample:
         result = catnip.execute()
 
         assert result == 3
+
+
+class TestTupleSubscript:
+    """Tests for multi-index subscripts `obj[a, b]` (tuple key, e.g. numpy arr[y, x])."""
+
+    def test_tuple_subscript_read(self):
+        """`d[a, b]` builds a tuple key `(a, b)` for __getitem__."""
+        catnip = Catnip()
+        catnip.parse('d = dict((tuple(1, 2), "found")); d[1, 2]')
+        assert catnip.execute() == "found"
+
+    def test_tuple_subscript_three_indices(self):
+        """More than two indices still build a single tuple key."""
+        catnip = Catnip()
+        catnip.parse('d = dict((tuple(1, 2, 3), "x")); d[1, 2, 3]')
+        assert catnip.execute() == "x"
+
+    def test_tuple_subscript_write(self):
+        """`d[a, b] = v` routes through SetItem with the tuple key."""
+        catnip = Catnip()
+        catnip.parse('d = dict(); d[1, 2] = "w"; d[1, 2]')
+        assert catnip.execute() == "w"
+
+    def test_single_index_unchanged(self):
+        """A single index is not wrapped in a tuple."""
+        catnip = Catnip()
+        catnip.parse("lst = list(10, 20, 30); lst[1]")
+        assert catnip.execute() == 20
 
 
 if __name__ == "__main__":

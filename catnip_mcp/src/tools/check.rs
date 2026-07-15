@@ -17,7 +17,7 @@ pub fn handle(server: &CatnipMcpServer, code: &str) -> Result<CallToolResult, rm
         }),
     };
 
-    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+    Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
         serde_json::to_string(&payload).unwrap(),
     )]))
 }

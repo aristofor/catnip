@@ -6,6 +6,48 @@ use tree_sitter::Node;
 use super::convert::{BodyItem, build_body_doc, convert, node_text};
 use super::doc::{Arena, Doc};
 
+/// Render a `type_expr` in canonical form: `a | b`, `list[int]`,
+/// `(int, str) -> bool`, recursively. Normalizes internal spacing (source
+/// `(int,int)->bool` becomes `(int, int) -> bool`) instead of echoing raw text.
+fn type_text(node: Node, source: &[u8]) -> String {
+    match node.kind() {
+        "type_expr" => {
+            let mut c = node.walk();
+            let atoms: Vec<String> = node.named_children(&mut c).map(|a| type_text(a, source)).collect();
+            atoms.join(" | ")
+        }
+        "type_atom" => {
+            let mut c = node.walk();
+            let mut out = String::new();
+            for child in node.named_children(&mut c) {
+                match child.kind() {
+                    "identifier" => out.push_str(node_text(child, source)),
+                    _ => out.push_str(&type_text(child, source)), // type_args or function_type
+                }
+            }
+            out
+        }
+        "function_type" => {
+            let mut c = node.walk();
+            let exprs: Vec<Node> = node.named_children(&mut c).collect();
+            // All named children are type_expr: the last is the return, the rest are params.
+            match exprs.split_last() {
+                Some((ret, params)) => {
+                    let ps: Vec<String> = params.iter().map(|p| type_text(*p, source)).collect();
+                    format!("({}) -> {}", ps.join(", "), type_text(*ret, source))
+                }
+                None => node_text(node, source).to_string(),
+            }
+        }
+        "type_args" => {
+            let mut c = node.walk();
+            let args: Vec<String> = node.named_children(&mut c).map(|a| type_text(a, source)).collect();
+            format!("[{}]", args.join(", "))
+        }
+        _ => node_text(node, source).to_string(),
+    }
+}
+
 /// `(params) => { body }`
 pub(crate) fn convert_lambda(arena: &mut Arena, node: Node, source: &[u8], indent: i32) -> Doc {
     let mut parts = Vec::new();
@@ -18,7 +60,11 @@ pub(crate) fn convert_lambda(arena: &mut Arena, node: Node, source: &[u8], inden
         }
     }
 
-    parts.push(arena.text(") => "));
+    parts.push(arena.text(")"));
+    if let Some(rt) = node.child_by_field_name("return_type") {
+        parts.push(arena.text(format!(": {}", type_text(rt, source))));
+    }
+    parts.push(arena.text(" => "));
 
     let mut cursor2 = node.walk();
     for child in node.named_children(&mut cursor2) {
@@ -52,15 +98,21 @@ pub(crate) fn convert_lambda_params(arena: &mut Arena, node: Node, source: &[u8]
 
 fn convert_lambda_param(arena: &mut Arena, node: Node, source: &[u8], indent: i32) -> Doc {
     let name = node.child_by_field_name("name").unwrap();
-    let name_doc = arena.text(node_text(name, source));
+    let mut parts = vec![arena.text(node_text(name, source))];
+
+    let typed = node.child_by_field_name("type");
+    if let Some(ty) = typed {
+        parts.push(arena.text(format!(": {}", type_text(ty, source))));
+    }
 
     if let Some(default) = node.child_by_field_name("default") {
-        let eq = arena.text("=");
-        let val = convert(arena, default, source, indent);
-        arena.concat_many(&[name_doc, eq, val])
-    } else {
-        name_doc
+        // Typed params use a spaced `= ` (`x: int = 5`); bare params stay
+        // compact (`x=5`), matching the machine-style kwarg convention.
+        parts.push(arena.text(if typed.is_some() { " = " } else { "=" }));
+        parts.push(convert(arena, default, source, indent));
     }
+
+    arena.concat_many(&parts)
 }
 
 /// Collect struct/trait body items, merging inline items on the same row.
@@ -251,27 +303,24 @@ fn convert_implements(arena: &mut Arena, node: Node, source: &[u8]) -> Doc {
 
 fn convert_struct_field(arena: &mut Arena, node: Node, source: &[u8], indent: i32) -> Doc {
     let name = node.child_by_field_name("name").unwrap();
-    let name_doc = arena.text(node_text(name, source));
+    let mut parts = vec![arena.text(node_text(name, source))];
 
-    // Preserve source semicolon: only add `;` if present in original
-    let last_idx = node.child_count().saturating_sub(1) as u32;
-    let has_semi = node.child(last_idx).is_some_and(|c| c.kind() == ";");
+    if let Some(ty) = node.child_by_field_name("type") {
+        parts.push(arena.text(format!(": {}", type_text(ty, source))));
+    }
 
     if let Some(default) = node.child_by_field_name("default") {
-        let eq = arena.text(" = ");
-        let val = convert(arena, default, source, indent);
-        if has_semi {
-            let semi = arena.text(";");
-            arena.concat_many(&[name_doc, eq, val, semi])
-        } else {
-            arena.concat_many(&[name_doc, eq, val])
-        }
-    } else if has_semi {
-        let semi = arena.text(";");
-        arena.concat(name_doc, semi)
-    } else {
-        name_doc
+        parts.push(arena.text(" = "));
+        parts.push(convert(arena, default, source, indent));
     }
+
+    // Preserve source semicolon: only add `;` if present in original.
+    let last_idx = node.child_count().saturating_sub(1) as u32;
+    if node.child(last_idx).is_some_and(|c| c.kind() == ";") {
+        parts.push(arena.text(";"));
+    }
+
+    arena.concat_many(&parts)
 }
 
 fn convert_struct_method(arena: &mut Arena, node: Node, source: &[u8], indent: i32) -> Doc {
@@ -302,6 +351,11 @@ fn convert_struct_method(arena: &mut Arena, node: Node, source: &[u8], indent: i
             }
             (")", false) => {
                 parts.push(arena.text(")"));
+            }
+            ("type_expr", true) => {
+                // Return-type annotation (`method(self): int => …`). The `:`
+                // token is anonymous and skipped by the catch-all below.
+                parts.push(arena.text(format!(": {}", type_text(child, source))));
             }
             ("=>", false) => {
                 parts.push(arena.text(" => "));

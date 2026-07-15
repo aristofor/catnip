@@ -1,0 +1,54 @@
+#!/usr/bin/env catnip
+# Types de fonctions : annoter un paramètre callback
+
+print("⇒ Le contrat d'un callback")
+
+# (int) -> int : le callback prend un int, retourne un int
+appliquer = (cb: (int) -> int, valeur: int) => {
+    cb(valeur)
+}
+
+double = (x) => { x * 2 }
+print("appliquer(double, 21) =", appliquer(double, 21))
+
+print()
+print("⇒ L'arité fait partie du contrat")
+
+# Un défaut couvre un paramètre : (x, y = 10) est appelable avec 1 argument
+avec_defaut = (x, y=10) => { x + y }
+print("appliquer(avec_defaut, 32) =", appliquer(avec_defaut, 32))
+
+# Une variadique accepte toute arité suffisante
+somme = (*termes) => { termes[0] + termes[1] + termes[2] }
+combiner = (cb: (int, int, int) -> int) => { cb(1, 2, 3) }
+print("combiner(somme) =", combiner(somme))
+
+print()
+print("⇒ Le retour est vérifié à chaque appel, côté appelant")
+
+# Le contrat promet un int : un callback qui retourne autre chose est
+# arrêté au moment où son retour devient observable
+menteur = (x) => { "pas un int" }
+try {
+    appliquer(menteur, 1)
+} except {
+    e: TypeError => { print("callback menteur rejeté:", e) }
+}
+
+print()
+print("⇒ La flèche absorbe à droite")
+
+# (int) -> int | None : une fonction qui retourne int OU None
+peut_etre = (cb: (int) -> int | None, v: int) => { cb(v) }
+pair_ou_rien = (x) => {
+    if x % 2 == 0 { x } else { None }
+}
+print("peut_etre(pair_ou_rien, 4) =", peut_etre(pair_ou_rien, 4))
+print("peut_etre(pair_ou_rien, 5) =", peut_etre(pair_ou_rien, 5))
+
+print()
+print("⇒ Un callback curryfié : le retour est lui-même une fonction")
+
+curry = (cb: (int) -> (int) -> int) => { cb(20)(22) }
+additionneur = (a) => { (b) => { a + b } }
+print("curry(additionneur) =", curry(additionneur))

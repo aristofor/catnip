@@ -5,7 +5,7 @@
 //! pragma("nd_mode", "process") → VMHost → WorkerPool → catnip worker
 
 mod common;
-use common::assert_output;
+use common::{assert_error, assert_output};
 
 #[test]
 fn test_nd_process_simple_map() {
@@ -71,6 +71,41 @@ pragma("nd_mode", "process");
 list(1, 2, 3, 4, 5).[~> (n) => { n > 3 }]
 "#;
     assert_output(code, "[False, False, False, True, True]");
+}
+
+#[test]
+fn test_nd_process_typed_param_coerces() {
+    // TH2-B step 0b: a typed param's boundary check + coercion must survive into
+    // the process worker, which recompiles the function from frozen IR. Without
+    // the params (with annotations) being captured in the frozen IR, the worker
+    // would drop the check and return [1, 2, 3] instead.
+    let code = r#"
+pragma("nd_mode", "process");
+list(1, 2, 3).[~> (n: float) => { n }]
+"#;
+    assert_output(code, "[1.0, 2.0, 3.0]");
+}
+
+#[test]
+fn test_nd_process_union_param() {
+    // A type-union boundary (CheckUnion) must also survive into the worker: the
+    // union spec is re-classified from the frozen param IR. No coercion -- ints
+    // pass through unchanged.
+    let code = r#"
+pragma("nd_mode", "process");
+list(1, 2, 3).[~> (n: int | str) => { n + n }]
+"#;
+    assert_output(code, "[2, 4, 6]");
+}
+
+#[test]
+fn test_nd_process_union_param_rejects() {
+    // A value outside the union is rejected at the worker boundary.
+    let code = r#"
+pragma("nd_mode", "process");
+list(1.5, 2.5).[~> (n: int | str) => { n }]
+"#;
+    assert_error(code);
 }
 
 #[test]

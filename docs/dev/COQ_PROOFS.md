@@ -5,11 +5,15 @@ matching, fonctions/TCO, et passes d'optimisation.
 
 ## TL;DR
 
-58 fichiers Coq dans `proof/` (~17900 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
+69 fichiers Coq dans `proof/` (~20000 lignes, 0 Admitted) prouvent des invariants structurels et sémantiques couvrant le
 parsing, le broadcasting, la résolution de scopes, le pattern matching, le trampoline TCO, les 5 passes d'optimisation
 IR vivantes (réécritures prouvées + gardes sur les règles retirées), l'analyse de liveness, la ND-récursion, le pipeline
-CFG/SSA (Braun et al. 2013), la dominance, le NaN-boxing VM, la sécurité de pile VM, les frames/IP/jumps, la
-linéarisation C3 (MRO), les structs/traits, le desugaring opérateurs (sémantique, pureté, broadcast), et le cache. Si
+CFG/SSA (Braun et al. 2013), la destruction SSA (séquencement de copies parallèles swap/lost-copy, résolution de phi
+triviaux, invisibilité d'une copie morte pour le gate liveness, raccord solveur↔environnement SSA : le lot d'une arête
+réalise la sémantique parallèle des phis du join), la reconstruction de régions (le merge d'un if par marche
+forward-only), la dominance, le NaN-boxing VM, la frontière de valeur (classification tag scalar/index/pointer, sûreté
+`from_raw_scalar`, frontière plugin ABI v5, propriété refcount cross-VM), la sécurité de pile VM, les frames/IP/jumps,
+la linéarisation C3 (MRO), les structs/traits, le desugaring opérateurs (sémantique, pureté, broadcast), et le cache. Si
 `make proof` passe, les théorèmes sont validés mécaniquement. Ces preuves portent sur des modèles formels alignés avec
 le code Rust, pas sur l'exécution du runtime en production. L'alignement est maintenu explicitement dans les
 commentaires en tête de chaque fichier `.v`. Tree-sitter et Cranelift ne sont pas formellement prouvés dans ce repo.
@@ -23,7 +27,7 @@ Catnip utilise tree-sitter pour parser, et tree-sitter fait son travail correcte
 `not` lie plus fort que `and`. Ces propriétés ne sont vérifiées par aucun test unitaire classique - un test vérifie
 qu'un cas marche, pas que tous les cas marchent.
 
-Les fichiers dans `proof/` couvrent six axes :
+Les fichiers dans `proof/` couvrent sept axes :
 
 - **Syntaxe** - invariants de parsing de la grammaire (`grammar.js`) via un parseur à descente récursive formalisé.
 - **Sémantique** - propriétés structurelles du modèle dimensionnel (broadcast, ND-récursion).
@@ -35,8 +39,12 @@ Les fichiers dans `proof/` couvrent six axes :
   folding) : réécritures correctes + théorèmes de garde sur les règles retirées ; invariant du TCO (équivalence
   tail-récursion/boucle).
 - **Analyses** - liveness analysis (linéaire + CFG), dead store elimination, fixpoint, dominance CFG (idom, frontières).
-- **Infrastructure** - CFG/SSA (single assignment, phi-nodes, GVN, LICM, CSE inter-blocs, DSE globale), cache (FIFO,
-  LRU+TTL, memoization, atomic writes).
+- **Infrastructure** - CFG/SSA (single assignment, phi-nodes, GVN, LICM, CSE inter-blocs, DSE globale), destruction SSA
+  (séquencement de copies parallèles swap/lost-copy, phi triviaux, copie morte invisible), cache (FIFO, LRU+TTL,
+  mémoïsation, atomic writes).
+- **Delta dataflow** - le noyau collection du moteur différentiel (compaction neutre par sommes par clé, delta vide
+  neutre, negate round-trip) et les opérateurs stateless (homomorphismes map/filter sur la représentation delta, concat
+  = union de multisets, commit stateless identité).
 
 Coq vérifie chaque étape de raisonnement : si `make proof` passe, les propriétés sont vraies.
 
@@ -103,50 +111,61 @@ Prouvent la correction des 5 passes IR vivantes du pipeline, avec des gardes `*_
 
 Prouvent la correction de l'analyse de liveness, de la dominance, et du pipeline CFG/SSA.
 
-| Fichier                     | Couverture                                                                                                         | Théorèmes clés                                                                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `CatnipVarSet.v`            | Bibliothèque VarSet réutilisable : add, union, remove, NoDup, subset                                               | `add_preserves_nodup`, `union_preserves_nodup`, `remove_list_subset`                                                               |
-| `CatnipLivenessLinear.v`    | Liveness linéaire : USE/DEF, transfer, backward analysis, DSE linéaire                                             | `live_in_sound`, `dse_linear_correct`, `transfer_monotone`                                                                         |
-| `CatnipLivenessCFG.v`       | Liveness CFG : LiveMap, fixpoint itératif, DSE CFG, path soundness                                                 | `dse_cfg_sound_head`, `exec_path_sound`, `iterate_cfg_stable`                                                                      |
-| `CatnipLivenessProof.v`     | Façade (`Require Export` des 3 fichiers ci-dessus)                                                                 | -                                                                                                                                  |
-| `CatnipDominanceProof.v`    | Dominance CFG : réflexivité, transitivité, antisymétrie, idom unicité, frontières                                  | `dom_refl`, `entry_dom_all`, `dom_trans`, `dom_antisym`, `idom_unique`, `entry_frontier_empty`                                     |
-| `CatnipCFGSSABase.v`        | SSA base : modèle SSA, utilitaires, modèles opérationnels (construction SSA, use-count, DSE)                       | `ssaval_eqb_eq`, `unique_def_from_def_block`, `no_dup_phi_from_lookup`, `seal_block_sealed`, `dse_iterate_mono`                    |
-| `CatnipCFGSSACorrectness.v` | SSA correctness (49 lemmes/théorèmes, 0 Admitted) : single assignment, phi-nodes, CSE, GVN, LICM, DSE, destruction | `single_assignment`, `def_before_use`, `phi_at_frontier`, `cse_same_key_same_value`, `licm_hoist_sound`, `dse_fixpoint_terminates` |
-| `CatnipCFGSSAProof.v`       | Façade de compatibilité (`Require Export` de `CatnipCFGSSABase` + `CatnipCFGSSACorrectness`)                       | -                                                                                                                                  |
+| Fichier                     | Couverture                                                                                                                                                                                                                                                                                                    | Théorèmes clés                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `CatnipVarSet.v`            | Bibliothèque VarSet réutilisable : add, union, remove, NoDup, subset                                                                                                                                                                                                                                          | `add_preserves_nodup`, `union_preserves_nodup`, `remove_list_subset`                                                               |
+| `CatnipLivenessLinear.v`    | Liveness linéaire : USE/DEF, transfer, backward analysis, DSE linéaire                                                                                                                                                                                                                                        | `live_in_sound`, `dse_linear_correct`, `transfer_monotone`                                                                         |
+| `CatnipLivenessCFG.v`       | Liveness CFG : LiveMap, fixpoint itératif, DSE CFG, path soundness                                                                                                                                                                                                                                            | `dse_cfg_sound_head`, `exec_path_sound`, `iterate_cfg_stable`                                                                      |
+| `CatnipLivenessProof.v`     | Façade (`Require Export` des 3 fichiers ci-dessus)                                                                                                                                                                                                                                                            | -                                                                                                                                  |
+| `CatnipDominanceProof.v`    | Dominance CFG : réflexivité, transitivité, antisymétrie, idom unicité, frontières                                                                                                                                                                                                                             | `dom_refl`, `entry_dom_all`, `dom_trans`, `dom_antisym`, `idom_unique`, `entry_frontier_empty`                                     |
+| `CatnipCFGSSABase.v`        | SSA base : modèle SSA, utilitaires, modèles opérationnels (construction SSA, use-count, DSE)                                                                                                                                                                                                                  | `ssaval_eqb_eq`, `unique_def_from_def_block`, `no_dup_phi_from_lookup`, `seal_block_sealed`, `dse_iterate_mono`                    |
+| `CatnipCFGSSACorrectness.v` | SSA correctness (49 lemmes/théorèmes, 0 Admitted) : single assignment, phi-nodes, CSE, GVN, LICM, DSE, destruction                                                                                                                                                                                            | `single_assignment`, `def_before_use`, `phi_at_frontier`, `cse_same_key_same_value`, `licm_hoist_sound`, `dse_fixpoint_terminates` |
+| `CatnipCFGSSAProof.v`       | Façade de compatibilité (`Require Export` de `CatnipCFGSSABase` + `CatnipCFGSSACorrectness`)                                                                                                                                                                                                                  | -                                                                                                                                  |
+| `CatnipParallelCopyProof.v` | Destruction SSA : séquencement des copies parallèles (swap/lost-copy, Briggs 1998 / Boissinot 2009), cassage de cycle par un scratch ; gate liveness (une copie morte est invisible)                                                                                                                          | `cycle_break_correct`, `cycle_break_outside`, `exec_frame_off`, `dead_copy_invisible`                                              |
+| `CatnipTrivialPhiProof.v`   | Destruction SSA : résolution des phi triviaux (`canonical`) — un phi à opérandes tous égaux dénote son opérande ; la résolution préserve la valeur runtime à toute profondeur                                                                                                                                 | `trivial_phi_value`, `resolve_preserves`                                                                                           |
+| `CatnipRegionMergeProof.v`  | Reconstruction (`region.rs`) : la recherche du merge d'un if en marche forward-only (back-edges coupées) retourne le merge du builder quel que soit l'ordre de parcours ; le contre-exemple du bug (boucle nichée dans une branche, atteinte depuis la branche sœur via une back-edge) est épinglé en concret | `merge_unique_minimal`, `candidate_behind_merge`, `forward_walk_stops_at_merge`                                                    |
+| `CatnipDestructionBridge.v` | Destruction SSA : raccord des modèles ParallelCopy (état abstrait) et Correctness (`Env = SSAVal → nat`) — le lot de copies séquentialisé d'une arête réalise la sémantique parallèle de tous les phis du join                                                                                                | `cycle_break_env_correct`, `cycle_batch_realizes_phi`, `cycle_batch_preserves_others`                                              |
 
 ### G. Preuves runtime avancées
 
 Prouvent les invariants des composants runtime avancés.
 
-| Fichier                      | Couverture                                                                                              | Théorèmes clés                                                                                                                                                                           |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CatnipNanBoxProof.v`        | NaN-boxing VM : 8 tags (SmallInt/Bool/Nil/Symbol/PyObj/Struct/BigInt/VMFunc), encoding 47-bit           | `tag_injective`, `encode_decode_roundtrip`, `smallint_range`, `promote_demote_id`                                                                                                        |
-| `CatnipVMOpCode.v`           | VM opcodes (83), bijection `VMOpCode <-> nat`, injectivité, range [1..83]                               | `vm_opcode_to_nat_injective`, `vm_opcode_roundtrip`, `nat_to_vm_opcode_roundtrip`                                                                                                        |
-| `CatnipVMState.v`            | Stack effect model (`Fixed`/`ArgDependent`), `VMState` record, classification                           | `fixed_effect_count`                                                                                                                                                                     |
-| `CatnipVMStackSafety.v`      | Stack safety, net effects par catégorie, arg-dependent effects, instruction sequences                   | `stack_safety_fixed`, `exec_seq_app`, `call_stack_safety`, `exit_stack_safety`, `membership_net_effect`                                                                                  |
-| `CatnipVMInvariants.v`       | Compilation invariants : expression net +1, statement net 0, DupTop/RotTwo                              | `load_net_plus_one`, `binop_pattern_depth`, `assignment_pattern_depth`                                                                                                                   |
-| `CatnipVMExamples.v`         | 10 exemples concrets, classification completeness (effect_total, arg_dependent_opcodes)                 | `effect_total`, `arg_dependent_opcodes`                                                                                                                                                  |
-| `CatnipVMFrame.v`            | VM frames (locals, IP, jumps, block stack, ForRange encoding roundtrips)                                | `get_set_same`, `ip_advance_in_bounds`, `jump_preserves_bounds`, `push_pop_restores`, `for_range_full_roundtrip`                                                                         |
-| `CatnipArithProof.v`         | Floor div/mod (Python semantics), equality, overflow promotion                                          | `floor_div_mod_identity`, `floor_mod_sign`, `exact_div_mod_zero`, `neg_overflow_only_min`                                                                                                |
-| `CatnipPureFrameProof.v`     | PureFrame bind_args, copy_args, fill_defaults, pool alloc/free                                          | `copy_args_slot_bound`, `bind_args_length`, `bind_args_no_defaults`, `pool_round_trip`                                                                                                   |
-| `CatnipVMProof.v`            | Façade (`Require Export` des 5 modules VM + `CatnipVMFrame`)                                            | -                                                                                                                                                                                        |
-| `CatnipMROC3Core.v`          | C3 merge algorithm, self-first property                                                                 | `c3_self_first`, `c3_self_is_head`, `c3_no_parents`                                                                                                                                      |
-| `CatnipMROC3Properties.v`    | C3 local precedence and monotonicity                                                                    | `c3_preserves_local_precedence`, `c3_monotonicity`, `c3_merge_preserves_order`                                                                                                           |
-| `CatnipMROFields.v`          | MRO field merge, diamond dedup, redefinition detection                                                  | `dedup_at_most_once`, `no_redefinition_correct`, `redefinition_detected`                                                                                                                 |
-| `CatnipMROMethods.v`         | MRO method resolution, left-priority                                                                    | `left_priority`, `merge_methods_subset`                                                                                                                                                  |
-| `CatnipMROSuper.v`           | Super resolution, cooperative termination                                                               | `super_at_self`, `super_at_end`, `super_max_steps`, `super_from_last_is_empty`                                                                                                           |
-| `CatnipMROExamples.v`        | Exemples concrets (diamond, linear, inconsistent, init chain)                                           | `diamond_c3`, `inconsistent_c3`, `diamond_method_resolution`, `super_from_B_in_diamond`                                                                                                  |
-| `CatnipMROProof.v`           | Facade (`Require Export` des 6 modules MRO ci-dessus)                                                   | -                                                                                                                                                                                        |
-| `CatnipOpDesugar.v`          | Desugaring opérateurs : symbol x arity -> method name, injectivité, totalité                            | `desugar_injective`, `desugar_total`                                                                                                                                                     |
-| `CatnipOpDesugarProps.v`     | Disambiguation +/-, distinctness, résolvabilité méthode, cohérence opcode, préfixe op\_                 | `arity_disambiguation_minus`, `desugar_names_distinct`, `desugar_method_resolvable`, `desugar_opcode_consistent`                                                                         |
-| `CatnipOpDesugarExamples.v`  | Exemples concrets (Vec2, disambiguation unaire/binaire, cas négatifs)                                   | `vec2_find_add`, `minus_as_binary`, `minus_as_unary`, `eq_not_unary`                                                                                                                     |
-| `CatnipOpDesugarSemantics.v` | Préservation sémantique : dispatch VM = appel méthode, reverse dispatch, roundtrip opcode, déterminisme | `operator_dispatch_is_method_call`, `dispatch_finds_same_method`, `reverse_dispatch_finds_method`, `forward_priority_over_reverse`, `rev_dispatch_subsumes_old`, `no_dispatch_ambiguity` |
-| `CatnipStructProof.v`        | Structs/traits : field access O(1), method resolution, inheritance, super chain                         | `field_access_sound`, `method_resolution_order`, `super_chain_terminates`, `trait_linearization`                                                                                         |
-| `CatnipCacheKey.v`           | Cache keys : CacheType, encoding Z, injectivité, disjointness                                           | `cache_key_injective`, `cache_type_disjoint`, `cache_key_bijection`                                                                                                                      |
-| `CatnipCacheMemory.v`        | MemoryCache FIFO : find/remove/set, key uniqueness, round-trip, eviction                                | `mc_set_get_same`, `mc_fifo_evicts_oldest`, `mc_set_size_bounded`                                                                                                                        |
-| `CatnipCacheDisk.v`          | DiskCache LRU+TTL : expiration, prune, eviction, atomic writes                                          | `dc_get_ttl_enforcement`, `dc_lru_evict_size`, `atomic_write_no_partial`                                                                                                                 |
-| `CatnipCacheAdapter.v`       | CatnipCache adapter, Memoization, invalidation (16 keys)                                                | `memo_set_get_same`, `invalidation_covers_all`, `all_invalidation_keys_nodup`                                                                                                            |
-| `CatnipCacheProof.v`         | Façade (`Require Export` des 4 fichiers ci-dessus)                                                      | -                                                                                                                                                                                        |
+| Fichier                       | Couverture                                                                                                                                           | Théorèmes clés                                                                                                                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CatnipNanBoxProof.v`         | NaN-boxing VM : 8 tags (SmallInt/Bool/Nil/Symbol/PyObj/Struct/BigInt/VMFunc), encoding 47-bit, promotion Phase 5 (arith int générique)               | `tag_injective`, `encode_decode_roundtrip`, `smallint_range`, `promote_demote_id`, `to_bigint_small_exact`, `int_paths_agree`, `i64_overflow_never_demotes`                              |
+| `CatnipValueClassProof.v`     | Classification canonique des tags (Scalar/Index/Pointer), exhaustivité, disjointness                                                                 | `class_exhaustive`, `scalar_pointer_disjoint`, `classify_scalar`                                                                                                                         |
+| `CatnipBoundaryProof.v`       | Sûreté de frontière : `from_raw_scalar` n'émet jamais un tag Pointer/Index depuis des bits bruts                                                     | `from_raw_scalar_class_scalar`, `from_raw_scalar_rejects_pointer`, `validate_index_sound`                                                                                                |
+| `CatnipPluginBoundaryProof.v` | Frontière FFI plugin (ABI v5) : canal non-flaggé scalaire-only, OBJECT/HOSTVALUE sanctionnés                                                         | `unflagged_pointer_rejected`, `unflagged_admits_only_scalar`, `hostvalue_admitted`                                                                                                       |
+| `CatnipOwnershipProof.v`      | Refcount des slots struct cross-VM : copy/transfer-transplant + proxy échappé ré-ancré au transplant (pass-through non ré-ancré : garde over-decref) | `copy_leaks`, `transfer_no_leak`, `reanchor_no_leak`, `passthrough_reanchor_underflows`, `transfer_preserves_invariant`                                                                  |
+| `CatnipVMOpCode.v`            | VM opcodes (83), bijection `VMOpCode <-> nat`, injectivité, range [1..83]                                                                            | `vm_opcode_to_nat_injective`, `vm_opcode_roundtrip`, `nat_to_vm_opcode_roundtrip`                                                                                                        |
+| `CatnipVMState.v`             | Stack effect model (`Fixed`/`ArgDependent`), `VMState` record, classification                                                                        | `fixed_effect_count`                                                                                                                                                                     |
+| `CatnipVMStackSafety.v`       | Stack safety, net effects par catégorie, arg-dependent effects, instruction sequences                                                                | `stack_safety_fixed`, `exec_seq_app`, `call_stack_safety`, `exit_stack_safety`, `membership_net_effect`                                                                                  |
+| `CatnipVMInvariants.v`        | Compilation invariants : expression net +1, statement net 0, DupTop/RotTwo                                                                           | `load_net_plus_one`, `binop_pattern_depth`, `assignment_pattern_depth`                                                                                                                   |
+| `CatnipVMExamples.v`          | 10 exemples concrets, classification completeness (effect_total, arg_dependent_opcodes)                                                              | `effect_total`, `arg_dependent_opcodes`                                                                                                                                                  |
+| `CatnipVMFrame.v`             | VM frames (locals, IP, jumps, block stack, ForRange encoding roundtrips)                                                                             | `get_set_same`, `ip_advance_in_bounds`, `jump_preserves_bounds`, `push_pop_restores`, `for_range_full_roundtrip`                                                                         |
+| `CatnipArithProof.v`          | Floor div/mod (Python semantics), equality, overflow promotion                                                                                       | `floor_div_mod_identity`, `floor_mod_sign`, `exact_div_mod_zero`, `neg_overflow_only_min`                                                                                                |
+| `CatnipPureFrameProof.v`      | PureFrame bind_args, copy_args, fill_defaults, pool alloc/free                                                                                       | `copy_args_slot_bound`, `bind_args_length`, `bind_args_no_defaults`, `pool_round_trip`                                                                                                   |
+| `CatnipVMProof.v`             | Façade (`Require Export` des 5 modules VM + `CatnipVMFrame`)                                                                                         | -                                                                                                                                                                                        |
+| `CatnipMROC3Core.v`           | C3 merge algorithm, self-first property                                                                                                              | `c3_self_first`, `c3_self_is_head`, `c3_no_parents`                                                                                                                                      |
+| `CatnipMROC3Properties.v`     | C3 local precedence and monotonicity                                                                                                                 | `c3_preserves_local_precedence`, `c3_monotonicity`, `c3_merge_preserves_order`                                                                                                           |
+| `CatnipMROFields.v`           | MRO field merge, diamond dedup, redefinition detection                                                                                               | `dedup_at_most_once`, `no_redefinition_correct`, `redefinition_detected`                                                                                                                 |
+| `CatnipMROMethods.v`          | MRO method resolution, left-priority                                                                                                                 | `left_priority`, `merge_methods_subset`                                                                                                                                                  |
+| `CatnipMROSuper.v`            | Super resolution, cooperative termination                                                                                                            | `super_at_self`, `super_at_end`, `super_max_steps`, `super_from_last_is_empty`                                                                                                           |
+| `CatnipMROExamples.v`         | Exemples concrets (diamond, linear, inconsistent, init chain)                                                                                        | `diamond_c3`, `inconsistent_c3`, `diamond_method_resolution`, `super_from_B_in_diamond`                                                                                                  |
+| `CatnipMROProof.v`            | Façade (`Require Export` des 6 modules MRO ci-dessus)                                                                                                | -                                                                                                                                                                                        |
+| `CatnipOpDesugar.v`           | Desugaring opérateurs : symbol x arity -> method name, injectivité, totalité                                                                         | `desugar_injective`, `desugar_total`                                                                                                                                                     |
+| `CatnipOpDesugarProps.v`      | Disambiguation +/-, distinctness, résolvabilité méthode, cohérence opcode, préfixe op\_                                                              | `arity_disambiguation_minus`, `desugar_names_distinct`, `desugar_method_resolvable`, `desugar_opcode_consistent`                                                                         |
+| `CatnipOpDesugarExamples.v`   | Exemples concrets (Vec2, disambiguation unaire/binaire, cas négatifs)                                                                                | `vec2_find_add`, `minus_as_binary`, `minus_as_unary`, `eq_not_unary`                                                                                                                     |
+| `CatnipOpDesugarSemantics.v`  | Préservation sémantique : dispatch VM = appel méthode, reverse dispatch, roundtrip opcode, déterminisme                                              | `operator_dispatch_is_method_call`, `dispatch_finds_same_method`, `reverse_dispatch_finds_method`, `forward_priority_over_reverse`, `rev_dispatch_subsumes_old`, `no_dispatch_ambiguity` |
+| `CatnipStructProof.v`         | Structs/traits : field access O(1), method resolution, inheritance, super chain                                                                      | `field_access_sound`, `method_resolution_order`, `super_chain_terminates`, `trait_linearization`                                                                                         |
+| `CatnipCacheKey.v`            | Cache keys : CacheType, encoding Z, injectivité, disjointness                                                                                        | `cache_key_injective`, `cache_type_disjoint`, `cache_key_bijection`                                                                                                                      |
+| `CatnipCacheMemory.v`         | MemoryCache FIFO : find/remove/set, key uniqueness, round-trip, eviction                                                                             | `mc_set_get_same`, `mc_fifo_evicts_oldest`, `mc_set_size_bounded`                                                                                                                        |
+| `CatnipCacheDisk.v`           | DiskCache LRU+TTL : expiration, prune, eviction, atomic writes                                                                                       | `dc_get_ttl_enforcement`, `dc_lru_evict_size`, `atomic_write_no_partial`                                                                                                                 |
+| `CatnipCacheAdapter.v`        | CatnipCache adapter, Memoization, invalidation (16 keys)                                                                                             | `memo_set_get_same`, `invalidation_covers_all`, `all_invalidation_keys_nodup`                                                                                                            |
+| `CatnipCacheProof.v`          | Façade (`Require Export` des 4 fichiers ci-dessus)                                                                                                   | -                                                                                                                                                                                        |
+| `DeltaCollection.v`           | Noyau delta : la compaction (somme par clé + zéros retirés, le repli IndexMap du Rust) est inobservable sur les sommes                               | `compaction_preserves_sum`, `apply_compact_eq`, `empty_delta_neutral`, `negate_roundtrip`                                                                                                |
+| `DeltaStateless.v`            | Opérateurs stateless : map/filter respectent la compaction et distribuent sur la concaténation, concat = union                                       | `map_respects_compaction`, `map_additive`, `sum_filter_delta`, `concat_union`, `from_deltas_observable`                                                                                  |
+| `DeltaProof.v`                | Façade (`Require Export` des 2 fichiers ci-dessus)                                                                                                   | -                                                                                                                                                                                        |
 
 ## A. Preuves syntaxiques
 
@@ -231,7 +250,7 @@ Douze fonctions mutuellement récursives (6 niveaux de précédence, chacun avec
 **Parenthèses** : forcent la structure à travers tous les niveaux (`paren_override_bool`).
 
 **Opérateurs de comparaison** : les 6 opérateurs sont testés individuellement (`comparison_ops_examples`) - chacun
-produit le bon noeud AST.
+produit le bon nœud AST.
 
 **Chaînage** : `n < n <= n` parse comme `(n < n) <= n` syntaxiquement (`comparison_chain_example`). Le fichier inclut
 aussi un modèle sémantique : `eval_comp_chain` évalue une chaîne de comparaisons comme une conjonction. Le théorème
@@ -317,7 +336,7 @@ résultats :
 
 - *Fusion complète* (`map_chain_fusion`) : toute chaîne de n broadcasts maps se réduit à un seul broadcast avec la
   fonction composée. Sûre (préserve la sémantique) et complète (n quelconque).
-- *Equivalence transformationnelle* : trois règles de réécriture prouvées correctes - map; map fusionne
+- *Équivalence transformationnelle* : trois règles de réécriture prouvées correctes - map; map fusionne
   (`equiv_map_map`), map;filter se réordonne en filter;map (`equiv_filter_map_swap`), filter;filter s'absorbe
   (`equiv_filter_filter`).
 - *Normalisation* (`pipeline_normalization`) : tout pipeline mixte de maps et filters sur une collection se réduit à une
@@ -325,7 +344,7 @@ résultats :
 
 ### CatnipNDRecursion.v
 
-Modèle parametrique de la ND-récursion (`~~(seed, lambda)`), split de `CatnipDimensional.v`. Indépendant du domaine de
+Modèle paramétrique de la ND-récursion (`~~(seed, lambda)`), split de `CatnipDimensional.v`. Indépendant du domaine de
 valeurs.
 
 **Monotonie** (`nd_eval_mono`) : si l'évaluation réussit avec un fuel `f`, elle réussit avec le même résultat pour tout
@@ -353,7 +372,7 @@ numérotation via `opcode_to_nat : IROpCode -> nat` (bijection) et `nat_to_opcod
 `is_control_flow_op`, `is_arithmetic_op` avec propriétés de disjointness (`literal_not_op`,
 `control_flow_not_arithmetic`).
 
-**IR** : inductif représentant les noeuds IR (IRInt, IRFloat, IRBool, IRStr, IRNone, IRDecimal, IRImaginary, IROp), avec
+**IR** : inductif représentant les nœuds IR (IRInt, IRFloat, IRBool, IRStr, IRNone, IRDecimal, IRImaginary, IROp), avec
 `ir_size` (taille structurelle), `ir_op` (constructeur par opcode + args), `ir_binop` (spécialisation binaire).
 
 Ce fichier sert de fondation importée par `CatnipStrengthRedProof.v`, `CatnipBluntCodeProof.v` et
@@ -424,9 +443,9 @@ produit un TailCall), `non_tail_produces_normal` (en position non-tail, l'appel 
 
 ## E. Preuves d'optimisation
 
-### CatnipOptimProof.v (facade)
+### CatnipOptimProof.v (façade)
 
-Façade qui re-exporte les 3 modules suivants. Code modélisé : les passes de `catnip_core/src/semantic/passes/`
+Façade qui ré-exporte les 3 modules suivants. Code modélisé : les passes de `catnip_core/src/semantic/passes/`
 (`strength_reduction.rs`, `blunt_code.rs`, `dead_code_elimination.rs`, `block_flattening.rs`).
 
 Le modèle d'expressions `Expr` (Const, BConst, Var, BinOp, UnOp, IfExpr, WhileExpr, Block, MatchExpr) avec évaluateur
@@ -544,9 +563,11 @@ incrémente/décrémente), `push_pop_saved_region` (la région sauvegardée est 
 
 ### CatnipArithProof.v
 
-Prouve les propriétés des opérations arithmétiques pures de `catnip_vm/src/ops/arith.rs`. Couvre floor division et floor
-modulo (sémantique Python, distincte de la division tronquée C), propriétés d'égalité native, et correction de la
-promotion overflow SmallInt vers BigInt.
+Prouve les propriétés des opérations arithmétiques pures de `catnip_core/src/arith.rs` (corps génériques Phase 5,
+monomorphisés par `catnip_vm` et `catnip_rs`). Couvre floor division et floor modulo (sémantique Python, distincte de la
+division tronquée C), propriétés d'égalité native, et correction de la promotion overflow SmallInt vers BigInt. Les
+lemmes de promotion Phase 5 (totalité de `to_bigint`, cohérence fast-path i64 / voie bigint) vivent avec le modèle
+d'encodage dans `CatnipNanBoxProof.v`.
 
 Théorèmes clés : `floor_div_mod_identity` (a = q\*b + r pour tout b != 0), `floor_mod_sign` (le reste a le signe du
 diviseur), `floor_mod_bound_pos/neg` (bornes du reste), `exact_div_mod_zero` (division exacte implique reste nul),
@@ -570,7 +591,7 @@ Façade (`Require Export` des 5 modules VM + `CatnipVMFrame`).
 ### CatnipMRO\*.v (6 modules)
 
 Modélisent la linéarisation C3 et la résolution MRO de `catnip_rs/src/vm/mro.rs`. Standalone, sans dépendances sur les
-autres preuves Catnip. `CatnipMROProof.v` est une facade (`Require Export` des 6 modules).
+autres preuves Catnip. `CatnipMROProof.v` est une façade (`Require Export` des 6 modules).
 
 **CatnipMROC3Core.v** : Algorithme C3 merge. `c3_self_first` (la classe courante est toujours en tête du MRO),
 `c3_no_parents` (classe sans parents = MRO singleton).
@@ -595,8 +616,9 @@ chaining, field dedup.
 
 ### CatnipOpDesugar\*.v (4 modules)
 
-Modélisent le desugaring des opérateurs surchargés (`op <symbol>`) de `catnip_core/src/parser/pure_transforms.rs`. Le
-mapping `(symbol, arity) → method_name` est prouvé injectif et total.
+Modélisent le desugaring des opérateurs surchargés (`op <symbol>`) de
+`catnip_core/src/parser/pure_transforms/definitions.rs`. Le mapping `(symbol, arity) → method_name` est prouvé injectif
+et total.
 
 **CatnipOpDesugar.v** : Modèle du mapping (19 symboles, 21 combinaisons valides sur 38). `desugar_injective` (deux
 couples distincts ne produisent jamais le même nom), `desugar_total` (toute combinaison valide produit un nom).
@@ -609,8 +631,8 @@ invalides), `desugar_method_resolvable` (connexion avec `find_method` de CatnipS
 **CatnipOpDesugarExamples.v** : Exemples concrets. Vec2 (struct avec méthodes opérateur), disambiguation `-` unaire vs
 binaire sur un même struct, cas négatifs (`SymEq Unary = None`, etc.).
 
-**CatnipOpDesugarSemantics.v** : Préservation sémantique du dispatch VM. Modélise le dispatch two-phase de `vm/core.rs`
-(native op → struct method) et le dispatch reverse (prim OP struct → méthode du struct).
+**CatnipOpDesugarSemantics.v** : Préservation sémantique du dispatch VM. Modélise le dispatch two-phase de
+`vm/core/mod.rs` (native op → struct method) et le dispatch reverse (prim OP struct → méthode du struct).
 `operator_dispatch_is_method_call` (pour les structs, le dispatch VM = appel méthode direct),
 `reverse_dispatch_finds_method` (prim OP struct dispatche vers la méthode du struct), `forward_priority_over_reverse`
 (le dispatch forward a priorité), `rev_dispatch_subsumes_old` (rétro-compatibilité : l'ancien dispatch est un cas
@@ -619,9 +641,9 @@ symbole résout vers exactement une méthode).
 
 ## F. Preuves d'analyse
 
-### CatnipLivenessProof.v (facade)
+### CatnipLivenessProof.v (façade)
 
-Façade qui re-exporte les 3 modules suivants. Modélise l'analyse de liveness et la dead store elimination (DSE), d'abord
+Façade qui ré-exporte les 3 modules suivants. Modélise l'analyse de liveness et la dead store elimination (DSE), d'abord
 sur des blocs linéaires puis sur un CFG. 48 lemmes/théorèmes.
 
 ### CatnipVarSet.v
@@ -648,6 +670,60 @@ peuvent être supprimées sans changer l'état observable (variables vivantes en
 
 **DSE CFG** (`exec_path_sound`) : pour tout chemin d'exécution dans le CFG, la DSE guidée par la liveness préserve les
 variables vivantes. La preuve procède par induction sur le chemin.
+
+### CatnipParallelCopyProof.v
+
+Destruction SSA : sortir de la forme SSA matérialise les phis en copies aux arêtes prédécesseur. Un lot de copies est
+**parallèle** (tous les `dst` lus depuis les valeurs initiales des `src`), et le sérialiser naïvement corrompt une
+valeur quand les copies forment un cycle — le problème swap / lost-copy (Briggs et al. 1998 ; Boissinot et al. 2009). Le
+modèle formalise l'état (`loc -> nat`), la copie (`do_copy`) et l'exécution séquentielle (`exec`).
+
+**Cassage de cycle** (`cycle_break_correct`) : pour un cycle de longueur quelconque et un scratch frais, la séquence
+`(t, x0) :: chain xs t` réalise la rotation parallèle sur toute location ; `cycle_break_outside` : les locations hors
+cycle restent intactes. `naive_swap_corrupts` épingle la nécessité du scratch (le swap à deux copies perd une valeur).
+
+**Gate liveness** (`dead_copy_invisible`, via `exec_frame_off`) : omettre une copie dont la destination n'est plus relue
+ne change aucune autre location — ce qui justifie que la matérialisation ignore les phis morts (variable non live-in).
+
+### CatnipTrivialPhiProof.v
+
+Destruction SSA : le builder élimine un phi dont tous les opérandes coïncident (Braun et al. 2013) mais laisse la valeur
+dans `value_defs`, où un usage périmé peut encore la référencer. La résolution `canonical` la fait pointer vers la
+définition survivante.
+
+**Correction** : `trivial_phi_value` — un phi à opérandes tous égaux à `w` dénote `w` quel que soit le prédécesseur
+pris. `resolve_preserves` — si chaque maillon de résolution préserve la valeur runtime, la suivre à toute profondeur la
+préserve (prouvé pour tout carburant, donc même une chaîne coupée par la garde nomme une valeur égale à l'originale).
+
+### CatnipRegionMergeProof.v
+
+Reconstruction CFG → IR : `find_merge_point` (`region.rs`) prend le premier bloc atteignable depuis les deux branches
+d'un if et dominé par son header. Le harnais par propriétés de la Phase 4 a montré que la marche naïve (toutes les
+arêtes) est fausse : depuis un `else`, elle remonte la boucle englobante par sa back-edge et atteint les blocs du `then`
+frère — le header d'un `while` niché dans le `then` passait pour le merge. Le fix coupe les back-edges (une arête dont
+la cible domine la source) de la marche.
+
+**Correction** (`merge_unique_minimal`) : sous l'invariant structurel du builder (tout chemin forward d'une branche vers
+un candidat passe par le merge), le merge est le seul candidat qui intercepte tous les candidats — toute recherche
+premier-candidat en marche forward le retourne, indépendamment de l'ordre de parcours. Preuve par descente infinie sur
+les longueurs de chemins, le squelette de l'antisymétrie de dominance.
+
+**Le bug en concret** : sur le CFG du contre-exemple minimisé, `naive_walk_reaches_inner_header` (la marche naïve
+atteint le header interne depuis le else) contre `forward_walk_stops_at_merge` (forward-only, le else n'atteint que
+lui-même et le merge).
+
+### CatnipDestructionBridge.v
+
+`CatnipParallelCopyProof` prouve le solveur sur un état abstrait (`loc = nat`) ; la section destruction de
+`CatnipCFGSSACorrectness` prouve les faits par-copie sur `Env = SSAVal → nat`. Les deux modèles n'étaient pas reliés :
+l'énoncé compositionnel — le lot séquentialisé d'une arête réalise **tous** les phis du join simultanément — ne vivait
+dans aucun des deux. Constat clé du raccord : `apply_copies` de `CatnipCFGSSABase` est exactement l'exécution
+séquentielle qu'émet le solveur.
+
+**Le pont** (`cycle_batch_realizes_phi`) : après exécution du cycle cassé par scratch, chaque cible de phi tient
+`eval_phi` de l'environnement *initial* — la sémantique parallèle du join, réalisée par la liste séquentielle.
+`cycle_batch_preserves_others` donne le frame (rien d'autre ne bouge) ; `swap_join_demo` instancie le join à deux phis
+en swap, le cas lost-copy canonique.
 
 ## Technique : récursion à carburant
 

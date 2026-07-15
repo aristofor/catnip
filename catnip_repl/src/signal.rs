@@ -12,6 +12,9 @@ static mut INTERRUPT_FLAG: Option<*const AtomicBool> = None;
 
 /// SIGINT handler: set the flag and nothing else (async-signal-safe).
 extern "C" fn sigint_handler(_sig: libc::c_int) {
+    // SAFETY: async-signal-safe -- only reads the `INTERRUPT_FLAG` pointer and does
+    // a relaxed atomic store. The pointer is valid while a `SigintGuard` lives (it
+    // owns the `Arc`), which is exactly the window the handler is installed for.
     unsafe {
         if let Some(ptr) = INTERRUPT_FLAG {
             (*ptr).store(true, Ordering::Relaxed);
@@ -31,6 +34,9 @@ impl SigintGuard {
     /// Install a SIGINT handler that sets `flag` to true.
     /// Re-enables ISIG so the terminal generates SIGINT on Ctrl+C.
     pub fn new(flag: Arc<AtomicBool>) -> Option<Self> {
+        // SAFETY: REPL setup runs single-threaded; the libc termios/sigaction calls
+        // act on STDIN/SIGINT with locally zeroed structs, and `INTERRUPT_FLAG` is
+        // set to a pointer into `flag`, which the returned guard keeps alive.
         unsafe {
             // Store flag pointer for the signal handler
             INTERRUPT_FLAG = Some(Arc::as_ptr(&flag));
@@ -67,6 +73,9 @@ impl SigintGuard {
 
 impl Drop for SigintGuard {
     fn drop(&mut self) {
+        // SAFETY: single-threaded teardown -- restores the previously saved SIGINT
+        // action and termios, then clears `INTERRUPT_FLAG` before `flag` is dropped,
+        // so the handler can no longer dereference it.
         unsafe {
             // Restore previous SIGINT handler
             libc::sigaction(libc::SIGINT, &self.prev_action, std::ptr::null_mut());

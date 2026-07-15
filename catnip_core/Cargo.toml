@@ -17,11 +17,12 @@ dirs = "6.0"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 indexmap = { version = "2.13", features = ["serde"] }
+rug = { version = "1", default-features = false, features = ["integer", "std"] }
 
 # Cranelift JIT compilation
-cranelift-codegen = { version = "0.132", features = ["incremental-cache"] }
-cranelift-frontend = "0.132"
-cranelift-jit = "0.132"
-cranelift-module = "0.132"
-cranelift-native = "0.132"
+cranelift-codegen = { version = "0.133", features = ["incremental-cache"] }
+cranelift-frontend = "0.133"
+cranelift-jit = "0.133"
+cranelift-module = "0.133"
+cranelift-native = "0.133"
 target-lexicon = "0.13"

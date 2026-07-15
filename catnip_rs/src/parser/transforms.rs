@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_transform_simple() {
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|_py| ());
     }
 }

@@ -61,7 +61,8 @@ union Option[T] {
         (union_field
           name: (identifier)
           type: (type_expr
-            (identifier))))
+            (type_atom
+              (identifier)))))
       (union_variant
         name: (identifier)))))
 
@@ -88,13 +89,15 @@ union Result[T, E] {
         (union_field
           name: (identifier)
           type: (type_expr
-            (identifier))))
+            (type_atom
+              (identifier)))))
       (union_variant
         name: (identifier)
         (union_field
           name: (identifier)
           type: (type_expr
-            (identifier)))))))
+            (type_atom
+              (identifier))))))))
 
 ================================================================================
 Union variant with multiple fields
@@ -147,16 +150,19 @@ union Tree[T] {
         (union_field
           name: (identifier)
           type: (type_expr
-            (identifier))))
+            (type_atom
+              (identifier)))))
       (union_variant
         name: (identifier)
         (union_field
           name: (identifier)
           type: (type_expr
-            (identifier)
-            (type_args
-              (type_expr
-                (identifier)))))))))
+            (type_atom
+              (identifier)
+              (type_args
+                (type_expr
+                  (type_atom
+                    (identifier)))))))))))
 
 ================================================================================
 Pattern matching union variant with payload
@@ -198,3 +204,38 @@ result = match x {
               (literal
                 (number
                   (integer))))))))))
+
+================================================================================
+Union with methods
+================================================================================
+
+union Option {
+    Some(value);
+    None;
+    map(self, f) => { 1 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (union_stmt
+      name: (identifier)
+      (union_variant
+        name: (identifier)
+        (union_field
+          name: (identifier)))
+      (union_variant
+        name: (identifier))
+      (union_method
+        method_name: (identifier)
+        (lambda_params
+          (lambda_param
+            name: (identifier))
+          (lambda_param
+            name: (identifier)))
+        (block
+          (statement
+            (literal
+              (number
+                (integer)))))))))

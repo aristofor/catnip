@@ -4,7 +4,7 @@
 //! Simplifies patterns:
 //! - not (a == b) → a != b (Eq/Ne only: order inversions are unsound with NaN)
 //! - True and False → False, ... (both operands Bool literals)
-//! - x and (not x) → False, x or (not x) → True (complement)
+//! - x and (not x) → False, x or (not x) → True (complement, x a Ref or literal)
 //! - if True { a } → a, if False { a } elif ... → elif ...
 //!
 //! Arithmetic identities (x + 0, x * 1, x * 0, x / 1, x // 1, x == True,
@@ -156,6 +156,10 @@ fn simplify_if(args: &[IR]) -> Option<IR> {
     None
 }
 
+/// True when `a` is `not (inner)` and `inner` is structurally equal to `b`.
+/// Gated on `inner` being a pure atom: matching arbitrary expressions would let
+/// `f() and not f()` collapse to a constant, dropping both calls and their side
+/// effects.
 fn is_negation_of(a: &IR, b: &IR) -> bool {
     if let IR::Op {
         opcode: IROpCode::Not,
@@ -164,10 +168,30 @@ fn is_negation_of(a: &IR, b: &IR) -> bool {
     } = a
     {
         if let Some(inner) = args.first() {
-            return inner == b;
+            return is_pure_atom(inner) && inner == b;
         }
     }
     false
+}
+
+/// A value whose evaluation has no side effects: scalar literals and variable
+/// references. Collections and operations are excluded — their elements/operands
+/// can be arbitrary expressions (`[f()]`, `a + b`). An unbound Ref still raises at
+/// runtime; the complement reduction targets tautological dead code, so masking
+/// that NameError is accepted, eliminating a side-effecting call is not.
+fn is_pure_atom(ir: &IR) -> bool {
+    matches!(
+        ir,
+        IR::Int(_)
+            | IR::Float(_)
+            | IR::String(_)
+            | IR::Bytes(_)
+            | IR::Bool(_)
+            | IR::None
+            | IR::Decimal(_)
+            | IR::Imaginary(_)
+            | IR::Ref(..)
+    )
 }
 
 #[cfg(test)]
@@ -308,5 +332,17 @@ mod tests {
         let x = IR::Ref("x".into(), 0, 1);
         let not_x = IR::op(IROpCode::Not, vec![x.clone()]);
         assert_eq!(opt(IR::op(IROpCode::Or, vec![x, not_x])), IR::Bool(true));
+    }
+
+    #[test]
+    fn test_complement_call_preserved() {
+        // f() and not f() / f() or not f() must NOT collapse: structural equality
+        // would drop both calls and their side effects. Only Refs/literals reduce.
+        let call = IR::call(IR::Ref("f".into(), 0, 1), vec![]);
+        let not_call = IR::op(IROpCode::Not, vec![call.clone()]);
+        let and = IR::op(IROpCode::And, vec![call.clone(), not_call.clone()]);
+        let or = IR::op(IROpCode::Or, vec![call, not_call]);
+        assert_eq!(opt(and.clone()), and);
+        assert_eq!(opt(or.clone()), or);
     }
 }

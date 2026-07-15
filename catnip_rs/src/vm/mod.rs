@@ -20,10 +20,11 @@ pub mod unified_compiler;
 pub mod unions;
 pub mod value;
 
-// ForRange constants -- re-exported from catnip_core
+// Bit-packing constants (ForRange, CallMethod) -- re-exported from catnip_core
 pub use catnip_core::vm::{
-    FOR_RANGE_JUMP_MASK, FOR_RANGE_SLOT_I_SHIFT, FOR_RANGE_SLOT_MASK, FOR_RANGE_SLOT_STOP_SHIFT,
-    FOR_RANGE_STEP_BYTE_MASK, FOR_RANGE_STEP_JUMP_MASK, FOR_RANGE_STEP_SHIFT, FOR_RANGE_STEP_SIGN_SHIFT,
+    CALL_ARGS_MASK, CALL_ARGS_SHIFT, FOR_RANGE_JUMP_MASK, FOR_RANGE_SLOT_I_SHIFT, FOR_RANGE_SLOT_MASK,
+    FOR_RANGE_SLOT_STOP_SHIFT, FOR_RANGE_STEP_BYTE_MASK, FOR_RANGE_STEP_JUMP_MASK, FOR_RANGE_STEP_SHIFT,
+    FOR_RANGE_STEP_SIGN_SHIFT,
 };
 
 // Re-exported from catnip_core (pure Rust, no PyO3)
@@ -45,7 +46,7 @@ pub use opcode::VMOpCode as OpCode; // Alias for backward compatibility
 pub use opcode::{Instruction, VMOpCode};
 pub use pattern::{VMPattern, VMPatternElement};
 pub use peephole::PeepholeOptimizer;
-pub use py_interop::{PyVMContext, convert_code_object, convert_pure_compile_output};
+pub use py_interop::{convert_code_object, convert_pure_compile_output};
 pub use structs::{CatnipStructProxy, CatnipStructType, StructRegistry, SuperProxy};
 pub use traits::TraitRegistry;
 pub use unified_compiler::UnifiedCompiler;

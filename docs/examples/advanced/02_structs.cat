@@ -14,7 +14,7 @@ print("p1.x =", p1.x)
 print("p2.y =", p2.y)
 
 print()
-print("⇒ Egalite structurelle")
+print("⇒ Égalité structurelle")
 
 a = Point(1, 2)
 b = Point(1, 2)
@@ -34,7 +34,7 @@ c.b = 64
 print("après mutation:", c)
 
 print()
-print("⇒ Structures imbriquees")
+print("⇒ Structures imbriquées")
 
 struct Vector2D { x; y; }
 struct Particle { position; velocity; mass; }
@@ -118,7 +118,7 @@ print("describe(Pixel(10, 10, 10)) =", describe(Pixel(10, 10, 10)))
 print("describe(Pixel(255, 0, 128)) =", describe(Pixel(255, 0, 128)))
 
 print()
-print("⇒ Heritage simple avec extends")
+print("⇒ Héritage simple avec extends")
 
 struct BaseVec {
     x; y;
@@ -139,7 +139,7 @@ print("ev.x =", ev.x)
 print("ev.z =", ev.z)
 
 print()
-print("⇒ Heritage avec override de méthode")
+print("⇒ Héritage avec override de méthode")
 
 struct Base {
     x
@@ -188,7 +188,7 @@ struct Validated {
 print("Validated(5).x =", Validated(5).x)
 
 print()
-print("⇒ Acces au parent avec super")
+print("⇒ Accès au parent avec super")
 
 struct Animal {
     name

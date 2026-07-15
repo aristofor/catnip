@@ -207,6 +207,61 @@ class TestVariableShadowing:
         assert result == 42 or result == 100
 
 
+class TestEnclosingShadowsGlobal:
+    """An enclosing binding that shares a name with a global must win (LEGB).
+
+    Regression: a nested closure used to resolve a name to the module global
+    even when an enclosing function bound the same name, because the resolver
+    consulted globals before the enclosing closure chain.
+    """
+
+    @pytest.fixture
+    def catnip(self):
+        return Catnip()
+
+    def test_nested_closure_prefers_enclosing_param_over_global(self, catnip):
+        code = """
+        v = 100
+        f = (v) => { g = () => { v }; g() }
+        f(7)
+        """
+        catnip.parse(code)
+        assert catnip.execute() == 7
+
+    def test_double_nested_closure_prefers_enclosing_param(self, catnip):
+        """The enclosing binding reaches the innermost closure through the chain
+        even when the intermediate closure does not reference it itself."""
+        code = """
+        v = 100
+        f = (v) => { g = () => { h = () => { v }; h() }; g() }
+        f(7)
+        """
+        catnip.parse(code)
+        assert catnip.execute() == 7
+
+    def test_broadcast_callback_prefers_enclosing_param(self, catnip):
+        code = """
+        v = 100
+        f = (v) => { list(0, 1).[(i) => { v }] }
+        f(7)
+        """
+        catnip.parse(code)
+        assert catnip.execute() == [7, 7]
+
+    def test_global_mutation_through_closure_preserved(self, catnip):
+        """A top-level closure still reaches a true global and mutates it: the
+        fix must not freeze module globals into the closure."""
+        code = """
+        counter = 0
+        inc = () => { counter = counter + 1 }
+        inc()
+        inc()
+        counter
+        """
+        catnip.parse(code)
+        assert catnip.execute() == 2
+
+
 class TestClosureState:
     """Test closures with mutable state."""
 
@@ -569,3 +624,121 @@ class TestLetrecGroup:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestClosureSemanticsGrid:
+    """The settled closure semantics (wip/CLOSURE_SEMANTICS.md, 2026-07-04):
+    copy capture at creation (a closure is a private mutable snapshot, writes
+    update its own capture -- nothing leaks to the parent), and module globals
+    resolved live at call time (late binding, reads and writes). Every case
+    asserts the reference value in whatever executor the suite runs: the grid
+    is the three-executor differential oracle that was missing when VM and AST
+    silently diverged on five of these ten cases."""
+
+    @staticmethod
+    def _run(src):
+        c = Catnip()
+        c.parse(src)
+        return c.execute()
+
+    def test_write_through_parent_does_not_leak(self):
+        assert self._run('outer = () => { c = "a"\n inner = () => { c = c + "b"\n 0 }\n inner()\n c }\nouter()') == 'a'
+
+    def test_late_binding_read_in_function_is_early(self):
+        assert self._run('outer = () => { c = 1\n inner = () => { c }\n c = 2\n inner() }\nouter()') == 1
+
+    def test_read_after_inner_write(self):
+        assert (
+            self._run(
+                'outer = () => { c = "a"\n inner = () => { tmp = c\n c = tmp + "b"\n c }\n r = inner()\n r + "|" + c }\nouter()'
+            )
+            == 'ab|a'
+        )
+
+    def test_sibling_closures_do_not_share(self):
+        assert (
+            self._run(
+                'outer = () => { c = 0\n up = () => { c = c + 1\n 0 }\n get = () => { c }\n up()\n up()\n get() }\nouter()'
+            )
+            == 0
+        )
+
+    def test_counter_escapes(self):
+        assert self._run('mk = () => { c = 0\n () => { c = c + 1\n c } }\nf = mk()\nf()\nf()') == 2
+
+    def test_toplevel_write_through_is_live(self):
+        assert self._run('c = "a"\nf = () => { c = c + "b"\n 0 }\nf()\nc') == 'ab'
+
+    def test_toplevel_read_is_late_bound(self):
+        assert self._run('c = 1\nf = () => { c }\nc = 2\nf()') == 2
+
+    def test_depth2_write_stays_in_inner_capture(self):
+        assert (
+            self._run(
+                'o = () => { c = "a"\n mid = () => { inner = () => { c = c + "x"\n 0 }\n inner()\n 0 }\n mid()\n c }\no()'
+            )
+            == 'a'
+        )
+
+    def test_param_capture_write_does_not_leak(self):
+        assert self._run('o = (c) => { inner = () => { c = c + 1\n 0 }\n inner()\n c }\no(10)') == 10
+
+    def test_write_only_global_creates_a_local(self):
+        # Settled 2026-07-04: a write-through requires a READ inside the
+        # function; a write-only name is a local, wherever the global was
+        # defined (the assignment-based pre-seed was order-dependent).
+        assert self._run('x = 0\nf = () => { x = 99\n 1 }\nf()\nx') == 0
+        assert self._run('f = () => { x = 99\n 1 }\nx = 0\nf()\nx') == 0
+
+    def test_read_then_write_global_is_live(self):
+        assert self._run('x = 0\nf = () => { x = x + 99\n 1 }\nf()\nx') == 99
+
+    def test_loop_var_captured_early_per_iteration(self):
+        assert (
+            self._run(
+                'o = () => { acc = 0\n fs = []\n for i in [1, 2, 3] { fs = fs + [(x) => { x + i }] }\n fs[0](0) + fs[2](0) }\no()'
+            )
+            == 4
+        )
+
+
+class TestClosureWriteThroughFallbackCompiler:
+    """The rs CompilerCore fork (Decimal-literal fallback, debugger, Compiler
+    API) used to register a local slot for an outer name written from a
+    closure: later reads compiled to LoadLocal on a slot the store never
+    filled (nil if the store didn't run, stale snapshot if the outer binding
+    mutated in between). Audit 2026-07-13 B7 -- emit_store aligned on the
+    catnip_vm production compiler. The Decimal literal below is what routes
+    compilation through the fork."""
+
+    @staticmethod
+    def _run(src):
+        c = Catnip()
+        c.parse(src)
+        return c.execute()
+
+    def test_conditional_outer_store_not_taken(self):
+        src = """
+x = 10
+d = 1.5d
+f = () => {
+    if x > 100 { x = 99 }
+    x
+}
+f()
+"""
+        assert self._run(src) == 10
+
+    def test_outer_binding_mutation_visible_after_write(self):
+        src = """
+counter = 0
+d = 1.5d
+bump = () => { counter = counter + 1 }
+observe = () => {
+    counter = counter + 10
+    bump()
+    counter
+}
+observe()
+"""
+        assert self._run(src) == 11

@@ -29,6 +29,14 @@ impl NativeList {
         self.inner.borrow().is_empty()
     }
 
+    /// Snapshot the items without touching refcounts, for a read-only pass (e.g.
+    /// a boundary type check). `Value` is `Copy`, so this duplicates the pointers
+    /// only; the returned values are valid while the list is alive and must not be
+    /// stored past it or decref'd.
+    pub fn snapshot_items(&self) -> Vec<Value> {
+        self.inner.borrow().iter().copied().collect()
+    }
+
     /// Get item by index (supports negative indexing).
     pub fn get(&self, index: i64) -> VMResult<Value> {
         let inner = self.inner.borrow();
@@ -224,7 +232,11 @@ fn value_cmp(a: Value, b: Value) -> VMResult<std::cmp::Ordering> {
     }
     // String comparison
     if a.is_native_str() && b.is_native_str() {
+        // SAFETY: the is_native_str tag was checked above, so the payload is a live
+        // Arc<NativeString> owned by `a`; the borrow does not outlive it.
         let sa = unsafe { a.as_native_str_ref().unwrap() };
+        // SAFETY: the is_native_str tag was checked above, so the payload is a live
+        // Arc<NativeString> owned by `b`; the borrow does not outlive it.
         let sb = unsafe { b.as_native_str_ref().unwrap() };
         return Ok(sa.cmp(sb));
     }

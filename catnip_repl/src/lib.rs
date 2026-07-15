@@ -1,6 +1,10 @@
 // FILE: catnip_repl/src/lib.rs
 //! Catnip REPL - Interactive TUI shell (ratatui + crossterm)
 
+// Production `unsafe` blocks must carry a `// SAFETY:` justification; test-local
+// unsafe is exempt.
+#![cfg_attr(not(test), deny(clippy::undocumented_unsafe_blocks))]
+
 // The catnip_rs crate has [lib] name = "_rs" (for PyO3).
 // Re-export it under a readable name.
 extern crate _rs as catnip_rs;

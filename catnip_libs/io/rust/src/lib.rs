@@ -14,12 +14,23 @@ use std::cell::RefCell;
 use std::ffi::{CStr, c_char};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use catnip_vm::Value;
 use catnip_vm::plugin::{
-    PLUGIN_ABI_MAGIC, PLUGIN_ABI_VERSION, PLUGIN_RESULT_OBJECT, PluginAttr, PluginCallFn, PluginDescriptor,
-    PluginDropFn, PluginGetAttrFn, PluginMethodFn, PluginResult,
+    PLUGIN_ABI_MAGIC, PLUGIN_ABI_VERSION, PLUGIN_RESULT_HOSTVALUE, PLUGIN_RESULT_OBJECT, PluginAttr, PluginCallFn,
+    PluginDescriptor, PluginDropFn, PluginGetAttrFn, PluginHasMemberFn, PluginHostApi, PluginMethodFn, PluginResult,
 };
+
+// ABI v4: host value-builder API, stored at init so structured returns are
+// built in the host heap.
+static HOST_API: AtomicPtr<PluginHostApi> = AtomicPtr::new(std::ptr::null_mut());
+
+#[inline]
+fn host() -> &'static PluginHostApi {
+    // SAFETY: set by catnip_plugin_init before any call; host-owned, 'static.
+    unsafe { &*HOST_API.load(Ordering::Acquire) }
+}
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -49,7 +60,7 @@ struct FileHandle {
 }
 
 thread_local! {
-    static FILES: RefCell<Vec<Option<FileHandle>>> = RefCell::new(Vec::new());
+    static FILES: RefCell<Vec<Option<FileHandle>>> = const { RefCell::new(Vec::new()) };
 }
 
 fn alloc_file(handle: FileHandle) -> u64 {
@@ -107,6 +118,17 @@ fn ok_val(v: Value) -> PluginResult {
     }
 }
 
+// ABI v4: return a string built in the host heap (never a plugin-owned Arc).
+fn ok_host_string(s: &str) -> PluginResult {
+    let value = unsafe { (host().make_string)(s.as_ptr(), s.len()) };
+    PluginResult {
+        value,
+        error_code: 0,
+        flags: PLUGIN_RESULT_HOSTVALUE,
+        error_message: std::ptr::null(),
+    }
+}
+
 fn ok_object(handle: u64) -> PluginResult {
     PluginResult {
         value: handle,
@@ -138,6 +160,20 @@ fn display_val(raw: u64) -> String {
     Value::from_raw(raw).display_string()
 }
 
+/// Build a plugin error result from an I/O failure. Leaks the message string;
+/// the host copies it immediately (same pattern as the read/open error paths).
+fn io_err(op: &str, e: &std::io::Error) -> PluginResult {
+    let msg = format!("IOError: {} failed: {}\0", op, e);
+    let ptr = msg.as_ptr() as *const c_char;
+    std::mem::forget(msg);
+    PluginResult {
+        value: 0,
+        error_code: 1,
+        flags: 0,
+        error_message: ptr,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module-level function dispatch
 // ---------------------------------------------------------------------------
@@ -153,47 +189,70 @@ unsafe extern "C" fn plugin_call(function_name: *const c_char, args: *const u64,
     match name {
         b"print" => {
             let mut out = std::io::stdout().lock();
-            for (i, &raw) in args_slice.iter().enumerate() {
-                if i > 0 {
-                    let _ = out.write_all(b" ");
+            let res = (|| -> std::io::Result<()> {
+                for (i, &raw) in args_slice.iter().enumerate() {
+                    if i > 0 {
+                        out.write_all(b" ")?;
+                    }
+                    out.write_all(display_val(raw).as_bytes())?;
                 }
-                let _ = out.write_all(display_val(raw).as_bytes());
+                out.write_all(b"\n")
+            })();
+            match res {
+                Ok(()) => ok_nil(),
+                Err(e) => io_err("print", &e),
             }
-            let _ = out.write_all(b"\n");
-            ok_nil()
         }
         b"write" => {
             let mut out = std::io::stdout().lock();
-            for &raw in args_slice {
-                let _ = out.write_all(display_val(raw).as_bytes());
+            let res = (|| -> std::io::Result<()> {
+                for &raw in args_slice {
+                    out.write_all(display_val(raw).as_bytes())?;
+                }
+                out.flush()
+            })();
+            match res {
+                Ok(()) => ok_nil(),
+                Err(e) => io_err("write", &e),
             }
-            let _ = out.flush();
-            ok_nil()
         }
         b"writeln" => {
             let mut out = std::io::stdout().lock();
-            for &raw in args_slice {
-                let _ = out.write_all(display_val(raw).as_bytes());
+            let res = (|| -> std::io::Result<()> {
+                for &raw in args_slice {
+                    out.write_all(display_val(raw).as_bytes())?;
+                }
+                out.write_all(b"\n")
+            })();
+            match res {
+                Ok(()) => ok_nil(),
+                Err(e) => io_err("writeln", &e),
             }
-            let _ = out.write_all(b"\n");
-            ok_nil()
         }
         b"eprint" => {
             let mut out = std::io::stderr().lock();
-            for (i, &raw) in args_slice.iter().enumerate() {
-                if i > 0 {
-                    let _ = out.write_all(b" ");
+            let res = (|| -> std::io::Result<()> {
+                for (i, &raw) in args_slice.iter().enumerate() {
+                    if i > 0 {
+                        out.write_all(b" ")?;
+                    }
+                    out.write_all(display_val(raw).as_bytes())?;
                 }
-                let _ = out.write_all(display_val(raw).as_bytes());
+                out.write_all(b"\n")
+            })();
+            match res {
+                Ok(()) => ok_nil(),
+                Err(e) => io_err("eprint", &e),
             }
-            let _ = out.write_all(b"\n");
-            ok_nil()
         }
         b"input" => {
             if let Some(&prompt_raw) = args_slice.first() {
+                // Best-effort prompt: write directly to the locked stdout instead of
+                // print!, which panics on write errors -- a panic across extern "C" is UB.
                 let prompt = display_val(prompt_raw);
-                print!("{}", prompt);
-                let _ = std::io::stdout().flush();
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(prompt.as_bytes());
+                let _ = out.flush();
             }
             let mut line = String::new();
             match std::io::stdin().read_line(&mut line) {
@@ -205,7 +264,7 @@ unsafe extern "C" fn plugin_call(function_name: *const c_char, args: *const u64,
                     if line.ends_with('\r') {
                         line.pop();
                     }
-                    ok_val(Value::from_string(line))
+                    ok_host_string(&line)
                 }
                 Err(_) => err(b"input error\0"),
             }
@@ -309,13 +368,10 @@ unsafe extern "C" fn plugin_method(handle: u64, method: *const c_char, args: *co
                     let mut buf = String::new();
                     r.read_to_string(&mut buf).map(|_| buf)
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "file not opened for reading",
-                    ))
+                    Err(std::io::Error::other("file not opened for reading"))
                 }
             }) {
-                Some(Ok(s)) => ok_val(Value::from_string(s)),
+                Some(Ok(s)) => ok_host_string(&s),
                 Some(Err(e)) => {
                     let msg = format!("read error: {}\0", e);
                     let ptr = msg.as_ptr() as *const c_char;
@@ -336,13 +392,10 @@ unsafe extern "C" fn plugin_method(handle: u64, method: *const c_char, args: *co
                     let mut line = String::new();
                     r.read_line(&mut line).map(|_| line)
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "file not opened for reading",
-                    ))
+                    Err(std::io::Error::other("file not opened for reading"))
                 }
             }) {
-                Some(Ok(s)) => ok_val(Value::from_string(s)),
+                Some(Ok(s)) => ok_host_string(&s),
                 Some(Err(_)) => err(b"readline error\0"),
                 None => err(b"invalid file handle\0"),
             }
@@ -358,10 +411,7 @@ unsafe extern "C" fn plugin_method(handle: u64, method: *const c_char, args: *co
                 if let FileState::Writer(ref mut w) = fh.state {
                     w.write_all(data.as_bytes()).map(|_| data.chars().count())
                 } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "file not opened for writing",
-                    ))
+                    Err(std::io::Error::other("file not opened for writing"))
                 }
             }) {
                 Some(Ok(n)) => ok_val(Value::from_int(n as i64)),
@@ -370,13 +420,22 @@ unsafe extern "C" fn plugin_method(handle: u64, method: *const c_char, args: *co
             }
         }
         b"close" => {
-            with_file(handle, |fh| {
-                if let FileState::Writer(ref mut w) = fh.state {
-                    let _ = w.flush();
-                }
+            // Flush before closing so a write error (e.g. disk full) surfaces
+            // instead of being silently lost; the handle is closed either way,
+            // matching CPython, which still releases the fd when close() raises.
+            let res = with_file(handle, |fh| {
+                let flushed = match fh.state {
+                    FileState::Writer(ref mut w) => w.flush(),
+                    _ => Ok(()),
+                };
                 fh.state = FileState::Closed;
+                flushed
             });
-            ok_nil()
+            match res {
+                Some(Ok(())) => ok_nil(),
+                Some(Err(e)) => io_err("close", &e),
+                None => err(b"invalid file handle\0"),
+            }
         }
         _ => err(b"unknown method\0"),
     }
@@ -391,11 +450,11 @@ unsafe extern "C" fn plugin_getattr(handle: u64, attr: *const c_char) -> PluginR
 
     match attr {
         b"name" => match with_file(handle, |fh| fh.path.clone()) {
-            Some(p) => ok_val(Value::from_string(p)),
+            Some(p) => ok_host_string(&p),
             None => err(b"invalid file handle\0"),
         },
         b"mode" => match with_file(handle, |fh| fh.mode.clone()) {
-            Some(m) => ok_val(Value::from_string(m)),
+            Some(m) => ok_host_string(&m),
             None => err(b"invalid file handle\0"),
         },
         b"closed" => match with_file(handle, |fh| matches!(fh.state, FileState::Closed)) {
@@ -404,6 +463,18 @@ unsafe extern "C" fn plugin_getattr(handle: u64, attr: *const c_char) -> PluginR
         },
         _ => err(b"unknown attribute\0"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Object membership probe (static: a File's members don't depend on its state)
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" fn plugin_has_member(_handle: u64, name: *const c_char) -> u8 {
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    u8::from(matches!(
+        name,
+        b"name" | b"mode" | b"closed" | b"read" | b"readline" | b"write" | b"close"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -435,18 +506,19 @@ unsafe impl Sync for StaticDescriptor {}
 
 static DESCRIPTOR: OnceLock<StaticDescriptor> = OnceLock::new();
 
+/// Plugin ABI entry point: builds and returns the module descriptor.
+///
+/// # Safety
+/// `host_api` must point to a valid `PluginHostApi` for the duration of the call.
+/// The catnip_vm loader upholds this contract when initializing the plugin.
 #[unsafe(no_mangle)]
-pub extern "C" fn catnip_plugin_init() -> *const PluginDescriptor {
+pub unsafe extern "C" fn catnip_plugin_init(host_api: *const PluginHostApi) -> *const PluginDescriptor {
+    HOST_API.store(host_api as *mut PluginHostApi, Ordering::Release);
     let sd = DESCRIPTOR.get_or_init(|| {
+        let mk = |s: &str| unsafe { ((*host_api).make_string)(s.as_ptr(), s.len()) };
         let attrs = vec![
-            PluginAttr {
-                name: PROTOCOL_ATTR_NAME.as_ptr() as *const c_char,
-                value: Value::from_str("rust").bits(),
-            },
-            PluginAttr {
-                name: VERSION_ATTR_NAME.as_ptr() as *const c_char,
-                value: Value::from_str("0.1.0").bits(),
-            },
+            PluginAttr::host_value(PROTOCOL_ATTR_NAME.as_ptr() as *const c_char, mk("rust")),
+            PluginAttr::host_value(VERSION_ATTR_NAME.as_ptr() as *const c_char, mk("0.1.0")),
         ];
 
         let fn_ptrs: Vec<*const c_char> = FN_NAMES.iter().map(|n| n.as_ptr() as *const c_char).collect();
@@ -464,6 +536,7 @@ pub extern "C" fn catnip_plugin_init() -> *const PluginDescriptor {
             method: Some(plugin_method as PluginMethodFn),
             getattr: Some(plugin_getattr as PluginGetAttrFn),
             drop: Some(plugin_drop as PluginDropFn),
+            has_member: Some(plugin_has_member as PluginHasMemberFn),
         };
 
         StaticDescriptor {
@@ -567,13 +640,23 @@ pub mod pymodule {
             stdout.call_method1("write", (prompt,))?;
             stdout.call_method0("flush")?;
         }
-        let line: String = sys.getattr("stdin")?.call_method0("readline")?.extract()?;
+        let mut line: String = sys.getattr("stdin")?.call_method0("readline")?.extract()?;
         if line.is_empty() {
             return Err(pyo3::exceptions::PyEOFError::new_err("end of input"));
         }
-        Ok(line.trim_end_matches('\n').to_string())
+        // Strip the trailing line terminator, matching the native ABI backend
+        // (a single \n then \r, so \n and \r\n both yield the bare line).
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        Ok(line)
     }
 
+    // Miroir de la signature du builtin Python open() : 8 paramètres irréductibles.
+    #[allow(clippy::too_many_arguments)]
     #[pyfunction]
     #[pyo3(signature = (file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, closefd=true, opener=None))]
     fn open<'py>(
@@ -629,5 +712,92 @@ pub mod pymodule {
     #[pymodule]
     fn catnip_io(m: &Bound<'_, PyModule>) -> PyResult<()> {
         register_items(m)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the native file-handle path
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // The native open/write/close path has no .cat coverage (the integration
+    // tests only exercise module-level print/write). close() must flush the
+    // BufWriter so buffered bytes reach disk, and report a flush error instead
+    // of swallowing it.
+    #[test]
+    fn close_flushes_buffered_writes() {
+        let path = std::env::temp_dir().join(format!("catnip_io_close_{}.txt", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let handle = alloc_file(FileHandle {
+            path: path.to_string_lossy().into_owned(),
+            mode: "w".to_string(),
+            state: FileState::Writer(BufWriter::new(file)),
+        });
+
+        // Buffer bytes without flushing -- BufWriter holds them until flush.
+        with_file(handle, |fh| {
+            if let FileState::Writer(ref mut w) = fh.state {
+                w.write_all(b"buffered").unwrap();
+            }
+        });
+
+        let res = unsafe { plugin_method(handle, c"close".as_ptr(), std::ptr::null(), 0) };
+        assert_eq!(res.error_code, 0, "close on a healthy writer succeeds");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "buffered", "close flushed the buffered bytes");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A second close on an already-closed handle stays a no-op success.
+    #[test]
+    fn double_close_is_noop_success() {
+        let path = std::env::temp_dir().join(format!("catnip_io_dbl_{}.txt", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let handle = alloc_file(FileHandle {
+            path: path.to_string_lossy().into_owned(),
+            mode: "w".to_string(),
+            state: FileState::Writer(BufWriter::new(file)),
+        });
+
+        let first = unsafe { plugin_method(handle, c"close".as_ptr(), std::ptr::null(), 0) };
+        let second = unsafe { plugin_method(handle, c"close".as_ptr(), std::ptr::null(), 0) };
+        assert_eq!(first.error_code, 0);
+        assert_eq!(second.error_code, 0, "double close stays a success");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The fix: a flush failure at close() must surface, not be swallowed.
+    // Force a real flush error by wrapping a read-only file as a Writer -- the
+    // byte buffers fine, but the deferred flush write() hits EBADF on the
+    // read-only fd. With the old `let _ = w.flush()` this returned nil.
+    #[test]
+    fn close_reports_flush_error() {
+        let path = std::env::temp_dir().join(format!("catnip_io_ro_{}.txt", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        let read_only = std::fs::File::open(&path).unwrap(); // O_RDONLY
+        let handle = alloc_file(FileHandle {
+            path: path.to_string_lossy().into_owned(),
+            mode: "w".to_string(),
+            state: FileState::Writer(BufWriter::new(read_only)),
+        });
+
+        // Buffered; the write to the read-only fd is deferred until flush.
+        with_file(handle, |fh| {
+            if let FileState::Writer(ref mut w) = fh.state {
+                let _ = w.write_all(b"x");
+            }
+        });
+
+        let res = unsafe { plugin_method(handle, c"close".as_ptr(), std::ptr::null(), 0) };
+        assert_ne!(res.error_code, 0, "a flush error at close must surface");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -281,6 +281,70 @@ impl<'py> CompilerNode<'py> {
         }
     }
 
+    /// True when this node is the IR shape produced by `@pure` on a function:
+    /// `pure(lambda)` — a Call to the `pure` decorator with a single lambda arg.
+    /// Used to mark the lambda's CodeObject pure statically (JIT inlining).
+    /// Stacked decorators (`@pure @jit`) wrap the lambda in another Call and are
+    /// not matched; only a directly-`@pure`-decorated lambda is.
+    pub fn is_pure_decorated_lambda(&self, py: Python<'py>) -> bool {
+        match self {
+            CompilerNode::PyObj(obj) => {
+                let Ok(op) = obj.extract::<PyRef<Op>>() else {
+                    return false;
+                };
+                if op.ident != IROpCode::Call as i32 {
+                    return false;
+                }
+                let args = op.args.bind(py);
+                // Call args: [func_ref, single_lambda_arg]
+                if args.len().unwrap_or(0) != 2 {
+                    return false;
+                }
+                let Ok(func) = args.get_item(0) else { return false };
+                if CompilerNode::PyObj(func).as_name(py).as_deref() != Some("pure") {
+                    return false;
+                }
+                let Ok(arg) = args.get_item(1) else { return false };
+                CompilerNode::PyObj(arg).is_op(py, IROpCode::OpLambda)
+            }
+            CompilerNode::Pure(ir) => {
+                if let IR::Call { func, args, .. } = ir {
+                    if let IR::Ref(name, ..) | IR::Identifier(name) = func.as_ref() {
+                        return name == "pure"
+                            && args.len() == 1
+                            && matches!(
+                                args[0],
+                                IR::Op {
+                                    opcode: IROpCode::OpLambda,
+                                    ..
+                                }
+                            );
+                    }
+                }
+                if let IR::Op {
+                    opcode: IROpCode::Call,
+                    args,
+                    ..
+                } = ir
+                {
+                    if args.len() == 2 {
+                        if let IR::Ref(name, ..) | IR::Identifier(name) = &args[0] {
+                            return name == "pure"
+                                && matches!(
+                                    args[1],
+                                    IR::Op {
+                                        opcode: IROpCode::OpLambda,
+                                        ..
+                                    }
+                                );
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
     /// Check if this is a call to `range()`. Used for for-range optimization.
     pub fn is_range_call(&self, py: Python<'py>) -> bool {
         match self {

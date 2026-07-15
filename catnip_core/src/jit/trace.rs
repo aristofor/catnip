@@ -150,6 +150,19 @@ pub struct Trace {
     pub iterations: u32,
     /// Guards for LoadScope variables: (name, expected_value, slot)
     pub name_guards: Vec<(String, i64, usize)>,
+    /// Identity guards for scope-resolved functions that were inlined:
+    /// (name, expected_nanbox_bits). Checked (not injected) at JIT entry so a
+    /// reassigned function falls back to the interpreter instead of running the
+    /// stale inlined body. Distinct from name_guards (which carry an i64 value
+    /// injected into a slot); a function value has no usable i64 and no slot.
+    pub func_guards: Vec<(String, u64)>,
+    /// Identity guards for functions held in a frame LOCAL slot that were inlined:
+    /// (slot, expected_nanbox_bits). The function load is elided from the trace
+    /// (no value pushed, no bogus GuardFloat); at JIT entry the slot must still
+    /// hold the same function or the loop falls back. The slot is read directly
+    /// from `frame.locals` (no name resolution) -- this is the local-slot analog
+    /// of `func_guards`.
+    pub func_slot_guards: Vec<(usize, u64)>,
 }
 
 impl Trace {
@@ -167,6 +180,8 @@ impl Trace {
             is_int_only: true,
             iterations: 0,
             name_guards: Vec::new(),
+            func_guards: Vec::new(),
+            func_slot_guards: Vec::new(),
         }
     }
 
@@ -184,6 +199,8 @@ impl Trace {
             is_int_only: true,
             iterations: 1, // Functions = single execution
             name_guards: Vec::new(),
+            func_guards: Vec::new(),
+            func_slot_guards: Vec::new(),
         }
     }
 
@@ -258,7 +275,7 @@ impl TraceRecorder {
         Self {
             trace: None,
             recording: false,
-            max_ops: 10000,
+            max_ops: crate::constants::JIT_MAX_TRACE_OPS,
             int_slots: Vec::new(),
             loop_start_offset: None,
             loop_end_offset: None,
@@ -300,7 +317,32 @@ impl TraceRecorder {
     /// Stop recording and return the trace.
     pub fn stop(&mut self) -> Option<Trace> {
         self.recording = false;
-        self.trace.take()
+        let trace = self.trace.take()?;
+        // Soundness: a scope function that is ALSO reassigned anywhere in the
+        // loop can't be inlined as a fixed body. modified_names is complete now
+        // (the whole iteration was traced, regardless of reassign/call order),
+        // so drop the trace if any guarded function name was modified -- the
+        // loop falls back to the interpreter instead of running a stale body.
+        if trace
+            .func_guards
+            .iter()
+            .any(|(name, _)| self.modified_names.contains(name))
+        {
+            return None;
+        }
+        // Same soundness check for local-slot function guards: a slot reassigned
+        // anywhere in the loop (a StoreLocal to it) can't be inlined as a fixed
+        // body. The slot writes are recorded as TraceOp::StoreLocal, complete now.
+        if !trace.func_slot_guards.is_empty() {
+            let written = trace
+                .ops
+                .iter()
+                .any(|op| matches!(op, TraceOp::StoreLocal(s) if trace.func_slot_guards.iter().any(|(g, _)| g == s)));
+            if written {
+                return None;
+            }
+        }
+        Some(trace)
     }
 
     /// Abort recording without returning trace.
@@ -380,6 +422,35 @@ impl TraceRecorder {
                     TraceOp::AddFloat
                 }
             }
+            // TH4 canal A: type-specialized arithmetic. The operand type is a
+            // proven runtime fact, so the trace op is chosen statically (no
+            // dependence on the profiled `is_int_value`) -- this is what the
+            // specialization buys. True division is float-only.
+            OpCode::AddInt => TraceOp::AddInt,
+            OpCode::AddFloat => {
+                trace.is_int_only = false;
+                TraceOp::AddFloat
+            }
+            OpCode::SubInt => TraceOp::SubInt,
+            OpCode::SubFloat => {
+                trace.is_int_only = false;
+                TraceOp::SubFloat
+            }
+            OpCode::MulInt => TraceOp::MulInt,
+            OpCode::MulFloat => {
+                trace.is_int_only = false;
+                TraceOp::MulFloat
+            }
+            // Float division is kept out of compiled traces: native `fdiv`
+            // yields +/-inf on a zero divisor, which would lose the interpreter's
+            // ZeroDivisionError. A Fallback makes the trace non-compilable, so the
+            // loop runs interpreted (where DivFloat raises correctly). Re-enable a
+            // `TraceOp::DivFloat` here once codegen guards the divisor with a
+            // zero-check side-exit.
+            OpCode::DivFloat => {
+                trace.is_int_only = false;
+                TraceOp::Fallback(OpCode::DivFloat)
+            }
             OpCode::Sub => {
                 if is_int_value {
                     TraceOp::SubInt
@@ -396,13 +467,16 @@ impl TraceRecorder {
                     TraceOp::MulFloat
                 }
             }
+            // True division (`/`) always yields a float and must raise on a zero
+            // divisor. Neither DivInt (integer truncation -- wrong result -- plus
+            // a SIGFPE trap on /0) nor DivFloat (inf on /0) captures that, so true
+            // division is never JIT-compiled: a Fallback keeps it interpreted,
+            // with the correct float result and ZeroDivisionError. (`is_int_value`
+            // defaults to true for Div, so the old DivInt branch was reached for
+            // every `/`, mis-typing true division as integer division.)
             OpCode::Div => {
-                if is_int_value {
-                    TraceOp::DivInt
-                } else {
-                    trace.is_int_only = false;
-                    TraceOp::DivFloat
-                }
+                trace.is_int_only = false;
+                TraceOp::Fallback(OpCode::Div)
             }
             OpCode::Mod => TraceOp::ModInt, // Mod is int-only
             OpCode::Lt => {
@@ -675,6 +749,40 @@ impl TraceRecorder {
         true
     }
 
+    /// Record an identity guard for a scope-resolved function being inlined.
+    /// The function value is not pushed on the trace stack (it has no usable
+    /// i64) and the inliner reconstructs the body from the registry, so this
+    /// guard is check-only: at JIT entry the name must still resolve to the same
+    /// function (NaN-box bits) or the loop falls back to the interpreter instead
+    /// of running the stale inlined body. Deduplicated by name. A reassignment
+    /// of `name` inside the loop is caught in `stop()` (the trace is dropped).
+    pub fn record_func_guard(&mut self, name: &str, bits: u64) {
+        let trace = match &mut self.trace {
+            Some(t) => t,
+            None => return,
+        };
+        if !trace.func_guards.iter().any(|(n, _)| n == name) {
+            trace.func_guards.push((name.to_string(), bits));
+        }
+    }
+
+    /// Record an identity guard for a function held in a frame local slot being
+    /// inlined. The `LoadLocal` of the function is elided from the trace (so no
+    /// function value reaches the JIT stack and no bogus GuardFloat is emitted);
+    /// the inliner rebuilds the body from the registry. At JIT entry the slot must
+    /// still hold the same function (NaN-box bits) or the loop falls back. A write
+    /// to the slot inside the loop is caught in `stop()` (the trace is dropped).
+    /// Deduplicated by slot.
+    pub fn record_func_slot_guard(&mut self, slot: usize, bits: u64) {
+        let trace = match &mut self.trace {
+            Some(t) => t,
+            None => return,
+        };
+        if !trace.func_slot_guards.iter().any(|(s, _)| *s == slot) {
+            trace.func_slot_guards.push((slot, bits));
+        }
+    }
+
     /// Record a StoreScope operation.
     /// Transforms StoreScope into StoreLocal.
     /// `existing_slot`: If the variable already has a slot in the slotmap, use it instead of allocating a new one.
@@ -855,6 +963,46 @@ mod tests {
         assert_eq!(trace.loop_offset, 100);
         assert_eq!(trace.iterations, 1);
         assert!(trace.is_int_only);
+    }
+
+    #[test]
+    fn test_trace_records_typed_add() {
+        // TH4 canal A: AddInt/AddFloat must trace to their TraceOp instead of
+        // bailing as unsupported (which would deopt typed-param loops).
+        let mut recorder = TraceRecorder::new();
+        recorder.start(100, 4);
+        recorder.record_const_int(0, 100);
+        recorder.record_opcode(OpCode::StoreLocal, 0, true, 101);
+        recorder.record_opcode(OpCode::LoadLocal, 0, true, 102);
+        recorder.record_const_int(1, 103);
+        recorder.record_opcode(OpCode::AddInt, 0, true, 102);
+        recorder.record_opcode(OpCode::StoreLocal, 0, true, 103);
+        recorder.record_loop_back(104);
+        let trace = recorder.stop().unwrap();
+        assert!(
+            trace.ops.iter().any(|op| matches!(op, TraceOp::AddInt)),
+            "AddInt should trace to TraceOp::AddInt"
+        );
+        assert!(trace.is_int_only);
+    }
+
+    #[test]
+    fn test_trace_records_typed_add_float() {
+        let mut recorder = TraceRecorder::new();
+        recorder.start(100, 4);
+        recorder.record_const_int(0, 100);
+        recorder.record_opcode(OpCode::StoreLocal, 0, false, 101);
+        recorder.record_opcode(OpCode::LoadLocal, 0, false, 102);
+        recorder.record_const_int(1, 103);
+        recorder.record_opcode(OpCode::AddFloat, 0, false, 102);
+        recorder.record_opcode(OpCode::StoreLocal, 0, false, 103);
+        recorder.record_loop_back(104);
+        let trace = recorder.stop().unwrap();
+        assert!(
+            trace.ops.iter().any(|op| matches!(op, TraceOp::AddFloat)),
+            "AddFloat should trace to TraceOp::AddFloat"
+        );
+        assert!(!trace.is_int_only, "AddFloat marks the trace non-int-only");
     }
 
     #[test]

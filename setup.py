@@ -13,6 +13,7 @@ from pathlib import Path
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
 from setuptools_rust import Binding, RustExtension
+from setuptools_rust import build_rust as _build_rust
 
 
 def _discover_native_libs():
@@ -31,6 +32,26 @@ def _discover_native_libs():
         m = re.search(r'^\s*name\s*=\s*"([^"]+)"', text, re.M)
         libs.append(m.group(1) if m else spec.parent.name)
     return libs
+
+
+class BuildRustCustom(_build_rust):
+    """Records the build-profile stamp after the Rust extension actually compiles.
+
+    Written in build_rust (which runs cargo and raises on failure), not in
+    build_ext: setuptools-rust drives build_rust *after* build_ext.run(), so a
+    build_ext override would stamp before cargo ran. Here the stamp is reached
+    only once super().run() succeeds, so it records the profile of the extension
+    really on disk — never a failed or non-build invocation. Every real build
+    path goes through build_rust (make compile's `build_ext --inplace`, pip
+    install -e, wheels), so the makefile (build-native-libs) can rely on it.
+    """
+
+    def run(self):
+        super().run()
+        try:
+            Path('catnip/.build-profile').write_text(('fastdev' if _dev_mode else 'release') + '\n')
+        except OSError:
+            pass
 
 
 class BuildPyCustom(_build_py):
@@ -78,7 +99,7 @@ class BuildPyCustom(_build_py):
                 self.announce(f'Skipping {binary} (not found, run make build-bins first)', level=2)
 
 
-# CATNIP_DEV=1 → profil "fastdev" (incremental, thin LTO, codegen-units=16)
+# CATNIP_DEV=1 → profil "fastdev" (incremental, no LTO, codegen-units=256)
 _dev_mode = os.environ.get('CATNIP_DEV', '') == '1'
 _profile_args = ('--profile', 'fastdev') if _dev_mode else ()
 
@@ -119,6 +140,7 @@ rust_extensions = [
 setup(
     rust_extensions=rust_extensions,
     cmdclass={
+        'build_rust': BuildRustCustom,
         'build_py': BuildPyCustom,
     },
 )

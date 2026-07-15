@@ -227,6 +227,38 @@ class TestBreakContinueCombined:
 class TestLoopEdgeCases:
     """Test edge cases for break and continue"""
 
+    def test_range_break_with_dead_code_after(self, vm_mode):
+        """Dead code after break in a range-for must not corrupt the loop exit.
+
+        The bytecode peephole removes the unreachable statements but has to
+        re-encode ForRangeInt's packed relative exit offset; unadjusted, the
+        exit jumped past the program tail (silent None) or into the middle of
+        an expression (stack underflow). Found by the CFG property harness.
+        """
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("""
+        a = 1
+        for i in range(0) {
+            break
+            a = 0
+        }
+        a
+        """)
+        assert cat.execute() == 1
+
+    def test_range_continue_with_dead_code_after(self, vm_mode):
+        """Same shape with continue: the loop must still run and terminate."""
+        cat = Catnip(vm_mode=vm_mode)
+        cat.parse("""
+        a = 1
+        for i in range(3) {
+            continue
+            a = 0
+        }
+        a
+        """)
+        assert cat.execute() == 1
+
     def test_break_outside_loop_raises_error(self, vm_mode):
         """Break outside a loop should raise BreakLoop exception (or SyntaxError in VM)"""
         cat = Catnip(vm_mode=vm_mode)

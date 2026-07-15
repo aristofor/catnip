@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_parser_creation() {
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|_py| {
             let parser = TreeSitterParser::new();
             assert!(parser.is_ok());
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_parse_simple() {
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|py| {
             let mut parser = TreeSitterParser::new().unwrap();
             let result = parser.parse(py, "1 + 2", 3);
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn test_parse_syntax_error() {
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|py| {
             let mut parser = TreeSitterParser::new().unwrap();
             let result = parser.parse(py, "if {", 3);

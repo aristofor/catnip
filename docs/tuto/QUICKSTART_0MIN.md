@@ -111,5 +111,4 @@ Prochaine étape logique :
 
 **[Guide 2 minutes](QUICKSTART_2MIN.md)** pour apprendre variables, lambdas, boucles, conditions et pattern matching.
 
-> Après ces deux minutes, tu parleras couramment Catnip, un dialecte dimension-agnostique strictement plus stable que le
-> français.
+> Après ces deux minutes, tu auras le vocabulaire de base : valeurs, fonctions, boucles, conditions, patterns.

@@ -42,7 +42,7 @@ Color.yellow  # Erreur : 'Color' has no variant 'yellow'
 ## Enums multiples
 
 Plusieurs enums coexistent dans le même scope. Des noms de variantes identiques dans des enums distincts ne créent aucun
-conflit : la qualification lève l'ambiguité.
+conflit : la qualification lève l'ambiguïté.
 
 ```catnip
 enum Color { red; blue }
@@ -63,7 +63,7 @@ A.x != B.x
 > Deux variantes portant le même nom dans deux enums différents n'ont rien en commun. La cohabitation est purement
 > syntaxique.
 
-## Egalite
+## Égalité
 
 Deux variantes du même enum sont égales si et seulement si elles désignent la même variante. Deux variantes d'enums
 différents ne sont jamais égales, même si elles portent le même nom.
@@ -140,10 +140,10 @@ de variante. `red` capture la valeur dans une variable `red` ; `Color.red` teste
 enum Color { red; green; blue }
 
 match Color.blue {
-    red => { "piege" }    # capture dans 'red', matche toujours
+    red => { "piège" }    # capture dans 'red', matche toujours
     _ => { "jamais" }
 }
-# → "piege" (red est un binding, pas Color.red)
+# → "piège" (red est un binding, pas Color.red)
 ```
 
 Pour matcher une variante, toujours qualifier : `Color.red`.

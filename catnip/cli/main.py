@@ -10,7 +10,7 @@ from click.shell_completion import CompletionItem
 
 from .. import __version__
 from ..colors import Theme
-from ..config import ConfigManager
+from ..config import EXECUTOR_DEFAULT, ConfigManager
 from ..context import configure_logging
 from .plugins import discover_plugins, load_plugin
 
@@ -70,11 +70,11 @@ def _default_executor():
     Env var: CATNIP_EXECUTOR
     Accepts: vm (default), ast
     """
-    value = (os.environ.get('CATNIP_EXECUTOR') or 'vm').lower()
+    value = (os.environ.get('CATNIP_EXECUTOR') or EXECUTOR_DEFAULT).lower()
     if value in {'vm', 'ast'}:
         return value
     else:
-        return 'vm'
+        return EXECUTOR_DEFAULT
 
 
 class CatnipGroup(click.Group):
@@ -207,7 +207,7 @@ def setup_catnip(
     # Create Catnip with executor from config
     from ..config import executor_to_vm_mode
 
-    vm_mode = executor_to_vm_mode(config_manager.get('executor') or 'vm')
+    vm_mode = executor_to_vm_mode(config_manager.get('executor') or EXECUTOR_DEFAULT)
 
     # Setup cache if enabled
     cache = None
@@ -568,7 +568,7 @@ def _run_default_mode(ctx):
     )
     from ..config import executor_to_vm_mode
 
-    vm_mode = executor_to_vm_mode(catnip._config_manager.get('executor') or 'vm')
+    vm_mode = executor_to_vm_mode(catnip._config_manager.get('executor') or EXECUTOR_DEFAULT)
 
     # Inject script arguments into global context (accessible as 'argv')
     if script_path:

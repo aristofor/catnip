@@ -93,7 +93,7 @@ Intégration avec Python :
 - [`03_app_script.cat`](module-loading/03_app_script.cat) - Script utilisant l'API
 - [`05_simple_extension.py`](module-loading/05_simple_extension.py) - Extension simple
 - [`06_custom_functions.py`](module-loading/06_custom_functions.py) - Fonctions personnalisées
-- [`07_app_api.py`](module-loading/07_app_api.py) - API d'application simulée
+- [`03_app_api.py`](module-loading/03_app_api.py) - API d'application simulée
 - [`08_aesgcm.cat`](module-loading/08_aesgcm.cat) - AES-GCM avec propagation d'erreur Python
 - [`09_relative_import.cat`](module-loading/09_relative_import.cat) - Import relatif via `caller_dir`
 - [`10_wild_import.cat`](module-loading/10_wild_import.cat) - Import global (injection dans globals)
@@ -126,15 +126,6 @@ Scripts Catnip exécutables en ligne de commande :
 - [`03_transform_csv.cat`](run/03_transform_csv.cat) - Transformation de données tabulaires
 - [`04_config_validator.cat`](run/04_config_validator.cat) - Validation de configuration
 - [`05_data_report.cat`](run/05_data_report.cat) - Rapport de données
-
-## Graphe de contrôle (`cfg/`)
-
-Analyse et optimisation du control flow :
-
-- [`01_cfg_basic.md`](cfg/01_cfg_basic.md) - Construction de CFG, blocs basiques, arêtes
-- [`02_cfg_analysis.md`](cfg/02_cfg_analysis.md) - Dominance, détection de boucles
-- [`03_cfg_optimization.md`](cfg/03_cfg_optimization.md) - Optimisations (dead code, fusion, branches)
-- [`04_cfg_reconstruction.md`](cfg/04_cfg_reconstruction.md) - Reconstruction de code structuré depuis CFG
 
 ## Outils (`tools/`)
 

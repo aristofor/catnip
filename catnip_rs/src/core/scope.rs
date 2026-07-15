@@ -4,7 +4,9 @@
 //! Scope provides O(1) variable lookup with push/pop semantics.
 
 use indexmap::IndexMap;
+use pyo3::PyTraverseError;
 use pyo3::exceptions::PyNameError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::collections::HashSet;
@@ -31,11 +33,51 @@ pub struct Scope {
     /// Monotonic id per frame (never reused), to tell apart functions
     /// defined in the current frame from ones captured elsewhere
     frame_tokens: Vec<u64>,
+    /// Per-frame set of module-global names READ from inside the frame's
+    /// function; drives the global write-through rule in `_set` (Mutex for
+    /// the Sync bound, uncontended -- marked from `&self` resolution paths).
+    global_reads: std::sync::Mutex<Vec<std::collections::HashSet<String>>>,
+
     next_frame_token: u64,
 }
 
 #[pymethods]
 impl Scope {
+    /// Participate in CPython's cyclic GC. `ctx.locals` is a `Scope`, and its
+    /// `symbols` hold whatever the program binds -- including functions/lambdas
+    /// whose `registry` references the context back, closing a
+    /// `ctx -> locals(Scope) -> value -> registry -> ctx` cycle the collector
+    /// cannot see (a Rust pyclass is opaque to it). Without this, any session
+    /// that leaves a context-referencing binding in scope leaks its context.
+    /// Both the live `symbols` and the `shadow_stack` (saved values for
+    /// restore-on-pop) own strong references, so both are visited.
+    ///
+    /// PyO3 guards `__traverse__` with a non-blocking borrow, so a re-entrant GC
+    /// fired mid-mutation simply skips this scope rather than aliasing `&mut`.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for v in self.symbols.values() {
+            visit.call(v)?;
+        }
+        for frame in &self.shadow_stack {
+            for (_, slot) in frame {
+                if let Some(ref v) = slot {
+                    visit.call(v)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Break cycles by dropping the strong references the scope holds. Only
+    /// called by the GC on an otherwise-unreachable scope (its owning context is
+    /// being collected), so the scope is never used again afterwards.
+    fn __clear__(&mut self) {
+        self.symbols.clear();
+        for frame in &mut self.shadow_stack {
+            frame.clear();
+        }
+    }
+
     /// Create a new empty scope.
     #[new]
     #[pyo3(signature = (symbols=None))]
@@ -48,6 +90,7 @@ impl Scope {
             param_names: vec![HashSet::new()],
             frame_isolated: vec![false],
             frame_tokens: vec![1],
+            global_reads: std::sync::Mutex::new(vec![std::collections::HashSet::new()]),
             next_frame_token: 1,
         };
 
@@ -70,6 +113,7 @@ impl Scope {
         self.frame_isolated.push(false);
         self.next_frame_token += 1;
         self.frame_tokens.push(self.next_frame_token);
+        self.global_reads.lock().unwrap().push(std::collections::HashSet::new());
     }
 
     /// Monotonic id of the current frame.
@@ -118,19 +162,46 @@ impl Scope {
         self.param_names.pop();
         self.frame_isolated.pop();
         self.frame_tokens.pop();
+        self.global_reads.lock().unwrap().pop();
+    }
+
+    /// Frame owning the VISIBLE binding of `name` (the highest frame that
+    /// introduced it -- the flat `symbols` map holds that binding's value).
+    fn owner_frame(&self, name: &str) -> Option<usize> {
+        (0..self.frame_names.len())
+            .rev()
+            .find(|&i| self.frame_names[i].contains(name))
+    }
+
+    /// Record a module-global read from inside a function (feeds the
+    /// write-through rule below). The mark lives on the ISOLATED frame (the
+    /// function): the body's transparent block frames come and go, the
+    /// function frame is the stable scope of the rule.
+    fn mark_global_read(&self, name: &str) {
+        if self.owner_frame(name) != Some(0) {
+            return;
+        }
+        if let Some(iso) = self.find_isolating_frame(name) {
+            self.global_reads.lock().unwrap()[iso].insert(name.to_string());
+        }
     }
 
     /// Get a symbol value. Returns None if not found.
     fn get(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
-        self.symbols.get(name).map(|v| v.clone_ref(py))
+        let v = self.symbols.get(name).map(|v| v.clone_ref(py));
+        if v.is_some() {
+            self.mark_global_read(name);
+        }
+        v
     }
 
     /// Resolve a symbol, raising NameError if not found.
     fn resolve(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        self.symbols
-            .get(name)
-            .map(|v| v.clone_ref(py))
-            .ok_or_else(|| PyNameError::new_err(catnip_core::constants::format_name_error(name)))
+        let v = self.symbols.get(name).map(|v| v.clone_ref(py));
+        if v.is_some() {
+            self.mark_global_read(name);
+        }
+        v.ok_or_else(|| PyNameError::new_err(catnip_core::constants::format_name_error(name)))
     }
 
     /// Set a symbol in the current frame.
@@ -201,6 +272,13 @@ impl Scope {
     pub fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.symbols {
+            // Module globals are NOT captured: a closure resolves them live
+            // at call time (top-level late binding, wip/CLOSURE_SEMANTICS.md
+            // -- the VM's MakeFunction suppresses them the same way). Only
+            // function-scope bindings are copied.
+            if self.owner_frame(k) == Some(0) {
+                continue;
+            }
             dict.set_item(k, v)?;
         }
         Ok(dict.into())
@@ -276,11 +354,27 @@ impl Scope {
         if self.symbols.contains_key(&name) {
             // Check if any frame from current down to the variable's owner is isolated
             if let Some(iso_frame) = self.find_isolating_frame(&name) {
-                // Variable is from before an isolated frame: shadow
-                let old_value = self.symbols.get(&name).map(|v| v.clone_ref(py));
-                self.shadow_stack[iso_frame].push((name.clone(), old_value));
-                self.frame_names[iso_frame].insert(name.clone());
-                self.symbols.insert(name, value);
+                // A module global READ from this function writes through to
+                // the live binding (the top-level late-binding contract,
+                // wip/CLOSURE_SEMANTICS.md); a write-only global name shadows
+                // into a local (scope isolation -- a function's `a = ...`
+                // must not clobber the caller's `a`). The VM's own behavior
+                // on the write-only corner is order-and-shape dependent
+                // (traced in CLOSURE_SEMANTICS.md as an open corner); the
+                // read-based rule is the coherent one.
+                let reads_it = {
+                    let reads = self.global_reads.lock().unwrap();
+                    reads[iso_frame].contains(&name)
+                };
+                if reads_it && self.owner_frame(&name) == Some(0) {
+                    self.symbols.insert(name, value);
+                } else {
+                    // Variable is from before an isolated frame: shadow
+                    let old_value = self.symbols.get(&name).map(|v| v.clone_ref(py));
+                    self.shadow_stack[iso_frame].push((name.clone(), old_value));
+                    self.frame_names[iso_frame].insert(name.clone());
+                    self.symbols.insert(name, value);
+                }
             } else {
                 // No isolation boundary: update in place
                 self.symbols.insert(name, value);
@@ -529,28 +623,9 @@ impl Scope {
     /// If the symbol exists anywhere, update it in place.
     /// Otherwise, create it in the current frame.
     pub fn set_catnip(&mut self, py: Python<'_>, name: String, value: Py<PyAny>) {
-        let current_frame = self.frame_names.len() - 1;
-        if current_frame > 0 {
-            if let Some(modified) = self.modified_names.last_mut() {
-                modified.insert(name.clone());
-            }
-        }
-
-        if self.symbols.contains_key(&name) {
-            if let Some(iso_frame) = self.find_isolating_frame(&name) {
-                // Variable is from before an isolated frame: shadow
-                let old_value = self.symbols.get(&name).map(|v| v.clone_ref(py));
-                self.shadow_stack[iso_frame].push((name.clone(), old_value));
-                self.frame_names[iso_frame].insert(name.clone());
-                self.symbols.insert(name, value);
-            } else {
-                // No isolation boundary: update in place
-                self.symbols.insert(name, value);
-            }
-        } else {
-            // Create in current frame
-            self.set(py, name, value);
-        }
+        // One store semantics: delegate to `_set` (this used to be a drifted
+        // copy -- the global write-through rule only landed in one of them).
+        self._set(py, name, value);
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 use catnip_vm::Value;
 use catnip_vm::plugin::{
-    PLUGIN_ABI_MAGIC, PLUGIN_ABI_VERSION, PluginAttr, PluginCallFn, PluginDescriptor, PluginResult,
+    PLUGIN_ABI_MAGIC, PLUGIN_ABI_VERSION, PluginAttr, PluginCallFn, PluginDescriptor, PluginHostApi, PluginResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -31,11 +31,21 @@ pub const EXIT_ERROR_CODE: u32 = 0x45584954; // "EXIT"
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Platform string following Python's `sys.platform` convention (darwin, win32),
+/// shared by the native and PyO3 backends so both report the same value.
+fn platform_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Build attrs at init time (argv, environ, platform, etc.)
 // ---------------------------------------------------------------------------
 
-fn build_attrs() -> Vec<PluginAttr> {
+fn build_attrs(host: &PluginHostApi) -> Vec<PluginAttr> {
     // Static attr names (must live for the life of the plugin)
     static PROTOCOL_NAME: &[u8] = b"PROTOCOL\0";
     static ARGV_NAME: &[u8] = b"argv\0";
@@ -45,67 +55,64 @@ fn build_attrs() -> Vec<PluginAttr> {
     static VERSION_NAME: &[u8] = b"version\0";
     static CPU_COUNT_NAME: &[u8] = b"cpu_count\0";
 
+    // ABI v4: every structured value is built in the host heap via the host
+    // builder callbacks, so no plugin-owned Arc ever crosses the boundary.
+    let mk = |s: &str| unsafe { (host.make_string)(s.as_ptr(), s.len()) };
     let mut attrs = Vec::new();
 
     // PROTOCOL
-    attrs.push(PluginAttr {
-        name: PROTOCOL_NAME.as_ptr() as *const c_char,
-        value: Value::from_str("rust").bits(),
-    });
+    attrs.push(PluginAttr::host_value(
+        PROTOCOL_NAME.as_ptr() as *const c_char,
+        mk("rust"),
+    ));
 
-    // argv as a list
-    let argv_items: Vec<Value> = std::env::args().map(|a| Value::from_string(a)).collect();
-    attrs.push(PluginAttr {
-        name: ARGV_NAME.as_ptr() as *const c_char,
-        value: Value::from_list(argv_items).bits(),
-    });
+    // argv as a list of host strings (the string tokens are consumed by make_list)
+    // args_os/vars_os : ne paniquent pas sur argv/env non-UTF-8 (contrairement à
+    // args/vars). Un init de plugin qui panique traverserait `extern "C"` (UB).
+    let argv_tokens: Vec<u64> = std::env::args_os().map(|a| mk(&a.to_string_lossy())).collect();
+    let argv_val = unsafe { (host.make_list)(argv_tokens.as_ptr(), argv_tokens.len()) };
+    attrs.push(PluginAttr::host_value(ARGV_NAME.as_ptr() as *const c_char, argv_val));
 
-    // environ as a dict
-    {
-        let mut map = indexmap::IndexMap::new();
-        for (k, v) in std::env::vars() {
-            let key =
-                catnip_vm::collections::ValueKey::Str(std::sync::Arc::new(catnip_vm::value::NativeString::new(k)));
-            map.insert(key, Value::from_string(v));
-        }
-        attrs.push(PluginAttr {
-            name: ENVIRON_NAME.as_ptr() as *const c_char,
-            value: Value::from_dict(map).bits(),
-        });
+    // environ as a host dict of host strings
+    let mut keys: Vec<u64> = Vec::new();
+    let mut vals: Vec<u64> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        keys.push(mk(&k.to_string_lossy()));
+        vals.push(mk(&v.to_string_lossy()));
     }
+    let environ_val = unsafe { (host.make_dict)(keys.as_ptr(), vals.as_ptr(), keys.len()) };
+    attrs.push(PluginAttr::host_value(
+        ENVIRON_NAME.as_ptr() as *const c_char,
+        environ_val,
+    ));
 
     // platform
-    let platform = match std::env::consts::OS {
-        "linux" => "linux",
-        "macos" => "darwin",
-        other => other,
-    };
-    attrs.push(PluginAttr {
-        name: PLATFORM_NAME.as_ptr() as *const c_char,
-        value: Value::from_str(platform).bits(),
-    });
+    attrs.push(PluginAttr::host_value(
+        PLATFORM_NAME.as_ptr() as *const c_char,
+        mk(platform_name()),
+    ));
 
     // executable
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    attrs.push(PluginAttr {
-        name: EXECUTABLE_NAME.as_ptr() as *const c_char,
-        value: Value::from_string(exe).bits(),
-    });
+    attrs.push(PluginAttr::host_value(
+        EXECUTABLE_NAME.as_ptr() as *const c_char,
+        mk(&exe),
+    ));
 
-    // version
-    attrs.push(PluginAttr {
-        name: VERSION_NAME.as_ptr() as *const c_char,
-        value: Value::from_str(env!("CARGO_PKG_VERSION")).bits(),
-    });
+    // version -- the Catnip runtime version, not this plugin crate's version
+    attrs.push(PluginAttr::host_value(
+        VERSION_NAME.as_ptr() as *const c_char,
+        mk(catnip_vm::CATNIP_VERSION),
+    ));
 
-    // cpu_count
+    // cpu_count (scalar -- crosses directly)
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    attrs.push(PluginAttr {
-        name: CPU_COUNT_NAME.as_ptr() as *const c_char,
-        value: Value::from_int(cpus as i64).bits(),
-    });
+    attrs.push(PluginAttr::scalar(
+        CPU_COUNT_NAME.as_ptr() as *const c_char,
+        Value::from_int(cpus as i64).bits(),
+    ));
 
     attrs
 }
@@ -140,7 +147,7 @@ unsafe extern "C" fn plugin_call(function_name: *const c_char, args: *const u64,
             value: 0,
             error_code: 1,
             flags: 0,
-            error_message: b"unknown function\0".as_ptr() as *const c_char,
+            error_message: c"unknown function".as_ptr(),
         },
     }
 }
@@ -160,10 +167,15 @@ unsafe impl Sync for StaticDescriptor {}
 
 static DESCRIPTOR: OnceLock<StaticDescriptor> = OnceLock::new();
 
+/// Plugin ABI entry point: builds and returns the module descriptor.
+///
+/// # Safety
+/// `host_api` must point to a valid `PluginHostApi` for the duration of the call.
+/// The catnip_vm loader upholds this contract when initializing the plugin.
 #[unsafe(no_mangle)]
-pub extern "C" fn catnip_plugin_init() -> *const PluginDescriptor {
+pub unsafe extern "C" fn catnip_plugin_init(host_api: *const PluginHostApi) -> *const PluginDescriptor {
     let sd = DESCRIPTOR.get_or_init(|| {
-        let attrs = build_attrs();
+        let attrs = build_attrs(unsafe { &*host_api });
         let fn_ptrs: Vec<*const c_char> = FN_NAMES.iter().map(|n| n.as_ptr() as *const c_char).collect();
 
         let desc = PluginDescriptor {
@@ -179,6 +191,7 @@ pub extern "C" fn catnip_plugin_init() -> *const PluginDescriptor {
             method: None,
             getattr: None,
             drop: None,
+            has_member: None,
         };
 
         StaticDescriptor {
@@ -214,12 +227,12 @@ pub mod pymodule {
         let py = m.py();
         m.add("PROTOCOL", "rust")?;
 
-        let argv = argv.unwrap_or_else(|| std::env::args().collect());
+        let argv = argv.unwrap_or_else(|| std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect());
         m.add("argv", argv)?;
 
         let environ = PyDict::new(py);
-        for (k, v) in std::env::vars() {
-            environ.set_item(&k, &v)?;
+        for (k, v) in std::env::vars_os() {
+            environ.set_item(k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())?;
         }
         m.add("environ", environ)?;
 
@@ -230,8 +243,8 @@ pub mod pymodule {
         });
         m.add("executable", executable)?;
 
-        m.add("version", env!("CARGO_PKG_VERSION"))?;
-        m.add("platform", std::env::consts::OS)?;
+        m.add("version", catnip_vm::CATNIP_VERSION)?;
+        m.add("platform", super::platform_name())?;
 
         let cpu_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         m.add("cpu_count", cpu_count)?;

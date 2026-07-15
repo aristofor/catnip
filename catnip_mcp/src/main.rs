@@ -2,6 +2,7 @@
 use rmcp::ServiceExt;
 use rmcp::transport::io::stdio;
 
+mod capture;
 mod debug_session;
 mod resources;
 mod server;

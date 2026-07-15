@@ -39,17 +39,6 @@ class PauseInfo:
     start_byte: int = 0
 
 
-# Map string commands to DebugAction
-_ACTION_MAP = {
-    'continue': DebugAction.CONTINUE,
-    'step_into': DebugAction.STEP_INTO,
-    'step': DebugAction.STEP_INTO,
-    'step_over': DebugAction.STEP_OVER,
-    'next': DebugAction.STEP_OVER,
-    'step_out': DebugAction.STEP_OUT,
-    'out': DebugAction.STEP_OUT,
-}
-
 # Map string names to DebugAction command strings for Rust
 _RUST_CMD_MAP = {
     'continue': 'continue',

@@ -22,7 +22,7 @@ brew install gmp
 Optionnel :
 
 - **Node.js + pnpm** (pour CodeMirror et l'extension VSCode)
-- **fdfind** (`fd-find`) pour le tracking incremental du makefile
+- **fdfind** (`fd-find`) pour le tracking incrémental du makefile
 
 ## Setup rapide
 
@@ -73,11 +73,14 @@ make compile
 C'est l'étape la plus longue (~2 min la première fois). Le résultat est un `.so` dans `catnip/` que Python importe
 directement.
 
-Pour un build plus rapide en dev (incremental, thin LTO) :
+Pour un build plus rapide en dev (incrémental, sans LTO, codegen-units élevé), profil `fastdev` :
 
 ```bash
-CATNIP_DEV=1 make compile
+make dev   # raccourci de CATNIP_DEV=1 make compile
 ```
+
+Le rebuild incrémental passe de ~3 min (release) à ~10 s. Les libs natives et les tests suivent le profil de la dernière
+build (`make test` après `make dev` reste en fastdev).
 
 ### 4. Installer le package
 
@@ -105,7 +108,7 @@ make test-quick
 ### Après modification de code Rust
 
 ```bash
-CATNIP_DEV=1 make compile   # Rebuild incremental (~10-30s)
+CATNIP_DEV=1 make compile   # Rebuild incrémental (~10-30s)
 make test-quick              # Validation rapide
 ```
 
@@ -127,16 +130,21 @@ make test
 
 ## Commandes de test
 
-| Commande              | Quoi                                | Durée  |
-| --------------------- | ----------------------------------- | ------ |
-| `make test-rust-fast` | Tests unitaires Rust                | ~5s    |
-| `make test-quick`     | Rust units + Python language        | ~10s   |
-| `make test`           | Tests Python complets (VM)          | ~25s   |
-| `make test-vm`        | Tests Python mode VM (parallèle)    | ~15s   |
-| `make test-ast`       | Tests Python mode AST (parallèle)   | ~15s   |
-| `make test-all`       | Rust + Python VM + AST + standalone | ~2 min |
+| Commande              | Quoi                                         | Durée  |
+| --------------------- | -------------------------------------------- | ------ |
+| `make test-rust-fast` | Tests unitaires Rust                         | ~5s    |
+| `make test-quick`     | Rust units + Python language                 | ~10s   |
+| `make test`           | Tests Python complets (VM)                   | ~25s   |
+| `make test-vm`        | Tests Python mode VM (parallèle)             | ~15s   |
+| `make test-ast`       | Tests Python mode AST (parallèle)            | ~15s   |
+| `make lint-rust`      | Clippy (`-D warnings`) sur tous les crates   | ~30s   |
+| `make test-all`       | Clippy + Rust + Python VM + AST + standalone | ~2 min |
 
 Règle pratique : `test-quick` pendant le dev, `test-all` avant de proposer un changement.
+
+`make test-all` lance `lint-rust` en premier (avant les tests) : un warning Clippy arrête la suite tout de suite, sans
+attendre les tests Python. Les crates PyO3 (`catnip_rs`, `catnip_repl`) sont lintés avec `--features embedded` ;
+`extension-module`, le feature par défaut, ne se linke pas hors de Python.
 
 ## Structure du projet
 

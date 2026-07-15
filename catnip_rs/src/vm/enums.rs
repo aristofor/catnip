@@ -38,7 +38,7 @@ impl EnumType {
 }
 
 /// Registry of all enum types, with reverse lookup from symbol to enum info.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EnumRegistry {
     types: Vec<EnumType>,
     /// symbol_id -> (enum_type_id, variant_index)
@@ -138,11 +138,11 @@ impl CatnipEnumType {
     fn __getattr__(&self, py: Python<'_>, attr: &Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
         let attr_str = attr.to_str()?;
         if self.variant_names.contains(&attr_str.to_string()) {
-            let variant = CatnipEnumVariant {
-                enum_name: self.name.clone(),
-                variant_name: attr_str.to_string(),
-                qualified: qualified_name(&self.name, attr_str),
-            };
+            let variant = CatnipEnumVariant::new_from_parts(
+                self.name.clone(),
+                attr_str.to_string(),
+                qualified_name(&self.name, attr_str),
+            );
             Ok(Py::new(py, variant)?.into_any())
         } else {
             Err(pyo3::exceptions::PyAttributeError::new_err(format!(
@@ -167,6 +167,9 @@ pub struct CatnipEnumVariant {
     #[pyo3(get)]
     pub variant_name: String,
     qualified: String,
+    /// Union methods, shared by every nullary variant of the declaring
+    /// union. Empty for plain enum variants.
+    methods: std::sync::Arc<indexmap::IndexMap<String, Py<PyAny>>>,
 }
 
 impl CatnipEnumVariant {
@@ -175,6 +178,21 @@ impl CatnipEnumVariant {
             enum_name,
             variant_name,
             qualified,
+            methods: std::sync::Arc::new(indexmap::IndexMap::new()),
+        }
+    }
+
+    pub fn new_with_methods(
+        enum_name: String,
+        variant_name: String,
+        qualified: String,
+        methods: std::sync::Arc<indexmap::IndexMap<String, Py<PyAny>>>,
+    ) -> Self {
+        Self {
+            enum_name,
+            variant_name,
+            qualified,
+            methods,
         }
     }
 }
@@ -212,6 +230,29 @@ impl CatnipEnumVariant {
         self.enum_name.hash(&mut hasher);
         self.variant_name.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Union method lookup: bind `self` (this variant) like a struct method.
+    fn __getattr__(slf: Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let this = slf.get();
+        if let Some(func) = this.methods.get(name) {
+            let bound = Py::new(
+                py,
+                crate::core::BoundCatnipMethod {
+                    func: func.clone_ref(py),
+                    instance: slf.clone().into_any().unbind(),
+                    super_source_type: None,
+                    native_instance_idx: None,
+                    native_registry_id: 0,
+                },
+            )?;
+            return Ok(bound.into_any());
+        }
+        Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+            "'{}' has no attribute '{}'",
+            this.qualified, name
+        )))
     }
 }
 

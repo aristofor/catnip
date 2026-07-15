@@ -19,6 +19,7 @@ pub enum DocNode {
     /// Break mode: `\n` + indent. Flat mode: `" "`.
     Line,
     /// Break mode: `\n` + indent. Flat mode: `""`.
+    /// Algebra primitive, exercised by tests; not currently emitted by the formatter.
     #[allow(dead_code)]
     SoftLine,
     /// Always emits `\n` + indent.
@@ -30,7 +31,6 @@ pub enum DocNode {
     /// Sequence of two docs.
     Concat(Doc, Doc),
     /// Choose between flat and broken rendering.
-    #[allow(dead_code)]
     IfFlat { flat: Doc, broken: Doc },
     /// Opaque multi-line content (e.g. triple-quoted strings), emitted verbatim.
     Verbatim(String),
@@ -72,7 +72,7 @@ impl Arena {
         self.alloc(DocNode::Line)
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // algebra primitive, exercised by tests only
     pub fn softline(&mut self) -> Doc {
         self.alloc(DocNode::SoftLine)
     }
@@ -93,7 +93,6 @@ impl Arena {
         self.alloc(DocNode::Concat(a, b))
     }
 
-    #[allow(dead_code)]
     pub fn if_flat(&mut self, flat: Doc, broken: Doc) -> Doc {
         self.alloc(DocNode::IfFlat { flat, broken })
     }

@@ -7,13 +7,13 @@ use crate::debug_session::{DebugEvent, McpDebugSession, PausedState, SessionComm
 use crate::server::CatnipMcpServer;
 
 fn success_json(payload: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+    Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
         serde_json::to_string(&payload).unwrap(),
     )]))
 }
 
 fn error_json(msg: &str) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+    Ok(CallToolResult::error(vec![rmcp::model::ContentBlock::text(
         serde_json::to_string(&serde_json::json!({ "error": msg })).unwrap(),
     )]))
 }

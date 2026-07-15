@@ -23,8 +23,6 @@ pub struct NDScheduler {
     pub n_workers: usize,
     /// Process executor (None = not initialized)
     executor: Option<Py<PyAny>>,
-    /// Thread executor (None = not initialized)
-    thread_executor: Option<Py<PyAny>>,
     /// Execution mode: 'sequential', 'thread', or 'process'
     #[pyo3(get)]
     pub mode: String,
@@ -55,7 +53,6 @@ impl NDScheduler {
         Ok(Self {
             n_workers: actual_workers,
             executor: None,
-            thread_executor: None,
             mode: mode.to_string(),
             memoize_cache: HashMap::new(),
             memoize_enabled,
@@ -118,16 +115,6 @@ impl NDScheduler {
             }
         }
 
-        // Create the thread executor on demand
-        {
-            let mut self_ref = self_.borrow_mut();
-            if self_ref.thread_executor.is_none() {
-                let cf = py.import("concurrent.futures")?;
-                let executor = cf.getattr("ThreadPoolExecutor")?.call1((self_ref.n_workers,))?;
-                self_ref.thread_executor = Some(executor.unbind());
-            }
-        }
-
         // Create recur handle
         let self_obj: Py<PyAny> = self_.clone().into_any().unbind();
         let recur = Py::new(py, NDRecur::create(self_obj, nd_lambda.clone_ref(py), None, "thread"))?;
@@ -151,6 +138,22 @@ impl NDScheduler {
     #[pyo3(signature = (seed, nd_lambda))]
     fn execute_process(self_: Bound<'_, Self>, seed: Py<PyAny>, nd_lambda: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let py = self_.py();
+
+        // A builtin shadowed by a user callable (e.g. `str = (x) => {...}`) can't
+        // ship to a fresh worker, which would resolve the name to its own builtin
+        // and silently diverge -- no error to trigger the reactive fallback below.
+        // Detect it up front and take the shared-memory thread path.
+        if lambda_shadows_builtin(py, &nd_lambda) {
+            return Self::execute_thread(self_, seed, nd_lambda);
+        }
+
+        // A non-picklable seed (e.g. a struct instance) can't cross to a separate
+        // process; run it on the thread path in-process instead of crashing --
+        // mirrors the VM-mode policy (parallelise what serializes, thread the rest,
+        // never a pickle crash).
+        if py.import("pickle")?.call_method1("dumps", (&seed,)).is_err() {
+            return Self::execute_thread(self_, seed, nd_lambda);
+        }
 
         // Check if processes are available
         {
@@ -188,8 +191,18 @@ impl NDScheduler {
                 .call_method1("submit", (worker_fn, &seed, &nd_lambda))?
         };
 
-        // Wait for result
-        py_future.call_method0("result")?.extract().map_err(Into::into)
+        // Wait for the result. A fresh worker process can't see the parent's
+        // globals or a captured function, so a lambda referencing them raises
+        // (CatnipNameError). Fall back to the shared-memory thread path rather
+        // than failing the batch -- mirrors VM-mode's "non-freezable capture ->
+        // thread" policy (parallelise what ships, thread the rest).
+        match py_future
+            .call_method0("result")
+            .and_then(|r| r.extract::<Py<PyAny>>().map_err(Into::into))
+        {
+            Ok(result) => Ok(result),
+            Err(_) => Self::execute_thread(self_, seed, nd_lambda),
+        }
     }
 
     /// Submit a recursive call.
@@ -236,12 +249,9 @@ impl NDScheduler {
 
         self.mode = mode.to_string();
 
-        // Create executors on demand
-        if mode == "thread" && self.thread_executor.is_none() {
-            let cf = py.import("concurrent.futures")?;
-            let executor = cf.getattr("ThreadPoolExecutor")?.call1((self.n_workers,))?;
-            self.thread_executor = Some(executor.unbind());
-        } else if mode == "process" && self.executor.is_none() && self.processes_available {
+        // Create the process executor on demand (thread mode calls the lambda
+        // in-place; the real thread parallelism lives in the VM host's rayon path)
+        if mode == "process" && self.executor.is_none() && self.processes_available {
             match create_process_executor(py, self.n_workers) {
                 Ok(executor) => self.executor = Some(executor),
                 Err(_) => self.processes_available = false,
@@ -288,6 +298,22 @@ impl NDScheduler {
     }
 }
 
+/// True if the callback's context has a builtin shadowed by a Catnip callable,
+/// which the fresh worker process would resolve to its own builtin instead.
+/// Best-effort: any missing hop (not a Catnip callable, no context) means no
+/// detectable shadow, so the normal worker path proceeds.
+fn lambda_shadows_builtin(py: Python<'_>, nd_lambda: &Py<PyAny>) -> bool {
+    (|| -> PyResult<bool> {
+        nd_lambda
+            .bind(py)
+            .getattr("registry")?
+            .getattr("ctx")?
+            .call_method0("has_shadowed_builtin_callable")?
+            .extract()
+    })()
+    .unwrap_or(false)
+}
+
 /// Create ProcessPoolExecutor with worker initialization.
 fn create_process_executor(py: Python<'_>, n_workers: usize) -> PyResult<Py<PyAny>> {
     let mp = py.import("multiprocessing")?;
@@ -314,9 +340,6 @@ impl Drop for NDScheduler {
         // Shutdown executors
         Python::attach(|py| {
             if let Some(ref executor) = self.executor {
-                let _ = executor.bind(py).call_method1("shutdown", (true,));
-            }
-            if let Some(ref executor) = self.thread_executor {
                 let _ = executor.bind(py).call_method1("shutdown", (true,));
             }
         });

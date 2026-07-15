@@ -709,3 +709,32 @@ class TestDeepAnalysis:
         code = "f = () => {\n    if cond {\n        return 1\n    } else {  # noqa: W313\n        do(x)\n    }\n}"
         result = self._lint(code)
         assert not any(d.code == 'W313' for d in result.diagnostics)
+
+
+class TestDisabledCodes:
+    """Config-level on/off via disabled_codes (CLI --disable / [lint] disable)."""
+
+    def test_disable_style_code(self):
+        # W101 flows through tools::lint_code
+        base = lint_code("x = 1  \n", check_syntax=False, check_semantic=False)
+        assert any(d.code == 'W101' for d in base.diagnostics)
+        filtered = lint_code("x = 1  \n", check_syntax=False, check_semantic=False, disabled_codes=['W101'])
+        assert not any(d.code == 'W101' for d in filtered.diagnostics)
+
+    def test_disable_semantic_code(self):
+        # I103 is appended on the shims semantic path, after tools::lint_code's filter
+        code = "x = 1\nmatch x { 1 => { 1 } }"
+        base = lint_code(code, check_syntax=False, check_style=False)
+        assert any(d.code == 'I103' for d in base.diagnostics)
+        filtered = lint_code(code, check_syntax=False, check_style=False, disabled_codes=['I103'])
+        assert not any(d.code == 'I103' for d in filtered.diagnostics)
+
+    def test_disable_does_not_touch_other_codes(self):
+        code = "x = 1\nmatch x { 1 => { 1 } }"
+        filtered = lint_code(code, check_syntax=False, check_style=False, disabled_codes=['W200'])
+        assert any(d.code == 'I103' for d in filtered.diagnostics)
+
+    def test_disable_empty_is_noop(self):
+        code = "x = 1\nmatch x { 1 => { 1 } }"
+        result = lint_code(code, check_syntax=False, check_style=False, disabled_codes=[])
+        assert any(d.code == 'I103' for d in result.diagnostics)

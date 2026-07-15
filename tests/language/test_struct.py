@@ -554,3 +554,32 @@ p"""
         p.x = 99
     msg = str(exc_info.value).lower()
     assert "mutate" in msg or "hashed" in msg
+
+
+class TestMethodSelfSharing:
+    """`self` dans une méthode EST l'instance receveuse : une mutation de champ
+    persiste après l'appel, dans les deux modes d'exécution.
+
+    Régression (2026-07-07) : le `__getattr__` du proxy liait la méthode à un
+    CLONE du proxy — inoffensif en VM (le clone porte l'index registry, SetAttr
+    atteint l'instance partagée) mais fatal en AST (field_values clonées :
+    la mutation mourait avec l'appel, `p.m()` ne faisait silencieusement rien).
+    """
+
+    CASES = [
+        ('struct P { log; m(self) => { self.log = 1 } }\np = P(0)\np.m()\np.log', 1),
+        ('struct P { log; m(self) => { self.log = self.log + 1 } }\np = P(0)\np.m()\np.m()\np.log', 2),
+        ('struct P { log; m(self) => { self.log = 1 } }\np = P(0)\nq = p\nq.m()\np.log', 1),
+        ('struct P { log; m(self) => { self.log = 1 } }\nf = (x) => { x.m() }\np = P(0)\nf(p)\np.log', 1),
+        ('struct P { log; m(self) => { self } }\np = P(0)\nr = p.m()\nr.log = 9\np.log', 9),
+        ('struct P { log; m(self) => { self.log = 1 } }\np = P(0)\nmm = p.m\nmm()\np.log', 1),
+    ]
+
+    @pytest.mark.parametrize('code,expected', CASES)
+    def test_method_mutation_persists_both_modes(self, code, expected):
+        from catnip import Catnip
+
+        for mode in ('on', 'off'):
+            c = Catnip(vm_mode=mode)
+            c.parse(code)
+            assert c.execute() == expected, f'vm_mode={mode}'

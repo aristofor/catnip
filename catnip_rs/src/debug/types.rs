@@ -71,7 +71,12 @@ impl<T> SendPtr<T> {
     }
 }
 
+// SAFETY: SendPtr is a plain raw-pointer wrapper that owns nothing; the validity and
+// non-concurrent-access contract is enforced at the as_ref call site (see type doc above),
+// so moving it across threads transfers no shared mutable state.
 unsafe impl<T> Send for SendPtr<T> {}
+// SAFETY: SendPtr has no interior mutability and as_ref's contract already forbids
+// concurrent mutation of the pointee, so sharing &SendPtr across threads is sound.
 unsafe impl<T> Sync for SendPtr<T> {}
 
 // --- Constants (migrated from Python constants.py) ---

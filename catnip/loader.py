@@ -18,6 +18,10 @@ from .exc import CatnipRuntimeError
 
 _PROTOCOLS = frozenset(('py', 'rs', 'cat'))
 
+# Module search path env var; keep in sync with catnip_core::constants::ENV_CATNIP_PATH
+# (the Rust resolver reads the same variable in catnip_core/src/loader/resolve.rs)
+_ENV_CATNIP_PATH = 'CATNIP_PATH'
+
 # Stdlib native modules: bare Catnip name -> (crate import name, needs post-import config)
 # @generated-stdlib-start
 _STDLIB_MODULES = {
@@ -330,7 +334,7 @@ class ModuleLoader:
             if d not in seen:
                 seen.add(d)
                 dirs.append(d)
-        env = os.environ.get("CATNIP_PATH", "")
+        env = os.environ.get(_ENV_CATNIP_PATH, "")
         if env:
             for entry in env.split(os.pathsep):
                 p = Path(entry).resolve()

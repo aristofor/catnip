@@ -27,7 +27,7 @@ mod tests {
             ("FSTRING", IROpCode::Fstring),
             ("CALL", IROpCode::Call),
         ];
-        Python::initialize();
+        crate::test_support::init_python();
         Python::attach(|py| {
             let opcode_class = py.import(PY_MOD_SEMANTIC_OPCODE).unwrap().getattr("OpCode").unwrap();
             for (name, opcode) in pairs {

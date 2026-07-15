@@ -47,6 +47,21 @@ pub enum ValueKey {
     BigInt(Arc<GmpInt>),
     Tuple(Arc<[ValueKey]>),
     Complex(u64, u64), // (real bits, imag bits) -- imag != 0.0
+    /// Snapshot of a struct instance (and union payload variants, which are
+    /// struct instances) hashed as a dict/set key. The fields are frozen at
+    /// hash time -- the source instance is locked against mutation -- so the
+    /// snapshot stays consistent with structural equality (`deep_eq`).
+    ///
+    /// `hash_override` carries the result of a custom `op_hash` when the type
+    /// defines one; it feeds the hash only. Equality stays structural (on
+    /// `type_id` and `fields`), so `a == b` keeps `deep_eq` semantics. Keeping
+    /// `op_hash` consistent with that equality (`a == b` => `hash(a) == hash(b)`)
+    /// is the user's responsibility, as in the PyO3 runtime.
+    Struct {
+        type_id: u32,
+        fields: Arc<[ValueKey]>,
+        hash_override: Option<i64>,
+    },
 }
 
 /// Try to normalize a numeric ValueKey to i64 for cross-type hashing/equality.
@@ -113,6 +128,20 @@ impl Hash for ValueKey {
                 r_bits.hash(state);
                 i_bits.hash(state);
             }
+            ValueKey::Struct {
+                type_id,
+                fields,
+                hash_override,
+            } => {
+                8u8.hash(state);
+                type_id.hash(state);
+                // A custom op_hash supersedes the structural field hash; without
+                // one the fields drive the hash, matching structural equality.
+                match hash_override {
+                    Some(h) => h.hash(state),
+                    None => fields.hash(state),
+                }
+            }
             // Int/Bool always handled by numeric_as_i64 above
             _ => unreachable!(),
         }
@@ -127,12 +156,23 @@ impl PartialEq for ValueKey {
             (ValueKey::Symbol(a), ValueKey::Symbol(b)) => return a == b,
             (ValueKey::Str(a), ValueKey::Str(b)) => return a == b,
             (ValueKey::Tuple(a), ValueKey::Tuple(b)) => return a == b,
+            (
+                ValueKey::Struct {
+                    type_id: at,
+                    fields: af,
+                    ..
+                },
+                ValueKey::Struct {
+                    type_id: bt,
+                    fields: bf,
+                    ..
+                },
+            ) => return at == bt && af == bf,
             _ => {}
         }
         // Complex equality
-        match (self, other) {
-            (ValueKey::Complex(ar, ai), ValueKey::Complex(br, bi)) => return ar == br && ai == bi,
-            _ => {}
+        if let (ValueKey::Complex(ar, ai), ValueKey::Complex(br, bi)) = (self, other) {
+            return ar == br && ai == bi;
         }
         // Numeric cross-type equality
         if is_numeric(self) && is_numeric(other) {
@@ -182,13 +222,56 @@ impl ValueKey {
                 Value::from_tuple(values)
             }
             ValueKey::Complex(r_bits, i_bits) => Value::from_complex(f64::from_bits(*r_bits), f64::from_bits(*i_bits)),
+            // Struct keys hold no live registry handle; rebuilding the instance
+            // needs the registry, so materialization goes through
+            // `PureVM::key_to_value`. Reaching here means a struct key escaped
+            // that path -- a routing bug.
+            ValueKey::Struct { .. } => {
+                unreachable!("ValueKey::Struct must be materialized via PureVM::key_to_value")
+            }
         }
     }
 }
 
+/// Context for turning struct instances into hashable keys. Abstracts the
+/// registry queries plus the synchronous `op_hash` invocation, so the recursion
+/// in `to_key_impl` can honor a custom `op_hash` at every nesting level: the
+/// PyO3 runtime hashes each field through `hash()`, which dispatches to that
+/// field's `op_hash`, and this keeps the pure runtime in step. Implemented by
+/// the VM (`KeyBuilder`), which alone can run a method and reach the host.
+/// `to_key` (no context) rejects structs, matching the host paths that have no
+/// registry.
+pub trait KeyCtx {
+    /// True if the type defines a custom `op_eq` (=> unhashable).
+    fn type_defines_op_eq(&self, type_id: u32) -> bool;
+    /// Func-table index of the type's custom `op_hash`, if any.
+    fn type_op_hash_func(&self, type_id: u32) -> Option<u32>;
+    /// Type name for error messages.
+    fn type_name(&self, type_id: u32) -> String;
+    /// Run `op_hash` synchronously on the instance, returning its int result.
+    fn call_op_hash(&mut self, func_idx: u32, instance: Value) -> VMResult<i64>;
+}
+
 impl Value {
-    /// Convert Value to a hashable ValueKey. Errors if unhashable (list, dict, set).
+    /// Convert Value to a hashable ValueKey without registry access. Errors if
+    /// unhashable (list, dict, set, or any struct -- struct keys need a
+    /// `KeyCtx`, see `to_key_ctx`).
     pub fn to_key(self) -> VMResult<ValueKey> {
+        self.to_key_impl(None)
+    }
+
+    /// Like `to_key`, but with a `KeyCtx` so struct instances (and union payload
+    /// variants) can be hashed: the fields are snapshotted into the key and the
+    /// source instance is frozen against mutation. A struct whose type defines a
+    /// custom `op_eq` is rejected as unhashable (the "op_eq without op_hash"
+    /// rule); a custom `op_hash` is honored at every nesting level.
+    pub fn to_key_ctx(self, ctx: &mut dyn KeyCtx) -> VMResult<ValueKey> {
+        self.to_key_impl(Some(ctx))
+    }
+
+    // The trait-object lifetime `'a` is decoupled from the reference lifetime so
+    // `ctx.as_deref_mut()` reborrows can be released between loop iterations.
+    fn to_key_impl<'a>(self, mut ctx: Option<&mut (dyn KeyCtx + 'a)>) -> VMResult<ValueKey> {
         if let Some(i) = self.as_int() {
             return Ok(ValueKey::Int(i));
         }
@@ -206,17 +289,29 @@ impl Value {
         }
         if self.is_native_str() {
             let ptr = (self.to_raw() & PAYLOAD_MASK) as *const NativeString;
+            // SAFETY: the is_native_str tag guarantees ptr is a live Arc<NativeString>
+            // payload (from Arc::into_raw); the increment accounts for the extra owner
+            // materialized by from_raw below, leaving the NaN-box's own reference intact.
             unsafe { Arc::increment_strong_count(ptr) };
+            // SAFETY: ptr came from Arc::into_raw on the same NativeString and the strong
+            // count was just incremented, so reconstructing one Arc here is balanced.
             let arc = unsafe { Arc::from_raw(ptr) };
             return Ok(ValueKey::Str(arc));
         }
         if self.is_bigint() {
             let ptr = (self.to_raw() & PAYLOAD_MASK) as *const GmpInt;
+            // SAFETY: the is_bigint tag guarantees ptr is a live Arc<GmpInt> payload
+            // (from Arc::into_raw); the increment accounts for the extra owner
+            // materialized by from_raw below, leaving the NaN-box's own reference intact.
             unsafe { Arc::increment_strong_count(ptr) };
+            // SAFETY: ptr came from Arc::into_raw on the same GmpInt and the strong count
+            // was just incremented, so reconstructing one Arc here is balanced.
             let arc = unsafe { Arc::from_raw(ptr) };
             return Ok(ValueKey::BigInt(arc));
         }
         if self.is_complex() {
+            // SAFETY: the is_complex tag was checked above, so the payload holds the
+            // two f64 parts; reading them does not outlive `self`.
             let (r, i) = unsafe { self.as_complex_parts().unwrap() };
             if i == 0.0 {
                 // Pure real complex hashes like float for cross-type equality
@@ -225,9 +320,48 @@ impl Value {
             return Ok(ValueKey::Complex(r.to_bits(), i.to_bits()));
         }
         if self.is_native_tuple() {
+            // SAFETY: the is_native_tuple tag was checked above, so the payload is a live
+            // Arc<NativeTuple> owned by `self`; the borrow does not outlive it.
             let t = unsafe { self.as_native_tuple_ref().unwrap() };
-            let keys: VMResult<Vec<ValueKey>> = t.as_slice().iter().map(|v| v.to_key()).collect();
-            return Ok(ValueKey::Tuple(keys?.into()));
+            let slice = t.as_slice();
+            let mut keys = Vec::with_capacity(slice.len());
+            for v in slice {
+                keys.push(v.to_key_impl(ctx.as_deref_mut())?);
+            }
+            return Ok(ValueKey::Tuple(keys.into()));
+        }
+        // SAFETY: the owning Value lives on the stack for this transient borrow and is not decref'd while the reference is used.
+        if let Some(cell) = unsafe { self.as_struct_ref() } {
+            // Without a context (host paths with no registry) a struct stays
+            // unhashable, like the catch-all below. type_id / fields / freeze come
+            // straight from the cell; only the type-level queries need the ctx.
+            let ctx = match ctx {
+                Some(c) => c,
+                None => return Err(VMError::TypeError(format!("unhashable type: '{}'", self.type_name()))),
+            };
+            let type_id = cell.type_id;
+            if ctx.type_defines_op_eq(type_id) {
+                return Err(VMError::TypeError(format!(
+                    "unhashable type: '{}' (defines op_eq without op_hash)",
+                    ctx.type_name(type_id)
+                )));
+            }
+            // Snapshot fields first (honors a nested op_hash), then the
+            // instance's own op_hash, then lock it against mutation.
+            let mut fields = Vec::with_capacity(cell.field_count());
+            for v in cell.field_values() {
+                fields.push(v.to_key_impl(Some(&mut *ctx))?);
+            }
+            let hash_override = match ctx.type_op_hash_func(type_id) {
+                Some(f) => Some(ctx.call_op_hash(f, self)?),
+                None => None,
+            };
+            cell.frozen.set(true);
+            return Ok(ValueKey::Struct {
+                type_id,
+                fields: fields.into(),
+                hash_override,
+            });
         }
         Err(VMError::TypeError(format!("unhashable type: '{}'", self.type_name())))
     }
@@ -244,7 +378,7 @@ impl Value {
             "NoneType"
         } else if self.is_native_str() {
             "str"
-        } else if self.is_vmfunc() {
+        } else if self.is_vmfunc() || self.is_closure() {
             "function"
         } else if self.is_native_list() {
             "list"
@@ -266,6 +400,8 @@ impl Value {
             "module"
         } else if self.is_enum_type() {
             "type"
+        } else if self.is_union_type() {
+            "union"
         } else if self.is_complex() {
             "complex"
         } else if self.is_meta() {

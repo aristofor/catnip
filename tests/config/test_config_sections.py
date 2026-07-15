@@ -98,6 +98,27 @@ class TestConfigSections:
         assert format_config.indent_size == 4  # From [format]
         assert format_config.line_length == 120  # From [format]
 
+    def test_lint_disable_section(self):
+        """Test loading [lint] disable list."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.toml', delete=False) as f:
+            f.write(dedent("""\
+                [lint]
+                disable = ["W401", "I200"]
+                """))
+            config_path = Path(f.name)
+
+        try:
+            mgr = ConfigManager()
+            mgr.load_file(config_path)
+            assert mgr.get_lint_disable() == ['W401', 'I200']
+        finally:
+            config_path.unlink()
+
+    def test_lint_disable_default_empty(self):
+        """Test that [lint] disable defaults to empty."""
+        mgr = ConfigManager()
+        assert mgr.get_lint_disable() == []
+
     def test_env_vars_override_sections(self):
         """Test that env vars still override file sections."""
         import os

@@ -215,8 +215,15 @@ union Result[T, E] {
 }
 ```
 
-Les annotations de type et paramètres génériques sont parsés mais non encore vérifiés au runtime. Le pattern matching
-utilise `Union.Variant{field}` pour les variantes avec payload, `Union.Variant` pour les nullaires :
+Les annotations de type sur les paramètres sont appliquées à l'entrée de la fonction (voir [FUNCTIONS](FUNCTIONS.md), «
+Arité ») : primitives (`int`, `float`, `bool`, `None`) vérifiées et coercées selon la tour numérique, types nominaux
+(structs/enums/unions/traits) vérifiés avec sous-typage sans coercion, et unions de types (`int | str`, `Point | None`)
+acceptées si la valeur satisfait l'un des membres. Les composites `list[T]`/`set[T]`/`dict[K, V]`/`tuple[...]` sont
+vérifiés conteneur **et** paramètres (élément, clé/valeur ou position, récursivement), les génériques nominaux
+(`Option[int]`) avec substitution des paramètres dans les payloads, et les types de fonctions (`(int, str) -> bool`,
+flèche absorbante à droite) sur la callabilité et l'arité — le retour d'un callback est vérifié à chaque appel, côté
+appelant. Le pattern matching utilise `Union.Variant{field}` pour les variantes avec payload, `Union.Variant` pour les
+nullaires :
 
 <!-- check: no-check -->
 
@@ -227,7 +234,27 @@ match opt {
 }
 ```
 
-Voir [UNIONS](UNIONS.md) pour la référence complète.
+Une union peut déclarer des méthodes après ses variantes -- au niveau de l'union, `self` reçoit la variante appelée et
+le corps discrimine par `match` :
+
+```catnip
+union Opt {
+    Some(value);
+    Nothing;
+
+    unwrap_or(self, default) => {
+        match self {
+            Opt.Some{value} => { value }
+            Opt.Nothing => { default }
+        }
+    }
+}
+
+Opt.Some(7).unwrap_or(0)
+# → 7
+```
+
+Voir [UNIONS](UNIONS.md) pour la référence complète (méthodes, égalité, exhaustivité).
 
 ______________________________________________________________________
 

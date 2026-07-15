@@ -28,18 +28,25 @@ flowchart TD
     HOST --> RS["VMHost (Standalone)"]
     HOST --> PURE["PureVM (catnip_vm)"]
 
-    PY --> REG["Registry Rust"]
+    PY --> FAST{"lambda = VMFunction ?"}
+    FAST -->|oui| NDVMDECL["NDVmDecl (frame-stack recursion, bypass Registry)"]
+    FAST -->|non| REG["Registry Rust"]
     REG --> SCHED["NDScheduler"]
     SCHED --> SEQ["Sequential"]
-    SCHED --> THR["ThreadPool"]
-    SCHED --> PROC["ProcessPool"]
+    SCHED --> PROC_REQ{"Process demandé ?"}
+    PROC_REQ -->|non| THR["ThreadPool"]
+    PROC_REQ -->|oui| SHADOW1{"builtin shadowé par fn user ?"}
+    SHADOW1 -->|oui : fallback| THR
+    SHADOW1 -->|non| PROC["ProcessPool"]
 
     RS --> ND_CFG{"NdMode"}
     ND_CFG --> SEQ2["Sequential"]
     ND_CFG --> RAY["Rayon (par_iter)"]
     ND_CFG --> PROC_TRY{"Freezable?"}
-    PROC_TRY -->|oui| POOL["WorkerPool (Rust IPC)"]
-    PROC_TRY -->|non| PROC2["ProcessPoolExecutor (Python)"]
+    PROC_TRY -->|non| RAY
+    PROC_TRY -->|oui| SHADOW2{"builtin shadowé par fn user ?"}
+    SHADOW2 -->|oui : fallback| RAY
+    SHADOW2 -->|non| POOL["WorkerPool (Rust IPC)"]
     POOL --> WORKER["catnip worker"]
 
     PURE --> BC_MOD["broadcast.rs"]
@@ -80,8 +87,8 @@ Opérateur `~~` - récursion non-déterministe avec 2 formes.
 
 **Arguments** :
 
-- `arg = 0` : Combinator form `~~(seed, lambda)`
-- `arg = 1` : Declaration form `~~ lambda`
+- `arg = 0` : forme combinator `~~(seed, lambda)`
+- `arg = 1` : forme déclaration `~~ lambda`
 
 **Implémentation** :
 
@@ -94,7 +101,7 @@ OpCode::NdRecursion => {
         let result = registry.execute_nd_recursion_py(seed, lambda)
         frame.push(result)
     } else {
-        // Declaration: pop lambda, wrap in NDDeclaration
+        // Déclaration: pop lambda, wrap in NDDeclaration
         let lambda = frame.pop()
         let decl = NDDeclaration::new(lambda, ctx)
         frame.push(decl)
@@ -113,7 +120,7 @@ LoadConst 0        # Push 5
 LoadConst 1        # Push lambda
 NdRecursion 0      # Execute combinator
 
-# Declaration: countdown = ~~(n, r) => n - 1
+# Déclaration: countdown = ~~(n, r) => n - 1
 LoadConst 0        # Push lambda
 NdRecursion 1      # Wrap in NDDeclaration
 StoreLocal 0       # Store countdown
@@ -274,18 +281,23 @@ pub fn execute_nd_recursion_py(seed, lambda) -> result {
 
 Le NDScheduler gère :
 
-- **Memoization** : cache des résultats (si `pragma("nd_memoize", True)`)
+- **Mémoïsation** : cache des résultats (si `pragma("nd_memoize", True)`)
 - **Concurrence** : ThreadPoolExecutor ou ProcessPoolExecutor
 
 ### VMHost (Standalone)
 
 Exécution directe avec trois modes configurables via `NdConfig` :
 
-- **Sequential** : boucle simple, `NDVmDecl`/`NDVmRecur` (memoization `RefCell<HashMap>`)
-- **Thread (rayon)** : parallélisme via `par_iter().map_with()`, `NDParallelDecl`/`NDParallelRecur` (memoization
+- **Sequential** : boucle simple, `NDVmDecl`/`NDVmRecur` (mémoïsation `RefCell<HashMap>`)
+- **Thread (rayon)** : parallélisme via `par_iter().map_with()`, `NDParallelDecl`/`NDParallelRecur` (mémoïsation
   `Arc<Mutex<HashMap>>`, depth `AtomicUsize`)
-- **Process** : pool de workers Rust natifs (`catnip worker`) avec IPC postcard. Si la lambda et ses captures ne sont
-  pas freezables, fallback vers `ProcessPoolExecutor` Python avec `_worker_execute_simple`
+- **Process** : pool de workers Rust natifs (`catnip worker`) avec IPC postcard -- parallélisme CPU réel, y compris pour
+  les **structs plats** (frontière v1 : `FrozenStructType` transmis dans `Execute.type_defs`, reconstruit par nom côté
+  worker). Si la lambda, ses captures, ses seeds ou un global qu'elle référence ne sont pas freezables, fallback vers le
+  chemin **thread** (rayon, `run_nd_recursion_thread`) -- jamais de pickle. `submit_to_worker_pool` détecte aussi en
+  amont un builtin masqué par une fonction utilisateur (`str = (x) => {...}`, `Value::is_vmfunc()` + `hasattr`) : le
+  worker résoudrait *son* builtin pré-installé, une divergence qu'aucune erreur ne signalerait -- d'où le fallback avant
+  soumission
 
 ```rust
 // vm/host.rs - VMHost
@@ -296,11 +308,11 @@ fn broadcast_nd_recursion(&self, py, target, lambda) -> Result<...> {
             // rayon par_iter, GIL release, thread-local globals
         }
         NdMode::Process => {
-            // 1. Tenter le chemin natif Rust
+            // 1. Tenter le chemin natif Rust (freezable, structs plats compris)
             if let Some(results) = self.try_native_nd_recursion(py, &elements, lambda)? {
                 return Ok(results);  // WorkerPool IPC postcard
             }
-            // 2. Fallback Python ProcessPoolExecutor
+            // 2. Fallback thread (rayon) -- run_nd_recursion_thread, jamais de pickle
         }
     }
 }
@@ -310,7 +322,7 @@ Configuration : `Pipeline.set_nd_mode("thread" | "sequential" | "process")`
 
 **Optimisation NDVmRecur** : `NDVmDecl.__call__` extrait `vm_code`/`vm_closure` du `VMFunction` lambda. Le VM Call
 opcode détecte `NDVmRecur` avec `vm_code` et pousse un frame sur la stack courante au lieu de créer une VM par appel
-récursif. Tracking via `NdRecurEntry` dans `nd_recur_stack` (depth guard, memoization cache, cleanup sur frame pop et
+récursif. Tracking via `NdRecurEntry` dans `nd_recur_stack` (depth guard, cache de mémoïsation, cleanup sur frame pop et
 error path).
 
 ### PureVM (catnip_vm)
@@ -320,7 +332,7 @@ uniquement.
 
 **Broadcast** : `apply_broadcast()` itère sur les éléments d'une liste/tuple et applique l'opérateur (string binaire ou
 VMFunc) via `apply_single()`. Deep broadcast automatique : si un élément est lui-même une collection, récursion. Type
-preservation : list→list, tuple→tuple. Filter par condition ou masque booléen.
+préservation : list→list, tuple→tuple. Filter par condition ou masque booléen.
 
 **Appel synchrone** : `call_vmfunc_sync()` sauvegarde le frame_stack (`std::mem::take`), crée un nouveau frame, exécute
 `dispatch()`, puis restaure le frame_stack. Permet d'appeler des VMFunc depuis la logique broadcast sans modifier la
@@ -340,7 +352,7 @@ Les pragmas ND sont lus par le Context Python et passés au NDScheduler :
 ```python
 pragma("nd_mode", ND.sequential)  # ou ND.thread, ND.process
 pragma("nd_workers", 8)          # nombre de workers
-pragma("nd_memoize", True)       # activer memoization
+pragma("nd_memoize", True)       # activer la mémoïsation
 pragma("nd_batch_size", 100)     # taille des batches
 ```
 
@@ -398,7 +410,7 @@ Coût : ~5-10 ns par dispatch (vs ~100-200 ns pour lookup Python dict).
 La forme lift est un no-op (0 alloc). La forme déclaration alloue un `NDDeclaration` wrapper (1 alloc) :
 
 ```rust
-// Declaration: ~~ lambda
+// Déclaration: ~~ lambda
 NdRecursion 1      # Pop lambda, wrap in NDDeclaration (1 alloc)
 
 // Lift: ~> f
@@ -410,7 +422,7 @@ NdMap 1            # Pop + Push same func (0 alloc)
 Les opérations ND actuelles ne sont pas JIT-compilables car elles :
 
 1. Peuvent bloquer (modes thread/process/rayon)
-1. Ont des side-effects (memoization)
+1. Ont des side-effects (mémoïsation)
 1. Le chemin ContextHost appelle du code Python (NDScheduler)
 
 Le chemin VMHost (standalone) est plus proche du JIT : la boucle séquentielle est du Rust pur. Pistes d'optimisation
@@ -427,12 +439,12 @@ AST et VM.
 
 ## Références
 
-- `catnip_rs/src/vm/host.rs` : trait `VmHost`, `NdMode`, `NdConfig`, broadcast ND delegation
-- `catnip_rs/src/vm/core.rs` : handlers VM (opcodes ND, dispatch au host)
+- `catnip_rs/src/vm/host.rs` : trait `VmHost`, `NdMode`, `NdConfig`, broadcast ND délégation
+- `catnip_rs/src/vm/core/mod.rs` : handlers VM (opcodes ND, dispatch au host)
 - `catnip_rs/src/nd/` : `NDScheduler`, `NDVmDecl`, `NDParallelDecl`, `NDRecur`
 - `catnip_rs/src/core/registry/nd.rs` : logique ND AST (Registry)
 - `catnip_vm/src/vm/broadcast.rs` : broadcast et ND en PureVM (Rust pur, sans PyO3)
-- `catnip_vm/src/vm/core.rs` : dispatch loop PureVM (opcodes Broadcast, NdRecursion, NdMap, NdEmptyTopos)
+- `catnip_vm/src/vm/core/mod.rs` : dispatch loop PureVM (opcodes Broadcast, NdRecursion, NdMap, NdEmptyTopos)
 - `catnip/nd.py` : NDTopos, worker functions (process mode)
 - `docs/lang/PRAGMAS.md` : spécification langage (section ND-récursion)
 

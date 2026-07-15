@@ -427,11 +427,17 @@ fn convert_member(arena: &mut Arena, node: Node, source: &[u8], indent: i32) -> 
             convert_arguments(arena, node, source, indent)
         }
         "index" => {
-            if let Some(expr) = node.named_child(0) {
-                let expr_doc = convert(arena, expr, source, indent);
-                arena.surround("[", expr_doc, "]")
-            } else {
+            // Handle single and tuple subscripts (`arr[y, x]`): join every index
+            // child with `, `, not just the first, so extra indices aren't dropped.
+            let mut cursor = node.walk();
+            let children: Vec<Node> = node.named_children(&mut cursor).collect();
+            if children.is_empty() {
                 arena.text(node_text(node, source))
+            } else {
+                let docs: Vec<Doc> = children.iter().map(|c| convert(arena, *c, source, indent)).collect();
+                let sep = arena.text(", ");
+                let body = arena.intersperse(&docs, sep);
+                arena.surround("[", body, "]")
             }
         }
         "broadcast" | "fullslice" => {

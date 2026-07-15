@@ -32,7 +32,7 @@ test = [
 ]
 dev = [
     "catnip-lang[test]",
-    "cibuildwheel>=3.4,<4",
+    "cibuildwheel>=4.0,<5",
     "build>=1.4,<2",
     "ruff>=0.15,<1",
     "numpy>=2.4,<3",
@@ -43,8 +43,13 @@ dev = [
     "setuptools-rust>=1.12,<2"
 ]
 
-# Exemples d'intégration par catégorie
-examples-data = [
+# Exemples du langage (docs/examples/) : seule dépendance externe = cryptography
+examples-all = [
+    "cryptography>=43,<49"
+]
+
+# Codex -- intégrations Python par catégorie (1 extra = 1 dossier codex/)
+codex-data-analytics = [
     "numpy>=2.4,<3",
     "pandas>=3.0,<4",
     "duckdb>=1.4,<2",
@@ -53,60 +58,99 @@ examples-data = [
     "polars>=1.38,<2",
     "pyarrow>=23,<24"
 ]
-examples-files = [
+codex-files-formats = [
     "pyyaml>=6.0,<7",
     "lxml>=6.0,<7",
-    "jmespath>=1.1,<2"
+    "jmespath>=1.1,<2",
+    "orjson>=3.11,<4",
+    "pyarrow>=23,<24"
 ]
-examples-web = [
-    "httpx[http2]>=0.28,<1",
-    "selectolax>=0.4.7,<0.5",
-    "redis>=7.3,<8"
-]
-examples-viz = [
-    "matplotlib>=3.10,<4",
-    "seaborn>=0.13,<1",
-    "plotly>=6.6,<7"
-]
-examples-nlp = [
-    "textblob>=0.19,<1",
-    "spacy>=3.8,<4"
-]
-examples-images = [
-    "pillow>=12.1,<13"
-]
-examples-ml = [
-    "scikit-learn>=1.8,<2",
-    "torch>=2.10,<3"
-]
-examples-geometry = [
+codex-geometry = [
+    "numpy>=2.4,<3",
+    "pillow>=12.1,<13",
     "shapely>=2.1,<3",
     "scipy>=1.17,<2"
 ]
-examples-geospatial = [
+codex-geospatial = [
     "geopy>=2.4,<3",
     "pyproj>=3.7,<4",
-    "shapely>=2.1,<3"
+    "shapely>=2.1,<3",
+    "rasterio>=1.5,<2",
+    "geopandas>=1.1,<2",
+    "osmnx>=2.1,<3",
+    "folium>=0.20,<1",
+    "branca>=0.8,<1",
+    "pystac-client>=0.9,<1"
 ]
-examples-symbolic = [
+codex-images-media = [
+    "numpy>=2.4,<3",
+    "scipy>=1.17,<2",
+    "opencv-python>=4.13,<5",
+    "pillow>=12.1,<13",
+    "pyvips[binary]>=3.1,<4"
+]
+codex-machine-learning = [
+    "numpy>=2.4,<3",
+    "scikit-learn>=1.8,<2",
+    "torch>=2.10,<3",
+    "torchvision>=0.25,<1"
+]
+codex-nlp-text = [
+    # 3.8.14 ne publie ni wheel CPython 3.14 ni distribution source.
+    "spacy>=3.8,<3.8.14"
+]
+codex-optimization = [
+    "numpy>=2.4,<3",
+    "scipy>=1.17,<2",
+    "matplotlib>=3.10,<4"
+]
+codex-persistence = [
+    "redis>=7.3,<8",
+    "orjson>=3.11,<4"
+]
+codex-structural-biology = [
+    "gemmi>=0.7,<1",
+    "numpy>=2.4,<3",
+    "scipy>=1.17,<2",
+    "matplotlib>=3.10,<4",
+    "networkx>=3.6,<4"
+]
+codex-symbolic-graphs = [
     "sympy>=1.14,<2",
     "networkx>=3.6,<4"
 ]
+codex-utils = [
+    "tqdm>=4.67,<5"
+]
+codex-visualization = [
+    "numpy>=2.4,<3",
+    "matplotlib>=3.10,<4",
+    "seaborn>=0.13,<1",
+    "plotly>=6.6,<7",
+    "hvplot>=0.12,<1",
+    "holoviews>=1.23,<2"
+]
+codex-web = [
+    "httpx[http2]>=0.28,<1",
+    "selectolax>=0.4.7,<0.5"
+]
 
-# Toutes les dépendances exemples
-examples-all = [
-    "catnip-lang[examples-data]",
-    "catnip-lang[examples-files]",
-    "catnip-lang[examples-web]",
-    "catnip-lang[examples-viz]",
-    "catnip-lang[examples-nlp]",
-    "catnip-lang[examples-images]",
-    "catnip-lang[examples-ml]",
-    "catnip-lang[examples-geometry]",
-    "catnip-lang[examples-geospatial]",
-    "catnip-lang[examples-symbolic]",
-    "tqdm>=4.67,<5",
-    "cryptography>=43,<49"
+# Toutes les intégrations codex
+codex-all = [
+    "catnip-lang[codex-data-analytics]",
+    "catnip-lang[codex-files-formats]",
+    "catnip-lang[codex-geometry]",
+    "catnip-lang[codex-geospatial]",
+    "catnip-lang[codex-images-media]",
+    "catnip-lang[codex-machine-learning]",
+    "catnip-lang[codex-nlp-text]",
+    "catnip-lang[codex-optimization]",
+    "catnip-lang[codex-persistence]",
+    "catnip-lang[codex-structural-biology]",
+    "catnip-lang[codex-symbolic-graphs]",
+    "catnip-lang[codex-utils]",
+    "catnip-lang[codex-visualization]",
+    "catnip-lang[codex-web]"
 ]
 
 [dependency-groups]
@@ -240,8 +284,9 @@ build = "cp313-* cp314-*"
 skip = "*-musllinux_* *-manylinux_aarch64 *-manylinux_i686"
 build-verbosity = 0
 before-all = [
-    # Install Rust with minimal profile (saves ~200MB download)
-    "curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal",
+    # Keep in sync with rust-toolchain.toml. Installing with `--default-toolchain none`
+    # and relying on rust-toolchain.toml being picked up fails in the manylinux container.
+    "curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0 --profile minimal",
     "rm -rf /project/target /project/build /project/.cargo/config.toml",  # Clean build artifacts + local cargo config (mold/sccache)
 ]
 # Note: Binaries are NOT included in manylinux wheels due to static Python limitation

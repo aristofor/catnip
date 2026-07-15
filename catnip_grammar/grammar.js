@@ -50,6 +50,7 @@ module.exports = grammar({
     [$.kwarg, $.lambda_param],  // ~~(x=val) ambiguity: kwarg vs lambda default
     [$.arguments, $.lambda_expr],  // ~~() ambiguity: empty args vs lambda start
     [$.bcast_op, $.unary_op],  // .[- x] ambiguity: broadcast subtract vs negative slice start
+    [$.union_field, $.lambda_param],  // union member `name(x` ambiguity: payload variant vs method params
   ],
 
   rules: {
@@ -126,6 +127,7 @@ module.exports = grammar({
 
     struct_field: $ => seq(
       field('name', $.identifier),
+      optional(seq(':', field('type', $.type_expr))),
       optional(seq('=', field('default', $._expression))),
       optional(';'),
     ),
@@ -146,6 +148,7 @@ module.exports = grammar({
       '(',
       optional($.lambda_params),
       ')',
+      optional(seq(':', field('return_type', $.type_expr))),
       // Body is optional: abstract methods have decorator(s) but no => { body }
       // Concrete methods always have => { body }
       optional(seq('=>', $.block)),
@@ -191,7 +194,23 @@ module.exports = grammar({
       optional(field('type_params', $.type_params)),
       '{',
       repeat($.union_variant),
+      repeat($.union_method),
       '}',
+    ),
+
+    // Union method: subset of struct_method. The body is mandatory, which
+    // both rules out abstract methods (unions have no inheritance) and
+    // disambiguates from a payload variant (`Some(value)` vs `map(f) => {}`
+    // only diverge after the closing paren). No decorators, no `op` overloads:
+    // a single dispatch shape for every variant, nullary included.
+    union_method: $ => seq(
+      field('method_name', $.identifier),
+      '(',
+      optional($.lambda_params),
+      ')',
+      optional(seq(':', field('return_type', $.type_expr))),
+      '=>',
+      $.block,
     ),
 
     type_params: $ => seq(
@@ -219,10 +238,41 @@ module.exports = grammar({
       optional(seq(':', field('type', $.type_expr))),
     ),
 
-    type_expr: $ => seq(
-      $.identifier,
-      optional($.type_args),
+    // A type expression is a `|`-separated union of atoms. A single atom is the
+    // common case (`int`, `list[int]`); the union form (`int | str`, `Point | None`)
+    // models optionals and dynamic-interop boundaries. `type_expr` only appears
+    // after `:` or inside `[...]`, never in expression position, so the `|` here
+    // cannot collide with `bit_or`.
+    type_expr: $ => prec.left(seq(
+      $.type_atom,
+      repeat(seq('|', $.type_atom)),
+    )),
+
+    // An atom is a named type (`int`, `list[int]`, `Option[int]`) or a
+    // function type (`(int, str) -> bool`). The arrow is right-absorbing:
+    // in `(int) -> int | str` the union belongs to the return type (a
+    // function type as a union member goes last: `None | (int) -> int`).
+    // `->` is distinct from the lambda's `=>`: a type is a contract, not a
+    // value, and the two can share a line (`cb: (int) -> int = (x) => x`).
+    type_atom: $ => choice(
+      seq(
+        $.identifier,
+        optional($.type_args),
+      ),
+      $.function_type,
     ),
+
+    function_type: $ => prec.right(seq(
+      '(',
+      optional(seq(
+        $.type_expr,
+        repeat(seq(',', $.type_expr)),
+        optional(','),
+      )),
+      ')',
+      '->',
+      $.type_expr,
+    )),
 
     type_args: $ => seq(
       '[',
@@ -497,7 +547,7 @@ module.exports = grammar({
     callattr: $ => prec(2, seq('.', field('method', $.identifier), $.arguments)),
     call_member: $ => $.arguments,
     broadcast: $ => prec.dynamic(-1, seq('.[', $.broadcast_op, ']')),
-    index: $ => seq('[', $._slice_expr, ']'),
+    index: $ => seq('[', $._slice_expr, repeat(seq(',', $._slice_expr)), ']'),
     fullslice: $ => prec.dynamic(1, seq('.[', $.slice_range, ']')),
 
     _slice_expr: $ => choice($._expression, $.slice_range),
@@ -512,7 +562,6 @@ module.exports = grammar({
     broadcast_op: $ => choice(
       $.broadcast_if,
       $.broadcast_nd_recursion,
-      $.broadcast_nd_map,
       $.broadcast_binary,
       $.broadcast_unary,
       $.broadcast,
@@ -521,9 +570,6 @@ module.exports = grammar({
 
     // data.[~~ lambda] - broadcast ND-recursion (higher prec than nd_recursion)
     broadcast_nd_recursion: $ => prec(3, seq('~~', choice($.lambda_expr, $._expression))),
-
-    // data.[~> f] - broadcast ND-map (higher prec than nd_map)
-    broadcast_nd_map: $ => prec(3, seq('~>', $._expression)),
 
     broadcast_if: $ => seq(
       'if',
@@ -583,6 +629,7 @@ module.exports = grammar({
       '(',
       optional($.lambda_params),
       ')',
+      optional(seq(':', field('return_type', $.type_expr))),
       '=>',
       $.block,
     ),
@@ -603,6 +650,7 @@ module.exports = grammar({
 
     lambda_param: $ => seq(
       field('name', $.identifier),
+      optional(seq(':', field('type', $.type_expr))),
       optional(seq('=', field('default', $._expression))),
     ),
 

@@ -135,11 +135,37 @@ pub enum IROpCode {
     /// Tagged union (ADT) definition. Reserved here to keep prior opcode
     /// values stable; logically belongs to the 65-67 definitions block.
     UnionDef = 72,
+
+    // -- Typed arithmetic (73-79), TH4 canal A --
+    /// Specialized arithmetic produced by the analyzer when both operands are a
+    /// proven-`int` / proven-`float` runtime fact (rewrite of the polymorphic
+    /// op). The compiler lowers these to the matching `VMOpCode::*`; same result
+    /// as the polymorphic op but skips the runtime type dispatch and feeds the
+    /// JIT a pre-typed trace. The transformer never emits them -- only the
+    /// analyzer's rewrite. `Div` (true division `/`) always yields a float, so
+    /// only `DivFloat` exists (int/int via `/` stays the polymorphic `Div`).
+    AddInt = 73,
+    AddFloat = 74,
+    SubInt = 75,
+    SubFloat = 76,
+    MulInt = 77,
+    MulFloat = 78,
+    DivFloat = 79,
+
+    /// Return check on a declared-callback call (FT2-A). Produced by the
+    /// analyzer's rewrite (never by the transformer): `args[0]` is the wrapped
+    /// call, `args[1]` the declared return annotation text. Evaluates the
+    /// call, then enforces the annotation on its result exactly like a param
+    /// boundary (the compilers lower it to the matching `VMOpCode::Check*` on
+    /// the call's result; the AST executor applies the same classified check).
+    /// The wrapped call loses its tail position by construction: a checked
+    /// return must be consumed.
+    CheckReturn = 80,
 }
 
 impl IROpCode {
     /// Highest opcode value. Used for range checks.
-    pub const MAX: u8 = IROpCode::UnionDef as u8;
+    pub const MAX: u8 = IROpCode::CheckReturn as u8;
 
     /// Highest shared opcode value (same values as VMOpCode).
     pub const SHARED_MAX: u8 = IROpCode::Breakpoint as u8;
@@ -197,7 +223,15 @@ mod tests {
         assert_eq!(IROpCode::TypeOf as u8, 69);
         assert_eq!(IROpCode::Locals as u8, 71);
         assert_eq!(IROpCode::UnionDef as u8, 72);
-        assert_eq!(IROpCode::MAX, 72);
+        assert_eq!(IROpCode::AddInt as u8, 73);
+        assert_eq!(IROpCode::AddFloat as u8, 74);
+        assert_eq!(IROpCode::SubInt as u8, 75);
+        assert_eq!(IROpCode::SubFloat as u8, 76);
+        assert_eq!(IROpCode::MulInt as u8, 77);
+        assert_eq!(IROpCode::MulFloat as u8, 78);
+        assert_eq!(IROpCode::DivFloat as u8, 79);
+        assert_eq!(IROpCode::CheckReturn as u8, 80);
+        assert_eq!(IROpCode::MAX, 80);
     }
 
     #[test]
@@ -216,7 +250,11 @@ mod tests {
         assert_eq!(IROpCode::from_u8(59), Some(IROpCode::OpRaise));
         assert_eq!(IROpCode::from_u8(71), Some(IROpCode::Locals));
         assert_eq!(IROpCode::from_u8(72), Some(IROpCode::UnionDef));
-        assert_eq!(IROpCode::from_u8(73), None);
+        assert_eq!(IROpCode::from_u8(73), Some(IROpCode::AddInt));
+        assert_eq!(IROpCode::from_u8(74), Some(IROpCode::AddFloat));
+        assert_eq!(IROpCode::from_u8(79), Some(IROpCode::DivFloat));
+        assert_eq!(IROpCode::from_u8(80), Some(IROpCode::CheckReturn));
+        assert_eq!(IROpCode::from_u8(81), None);
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //!
 //! Separate from VM's NaN-boxed Value (which holds PyObject handles).
 //! Covers all primitive types a Catnip program can produce.
-//! Functions, closures, and struct instances are not freezable.
+//! Functions and closures are not freezable; struct instances freeze
+//! nominally (by type name + field values, see [`FrozenValue::Struct`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,13 @@ pub enum FrozenValue {
     Dict(Vec<(FrozenValue, FrozenValue)>),
     Set(Vec<FrozenValue>),
     Bytes(Vec<u8>),
+    /// A struct instance carried by type name and field (name, value) pairs.
+    /// The worker resolves the type by name in its own registry, so field
+    /// order need not match the parent's -- fields are keyed by name.
+    Struct {
+        type_name: String,
+        fields: Vec<(String, FrozenValue)>,
+    },
 }
 
 #[cfg(test)]
@@ -45,6 +53,30 @@ mod tests {
             let decoded: FrozenValue = postcard::from_bytes(&encoded).unwrap();
             assert_eq!(&decoded, val);
         }
+    }
+
+    #[test]
+    fn test_frozen_struct_roundtrip_postcard() {
+        // Nested struct: a field holds another struct, itself holding a list.
+        let s = FrozenValue::Struct {
+            type_name: "Point".into(),
+            fields: vec![
+                ("x".into(), FrozenValue::Int(1)),
+                (
+                    "meta".into(),
+                    FrozenValue::Struct {
+                        type_name: "Meta".into(),
+                        fields: vec![(
+                            "tags".into(),
+                            FrozenValue::List(vec![FrozenValue::String("a".into()), FrozenValue::None]),
+                        )],
+                    },
+                ),
+            ],
+        };
+        let encoded = postcard::to_allocvec(&s).unwrap();
+        let decoded: FrozenValue = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, s);
     }
 
     #[test]

@@ -9,7 +9,6 @@
 
 use crate::constants::*;
 use crate::policy::{self, ModulePolicy};
-use catnip_core::paths::get_cache_dir as core_get_cache_dir;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -133,6 +132,31 @@ pub struct ConfigManager {
     named_policies: HashMap<String, ModulePolicy>,
     auto_modules: Vec<String>,
     auto_modules_by_mode: HashMap<String, Vec<String>>,
+    lint_disable: Vec<String>,
+}
+
+/// Build a file-sourced ConfigValue with its origin detail.
+fn file_value(py_value: Py<PyAny>, detail: &str) -> ConfigValue {
+    ConfigValue {
+        value: py_value,
+        source: ConfigSource::File,
+        source_detail: Some(detail.to_string()),
+    }
+}
+
+impl ConfigManager {
+    /// Route one TOML entry to the config or format map (config key wins).
+    fn insert_toml_entry(&mut self, py: Python<'_>, key: &str, value: &toml::Value, detail: &str) {
+        if let Some(k) = str_to_config_key(key) {
+            if let Some(py_value) = toml_to_python(py, value) {
+                self.values.insert(k, file_value(py_value, detail));
+            }
+        } else if let Some(k) = str_to_format_key(key) {
+            if let Some(py_value) = toml_to_python(py, value) {
+                self.format_values.insert(k, file_value(py_value, detail));
+            }
+        }
+    }
 }
 
 #[pymethods]
@@ -149,6 +173,7 @@ impl ConfigManager {
                 ("cli".to_string(), vec!["io:!".to_string()]),
                 ("repl".to_string(), vec!["io:!".to_string()]),
             ]),
+            lint_disable: vec![],
         };
         manager.load_defaults(py);
         manager
@@ -214,106 +239,30 @@ impl ConfigManager {
 
         let path_str = config_path.to_string_lossy().to_string();
 
-        // Load root-level keys (backward compatibility)
+        // Load root-level keys (backward compatibility); tables are sections
         for (key, value) in &data {
-            if let Some(k) = str_to_config_key(key) {
-                if !value.is_table() {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
-                    }
-                }
-            } else if let Some(k) = str_to_format_key(key) {
-                if !value.is_table() {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.format_values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
+            if !value.is_table() {
+                self.insert_toml_entry(py, key, value, &path_str);
+            }
+        }
+
+        // Sections whose keys route to the config map only
+        for section in ["repl", "optimize", "cache", "diagnostics"] {
+            if let Some(table) = data.get(section).and_then(|v| v.as_table()) {
+                for (key, value) in table {
+                    if let Some(k) = str_to_config_key(key) {
+                        if let Some(py_value) = toml_to_python(py, value) {
+                            self.values.insert(k, file_value(py_value, &path_str));
+                        }
                     }
                 }
             }
         }
 
-        // Load [repl] section
-        if let Some(repl) = data.get("repl").and_then(|v| v.as_table()) {
-            for (key, value) in repl {
-                if let Some(k) = str_to_config_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Load [optimize] section
-        if let Some(optimize) = data.get("optimize").and_then(|v| v.as_table()) {
-            for (key, value) in optimize {
-                if let Some(k) = str_to_config_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Load [cache] section
-        if let Some(cache) = data.get("cache").and_then(|v| v.as_table()) {
-            for (key, value) in cache {
-                if let Some(k) = str_to_config_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Load [diagnostics] section
-        if let Some(diagnostics) = data.get("diagnostics").and_then(|v| v.as_table()) {
-            for (key, value) in diagnostics {
-                if let Some(k) = str_to_config_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
-                    }
-                }
+        // Load [lint] section
+        if let Some(lint) = data.get("lint").and_then(|v| v.as_table()) {
+            if let Some(arr) = lint.get("disable").and_then(|v| v.as_array()) {
+                self.lint_disable = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
             }
         }
 
@@ -361,14 +310,7 @@ impl ConfigManager {
             for (key, value) in format {
                 if let Some(k) = str_to_format_key(key) {
                     if let Some(py_value) = toml_to_python(py, value) {
-                        self.format_values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(path_str.clone()),
-                            },
-                        );
+                        self.format_values.insert(k, file_value(py_value, &path_str));
                     }
                 }
             }
@@ -384,29 +326,7 @@ impl ConfigManager {
             {
                 let mode_detail = format!("{} [mode.{}]", path_str, mode_name);
                 for (key, value) in mode_table {
-                    if let Some(k) = str_to_config_key(key) {
-                        if let Some(py_value) = toml_to_python(py, value) {
-                            self.values.insert(
-                                k,
-                                ConfigValue {
-                                    value: py_value,
-                                    source: ConfigSource::File,
-                                    source_detail: Some(mode_detail.clone()),
-                                },
-                            );
-                        }
-                    } else if let Some(k) = str_to_format_key(key) {
-                        if let Some(py_value) = toml_to_python(py, value) {
-                            self.format_values.insert(
-                                k,
-                                ConfigValue {
-                                    value: py_value,
-                                    source: ConfigSource::File,
-                                    source_detail: Some(mode_detail.clone()),
-                                },
-                            );
-                        }
-                    }
+                    self.insert_toml_entry(py, key, value, &mode_detail);
                 }
             }
         }
@@ -442,29 +362,7 @@ impl ConfigManager {
         {
             let mode_detail = format!("{} [mode.{}]", path_str, mode);
             for (key, value) in mode_table {
-                if let Some(k) = str_to_config_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(mode_detail.clone()),
-                            },
-                        );
-                    }
-                } else if let Some(k) = str_to_format_key(key) {
-                    if let Some(py_value) = toml_to_python(py, value) {
-                        self.format_values.insert(
-                            k,
-                            ConfigValue {
-                                value: py_value,
-                                source: ConfigSource::File,
-                                source_detail: Some(mode_detail.clone()),
-                            },
-                        );
-                    }
-                }
+                self.insert_toml_entry(py, key, value, &mode_detail);
             }
         }
     }
@@ -484,15 +382,15 @@ impl ConfigManager {
         }
 
         // CATNIP_THEME
-        if let Ok(theme) = env::var("CATNIP_THEME") {
+        if let Ok(theme) = env::var(ENV_THEME) {
             let val = theme.to_lowercase();
-            if matches!(val.as_str(), "auto" | "dark" | "light") {
+            if THEME_VALUES.contains(&val.as_str()) {
                 self.values.insert(
                     CFG_THEME,
                     ConfigValue {
                         value: to_py_any(py, val),
                         source: ConfigSource::Env,
-                        source_detail: Some("CATNIP_THEME".to_string()),
+                        source_detail: Some(ENV_THEME.to_string()),
                     },
                 );
             }
@@ -714,6 +612,11 @@ impl ConfigManager {
         self.auto_modules.clone()
     }
 
+    /// Get globally disabled lint codes from [lint].disable.
+    fn get_lint_disable(&self) -> Vec<String> {
+        self.lint_disable.clone()
+    }
+
     /// Generate debug report showing sources.
     fn debug_report(&self, py: Python<'_>) -> Vec<String> {
         let mut lines = Vec::new();
@@ -825,7 +728,7 @@ impl ConfigManager {
         self.values.insert(
             CFG_JIT,
             ConfigValue {
-                value: to_py_any(py, false),
+                value: to_py_any(py, JIT_DEFAULT_PIPELINE),
                 source: ConfigSource::Default,
                 source_detail: None,
             },
@@ -841,7 +744,7 @@ impl ConfigManager {
         self.values.insert(
             CFG_OPTIMIZE,
             ConfigValue {
-                value: to_py_any(py, 3i64),
+                value: to_py_any(py, OPTIMIZATION_LEVEL_DEFAULT as i64),
                 source: ConfigSource::Default,
                 source_detail: None,
             },
@@ -849,7 +752,7 @@ impl ConfigManager {
         self.values.insert(
             CFG_EXECUTOR,
             ConfigValue {
-                value: to_py_any(py, "vm".to_string()),
+                value: to_py_any(py, EXECUTOR_DEFAULT.to_string()),
                 source: ConfigSource::Default,
                 source_detail: None,
             },
@@ -857,7 +760,7 @@ impl ConfigManager {
         self.values.insert(
             CFG_THEME,
             ConfigValue {
-                value: to_py_any(py, "auto".to_string()),
+                value: to_py_any(py, THEME_DEFAULT.to_string()),
                 source: ConfigSource::Default,
                 source_detail: None,
             },
@@ -1066,51 +969,30 @@ fn toml_to_python(py: Python<'_>, value: &toml::Value) -> Option<Py<PyAny>> {
     }
 }
 
-// --- XDG directory helpers ---
-
-/// Get home directory, respecting $HOME env var (for tests).
-fn get_home_dir() -> PathBuf {
-    if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home)
-    } else {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
-    }
-}
+// --- XDG directory helpers (PyO3 wrappers over catnip_core::paths) ---
 
 /// Return the Catnip config directory following XDG conventions.
 #[pyfunction]
 pub fn get_config_dir() -> PathBuf {
-    if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg_config_home).join("catnip")
-    } else {
-        get_home_dir().join(".config").join("catnip")
-    }
+    catnip_core::paths::get_config_dir()
 }
 
 /// Return the Catnip state directory following XDG conventions.
 #[pyfunction]
 pub fn get_state_dir() -> PathBuf {
-    if let Ok(xdg_state_home) = env::var("XDG_STATE_HOME") {
-        PathBuf::from(xdg_state_home).join("catnip")
-    } else {
-        get_home_dir().join(".local").join("state").join("catnip")
-    }
+    catnip_core::paths::get_state_dir()
 }
 
 /// Return the Catnip cache directory following XDG conventions.
 #[pyfunction]
 pub fn get_cache_dir() -> PathBuf {
-    core_get_cache_dir()
+    catnip_core::paths::get_cache_dir()
 }
 
 /// Return the Catnip data directory following XDG conventions.
 #[pyfunction]
 pub fn get_data_dir() -> PathBuf {
-    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg_data_home).join("catnip")
-    } else {
-        get_home_dir().join(".local").join("share").join("catnip")
-    }
+    catnip_core::paths::get_data_dir()
 }
 
 /// Return the path to the config file.

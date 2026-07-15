@@ -57,7 +57,7 @@ Transformation du code source Catnip en **Abstract Syntax Tree (AST)**.
 - Tolérance aux erreurs : continue l'analyse même sur code invalide
 - Parse tree → IR : 72 transformateurs convertissent l'arbre syntaxique en représentation intermédiaire
 
-### Semantic Analysis
+### Analyse sémantique
 
 Transformation de l'AST en **Op nodes** (opérations exécutables):
 
@@ -68,7 +68,7 @@ Transformation de l'AST en **Op nodes** (opérations exécutables):
 
 **Phase**: Analyse statique et optimisation du code avant exécution
 
-### Execution
+### Exécution
 
 Exécution des Op nodes via le Registry, par interprétation directe de l'arbre.
 
@@ -172,8 +172,8 @@ basiques (séquences d'instructions linéaires) et les arêtes représentent les
 - `Break/Continue` : contrôle de boucle
 - `Return` : sortie vers exit
 
-**Construction** : Le CFG est construit depuis l'IR via `rs.cfg.build_cfg_from_ir()`. Voir `docs/examples/cfg/` pour des
-exemples d'utilisation.
+**Construction** : Le CFG est construit depuis l'IR par le moteur interne (`catnip_core/src/cfg`, pur Rust). Voir
+[ARCHITECTURE](../dev/ARCHITECTURE.md) pour le pipeline CFG/SSA.
 
 **Algorithmes** : Dominance calculée via l'algorithme de Cooper-Harvey-Kennedy (2001), convergence en O(n²) mais
 typiquement 2-3 itérations.
@@ -440,7 +440,7 @@ Fonction ou objet Python accessible depuis Catnip sans import.
 
 Fonction **sans effets de bord** qui retourne toujours le même résultat pour les mêmes arguments.
 
-**Utilisé pour**: Optimisations de broadcasting, mémoization.
+**Utilisé pour**: Optimisations de broadcasting, mémoization, inlining JIT du corps dans une boucle chaude.
 
 **Décorateur** : `@pure` en Python
 

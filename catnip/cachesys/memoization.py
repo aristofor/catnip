@@ -9,171 +9,24 @@ Note: This is memoization (storing function results), not compilation caching.
 
 from typing import Any, Callable, Optional
 
-from catnip._rs import CacheEntry, CacheKey, CacheType, MemoryCache
-
-from .base import CacheBackend
-
-# Sentinel to distinguish cache miss from a cached None value
-_CACHE_MISS = object()
+# Process-level Memoization backing the standalone `cached` builtin (lazy).
+_STANDALONE_MEMO = None
 
 
-class Memoization:
+def standalone_cached(func, name=None, key_func=None, validator=None):
+    """`cached` builtin for the standalone VM host.
+
+    VMHost looks this function up by name when seeding globals (vm/host.rs)
+    and injects it as `cached`. Backed by one process-level Rust Memoization
+    instance -- the standalone binary runs one VM per process.
     """
-    Memoization system for function execution results.
+    from catnip._rs import Memoization
 
-    Uses argument hash as cache key.
-    Compatible with Python hooks for custom backends.
-    """
-
-    def __init__(self, backend: Optional[CacheBackend] = None):
-        """
-        :param backend: Cache backend to use (default: MemoryCache)
-        """
-        self.backend = backend or MemoryCache()
-        self._enabled = True
-        # Index: func_name -> list of cache keys
-        self._func_index: dict[str, list[CacheKey]] = {}
-
-    def get(self, func_name: str, args: tuple, kwargs: dict) -> Optional[Any]:
-        """
-        Retrieve result from cache.
-
-        :param func_name: Function name
-        :param args: Positional arguments
-        :param kwargs: Keyword arguments
-        :return: Cached result or None if cache miss
-        """
-        if not self._enabled:
-            return _CACHE_MISS
-
-        key = self._make_key(func_name, args, kwargs)
-        entry: Optional[CacheEntry] = self.backend.get(key)
-        return entry.value if entry else _CACHE_MISS
-
-    def get_entry(self, func_name: str, args: tuple, kwargs: dict) -> Optional[CacheEntry]:
-        """Retrieve CacheEntry on hit, None on miss."""
-        if not self._enabled:
-            return None
-        key = self._make_key(func_name, args, kwargs)
-        return self.backend.get(key)
-
-    def set(self, func_name: str, args: tuple, kwargs: dict, result: Any) -> None:
-        """
-        Store result in the cache.
-
-        :param func_name: Function name
-        :param args: Positional arguments
-        :param kwargs: Keyword arguments
-        :param result: Result to cache
-        """
-        if not self._enabled:
-            return
-
-        key = self._make_key(func_name, args, kwargs)
-        metadata = dict(
-            func_name=func_name,
-            args_count=len(args),
-            kwargs_keys=list(kwargs.keys()),
-        )
-        self.backend.set(key, result, metadata)
-
-        # Update func_name index
-        if func_name not in self._func_index:
-            self._func_index[func_name] = []
-        self._func_index[func_name].append(key)
-
-    def invalidate(self, func_name: Optional[str] = None) -> int:
-        """
-        Invalidate cache entries.
-
-        :param func_name: Function name to invalidate (None = invalidate all)
-        :return: Number of entries invalidated
-        """
-        if func_name is None:
-            # Invalidate entire cache
-            count = self.backend.stats()['size']
-            self.backend.clear()
-            self._func_index.clear()
-            return count
-        else:
-            # Invalidate only this function using index
-            if func_name not in self._func_index:
-                return 0
-
-            keys = self._func_index[func_name]
-            count = 0
-            for key in keys:
-                if self.backend.delete(key):
-                    count += 1
-
-            # Remove from index
-            del self._func_index[func_name]
-            return count
-
-    def invalidate_key(self, func_name: str, args: tuple, kwargs: dict) -> bool:
-        """
-        Invalidate a specific cache entry.
-
-        :param func_name: Function name
-        :param args: Positional arguments
-        :param kwargs: Keyword arguments
-        :return: True if entry existed
-        """
-        key = self._make_key(func_name, args, kwargs)
-        deleted = self.backend.delete(key)
-
-        # Update index
-        if deleted and func_name in self._func_index:
-            try:
-                self._func_index[func_name].remove(key)
-            except ValueError:
-                pass
-            # Clean up empty lists
-            if not self._func_index[func_name]:
-                del self._func_index[func_name]
-
-        return deleted
-
-    def enable(self) -> None:
-        """Enable the cache."""
-        self._enabled = True
-
-    def disable(self) -> None:
-        """Disable the cache."""
-        self._enabled = False
-
-    def stats(self) -> dict:
-        """Return cache statistics."""
-        base_stats = self.backend.stats()
-        base_stats['enabled'] = self._enabled
-        return base_stats
-
-    def _make_key(self, func_name: str, args: tuple, kwargs: dict) -> CacheKey:
-        """
-        Create a cache key from function name and arguments.
-
-        :param func_name: Function name
-        :param args: Positional arguments
-        :param kwargs: Keyword arguments
-        :return: CacheKey
-        """
-        # Serialize arguments to string for hashing
-        # Note: we use repr() which works for most Python types
-        args_str = ','.join(repr(arg) for arg in args)
-        kwargs_str = ','.join(f"{k}={repr(v)}" for k, v in sorted(kwargs.items()))
-
-        # Combine function + args in content
-        content = f"{func_name}({args_str}{(',' if args_str and kwargs_str else '')}{kwargs_str})"
-
-        return CacheKey(
-            content=content,
-            cache_type=CacheType.RESULT,
-            optimize=False,
-            tco_enabled=False,
-        )
-
-    def __repr__(self) -> str:
-        return f"Memoization(backend={self.backend.__class__.__name__}, enabled={self._enabled})"
+    global _STANDALONE_MEMO
+    if _STANDALONE_MEMO is None:
+        _STANDALONE_MEMO = Memoization()
+    func_name = name or getattr(func, '__name__', 'anonymous')
+    return CachedWrapper(func, _STANDALONE_MEMO, func_name, key_func=key_func, validator=validator)
 
 
 class CachedWrapper:
@@ -186,7 +39,7 @@ class CachedWrapper:
     def __init__(
         self,
         func: Any,
-        cache: "Memoization",
+        cache: Any,  # catnip._rs.Memoization
         func_name: str,
         key_func: Optional[Callable] = None,
         validator: Optional[Callable] = None,

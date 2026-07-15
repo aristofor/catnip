@@ -104,6 +104,36 @@ def test_lint_file_not_found():
     assert "not found" in result.output.lower()
 
 
+def test_lint_disable_cli(tmp_path):
+    f = tmp_path / "test.cat"
+    f.write_text("x = 1  \n")  # trailing whitespace -> W101
+    runner = CliRunner()
+    baseline = runner.invoke(main, ['lint', str(f)])
+    assert "W101" in baseline.output
+    disabled = runner.invoke(main, ['lint', '--disable', 'W101', str(f)])
+    assert "W101" not in disabled.output
+
+
+def test_lint_disable_config_file(tmp_path):
+    f = tmp_path / "test.cat"
+    f.write_text("x = 1  \n")
+    cfg = tmp_path / "catnip.toml"
+    cfg.write_text('[lint]\ndisable = ["W101"]\n')
+    runner = CliRunner()
+    result = runner.invoke(main, ['lint', str(f)], env={'CATNIP_CONFIG': str(cfg)})
+    assert "W101" not in result.output
+
+
+def test_lint_enable_overrides_config(tmp_path):
+    f = tmp_path / "test.cat"
+    f.write_text("x = 1  \n")
+    cfg = tmp_path / "catnip.toml"
+    cfg.write_text('[lint]\ndisable = ["W101"]\n')
+    runner = CliRunner()
+    result = runner.invoke(main, ['lint', '--enable', 'W101', str(f)], env={'CATNIP_CONFIG': str(cfg)})
+    assert "W101" in result.output
+
+
 # -- commands -----------------------------------------------------------------
 
 

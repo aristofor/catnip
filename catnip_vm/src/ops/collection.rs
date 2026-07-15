@@ -6,6 +6,9 @@ use crate::value::Value;
 
 /// Dispatch a method call on a NativeList.
 pub fn list_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
+    // SAFETY: obj is owned by the caller for the duration of this call, so its Arc
+    // payload stays alive while `list` is borrowed; as_native_list_ref checks the tag
+    // internally and returns None (mapped to a TypeError) when obj is not a list.
     let list = unsafe {
         obj.as_native_list_ref()
             .ok_or_else(|| VMError::TypeError("expected list".into()))?
@@ -78,6 +81,9 @@ pub fn list_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
                 .first()
                 .ok_or_else(|| VMError::TypeError("extend() takes 1 argument".into()))?;
             if v.is_native_list() {
+                // SAFETY: v.is_native_list() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeList> and unwrap is infallible.
                 let other = unsafe { v.as_native_list_ref().unwrap() };
                 let items = other.as_slice_cloned();
                 list.extend(&items);
@@ -85,6 +91,9 @@ pub fn list_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
                     item.decref(); // extend already cloned refcounts
                 }
             } else if v.is_native_tuple() {
+                // SAFETY: v.is_native_tuple() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeTuple> and unwrap is infallible.
                 let other = unsafe { v.as_native_tuple_ref().unwrap() };
                 list.extend(other.as_slice());
             } else {
@@ -98,6 +107,9 @@ pub fn list_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
 
 /// Dispatch a method call on a NativeDict.
 pub fn dict_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
+    // SAFETY: obj is owned by the caller for the duration of this call, so its Arc
+    // payload stays alive while `dict` is borrowed; as_native_dict_ref checks the tag
+    // internally and returns None (mapped to a TypeError) when obj is not a dict.
     let dict = unsafe {
         obj.as_native_dict_ref()
             .ok_or_else(|| VMError::TypeError("expected dict".into()))?
@@ -143,6 +155,9 @@ pub fn dict_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
                 .first()
                 .ok_or_else(|| VMError::TypeError("update() takes 1 argument".into()))?;
             if v.is_native_dict() {
+                // SAFETY: v.is_native_dict() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeDict> and unwrap is infallible.
                 let other = unsafe { v.as_native_dict_ref().unwrap() };
                 dict.update(other);
             } else {
@@ -164,6 +179,9 @@ pub fn dict_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> 
 
 /// Dispatch a method call on a NativeTuple.
 pub fn tuple_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
+    // SAFETY: obj is owned by the caller for the duration of this call, so its Arc
+    // payload stays alive while `tuple` is borrowed; as_native_tuple_ref checks the
+    // tag internally and returns None (mapped to a TypeError) when obj is not a tuple.
     let tuple = unsafe {
         obj.as_native_tuple_ref()
             .ok_or_else(|| VMError::TypeError("expected tuple".into()))?
@@ -187,6 +205,9 @@ pub fn tuple_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value>
 
 /// Dispatch a method call on a NativeSet.
 pub fn set_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
+    // SAFETY: obj is owned by the caller for the duration of this call, so its Arc
+    // payload stays alive while `set` is borrowed; as_native_set_ref checks the tag
+    // internally and returns None (mapped to a TypeError) when obj is not a set.
     let set = unsafe {
         obj.as_native_set_ref()
             .ok_or_else(|| VMError::TypeError("expected set".into()))?
@@ -233,6 +254,9 @@ pub fn set_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
                 .first()
                 .ok_or_else(|| VMError::TypeError("union() takes 1 argument".into()))?;
             if v.is_native_set() {
+                // SAFETY: v.is_native_set() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeSet> and unwrap is infallible.
                 let other = unsafe { v.as_native_set_ref().unwrap() };
                 Ok(Value::from_set(set.union(other)))
             } else {
@@ -244,6 +268,9 @@ pub fn set_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
                 .first()
                 .ok_or_else(|| VMError::TypeError("intersection() takes 1 argument".into()))?;
             if v.is_native_set() {
+                // SAFETY: v.is_native_set() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeSet> and unwrap is infallible.
                 let other = unsafe { v.as_native_set_ref().unwrap() };
                 Ok(Value::from_set(set.intersection(other)))
             } else {
@@ -255,6 +282,9 @@ pub fn set_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
                 .first()
                 .ok_or_else(|| VMError::TypeError("difference() takes 1 argument".into()))?;
             if v.is_native_set() {
+                // SAFETY: v.is_native_set() was checked just above and v stays alive
+                // for the borrow (owned by the caller), so the payload is a live
+                // Arc<NativeSet> and unwrap is infallible.
                 let other = unsafe { v.as_native_set_ref().unwrap() };
                 Ok(Value::from_set(set.difference(other)))
             } else {
@@ -267,6 +297,9 @@ pub fn set_method(obj: Value, method: &str, args: &[Value]) -> VMResult<Value> {
 
 /// Dispatch a method call on a NativeBytes.
 pub fn bytes_method(obj: Value, method: &str, _args: &[Value]) -> VMResult<Value> {
+    // SAFETY: obj is owned by the caller for the duration of this call, so its Arc
+    // payload stays alive while `bytes` is borrowed; as_native_bytes_ref checks the
+    // tag internally and returns None (mapped to a TypeError) when obj is not bytes.
     let bytes = unsafe {
         obj.as_native_bytes_ref()
             .ok_or_else(|| VMError::TypeError("expected bytes".into()))?

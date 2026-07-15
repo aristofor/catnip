@@ -160,20 +160,26 @@ impl<'a> PureInliner<'a> {
             .get_inlineable(func_id, self.config.max_inline_ops)
             .ok_or_else(|| format!("Function {} not in registry", func_id))?;
 
-        // Allocate a disjoint block of scratch slots for this callee's locals.
         let local_count = Self::callee_local_count(info);
         let local_offset = self.next_slot;
+
+        // Translate the body FIRST. This can fail (e.g. a float op the int-only
+        // inliner cannot lower), and it must do so before any state is mutated:
+        // a half-allocated scratch block left behind on the error path would
+        // desync slot accounting for the rest of the trace.
+        let body_ops = self.bytecode_to_trace_ops(info, scope_slots, local_offset)?;
+
+        // Translation succeeded: commit the disjoint scratch-slot block.
         self.next_slot += local_count;
         for slot in local_offset..local_offset + local_count {
             self.inlined_slots.push(slot);
         }
 
-        // Convert bytecode to TraceOps (callee locals shifted by local_offset)
-        let body_ops = self.bytecode_to_trace_ops(info, scope_slots, local_offset)?;
-
         // Bind arguments: pop args from stack to the callee's (remapped) slots.
-        // Stack: [..., arg0, arg1, ..., argN]
-        for i in 0..num_args {
+        // Stack: [..., arg0, arg1, ..., argN-1] with argN-1 on top. StoreLocal
+        // pops the top, so bind from the last slot down to the first -- otherwise
+        // argN-1 would land in slot 0 (reversed binding for num_args >= 2).
+        for i in (0..num_args).rev() {
             new_ops.push(TraceOp::StoreLocal(local_offset + i));
         }
 
@@ -209,8 +215,47 @@ impl<'a> PureInliner<'a> {
         local_offset: usize,
     ) -> Result<Vec<TraceOp>, String> {
         let mut ops = Vec::new();
+        let last_idx = info.instructions.len().wrapping_sub(1);
 
-        for instr in &info.instructions {
+        for (idx, instr) in info.instructions.iter().enumerate() {
+            // An inlined callee's terminal Return must NOT become a trace
+            // terminator (Exit): the result is already on the stack and the host
+            // trace (the loop, or an outer function) continues after the call.
+            // Drop a terminal Return. A non-terminal Return is an early return --
+            // branching control flow the linear inliner cannot model -- so refuse
+            // to inline (the call stays an interpreted CallPure).
+            if instr.op == VMOpCode::Return {
+                if idx == last_idx {
+                    continue;
+                }
+                return Err("callee not inlinable: non-terminal Return".into());
+            }
+            // CheckType is the typed-param boundary check (TH2-B) emitted in an
+            // annotated function's prologue. The int-only inliner can honor only
+            // an INT check: on a value this trace already proves to be int it is a
+            // no-op, so skip it (the surrounding LoadLocal/StoreLocal round-trip
+            // stays, harmless). Any other declared type constrains the param to a
+            // type this inliner cannot lower -- refuse, leaving the call as a
+            // CallPure (interpreted), same policy as a float constant / *Float op.
+            if instr.op == VMOpCode::CheckType {
+                if instr.arg as u8 == crate::vm::opcode::type_code::INT {
+                    continue;
+                }
+                return Err(format!(
+                    "callee not int-only-inlinable: CheckType({})",
+                    crate::vm::opcode::type_code::name(instr.arg as u8)
+                ));
+            }
+            // Block-scope bookkeeping. A lambda body is always a block, so every
+            // user callee carries PushBlock/PopBlock. They only reset block-local
+            // slots on block exit; the inliner remaps callee locals to scratch
+            // slots that are re-bound (StoreLocal) on every call, and only linear
+            // bodies are inlinable (branches -> unsupported opcode -> refused), so
+            // every local is assigned before use. The reset is therefore a no-op
+            // for the inlined result -- skip both.
+            if matches!(instr.op, VMOpCode::PushBlock | VMOpCode::PopBlock) {
+                continue;
+            }
             let trace_op = match instr.op {
                 VMOpCode::LoadConst => {
                     let constant = info
@@ -219,7 +264,14 @@ impl<'a> PureInliner<'a> {
                         .ok_or("LoadConst: constant index out of bounds")?;
                     match constant {
                         JitConstant::Int(i) => TraceOp::LoadConstInt(*i),
-                        JitConstant::Float(f) => TraceOp::LoadConstFloat(*f),
+                        // This inliner is int-only: it lowers every arithmetic op
+                        // to its Int form. A float constant means the callee does
+                        // float work that cannot be lowered safely, so refuse to
+                        // inline -- the call stays a CallPure (interpreted) rather
+                        // than feeding a float value to an int opcode.
+                        JitConstant::Float(_) => {
+                            return Err("callee not int-only-inlinable: float constant".into());
+                        }
                     }
                 }
                 // Callee locals live in the callee's own slot namespace; shift
@@ -238,9 +290,19 @@ impl<'a> PureInliner<'a> {
                     TraceOp::LoadLocal(*slot)
                 }
                 VMOpCode::Add => TraceOp::AddInt,
+                // TH4 canal A: the int-specialized ops inline like their
+                // polymorphic form. The *Float variants are refused (they fall
+                // through to the error arm below, like a float constant), so a
+                // float callee stays a CallPure rather than being miscompiled as
+                // int. This int-only inliner has no float lowering.
+                VMOpCode::AddInt => TraceOp::AddInt,
+                VMOpCode::SubInt => TraceOp::SubInt,
+                VMOpCode::MulInt => TraceOp::MulInt,
                 VMOpCode::Sub => TraceOp::SubInt,
                 VMOpCode::Mul => TraceOp::MulInt,
-                VMOpCode::Div => TraceOp::DivInt,
+                // True division (`/`) yields a float and raises on /0; an int-only
+                // sdiv would truncate and SIGFPE. Refuse to inline it (falls to the
+                // error arm below), so the call stays interpreted.
                 VMOpCode::Mod => TraceOp::ModInt,
                 VMOpCode::Lt => TraceOp::LtInt,
                 VMOpCode::Le => TraceOp::LeInt,
@@ -248,7 +310,6 @@ impl<'a> PureInliner<'a> {
                 VMOpCode::Ge => TraceOp::GeInt,
                 VMOpCode::Eq => TraceOp::EqInt,
                 VMOpCode::Ne => TraceOp::NeInt,
-                VMOpCode::Return => TraceOp::Exit,
                 VMOpCode::DupTop => TraceOp::DupTop,
                 VMOpCode::PopTop => TraceOp::PopTop,
                 _ => return Err(format!("Unsupported opcode for inlining: {:?}", instr.op)),
@@ -263,7 +324,7 @@ impl<'a> PureInliner<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::opcode::Instruction;
+    use crate::vm::opcode::{Instruction, type_code};
 
     #[test]
     fn test_inline_simple_pure() {
@@ -437,6 +498,152 @@ mod tests {
     }
 
     #[test]
+    fn test_float_callee_refused() {
+        // TH4 canal A: the int-only inliner must refuse a float callee (a float
+        // constant or an AddFloat) instead of lowering it as int -- otherwise a
+        // float value gets fed to an int opcode (silent garbage).
+        let registry = PureFunctionRegistry::new();
+        let inliner = PureInliner::new(InliningConfig::default(), &registry);
+        let empty_scope = HashMap::new();
+
+        let float_const = JitFunctionInfo {
+            instructions: vec![Instruction::new(VMOpCode::LoadConst, 0)],
+            constants: vec![JitConstant::Float(1.5)],
+            names: vec![],
+            nargs: 0,
+            complexity: 1,
+            is_pure: false,
+        };
+        assert!(inliner.bytecode_to_trace_ops(&float_const, &empty_scope, 0).is_err());
+
+        let add_float = JitFunctionInfo {
+            instructions: vec![Instruction::new(VMOpCode::AddFloat, 0)],
+            constants: vec![],
+            names: vec![],
+            nargs: 0,
+            complexity: 1,
+            is_pure: false,
+        };
+        assert!(inliner.bytecode_to_trace_ops(&add_float, &empty_scope, 0).is_err());
+    }
+
+    #[test]
+    fn test_checktype_int_is_noop() {
+        // TH2-B: an `(x: int) => x + 1` callee carries a typed-param prologue
+        // LoadLocal/CheckType(INT)/StoreLocal. The int-only inliner treats the
+        // INT check as a no-op (the value is already a proven int), so the body
+        // lowers to int TraceOps with the CheckType dropped.
+        let registry = PureFunctionRegistry::new();
+        let inliner = PureInliner::new(InliningConfig::default(), &registry);
+
+        let info = JitFunctionInfo {
+            instructions: vec![
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::CheckType, type_code::INT as u32),
+                Instruction::new(VMOpCode::StoreLocal, 0),
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::LoadConst, 0),
+                Instruction::new(VMOpCode::Add, 0),
+                Instruction::new(VMOpCode::Return, 0),
+            ],
+            constants: vec![JitConstant::Int(1)],
+            names: vec![],
+            nargs: 1,
+            complexity: 7,
+            is_pure: true,
+        };
+
+        let empty_scope = HashMap::new();
+        let ops = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0).unwrap();
+
+        // CheckType skipped, terminal Return dropped (no Exit): prologue
+        // round-trip kept, body lowered to int ops, result left on the stack.
+        assert_eq!(ops.len(), 5);
+        assert!(matches!(ops[0], TraceOp::LoadLocal(0)));
+        assert!(matches!(ops[1], TraceOp::StoreLocal(0)));
+        assert!(matches!(ops[2], TraceOp::LoadLocal(0)));
+        assert!(matches!(ops[3], TraceOp::LoadConstInt(1)));
+        assert!(matches!(ops[4], TraceOp::AddInt));
+        assert!(!ops.iter().any(|op| matches!(op, TraceOp::Exit)));
+    }
+
+    #[test]
+    fn test_checktype_non_int_refused() {
+        // Only an INT boundary check is honored. float/str/bool/None constrain
+        // the param to a type the int-only inliner can't lower, so the callee is
+        // refused (stays an interpreted CallPure).
+        let registry = PureFunctionRegistry::new();
+        let inliner = PureInliner::new(InliningConfig::default(), &registry);
+        let empty_scope = HashMap::new();
+
+        for code in [type_code::FLOAT, type_code::STR, type_code::BOOL, type_code::NONE] {
+            let info = JitFunctionInfo {
+                instructions: vec![
+                    Instruction::new(VMOpCode::LoadLocal, 0),
+                    Instruction::new(VMOpCode::CheckType, code as u32),
+                    Instruction::new(VMOpCode::StoreLocal, 0),
+                ],
+                constants: vec![],
+                names: vec![],
+                nargs: 1,
+                complexity: 3,
+                is_pure: true,
+            };
+            assert!(
+                inliner.bytecode_to_trace_ops(&info, &empty_scope, 0).is_err(),
+                "CheckType({}) should refuse inlining",
+                type_code::name(code)
+            );
+        }
+    }
+
+    #[test]
+    fn test_inline_typed_param_fn() {
+        // End-to-end through optimize(): a registered `(x: int) => x + 1` with a
+        // typed-param prologue is now inlinable (was refused on CheckType before).
+        let mut registry = PureFunctionRegistry::new();
+
+        let info = JitFunctionInfo {
+            instructions: vec![
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::CheckType, type_code::INT as u32),
+                Instruction::new(VMOpCode::StoreLocal, 0),
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::LoadConst, 0),
+                Instruction::new(VMOpCode::Add, 0),
+                Instruction::new(VMOpCode::Return, 0),
+            ],
+            constants: vec![JitConstant::Int(1)],
+            names: vec![],
+            nargs: 1,
+            complexity: 7,
+            is_pure: true,
+        };
+
+        registry.register("inc".to_string(), std::sync::Arc::new(info));
+
+        let mut inliner = PureInliner::new(InliningConfig::default(), &registry);
+
+        let mut trace = Trace::new(0);
+        trace.ops = vec![
+            TraceOp::LoadConstInt(5),
+            TraceOp::CallPure {
+                func_id: "inc".to_string(),
+                num_args: 1,
+            },
+        ];
+
+        inliner.optimize(&mut trace).unwrap();
+
+        // The CallPure is gone (inlined), not left interpreted.
+        assert!(!trace.ops.iter().any(|op| matches!(op, TraceOp::CallPure { .. })));
+        assert!(matches!(trace.ops[0], TraceOp::LoadConstInt(5)));
+        assert!(matches!(trace.ops[1], TraceOp::StoreLocal(0)));
+        // CheckType lowered to nothing: no stray opcode survives the prologue.
+        assert!(trace.ops.iter().any(|op| matches!(op, TraceOp::AddInt)));
+    }
+
+    #[test]
     fn test_load_scope_with_known_var() {
         let registry = PureFunctionRegistry::new();
         let inliner = PureInliner::new(InliningConfig::default(), &registry);
@@ -461,11 +668,11 @@ mod tests {
 
         let ops = inliner.bytecode_to_trace_ops(&info, &scope_slots, 0).unwrap();
 
-        assert_eq!(ops.len(), 4);
+        // Terminal Return dropped (no Exit): result left on the stack.
+        assert_eq!(ops.len(), 3);
         assert!(matches!(ops[0], TraceOp::LoadLocal(0)));
         assert!(matches!(ops[1], TraceOp::LoadLocal(5))); // outer → slot 5 (host slot, unshifted)
         assert!(matches!(ops[2], TraceOp::AddInt));
-        assert!(matches!(ops[3], TraceOp::Exit));
     }
 
     #[test]
@@ -525,15 +732,16 @@ mod tests {
         inliner.optimize(&mut trace).unwrap();
 
         // outer is guarded at slot 3, so callee locals are remapped above it
-        // (scratch base = 4). The scope slot 3 itself stays unshifted.
-        // Expected: LoadConstInt(42), StoreLocal(4), LoadLocal(4), LoadLocal(3), AddInt, Exit
-        assert_eq!(trace.ops.len(), 6);
+        // (scratch base = 4). The scope slot 3 itself stays unshifted. The
+        // terminal Return is dropped (no Exit): the result stays on the stack.
+        // Expected: LoadConstInt(42), StoreLocal(4), LoadLocal(4), LoadLocal(3), AddInt
+        assert_eq!(trace.ops.len(), 5);
         assert!(matches!(trace.ops[0], TraceOp::LoadConstInt(42)));
         assert!(matches!(trace.ops[1], TraceOp::StoreLocal(4)));
         assert!(matches!(trace.ops[2], TraceOp::LoadLocal(4)));
         assert!(matches!(trace.ops[3], TraceOp::LoadLocal(3))); // outer → slot 3 (unshifted)
         assert!(matches!(trace.ops[4], TraceOp::AddInt));
-        assert!(matches!(trace.ops[5], TraceOp::Exit));
+        assert!(!trace.ops.iter().any(|op| matches!(op, TraceOp::Exit)));
         // Scratch slot registered for sizing
         assert!(trace.locals_used.contains(&4));
     }
@@ -610,5 +818,117 @@ mod tests {
         assert!(matches!(trace.ops[2], TraceOp::LoadConstInt(3)));
         assert!(matches!(trace.ops[3], TraceOp::LoadConstInt(7)));
         assert!(matches!(trace.ops[4], TraceOp::MinInt));
+    }
+
+    #[test]
+    fn test_inline_arg_order_two_params() {
+        // f(a, b) = a - b. The stack is [a, b] with b on top; binding must put a
+        // in slot 0 and b in slot 1, not reversed -- else a - b becomes b - a.
+        let mut registry = PureFunctionRegistry::new();
+        let info = JitFunctionInfo {
+            instructions: vec![
+                Instruction::new(VMOpCode::LoadLocal, 0), // a
+                Instruction::new(VMOpCode::LoadLocal, 1), // b
+                Instruction::new(VMOpCode::Sub, 0),       // a - b
+                Instruction::new(VMOpCode::Return, 0),
+            ],
+            constants: vec![],
+            names: vec![],
+            nargs: 2,
+            complexity: 4,
+            is_pure: true,
+        };
+        registry.register("sub".to_string(), std::sync::Arc::new(info));
+        let mut inliner = PureInliner::new(InliningConfig::default(), &registry);
+
+        let mut trace = Trace::new(0);
+        trace.ops = vec![
+            TraceOp::LoadConstInt(10), // a
+            TraceOp::LoadConstInt(3),  // b (top of stack)
+            TraceOp::CallPure {
+                func_id: "sub".to_string(),
+                num_args: 2,
+            },
+        ];
+        inliner.optimize(&mut trace).unwrap();
+
+        assert!(!trace.ops.iter().any(|op| matches!(op, TraceOp::CallPure { .. })));
+        // Scratch base is 0 (empty host frame). Reversed binding: StoreLocal(1)
+        // pops b, then StoreLocal(0) pops a -> a in slot 0, b in slot 1.
+        let stores: Vec<usize> = trace
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                TraceOp::StoreLocal(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stores, vec![1, 0]);
+        // Body reads slot 0 then slot 1: a - b (not b - a).
+        let loads: Vec<usize> = trace
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                TraceOp::LoadLocal(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loads, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_non_terminal_return_refused() {
+        // A Return before the end is an early return; the linear inliner cannot
+        // model the branch, so it must refuse (call stays an interpreted CallPure).
+        let registry = PureFunctionRegistry::new();
+        let inliner = PureInliner::new(InliningConfig::default(), &registry);
+        let info = JitFunctionInfo {
+            instructions: vec![
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::Return, 0), // not last
+                Instruction::new(VMOpCode::LoadConst, 0),
+            ],
+            constants: vec![JitConstant::Int(1)],
+            names: vec![],
+            nargs: 1,
+            complexity: 3,
+            is_pure: true,
+        };
+        let empty_scope = HashMap::new();
+        let result = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Return"));
+    }
+
+    #[test]
+    fn test_block_scope_opcodes_skipped() {
+        // A lambda body is always a block, so real callee bytecode carries
+        // PushBlock/PopBlock. They only reset block-local slots on exit; for a
+        // linear inlinable body every local is assigned before use, so they are
+        // skipped (the computed result is unaffected).
+        let registry = PureFunctionRegistry::new();
+        let inliner = PureInliner::new(InliningConfig::default(), &registry);
+        let info = JitFunctionInfo {
+            instructions: vec![
+                Instruction::new(VMOpCode::PushBlock, 0),
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::LoadLocal, 0),
+                Instruction::new(VMOpCode::Mul, 0),
+                Instruction::new(VMOpCode::PopBlock, 0),
+                Instruction::new(VMOpCode::Return, 0),
+            ],
+            constants: vec![],
+            names: vec![],
+            nargs: 1,
+            complexity: 6,
+            is_pure: true,
+        };
+        let empty_scope = HashMap::new();
+        let ops = inliner.bytecode_to_trace_ops(&info, &empty_scope, 0).unwrap();
+        // PushBlock/PopBlock skipped, terminal Return dropped: x * x.
+        assert_eq!(ops.len(), 3);
+        assert!(matches!(ops[0], TraceOp::LoadLocal(0)));
+        assert!(matches!(ops[1], TraceOp::LoadLocal(0)));
+        assert!(matches!(ops[2], TraceOp::MulInt));
     }
 }

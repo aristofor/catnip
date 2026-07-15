@@ -2,10 +2,10 @@
 //! Pool of persistent Rust worker processes for ND process mode.
 //!
 //! Each worker is a `catnip worker` subprocess communicating
-//! via length-prefixed bincode over stdin/stdout pipes.
+//! via length-prefixed postcard over stdin/stdout pipes.
 
-use catnip_core::freeze::FrozenValue;
 use catnip_core::freeze::worker::{WorkerCommand, WorkerResult, read_message, write_message};
+use catnip_core::freeze::{FrozenStructType, FrozenValue};
 use std::io::{BufReader, BufWriter};
 use std::process::{Child, Command, Stdio};
 
@@ -89,6 +89,8 @@ impl WorkerPool {
         captures: &[(String, FrozenValue)],
         param_names: &[String],
         seeds: &[FrozenValue],
+        type_defs: &[FrozenStructType],
+        globals: &[(String, FrozenValue)],
     ) -> Result<Vec<FrozenValue>, String> {
         let n_workers = self.workers.len();
         if n_workers == 0 {
@@ -108,13 +110,18 @@ impl WorkerPool {
                 captures: captures.to_vec(),
                 param_names: param_names.to_vec(),
                 seed: seed.clone(),
+                type_defs: type_defs.to_vec(),
+                globals: globals.to_vec(),
             };
 
             if let Err(e) = self.send_to(worker_idx, &cmd) {
-                // Worker crashed, try to respawn and retry
-                self.respawn(worker_idx)?;
-                self.send_to(worker_idx, &cmd)
-                    .map_err(|e2| format!("worker {worker_idx} retry failed: {e}, {e2}"))?;
+                // Worker crashed mid-batch: earlier sends to it are lost, so a
+                // retry would collect results out of order and deadlock the next
+                // recv. Respawn for future batches and fail the whole batch --
+                // the caller falls back to the thread path (same policy as the
+                // recv arm below).
+                let _ = self.respawn(worker_idx);
+                return Err(format!("worker {worker_idx} send failed: {e}"));
             }
         }
 

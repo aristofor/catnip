@@ -250,6 +250,24 @@ class TestErrorPositionAccuracy(unittest.TestCase):
             Catnip().parse(code)
         self.assertEqual(cm.exception.line, 2)
 
+    def test_finally_raise_position(self):
+        """An error raised in finally reports the finally's line, not the body's.
+
+        AST path (op_try): error_byte is "first write wins", so without
+        clearing it before the finally a finally-raised error would inherit
+        the body's recorded position.
+        """
+        # body raises on line 2, finally raises on line 4
+        code = "try {\n  body_undef\n} finally {\n  finally_undef\n}"
+        c = Catnip(vm_mode='off')
+        c.parse(code)
+        with self.assertRaises(CatnipNameError) as cm:
+            c.execute()
+        # The finally exception is the one that propagates; its position must
+        # be the finally body, not the original body error.
+        self.assertIn('finally_undef', str(cm.exception))
+        self.assertEqual(cm.exception.line, 4)
+
 
 class TestErrorSuggestions(unittest.TestCase):
     """Tests for 'did you mean?' suggestions in error messages."""
@@ -366,6 +384,28 @@ class TestErrorSuggestions(unittest.TestCase):
         catnip.parse("text.zzzzzzz")
         with self.assertRaises((AttributeError, CatnipRuntimeError)):
             catnip.execute()
+
+
+class TestStalePreparedState(unittest.TestCase):
+    """A failed parse() must not leave previously prepared code executable."""
+
+    def test_failed_parse_invalidates_prepared_ir(self):
+        """A fatal E300 in parse() must drop the prior IR, not reuse it."""
+        catnip = Catnip()
+        catnip.parse("f = (x: int) => { x }\nf(1)")
+        self.assertEqual(catnip.execute(), 1)
+
+        # A parse that fails (fatal type mismatch) must invalidate the prepared
+        # code, so a following execute() reports the missing code instead of
+        # silently running the previously prepared program.
+        with self.assertRaises(CatnipRuntimeError):
+            catnip.parse('g = (y: int) => { y }\ng("no")')
+        with self.assertRaises((RuntimeError, CatnipRuntimeError)):
+            catnip.execute()
+
+        # A subsequent valid parse() restores normal execution.
+        catnip.parse("h = (z: int) => { z + 10 }\nh(5)")
+        self.assertEqual(catnip.execute(), 15)
 
 
 if __name__ == "__main__":

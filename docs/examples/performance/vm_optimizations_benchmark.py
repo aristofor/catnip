@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-VM Optimizations Benchmark (v2) - Fevrier 2026
+VM Optimizations Benchmark (v2) - Février 2026
 
 Mesure des hot paths VM Catnip avec un focus explicite sur BigInt:
-1. ForRangeInt: boucle numerique range()
+1. ForRangeInt: boucle numérique range()
 2. TailRecursionToLoopPass: tail recursion -> loop
 3. BigInt growth: multiplications successives
 4. BigInt div/mod: // et % sur gros entiers
@@ -11,7 +11,7 @@ Mesure des hot paths VM Catnip avec un focus explicite sur BigInt:
 Le script compare Catnip VM et Python natif avec:
 - warmup
 - min/median/mean/p95
-- verification de resultat
+- vérification de résultat
 """
 
 from __future__ import annotations
@@ -206,12 +206,12 @@ x
 
 
 @click.command()
-@click.option("-n", "--iterations", default=12, show_default=True, help="Iterations de mesure par scenario.")
-@click.option("-w", "--warmup", default=3, show_default=True, help="Iterations de chauffe.")
-@click.option("--factorial-n", default=1000, show_default=True, help="Input pour le scenario factorial.")
+@click.option("-n", "--iterations", default=12, show_default=True, help="Itérations de mesure par scénario.")
+@click.option("-w", "--warmup", default=3, show_default=True, help="Itérations de chauffe.")
+@click.option("--factorial-n", default=1000, show_default=True, help="Input pour le scénario factorial.")
 @click.option("--bigint-growth-steps", default=1200, show_default=True, help="Steps de multiplication BigInt.")
-@click.option("--bigint-divmod-steps", default=2000, show_default=True, help="Iterations div/mod BigInt.")
-@click.option("--fast", is_flag=True, help="Preset rapide: iterations=6, warmup=2, divmod-steps<=800.")
+@click.option("--bigint-divmod-steps", default=2000, show_default=True, help="Itérations div/mod BigInt.")
+@click.option("--fast", is_flag=True, help="Preset rapide: itérations=6, warmup=2, divmod-steps<=800.")
 def main(
     iterations: int,
     warmup: int,
@@ -227,7 +227,7 @@ def main(
         bigint_divmod_steps = min(bigint_divmod_steps, 800)
 
     click.echo("=" * 78)
-    click.echo("Catnip VM Optimizations Benchmark (v2) - Fevrier 2026")
+    click.echo("Catnip VM Optimizations Benchmark (v2) - Février 2026")
     click.echo("=" * 78)
     click.echo(f"iterations={iterations}, warmup={warmup}, vm_mode=on")
     click.echo("scenarios: for-range, tail->loop, bigint-growth, bigint-divmod")
@@ -239,14 +239,14 @@ def main(
         scenario_bigint_divmod(iterations, warmup, bigint_growth_steps, bigint_divmod_steps),
     ]
 
-    click.echo("\nValidation des resultats:")
+    click.echo("\nValidation des résultats:")
     for s in scenarios:
         ok = s.catnip_result == s.python_result
         click.echo(f"  {s.name:<50} {'OK' if ok else 'MISMATCH'}")
         if not ok:
-            raise click.ClickException(f"Mismatch on scenario: {s.name}")
+            raise click.ClickException(f"Mismatch sur scénario: {s.name}")
 
-    click.echo("\nDetails par scenario:")
+    click.echo("\nDétails par scénario:")
     for s in scenarios:
         print_stats_pair(s.name, s.catnip_stats, s.python_stats)
 

@@ -1,6 +1,8 @@
 # FILE: tests/language/test_try_except.py
 """Tests for try/except/finally and raise."""
 
+import os
+
 import pytest
 
 from catnip import Catnip
@@ -213,14 +215,16 @@ class TestRaise:
 
 class TestControlFlowFinally:
     def test_return_through_finally(self, cat):
-        """Finally executes before return propagates."""
+        """Finally executes before return propagates. The global is READ in
+        the finally so the write reaches the live module binding (the settled
+        read-based rule: a write-only name would create a local)."""
         code = """
         x = 0
         f = () => {
             try {
                 return 42
             } finally {
-                x = 99
+                x = x + 99
             }
         }
         f()

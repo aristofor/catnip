@@ -4,12 +4,7 @@ import logging
 import sys
 
 from catnip import _rs
-from catnip._rs import CatnipMeta, ContextBase
-
-try:
-    from catnip._rs import JIT_PURE_BUILTINS as _RUST_JIT_PURE_BUILTINS
-except ImportError:
-    _RUST_JIT_PURE_BUILTINS = None
+from catnip._rs import JIT_PURE_BUILTINS, CatnipMeta, ContextBase
 
 from .exc import CatnipTypeError
 
@@ -159,7 +154,6 @@ class _JitWrapper:
 
         if not self.ctx.jit_enabled:
             self.ctx.jit_enabled = True
-        self.ctx._init_jit()
 
         # No per-function compilation in AST mode: the JIT is a VM feature (hot
         # loop detection compiles in the VM). Marking jit_enabled is enough; the
@@ -323,38 +317,7 @@ class MinimalLogger:
 class Context(ContextBase):
     """Execution context - inherits core fields and scope ops from Rust ContextBase."""
 
-    KNOWN_PURE_FUNCTIONS = frozenset(
-        _RUST_JIT_PURE_BUILTINS
-        or (
-            'abs',
-            'all',
-            'any',
-            'bool',
-            'complex',
-            'dict',
-            'divmod',
-            'enumerate',
-            'filter',
-            'float',
-            'fold',
-            'int',
-            'len',
-            'list',
-            'map',
-            'max',
-            'min',
-            'pow',
-            'range',
-            'reduce',
-            'round',
-            'set',
-            'sorted',
-            'str',
-            'sum',
-            'tuple',
-            'zip',
-        )
-    )
+    KNOWN_PURE_FUNCTIONS = frozenset(JIT_PURE_BUILTINS)
 
     def __init__(self, globals=None, locals=None, logger=None, memoization=None):
         super().__init__()
@@ -483,3 +446,22 @@ class Context(ContextBase):
         # Pure functions set
         for name in self.KNOWN_PURE_FUNCTIONS:
             self.pure_functions.add(name)
+
+        # Snapshot of the builtin names seeded above, taken before any user
+        # global is assigned at runtime. Drives has_shadowed_builtin_callable().
+        self._builtin_names = frozenset(self.globals)
+
+    def has_shadowed_builtin_callable(self):
+        """True if a builtin name is currently bound to a Catnip callable.
+
+        A user global that shadows a builtin (e.g. ``str = (x) => {...}``)
+        can't ship to a fresh worker process: it isn't installed there, and the
+        worker resolves the name to its own pre-seeded builtin instead -- a
+        silent divergence, no error raised. The ND-process batch must fall back
+        to the shared-memory thread path when this holds.
+        """
+        from ._rs import Function, Lambda, VMFunction
+
+        callables = (Function, Lambda, VMFunction)
+        g = self.globals
+        return any(isinstance(g.get(name), callables) for name in self._builtin_names)

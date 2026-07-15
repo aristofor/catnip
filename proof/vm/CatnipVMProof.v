@@ -1,6 +1,10 @@
 (* FILE: proof/vm/CatnipVMProof.v *)
 (* Compatibility facade for split VM proofs. *)
 
+From Catnip Require Export CatnipValueClassProof.
+From Catnip Require Export CatnipBoundaryProof.
+From Catnip Require Export CatnipPluginBoundaryProof.
+From Catnip Require Export CatnipOwnershipProof.
 From Catnip Require Export CatnipVMOpCode.
 From Catnip Require Export CatnipVMState.
 From Catnip Require Export CatnipVMStackSafety.

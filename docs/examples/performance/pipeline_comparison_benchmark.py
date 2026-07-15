@@ -84,8 +84,8 @@ def benchmark_execution(cat_instance: Catnip, iterations: int, warmup: int):
 
 
 @click.command()
-@click.option("-n", "--iterations", default=10, show_default=True, help="Iterations par mesure.")
-@click.option("-w", "--warmup", default=3, show_default=True, help="Iterations de chauffe.")
+@click.option("-n", "--iterations", default=10, show_default=True, help="Itérations par mesure.")
+@click.option("-w", "--warmup", default=3, show_default=True, help="Itérations de chauffe.")
 @click.option(
     "-l",
     "--levels",
@@ -93,7 +93,7 @@ def benchmark_execution(cat_instance: Catnip, iterations: int, warmup: int):
     show_default=True,
     help="Niveaux d'optimisation (ex: '0-3', '0,2,3', '2').",
 )
-@click.option("-t", "--test", "tests", multiple=True, help="Filtrer par nom de test (sous-chaine).")
+@click.option("-t", "--test", "tests", multiple=True, help="Filtrer par nom de test (sous-chaîne).")
 @click.option("-x", "--executor", default="vm", show_default=True, type=click.Choice(["vm", "ast"]))
 def main(iterations: int, warmup: int, levels: str, tests: tuple[str, ...], executor: str) -> None:
     """Benchmark des niveaux d'optimisation Catnip (optimize=0..3)."""

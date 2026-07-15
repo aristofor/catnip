@@ -5,6 +5,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 use crate::constants::{FORMAT_ALIGN_DEFAULT, FORMAT_INDENT_SIZE_DEFAULT, FORMAT_LINE_LENGTH_DEFAULT};
+use catnip_tools::config::{
+    LINT_MAX_CYCLOMATIC_COMPLEXITY, LINT_MAX_FUNCTION_LENGTH, LINT_MAX_NESTING_DEPTH, LINT_MAX_PARAMETERS,
+};
 
 // --- FormatConfig ---
 
@@ -202,6 +205,9 @@ pub struct LintConfig {
     pub max_function_length: usize,
     #[pyo3(get, set)]
     pub max_parameters: usize,
+    /// Diagnostic codes to suppress globally (config-level on/off).
+    #[pyo3(get, set)]
+    pub disabled_codes: Vec<String>,
 }
 
 #[pymethods]
@@ -213,11 +219,13 @@ impl LintConfig {
         check_semantic=true,
         check_ir=false,
         check_names=false,
-        max_nesting_depth=5,
-        max_cyclomatic_complexity=10,
-        max_function_length=30,
-        max_parameters=6,
+        max_nesting_depth=LINT_MAX_NESTING_DEPTH,
+        max_cyclomatic_complexity=LINT_MAX_CYCLOMATIC_COMPLEXITY,
+        max_function_length=LINT_MAX_FUNCTION_LENGTH,
+        max_parameters=LINT_MAX_PARAMETERS,
+        disabled_codes=None,
     ))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python-facing LintConfig kwargs
     pub fn new(
         check_syntax: bool,
         check_style: bool,
@@ -228,6 +236,7 @@ impl LintConfig {
         max_cyclomatic_complexity: usize,
         max_function_length: usize,
         max_parameters: usize,
+        disabled_codes: Option<Vec<String>>,
     ) -> Self {
         Self {
             check_syntax,
@@ -239,12 +248,13 @@ impl LintConfig {
             max_cyclomatic_complexity,
             max_function_length,
             max_parameters,
+            disabled_codes: disabled_codes.unwrap_or_default(),
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "LintConfig(syntax={}, style={}, semantic={}, ir={}, names={}, max_nesting={}, max_complexity={}, max_length={}, max_params={})",
+            "LintConfig(syntax={}, style={}, semantic={}, ir={}, names={}, max_nesting={}, max_complexity={}, max_length={}, max_params={}, disabled={:?})",
             self.check_syntax,
             self.check_style,
             self.check_semantic,
@@ -254,6 +264,7 @@ impl LintConfig {
             self.max_cyclomatic_complexity,
             self.max_function_length,
             self.max_parameters,
+            self.disabled_codes,
         )
     }
 }
@@ -266,10 +277,11 @@ impl Default for LintConfig {
             check_semantic: true,
             check_ir: false,
             check_names: false,
-            max_nesting_depth: 5,
-            max_cyclomatic_complexity: 10,
-            max_function_length: 30,
-            max_parameters: 6,
+            max_nesting_depth: LINT_MAX_NESTING_DEPTH,
+            max_cyclomatic_complexity: LINT_MAX_CYCLOMATIC_COMPLEXITY,
+            max_function_length: LINT_MAX_FUNCTION_LENGTH,
+            max_parameters: LINT_MAX_PARAMETERS,
+            disabled_codes: Vec::new(),
         }
     }
 }
@@ -376,6 +388,7 @@ fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
 #[pyo3(signature = (source, config=None))]
 pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResult<Py<PyList>> {
     let cfg = config.unwrap_or_default();
+    let disabled: std::collections::HashSet<String> = cfg.disabled_codes.iter().cloned().collect();
     let tools_cfg = catnip_tools::config::LintConfig {
         check_syntax: cfg.check_syntax,
         check_style: cfg.check_style,
@@ -386,6 +399,7 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
         max_cyclomatic_complexity: cfg.max_cyclomatic_complexity,
         max_function_length: cfg.max_function_length,
         max_parameters: cfg.max_parameters,
+        disabled_codes: disabled.clone(),
     };
 
     let mut diagnostics =
@@ -417,6 +431,7 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
                         code: sd.code,
                         message: sd.message,
                         severity: match sd.severity {
+                            catnip_core::pipeline::SemanticSeverity::Error => catnip_tools::linter::Severity::Error,
                             catnip_core::pipeline::SemanticSeverity::Warning => catnip_tools::linter::Severity::Warning,
                             catnip_core::pipeline::SemanticSeverity::Hint => catnip_tools::linter::Severity::Hint,
                         },
@@ -432,6 +447,12 @@ pub fn lint_code(py: Python, source: &str, config: Option<LintConfig>) -> PyResu
                 diagnostics.sort_by(|a, b| a.line.cmp(&b.line).then(a.column.cmp(&b.column)));
             }
         }
+    }
+
+    // Semantic diagnostics are appended after tools::lint_code's own filter,
+    // so re-apply the disabled-codes filter over the full list.
+    if !disabled.is_empty() {
+        diagnostics.retain(|d| !disabled.contains(&d.code));
     }
 
     let list = PyList::empty(py);

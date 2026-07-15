@@ -11,9 +11,10 @@ Targets:
 - Cargo.toml                         workspace members
 """
 
-import re
 import tomllib
 from pathlib import Path
+
+from _genutil import replace_between_markers
 
 
 def discover_modules(libs_dir: Path) -> list[dict]:
@@ -38,27 +39,6 @@ def discover_modules(libs_dir: Path) -> list[dict]:
             has_pyo3=has_pyo3,
         ))
     return modules
-
-
-def replace_between_markers(path: Path, start_marker: str, end_marker: str, new_lines: list[str]) -> bool:
-    """Replace content between markers in file. Returns True if changed."""
-    content = path.read_text()
-
-    pattern = re.compile(
-        rf'^{re.escape(start_marker)}$.*?^{re.escape(end_marker)}$',
-        re.MULTILINE | re.DOTALL,
-    )
-    match = pattern.search(content)
-    if not match:
-        raise ValueError(f"Markers {start_marker} not found in {path}")
-
-    new_block = "\n".join([start_marker] + new_lines + [end_marker])
-    if match.group(0) == new_block:
-        return False
-
-    new_content = content[:match.start()] + new_block + content[match.end():]
-    path.write_text(new_content)
-    return True
 
 
 def gen_python_loader(modules: list[dict]) -> list[str]:
@@ -96,13 +76,13 @@ def gen_setup_extensions(modules: list[dict]) -> list[str]:
     for m in modules:
         if not m['has_pyo3']:
             continue
-        lines.append(f"    RustExtension(")
+        lines.append('    RustExtension(')
         lines.append(f'        "catnip.{m["import_name"]}",')
         lines.append(f'        path="catnip_libs/{m["dir_name"]}/{m["rust_path"]}/Cargo.toml",')
-        lines.append(f"        binding=Binding.PyO3,")
-        lines.append(f"        debug=False,")
-        lines.append(f"        args=_profile_args,")
-        lines.append(f"    ),")
+        lines.append('        binding=Binding.PyO3,')
+        lines.append('        debug=False,')
+        lines.append('        args=_profile_args,')
+        lines.append('    ),')
     return lines
 
 

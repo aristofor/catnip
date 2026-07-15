@@ -102,6 +102,14 @@ class OpCode(IntEnum):
     GLOBALS = 70
     LOCALS = 71
     UNION_DEF = 72
+    ADD_INT = 73
+    ADD_FLOAT = 74
+    SUB_INT = 75
+    SUB_FLOAT = 76
+    MUL_INT = 77
+    MUL_FLOAT = 78
+    DIV_FLOAT = 79
+    CHECK_RETURN = 80
 
 
 # Set of opcodes where arguments should not be evaluated immediately

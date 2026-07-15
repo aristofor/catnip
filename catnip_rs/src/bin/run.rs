@@ -18,6 +18,10 @@ use _rs::freeze::{frozen_to_value, value_to_frozen};
 use _rs::pipeline::Pipeline;
 use _rs::vm::Value;
 use _rs::vm::unified_compiler::{FunctionCompileMeta, UnifiedCompiler};
+// The `#[pymodule]` glue lives in a generated module named like the function;
+// alias it so `append_to_inittab!` can reach it without clashing with the `_rs`
+// crate name.
+use _rs::_rs as catnip_static_rs;
 use catnip_core::freeze::worker::{WorkerCommand, WorkerResult, read_message, write_message};
 use catnip_core::ir::IR;
 use clap::{Parser, Subcommand};
@@ -53,6 +57,8 @@ struct Cli {
     verbose: bool,
 
     /// Disable JIT compiler (enabled by default)
+    // The standalone default is structural (!no_jit): keep it in sync with
+    // catnip_core::constants::JIT_DEFAULT_STANDALONE.
     #[arg(long = "no-jit")]
     no_jit: bool,
 
@@ -190,12 +196,10 @@ fn extract_script_args(raw_args: &[String]) -> (Vec<String>, Vec<String>) {
 
         if arg.starts_with('-') {
             clap_args.push(arg.clone());
-            if is_value_option(arg) {
-                if i + 1 < raw_args.len() {
-                    clap_args.push(raw_args[i + 1].clone());
-                    i += 2;
-                    continue;
-                }
+            if is_value_option(arg) && i + 1 < raw_args.len() {
+                clap_args.push(raw_args[i + 1].clone());
+                i += 2;
+                continue;
             }
             i += 1;
             continue;
@@ -245,6 +249,27 @@ fn shutdown(code: i32) -> ! {
     process::exit(code);
 }
 
+/// Register the statically-linked `_rs` extension as `catnip._rs` so the whole
+/// process shares a single catnip_rs instance (one set of thread-local
+/// func_table/symbol/enum/struct tables). Must be called before any
+/// `Python::attach` (append_to_inittab requires an uninitialized interpreter).
+fn register_static_rs() {
+    pyo3::append_to_inittab!(catnip_static_rs);
+    Python::attach(|py| {
+        // Importing "_rs" runs the static module init from the inittab entry;
+        // alias it under the package-qualified name the catnip package imports.
+        let rs_mod = match py.import("_rs") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        if let Ok(sys) = py.import("sys") {
+            if let Ok(modules) = sys.getattr("modules") {
+                let _ = modules.set_item("catnip._rs", rs_mod);
+            }
+        }
+    });
+}
+
 /// Delegate the full invocation to the Python CLI (catnip.cli:main).
 /// Sets sys.argv and calls Click's main(), never returns.
 fn delegate_to_python_cli(args: Vec<String>) -> ! {
@@ -283,6 +308,14 @@ fn delegate_to_python_cli(args: Vec<String>) -> ! {
 }
 
 fn main() {
+    // Register the statically-linked `_rs` extension under the `catnip._rs`
+    // name the Python package imports. Without this, `import catnip` dlopens the
+    // separate `catnip/_rs.so`, giving child `.cat` module loaders a *different*
+    // catnip_rs instance with its own thread-local func_table/registries -- so
+    // cross-VM transplants (imported functions, union/enum variants) cannot
+    // reach this binary's parent VM. Sharing one DSO keeps them in sync.
+    register_static_rs();
+
     // Pre-parse: delegate Python subcommands before Clap runs
     let raw_args: Vec<String> = std::env::args().collect();
 
@@ -556,8 +589,18 @@ fn run_worker() {
                 captures,
                 param_names,
                 seed,
+                type_defs,
+                globals,
             } => {
-                let result = execute_worker_task(&mut pipeline, &encoded_ir, &captures, &param_names, &seed);
+                let result = execute_worker_task(
+                    &mut pipeline,
+                    &encoded_ir,
+                    &captures,
+                    &param_names,
+                    &seed,
+                    &type_defs,
+                    &globals,
+                );
                 let msg = match result {
                     Ok(frozen) => WorkerResult::Ok(frozen),
                     Err(e) => WorkerResult::Err(e),
@@ -577,6 +620,8 @@ fn execute_worker_task(
     captures: &[(String, catnip_core::freeze::FrozenValue)],
     param_names: &[String],
     seed: &catnip_core::freeze::FrozenValue,
+    type_defs: &[catnip_core::freeze::FrozenStructType],
+    globals: &[(String, catnip_core::freeze::FrozenValue)],
 ) -> Result<catnip_core::freeze::FrozenValue, String> {
     // Decode raw bincode IR (no .catf header)
     let body_ir: Vec<IR> = catnip_core::freeze::decode(encoded_ir).map_err(|e| format!("worker: decode IR: {e}"))?;
@@ -597,21 +642,44 @@ fn execute_worker_task(
     let (code, closure, args) = Python::attach(|py| -> Result<_, String> {
         let executor = pipe.ensure_executor();
         executor.ensure_host(py)?;
+        // Pin the thread-local registry to this VM after ensure_host (module
+        // imports may have moved it): every thaw below (types, globals,
+        // captures, seed) creates struct instances into it, and their releases
+        // free from this same VM -- a mismatch would leak or corrupt.
+        executor.install_tables();
 
-        // Compile the body as a function with param_names
-        let body_node = if body_ir.len() == 1 {
-            &body_ir[0]
-        } else {
-            return Err("worker: expected single IR body node".to_string());
-        };
+        // Register incoming struct types before thawing the seed: a struct seed
+        // needs its type present to reconstruct (step D). register-if-absent by
+        // name, so a respawned/reused worker stays correct.
+        if !type_defs.is_empty() {
+            _rs::freeze::register_frozen_struct_types(py, &mut executor.vm_mut().struct_registry, None, type_defs)?;
+        }
+
+        // Install parent globals the callback (or a struct method it calls) may
+        // reference by name, thawed against the just-registered types. Releases
+        // any value displaced on this reused worker pipeline (see the method).
+        if !globals.is_empty() {
+            executor.install_frozen_globals(py, globals)?;
+        }
+
+        // Element 0 is the function body. Element 1, when present, holds the
+        // params (with type annotations): rebuild the typed-param boundary
+        // checks (TH2-B 0b) the parent emitted, instead of dropping them in the
+        // worker. Older frozen IR (body only) yields no checks.
+        let body_node = &body_ir[0];
 
         let mut compiler = UnifiedCompiler::new();
+        let param_types = match body_ir.get(1) {
+            Some(params_ir) => compiler.param_type_codes(py, params_ir),
+            None => Vec::new(),
+        };
         let code = compiler
             .compile_function_pure(
                 py,
                 body_node,
                 FunctionCompileMeta {
                     params: param_names.to_vec(),
+                    param_types,
                     name: "<nd_worker>",
                     defaults: vec![],
                     vararg_idx: -1,
@@ -637,12 +705,25 @@ fn execute_worker_task(
         Ok((code, closure, args))
     })?;
 
-    // Execute function with closure scope
+    // Execute function with closure scope. Keep a handle to the scope: its Drop
+    // reclaims pyobj/bigint captures but deliberately not struct captures, which
+    // the worker must release explicitly (a fresh scope is thawed per task on
+    // this reused pipeline).
     let executor = pipe.ensure_executor();
-    let result = executor.execute_function(Arc::new(code), &args, closure)?;
+    let result = executor.execute_function(Arc::new(code), &args, closure.clone())?;
 
-    // Freeze result
-    Python::attach(|py| value_to_frozen(py, result).ok_or_else(|| "worker: result not freezable".to_string()))
+    // Freeze the result, then release it -- execute_function returns an owned
+    // Value (like execute(), whose consume_result releases it); dropping it here
+    // would strand one ref per task. Reclaim struct captures after the freeze,
+    // since a result may alias a captured struct.
+    Python::attach(|py| {
+        let frozen = value_to_frozen(py, result).ok_or_else(|| "worker: result not freezable".to_string());
+        executor.release_owned(result);
+        if let Some(scope) = &closure {
+            executor.release_captured_structs(scope);
+        }
+        frozen
+    })
 }
 
 fn run_benchmark(file: &PathBuf, iterations: usize, enable_jit: bool, jit_threshold: u32) {

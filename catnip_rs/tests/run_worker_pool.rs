@@ -37,7 +37,9 @@ fn test_pool_submit_batch_simple() {
         FrozenValue::Int(5),
     ];
 
-    let results = pool.submit_batch(&encoded_ir, &[], &["n".into()], &seeds).unwrap();
+    let results = pool
+        .submit_batch(&encoded_ir, &[], &["n".into()], &seeds, &[], &[])
+        .unwrap();
 
     assert_eq!(results.len(), 5);
     for (i, result) in results.iter().enumerate() {
@@ -65,7 +67,7 @@ fn test_pool_submit_batch_with_captures() {
     let seeds = vec![FrozenValue::Int(1), FrozenValue::Int(2), FrozenValue::Int(3)];
 
     let results = pool
-        .submit_batch(&encoded_ir, &captures, &["n".into()], &seeds)
+        .submit_batch(&encoded_ir, &captures, &["n".into()], &seeds, &[], &[])
         .unwrap();
 
     assert_eq!(
@@ -88,7 +90,9 @@ fn test_pool_submit_batch_larger_than_workers() {
 
     let seeds: Vec<_> = (1..=10).map(FrozenValue::Int).collect();
 
-    let results = pool.submit_batch(&encoded_ir, &[], &["n".into()], &seeds).unwrap();
+    let results = pool
+        .submit_batch(&encoded_ir, &[], &["n".into()], &seeds, &[], &[])
+        .unwrap();
 
     let expected: Vec<_> = (1..=10).map(|i| FrozenValue::Int(i * i)).collect();
     assert_eq!(results, expected);
@@ -104,7 +108,7 @@ fn test_pool_reuse_across_batches() {
 
     // First batch
     let results1 = pool
-        .submit_batch(&encoded_ir, &[], &["n".into()], &[FrozenValue::Int(10)])
+        .submit_batch(&encoded_ir, &[], &["n".into()], &[FrozenValue::Int(10)], &[], &[])
         .unwrap();
     assert_eq!(results1, vec![FrozenValue::Int(11)]);
 
@@ -115,6 +119,8 @@ fn test_pool_reuse_across_batches() {
             &[],
             &["n".into()],
             &[FrozenValue::Int(20), FrozenValue::Int(30)],
+            &[],
+            &[],
         )
         .unwrap();
     assert_eq!(results2, vec![FrozenValue::Int(21), FrozenValue::Int(31)]);

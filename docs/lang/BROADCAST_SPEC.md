@@ -397,6 +397,52 @@ data = list("a", "b", "c")
 result = data.[+ 2]  # TypeError: can only concatenate str (not "int") to str
 ```
 
+### 4. Mutation des éléments struct : le callback reçoit une copie
+
+**Choix** : un callback broadcast (`.[f]`, `.[if f]`, `~>`) reçoit une **copie privée profonde** de chaque élément
+struct. Muter cette copie, à n'importe quelle profondeur, ne modifie jamais la collection source ; retourner la copie
+mutée la place dans le résultat.
+
+```catnip
+struct P { log }
+items = [P(0), P(0)]
+
+items.[(p) => { p.log = 1 }]     # la source est intacte : items[0].log == 0
+r = items.[(p) => { p.log = 5
+                    p }]         # la copie mutée est dans le résultat : r[0].log == 5
+
+struct Box { inner }             # champ struct imbriqué
+b = [Box(P(0))]
+b.[(x) => { x.inner.log = 9 }]   # même le nested est isolé : b[0].inner.log == 0
+```
+
+**Raisons** :
+
+- même règle de visibilité que la capture de closure (copie privée) : une seule règle pour tout ce qui traverse une
+  frontière d'exécution ;
+- comportement déterministe sous parallélisme (modes thread et process) : aucune mutation partagée observable, donc
+  aucun ordre d'observation à définir ;
+- le flux de données reste linéaire : la source entre, le résultat sort, rien ne se modifie sur le côté.
+
+Le pattern de transformation s'écrit donc par le résultat, jamais par effet de bord :
+
+<!-- check: no-check -->
+
+```catnip
+items = items.[(p) => { p.log = p.log + 1
+                        p }]     # transformer = retourner la copie mutée
+```
+
+> La copie descend récursivement dans les champs **struct** imbriqués (identité préservée si deux champs pointent le
+> même struct, cycles compris) : muter un struct imbriqué de la copie, à toute profondeur, n'affecte pas la source. Les
+> champs **non-struct** (listes, dicts, grands entiers) restent partagés par référence — muter l'objet derrière un tel
+> champ reste visible des deux côtés.
+
+La règle est en réalité générale — elle décrit la **frontière d'exécution Python**, pas seulement le broadcast : un
+callback Catnip invoqué depuis du code Python arbitraire (une fonction du contexte, un HOF, `map`/`filter`) reçoit lui
+aussi des copies privées de ses arguments struct. À l'intérieur du langage, rien ne change : un appel direct, une
+méthode, un tail call partagent l'instance. Rester en Catnip = référence partagée ; traverser Python = copie privée.
+
 ## Comportement par Type de Collection
 
 Le broadcast traite les types de données différemment selon leur nature :

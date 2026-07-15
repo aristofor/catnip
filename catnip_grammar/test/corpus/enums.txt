@@ -1,0 +1,53 @@
+================================================================================
+Enum declaration
+================================================================================
+
+enum Color { red; green; blue }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (enum_stmt
+      name: (identifier)
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier)))))
+
+================================================================================
+Enum single variant
+================================================================================
+
+enum Unit { only }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (enum_stmt
+      name: (identifier)
+      (enum_variant
+        name: (identifier)))))
+
+================================================================================
+Enum multiline without separators
+================================================================================
+
+enum Dir {
+  north
+  south
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (enum_stmt
+      name: (identifier)
+      (enum_variant
+        name: (identifier))
+      (enum_variant
+        name: (identifier)))))

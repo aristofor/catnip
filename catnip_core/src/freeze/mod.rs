@@ -5,9 +5,11 @@
 //! Header is manually serialized.
 //! Stale files (opcode mismatch) are silently rejected, not errors.
 
+pub mod struct_type;
 pub mod value;
 pub mod worker;
 
+pub use struct_type::{FrozenField, FrozenMethod, FrozenStructType};
 pub use value::FrozenValue;
 
 use crate::ir::{IR, IROpCode};

@@ -11,12 +11,12 @@ None ?? None ?? 3  # → 3
 0 ?? 99      # → 0
 False ?? 99  # → False
 
-# and/or retournent des booleens
+# and/or retournent des booléens
 "ok" and 42       # → True
 0 or "fallback"   # → True
 False and "nope"  # → False
 
-# Trois niveaux de selection :
+# Trois niveaux de sélection :
 # - and/or : logique pure (bool)
 # - ?? : nil-check (valeur)
 # - if/else : truthiness (contrôle de flux)

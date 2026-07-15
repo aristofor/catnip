@@ -2,6 +2,8 @@
 //! Runtime introspection for Catnip - exposed as `catnip` builtin.
 
 use crate::pragma::PragmaContext;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -25,6 +27,29 @@ impl CatnipRuntime {
             context: None,
             modules: Vec::new(),
         }
+    }
+
+    /// Participate in CPython's cyclic GC. `RUNTIME` is injected into the
+    /// context's globals (`globals['catnip']`) and holds the context back via
+    /// `_set_context`, closing a `Context <-> CatnipRuntime` cycle the collector
+    /// cannot see (a Rust pyclass is opaque to it). Visiting the owned references
+    /// lets the collector detect the cycle; `__clear__` breaks it. Without this,
+    /// every `Catnip()` session leaks its context.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(ref pc) = self.pragma_context {
+            visit.call(pc)?;
+        }
+        if let Some(ref ctx) = self.context {
+            visit.call(ctx)?;
+        }
+        Ok(())
+    }
+
+    /// Break the `Context <-> CatnipRuntime` cycle by dropping the strong
+    /// references. Only called by the GC on an otherwise-unreachable object.
+    fn __clear__(&mut self) {
+        self.pragma_context = None;
+        self.context = None;
     }
 
     /// Set the pragma context (called after Catnip init).

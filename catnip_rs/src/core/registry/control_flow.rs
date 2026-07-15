@@ -914,11 +914,21 @@ impl Registry {
         let fields_tuple = args.get_item(1)?.cast::<PyTuple>()?.clone();
         let mut field_names: Vec<String> = Vec::new();
         let mut field_defaults: Vec<Option<Py<PyAny>>> = Vec::new();
+        let mut field_checks: Vec<catnip_core::vm::opcode::ParamCheck> = Vec::new();
 
         for field_item in fields_tuple.iter() {
             let pair = field_item.cast::<PyTuple>()?;
             let fname: String = pair.get_item(0)?.extract()?;
             let has_default: bool = pair.get_item(1)?.extract()?;
+            // Field IR is (name, has_default, default, type_or_none); classify the
+            // annotation text (index 3) into a runtime check, parity with the VMs.
+            let check = pair
+                .get_item(3)
+                .ok()
+                .and_then(|t| t.extract::<String>().ok())
+                .map(|t| catnip_core::vm::opcode::ParamCheck::from_annotation(&t))
+                .unwrap_or(catnip_core::vm::opcode::ParamCheck::None);
+            field_checks.push(check);
             if has_default {
                 let default = pair.get_item(2)?;
                 let default_val = self.exec_stmt_impl(py, default.unbind())?;
@@ -1005,6 +1015,7 @@ impl Registry {
             let mut seen_field_names: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut mro_field_names: Vec<String> = Vec::new();
             let mut mro_field_defaults: Vec<Option<Py<PyAny>>> = Vec::new();
+            let mut mro_field_checks: Vec<catnip_core::vm::opcode::ParamCheck> = Vec::new();
 
             for mro_type_name in mro.iter().skip(1) {
                 // Built-in exception types have no fields/methods to inherit
@@ -1031,6 +1042,16 @@ impl Registry {
                     if seen_field_names.insert(fname.clone()) {
                         mro_field_names.push(fname.clone());
                         mro_field_defaults.push(parent.field_defaults[i].as_ref().map(|v| v.clone_ref(py)));
+                        // Inherit the parent field's type contract (parity with the
+                        // VMs, where the check travels with the cloned field). An
+                        // older parent type with no field_checks degrades to None.
+                        mro_field_checks.push(
+                            parent
+                                .field_checks
+                                .get(i)
+                                .cloned()
+                                .unwrap_or(catnip_core::vm::opcode::ParamCheck::None),
+                        );
                     }
                 }
 
@@ -1060,8 +1081,10 @@ impl Registry {
             // Prepend MRO fields before child fields
             mro_field_names.extend(field_names);
             mro_field_defaults.extend(field_defaults);
+            mro_field_checks.extend(field_checks);
             field_names = mro_field_names;
             field_defaults = mro_field_defaults;
+            field_checks = mro_field_checks;
 
             mro
         } else {
@@ -1201,6 +1224,15 @@ impl Registry {
             )));
         }
 
+        // Weak ref to the context so __call__ can resolve nominal field types
+        // without forming a `ctx <-> type` cycle (the context's globals hold this
+        // type). Weak so each `Catnip()` session is collected normally.
+        let ctx_weakref = py
+            .import("weakref")?
+            .getattr("ref")?
+            .call1((self.ctx.bind(py),))?
+            .unbind();
+
         // Create CatnipStructType
         let struct_type = Py::new(
             py,
@@ -1208,11 +1240,16 @@ impl Registry {
                 name: name.clone(),
                 field_names,
                 field_defaults,
+                field_checks,
+                // A plain struct carries no generic-union payload templates.
+                field_templates: Vec::new(),
+                ctx_weakref: Some(ctx_weakref),
                 methods,
                 static_methods,
                 init_fn,
                 parent_names: base_names,
                 mro: struct_mro,
+                implements: implements_list,
                 abstract_methods: final_abstract,
             },
         )?;
@@ -1583,9 +1620,10 @@ impl Registry {
     /// CatnipEnumVariant singletons (nullary). Stores the namespace in the
     /// scope under the union name.
     ///
-    /// Args: [name, type_params_list, variants_list]
+    /// Args: [name, type_params_list, variants_list[, methods_list]]
     ///   variants_list: each variant is `(variant_name, fields_list)`
     ///   fields_list: each field is `(field_name, type_text_or_none)`
+    ///   methods_list: each method is `(method_name, lambda_ir)`
     pub(crate) fn op_union(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         use crate::vm::unions::build_union_type;
 
@@ -1606,7 +1644,7 @@ impl Registry {
 
         let variants_obj = self.exec_stmt_impl(py, args.get_item(2)?.unbind())?;
 
-        let mut variants: Vec<(String, Vec<String>)> = Vec::new();
+        let mut variants: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         for variant_item in variants_obj.bind(py).try_iter()? {
             let variant_item = variant_item?;
             let variant_tuple = variant_item.cast::<PyTuple>()?;
@@ -1619,18 +1657,49 @@ impl Registry {
             let fields_obj = variant_tuple.get_item(1)?;
 
             let mut field_names: Vec<String> = Vec::new();
+            let mut field_types: Vec<String> = Vec::new();
             for field_item in fields_obj.try_iter()? {
                 let field_item = field_item?;
-                // Each field is (name, type_text_or_none). Type text is
-                // captured but unused at runtime.
+                // Each field is (name, type_text_or_none); the type text drives
+                // the generic-nominal boundary (empty string when unannotated).
                 let pair = field_item.cast::<PyTuple>()?;
                 let fname: String = pair.get_item(0)?.extract()?;
+                let ftype: String = if pair.len() >= 2 {
+                    pair.get_item(1)?.extract().unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 field_names.push(fname);
+                field_types.push(ftype);
             }
-            variants.push((variant_name, field_names));
+            variants.push((variant_name, field_names, field_types));
         }
 
-        let union_obj = build_union_type(py, &name, type_params, &variants)?;
+        // Optional methods list: each entry is (method_name, lambda_ir).
+        // Evaluating the lambda IR yields the callable, like struct methods.
+        let mut methods: indexmap::IndexMap<String, Py<PyAny>> = indexmap::IndexMap::new();
+        if args.len() > 3 {
+            let methods_obj = args.get_item(3)?;
+            for method_result in methods_obj.try_iter()? {
+                let method_pair = method_result?;
+                let pair_tuple = method_pair.cast::<PyTuple>()?;
+                let method_name: String = pair_tuple.get_item(0)?.extract()?;
+                let lambda_ir = pair_tuple.get_item(1)?;
+                let callable = self.exec_stmt_impl(py, lambda_ir.unbind())?;
+                methods.insert(method_name, callable);
+            }
+        }
+
+        // Weak ref to the context so a payload variant's `__call__` can resolve
+        // nominal field types, exactly like `op_struct`. Weak to avoid a
+        // `ctx <-> type` cycle (globals hold the union type).
+        let ctx_weakref = py
+            .import("weakref")?
+            .getattr("ref")?
+            .call1((self.ctx.bind(py),))?
+            .unbind();
+
+        let union_obj = build_union_type(py, &name, type_params, &variants, methods, Some(ctx_weakref))?;
 
         // Store in global scope (same path used by op_struct / op_trait_def).
         // `ctx.globals` is a dict; `set_local` would be wrong here -- it does
@@ -1769,8 +1838,15 @@ impl Registry {
 
         // 2. Execute finally (always)
         if has_finally {
-            // If finally itself raises, that exception replaces any pending
+            // A pending body error already recorded its position (error_byte is
+            // "first write wins", see execution.rs). Clear it so a raise inside
+            // finally records its own position instead of inheriting the body's;
+            // the `?` then propagates the finally error with the right byte.
+            // Restore the saved position if finally succeeds, so a pending body
+            // exception keeps its own position when re-raised below.
+            let saved_byte = self.error_byte.replace(-1);
             self.exec_stmt_impl(py, finally_node.unbind())?;
+            self.error_byte.set(saved_byte);
         }
 
         // 3. Re-raise pending signal or exception

@@ -195,6 +195,134 @@ Point(1)        # Error: missing 1 required positional argument: 'y'
 Point(1, 2, 3)  # Error: takes 3 positional arguments but 4 were given
 ```
 
+Un paramètre **annoté** suit la même règle d'arité : l'annotation porte sur le *type* de la valeur, pas sur sa
+*présence*. Un paramètre annoté omis vaut donc `None`.
+
+Pour les types **primitifs** (`int`, `float`, `str`, `bool`, `None`), un contrôle à l'entrée de la fonction vérifie — et
+coerce au besoin selon la tour numérique (`int`/`bool` → `float`, `bool` → `int`) — la valeur reçue ; `str` est vérifié
+sans coercion (seule une chaîne passe) et le `None` d'un paramètre omis y est soumis :
+
+<!-- check: no-check -->
+
+```catnip
+f = (x: int) => { x }
+f()             # TypeError : None n'est pas un int
+g = (x: None) => { x }
+g()             # None — None est bien du type déclaré
+```
+
+Annoter `x: int` ne rend pas `x` obligatoire : ça garantit seulement que, *si* `x` a une valeur, elle est du type
+déclaré (ou la fonction est refusée).
+
+Les types **nominaux** — structs, enums, unions taggées, traits — sont eux aussi vérifiés à l'entrée, **avec
+sous-typage** : `(b: Base)` accepte une instance d'un sous-struct (`Child extends(Base)`), `(x: Drawable)` accepte une
+valeur dont le struct `implements(Drawable)`, et une variante d'union ou d'enum est acceptée pour le type qui la
+déclare. Contrairement aux primitifs, un nominal n'est jamais coercé : la valeur est acceptée telle quelle ou refusée
+(`TypeError`). Les composites `list[T]` / `set[T]` / `dict[K, V]` / `tuple[...]` sont vérifiés **conteneur et
+paramètres** : d'abord le conteneur (seule une liste satisfait `list`, un set `set`, un dict `dict`, un tuple `tuple`),
+puis chaque élément (`list[T]` / `set[T]`), chaque clé/valeur (`dict[K, V]`), ou chaque position (`tuple[T0, T1, ...]`,
+où l'arité fait partie du contrat), récursivement (`list[list[int]]`, `dict[str, list[int]]`). Sans coercion, comme les
+nominaux. Un mismatch prouvable statiquement est une erreur de compilation ; sinon le contrôle a lieu à l'entrée de la
+fonction. La **variance** des paramètres est hybride pour les conteneurs mutables (`list` / `set` / `dict`) : un
+composite fraîchement construit (un littéral) est covariant — `[1, 2, 3]` satisfait `list[float]` via la tour numérique
+— mais une valeur déjà typée est invariante : une `list[int]` ne satisfait pas un slot `list[float]` (muter à travers
+l'alias serait incohérent). Un `tuple` est immuable, donc covariant sans réserve. Un nom de type inconnu laisse
+l'annotation inerte.
+
+<!-- check: no-check -->
+
+```catnip
+f = (xs: list[int]) => { xs }
+f([1, 2, 3])      # accepté
+f(["a", "b"])     # TypeError : un élément n'est pas un int
+
+g = (d: dict[str, int]) => { d }
+g({1: 2})         # TypeError : une clé n'est pas un str
+
+h = (xs: list[float]) => { xs }
+h([1, 2, 3])      # accepté — littéral covariant (int satisfait float)
+```
+
+> Une liste vide satisfait tout `list[T]` : il n'y a pas d'élément pour la contredire.
+
+Un **générique nominal** (`Option[int]`, `Result[T, E]`) vérifie l'appartenance à l'union **et** substitue les arguments
+de type dans les payloads : `x: Option[int]` exige un `Option` dont la charge `Some(value: T)` satisfait `int`. Un
+variant nullaire (`Option.None`) n'a pas de payload et passe ; l'arité fait partie du contrat (`Option[int, str]` sur
+une union à un seul paramètre est une erreur). Détail : [UNIONS](UNIONS.md#param%C3%A8tres-g%C3%A9n%C3%A9riques).
+
+<!-- check: no-check -->
+
+```catnip
+union Option[T] { Some(value: T); None }
+
+f = (x: Option[int]) => { 1 }
+f(Option.Some(42))     # accepté
+f(Option.None)         # accepté (aucun payload à vérifier)
+f(Option.Some("nope")) # TypeError : le payload est str, pas int
+```
+
+Une **union de types** (`int | str`, `Point | None`) accepte une valeur qui satisfait *un* de ses membres. Les membres
+primitifs suivent la tour numérique (un `bool` appartient à `int`, un `int` à `float`) ; les membres nominaux suivent le
+sous-typage. À la différence d'un paramètre primitif simple, **une union ne coerce pas** : elle ne saurait pas vers quel
+membre, donc la valeur passe inchangée :
+
+<!-- check: no-check -->
+
+```catnip
+f = (x: int | str) => { typeof(x) }
+f(1)            # "int"  — accepté tel quel, pas coercé
+f("a")          # "string"
+f(1.5)          # TypeError : 1.5 n'est ni int ni str
+
+opt = (p: Point | None) => { p }
+opt(Point(1, 2))  # accepté
+opt(None)         # accepté — None est un membre
+```
+
+Une union dont un membre n'est pas vérifiable (un nom de type inconnu, un générique non déclaré) reste inerte : on ne
+rejette jamais sur une preuve qu'on n'a pas. Un membre composite (`list`/`set`/`dict`/`tuple`) ou générique
+(`Option[int]`), lui, est vérifiable et rend l'union enforçable (`int | list[int]`, `int | Option[int]`).
+
+Un **type de fonction** (`(int) -> int`, `(int, str) -> bool`) décrit un paramètre callback : ses types de paramètres
+entre parenthèses, son type de retour après la flèche. La flèche absorbe à droite — `(int) -> int | None` est une
+fonction qui retourne `int | None` ; pour une union *de fonctions*, parenthéser : `((int) -> int) | None`. Le retour
+peut être un type de fonction (`(int) -> (int) -> int` : un callback curryfié).
+
+Ce qui est vérifié, en trois temps :
+
+- **statiquement**, une lambda littérale passée à un slot fonction est comparée composant par composant — arité exacte,
+  paramètres contravariants (un callback qui accepte plus large convient), retour covariant (un callback qui retourne
+  plus précis convient) ; un mismatch prouvable est une erreur de compilation ;
+- **à l'entrée de la fonction**, la valeur reçue doit être callable et son arité doit accepter l'arité déclarée : une
+  lambda `(x, y = 1)` satisfait `(int) -> int` (le défaut couvre `y`), une variadique satisfait toute arité suffisante,
+  un constructeur de struct est accepté sur sa plage de champs ; un callable Python passe sur sa seule callabilité (son
+  arité n'est pas introspectable). L'arité déclarée est un contrat exact : ni les défauts ni les mots-clés n'en font
+  partie ;
+- **au retour de chaque appel du callback**, côté appelant, la valeur rendue est vérifiée contre le type de retour
+  déclaré — un callback qui ment sur son retour est arrêté là où le mensonge devient observable, y compris à travers une
+  closure qui l'a capturé. Les types des paramètres, eux, ne sont observables qu'aux appels : c'est le check d'arguments
+  ordinaire qui s'en charge.
+
+<!-- check: no-check -->
+
+```catnip
+apply = (cb: (int) -> int) => { cb(21) * 2 }
+apply((x) => { x + 1 })        # 44
+apply((a, b) => { a })         # TypeError : le callback exige 2 arguments, le contrat en promet 1
+apply((x) => { "nope" })       # TypeError au retour : str n'est pas un int
+```
+
+> Le contrat d'une fonction ne se lit pas sur sa tête : il se constate à chaque appel. La flèche promet, l'appel
+> encaisse.
+
+Pour rendre un paramètre réellement obligatoire, utilisez un constructeur de struct.
+
+> L'annotation nominale décrit *de quelle forme* est la valeur, pas *si* elle est là. Un trou reste un trou, même typé.
+
+> Une union sans coercion : on demande à la valeur d'être l'un d'entre eux, pas de devenir l'un d'entre eux.
+
+> Une annotation primitive est un contrat sur ce qui franchit la porte, pas sur le fait qu'on frappe.
+
 Paramètres requis après un variadique (interdit) :
 
 <!-- check: no-check -->

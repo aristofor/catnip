@@ -53,6 +53,9 @@ def _build_default_config() -> dict:
 
 DEFAULT_CONFIG = _build_default_config()
 
+# Reflected from catnip_core::constants::EXECUTOR_DEFAULT via the Rust defaults
+EXECUTOR_DEFAULT = DEFAULT_CONFIG['optimize']['executor']
+
 VALID_KEYS = frozenset(valid_config_keys())
 VALID_FORMAT_KEYS = frozenset(valid_format_keys())
 

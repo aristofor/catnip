@@ -15,24 +15,73 @@ from catnip._error_strings import (
     SYNTAX_PREFIXES,
     TYPE_ERROR_PREFIX,
     VALUE_ERROR_PREFIX,
+    WEIRD_ERROR_PREFIX,
     ZERO_DIVISION_ERROR_PREFIX,
 )
-from catnip._rs import CatnipRuntime, Pipeline, extract_name_from_error
+from catnip._rs import CatnipRuntime, Pipeline, SourceMap, extract_name_from_error
 from catnip.exc import (
     CatnipNameError,
     CatnipPragmaError,
     CatnipRuntimeError,
     CatnipSemanticError,
     CatnipTypeError,
+    CatnipWeirdError,
 )
-from catnip.pragma import PRAGMA_ATTRS, PragmaContext
+from catnip.pragma import PragmaContext
 
 # Pattern: "@pragma:BYTE message" (pragma/semantic errors with byte position)
 _PRAGMA_RE = re.compile(r"^@pragma:(\d+) (.+)")
 
+# Python's "'X' object is not iterable", normalized to Catnip's unpack message
+_NOT_ITERABLE_RE = re.compile(r"'(\w+)' object is not iterable")
+
+
+def _byte_to_line_col(source_map, byte_offset):
+    """(1-based line, 0-based column) of a byte offset, or (None, None) without a SourceMap."""
+    if source_map is None or byte_offset is None:
+        return None, None
+    line, col = source_map.byte_to_line_col(byte_offset)
+    return line, col - 1
+
+
+def _type_error(detail):
+    """Build a CatnipTypeError, normalizing Python's iterable message to Catnip's."""
+    m = _NOT_ITERABLE_RE.match(detail)
+    if m:
+        return CatnipTypeError(f"Cannot unpack non-iterable {m.group(1)}")
+    return CatnipTypeError(detail)
+
+
+def _map_wrapped(msg):
+    """Map a "Prefix: detail" wrapped Python exception message, or None."""
+    for prefix in RUNTIME_WRAPPED_PREFIXES:
+        if not msg.startswith(prefix):
+            continue
+        inner = msg[len(prefix) :]
+        if prefix in (PY_TYPE_ERROR_PREFIX, CATNIP_TYPE_ERROR_PREFIX):
+            return _type_error(inner)
+        if prefix == INDEX_ERROR_PREFIX:
+            return IndexError(inner)
+        if prefix == KEY_ERROR_PREFIX:
+            # Rust wraps the repr ("KeyError: 'foo'"): strip the quotes or
+            # Python's own repr would double them.
+            return KeyError(inner.strip("'\""))
+        if prefix == VALUE_ERROR_PREFIX:
+            return ValueError(inner)
+        if prefix == ATTRIBUTE_ERROR_PREFIX:
+            return AttributeError(inner)
+        if prefix == ZERO_DIVISION_ERROR_PREFIX:
+            return CatnipRuntimeError(inner)
+        break  # RUNTIME_EXCEPTION_PREFIX: fall through to the caller
+    return None
+
 
 def _map_exception(exc, source_text=None):
-    """Map a VM exception to the appropriate Catnip exception."""
+    """Map a VM exception to the appropriate Catnip exception.
+
+    Single mapping for both the pipeline (Catnip.execute) and the VM executor
+    (debugger): keep the two paths producing identical exceptions.
+    """
     # Native Python exceptions from aligned VMError -> PyErr boundary:
     # pass through directly (they already have the right type)
     if isinstance(exc, (ValueError, IndexError, KeyError, AttributeError, MemoryError)):
@@ -40,7 +89,7 @@ def _map_exception(exc, source_text=None):
     if isinstance(exc, ZeroDivisionError):
         return CatnipRuntimeError(str(exc))
     if isinstance(exc, TypeError):
-        return CatnipTypeError(str(exc))
+        return _type_error(str(exc))
     if isinstance(exc, NameError):
         name = extract_name_from_error(str(exc))
         if name is not None:
@@ -56,9 +105,7 @@ def _map_exception(exc, source_text=None):
         detail = m.group(2)
         line = col = None
         if source_text is not None:
-            line = source_text[:start_byte].count('\n') + 1
-            last_nl = source_text.rfind('\n', 0, start_byte)
-            col = start_byte - last_nl - 1 if last_nl >= 0 else start_byte
+            line, col = _byte_to_line_col(SourceMap(source_text.encode('utf-8'), '<input>'), start_byte)
         if detail.startswith('Unknown pragma directive'):
             return CatnipSemanticError(detail, line=line, column=col)
         return CatnipPragmaError(detail, line=line, column=col)
@@ -69,6 +116,10 @@ def _map_exception(exc, source_text=None):
     if name is not None:
         return CatnipNameError(name)
 
+    # Internal VM errors (stack underflow, frame overflow)
+    if msg.startswith(WEIRD_ERROR_PREFIX):
+        return CatnipWeirdError(msg[len(WEIRD_ERROR_PREFIX) :], cause='vm')
+
     # SyntaxError from compilation: "Compilation error: SyntaxError: ..."
     if msg.startswith(COMPILE_SYNTAX_PREFIX):
         detail = msg[len(COMPILE_SYNTAX_PREFIX) :].strip()
@@ -78,58 +129,37 @@ def _map_exception(exc, source_text=None):
     if msg.startswith(SYNTAX_PREFIXES):
         return SyntaxError(msg)
 
-    # TypeError: "TypeError: ..." or "type error: ..."
-    if msg.startswith(PY_TYPE_ERROR_PREFIX):
-        return CatnipTypeError(msg[len(PY_TYPE_ERROR_PREFIX) :])
-    if msg.startswith(CATNIP_TYPE_ERROR_PREFIX):
-        return CatnipTypeError(msg[len(CATNIP_TYPE_ERROR_PREFIX) :])
+    # TypeError: "type error: ..." (the "TypeError:"/"CatnipTypeError:" forms
+    # are handled by _map_wrapped below)
     if msg.startswith(TYPE_ERROR_PREFIX):
         detail = msg[len(TYPE_ERROR_PREFIX) :].strip()
         # Strip redundant "TypeError: " prefix
         if detail.startswith(PY_TYPE_ERROR_PREFIX):
             detail = detail[len(PY_TYPE_ERROR_PREFIX) :]
-        return CatnipTypeError(detail)
+        return _type_error(detail)
 
     # Direct wrapped Python exceptions (e.g. "IndexError: ...", "ValueError: ...")
-    for prefix in RUNTIME_WRAPPED_PREFIXES:
-        if msg.startswith(prefix):
-            inner = msg[len(prefix) :]
-            if prefix in (PY_TYPE_ERROR_PREFIX, CATNIP_TYPE_ERROR_PREFIX):
-                return CatnipTypeError(inner)
-            if prefix == INDEX_ERROR_PREFIX:
-                return IndexError(inner)
-            if prefix == KEY_ERROR_PREFIX:
-                return KeyError(inner)
-            if prefix == VALUE_ERROR_PREFIX:
-                return ValueError(inner)
-            if prefix == ATTRIBUTE_ERROR_PREFIX:
-                return AttributeError(inner)
-            if prefix == ZERO_DIVISION_ERROR_PREFIX:
-                return CatnipRuntimeError(inner)
-            break
+    mapped = _map_wrapped(msg)
+    if mapped is not None:
+        return mapped
 
     # RuntimeError: "runtime error: ..." (legacy format)
     if msg.startswith(RUNTIME_ERROR_PREFIX.strip()):
         detail = msg[len(RUNTIME_ERROR_PREFIX) :].strip()
-        for prefix in RUNTIME_WRAPPED_PREFIXES:
-            if detail.startswith(prefix):
-                inner = detail[len(prefix) :]
-                if prefix in (PY_TYPE_ERROR_PREFIX, CATNIP_TYPE_ERROR_PREFIX):
-                    return CatnipTypeError(inner)
-                if prefix == INDEX_ERROR_PREFIX:
-                    return IndexError(inner)
-                if prefix == KEY_ERROR_PREFIX:
-                    return KeyError(inner)
-                if prefix == VALUE_ERROR_PREFIX:
-                    return ValueError(inner)
-                if prefix == ATTRIBUTE_ERROR_PREFIX:
-                    return AttributeError(inner)
-                break
+        if detail.startswith(WEIRD_ERROR_PREFIX):
+            return CatnipWeirdError(detail[len(WEIRD_ERROR_PREFIX) :], cause='vm')
+        mapped = _map_wrapped(detail)
+        if mapped is not None:
+            return mapped
         return CatnipRuntimeError(detail)
 
     # Division by zero (direct)
     if 'division by zero' in msg.lower() or 'DivisionByZero' in msg:
         return CatnipRuntimeError(msg)
+
+    # Bare type errors (no prefix)
+    if 'unsupported operand' in msg or 'not iterable' in msg:
+        return CatnipTypeError(msg)
 
     # Fallback: CatnipRuntimeError
     return CatnipRuntimeError(msg)
@@ -144,9 +174,7 @@ def _enrich_with_position(exc, pipeline, source):
         sb = ctx.get('start_byte', -1)
         raw = source.encode('utf-8')
         if 0 <= sb <= len(raw):
-            exc.line = raw[:sb].count(b'\n') + 1
-            last_nl = raw.rfind(b'\n', 0, sb)
-            exc.column = sb - last_nl - 1 if last_nl >= 0 else sb
+            exc.line, exc.column = _byte_to_line_col(SourceMap(raw, '<input>'), sb)
     # Add "Did you mean?" suggestions for NameError
     if type(exc) is CatnipNameError:
         suggestions = exc.suggestions
@@ -283,7 +311,7 @@ class CatnipStandalone:
         # Inject catnip runtime + cached builtin into VM globals
         self.runtime._set_context(self.context)
         self._pipeline.set_global('catnip', self.runtime)
-        from .cachesys.memoization import Memoization
+        from .cachesys import Memoization
 
         self._memoization = Memoization()
         self.context.memoization = self._memoization
@@ -381,31 +409,15 @@ class CatnipStandalone:
             nodes = self._pipeline.get_prepared_ir_nodes()
         except RuntimeError:
             return
-        for node in nodes:
-            if node.kind == 'Op' and node.opcode == 'Pragma':
-                args = node.args
-                if not args:
-                    continue
-                directive = args[0].value
-                value = args[1].value if len(args) > 1 else True
-                mapping = PRAGMA_ATTRS.get(directive)
-                if mapping is None:
-                    if directive in ('warning', 'inline', 'pure'):
-                        continue
-                    from .exc import CatnipSemanticError
+        from .exc import CatnipPragmaError, CatnipSemanticError
+        from .pragma import sync_pragmas_from_nodes
 
-                    raise CatnipSemanticError(f"Unknown pragma directive: '{directive}'")
-                attr, typ = mapping
-                if directive == 'jit' and value == 'all':
-                    self.pragma_context.jit_enabled = True
-                    self.pragma_context.jit_all = True
-                    continue
-                try:
-                    if typ is bool and not isinstance(value, bool):
-                        continue
-                    setattr(self.pragma_context, attr, typ(value))
-                except (ValueError, TypeError):
-                    continue
+        def on_error(kind, message, node):
+            # Same strictness as the DSL path (no line/column: the standalone
+            # wrapper does not keep the source text).
+            raise (CatnipSemanticError if kind == 'semantic' else CatnipPragmaError)(message)
+
+        sync_pragmas_from_nodes(nodes, self.pragma_context, on_error=on_error)
         self._apply_pragmas_to_pipeline()
 
     def _apply_pragmas_to_pipeline(self):

@@ -59,7 +59,7 @@ impl NativePluginFn {
     fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let mut vm_args: Vec<VmValue> = Vec::with_capacity(args.len());
         for a in args.iter() {
-            vm_args.push(convert_py_to_vm_value(py, &a)?);
+            vm_args.push(convert_py_to_vm_value(&a)?);
         }
 
         let call_fn = self.call_fn;
@@ -116,6 +116,8 @@ impl NativePluginObject {
 
     /// Extract the object handle and its callbacks.
     pub fn handle_and_callbacks(&self) -> Option<(u64, PluginObjectCallbacks)> {
+        // SAFETY: self.vm_value is the PluginObject value this struct owns exactly one
+        // live reference to (released only in Drop), so the backing Arc is alive here.
         unsafe { self.vm_value.as_plugin_object_ref() }
     }
 }
@@ -134,9 +136,11 @@ impl NativePluginObject {
 
     /// Python-side attribute protocol, used by the AST executor (the VM routes
     /// `OpCode::GetAttr`/`CallMethod` through the host instead). Tries the
-    /// plugin's getattr callback, then falls back to binding the name as a
-    /// method dispatched at call time (the AST lowers `obj.m(...)` to
-    /// getattr-then-call, so attribute-vs-method cannot be decided here).
+    /// plugin's getattr callback; on miss, binds the name as a method only when
+    /// the plugin's membership probe confirms it exists (the AST lowers
+    /// `obj.m(...)` to getattr-then-call, so attribute-vs-method cannot be
+    /// decided syntactically here). A name that is neither attribute nor method
+    /// raises AttributeError, matching the VM and keeping `hasattr` honest.
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         // Underscore names are Python protocol probes (__reduce__, __iter__,
         // ...), never plugin members: refuse them so hasattr stays honest
@@ -161,12 +165,20 @@ impl NativePluginObject {
             }
         }
         if cbs.method.is_some() {
-            self.vm_value.clone_refcount();
-            let bound = NativePluginBoundMethod {
-                vm_value: self.vm_value,
-                method_name: name.to_string(),
+            // Bind a method only if the object actually exposes this member.
+            // A pre-v3 plugin (no probe) keeps the optimistic fallback.
+            let is_member = match cbs.has_member {
+                Some(hm) => plugin::call_plugin_has_member(handle, hm, name),
+                None => true,
             };
-            return Ok(Py::new(py, bound)?.into_any());
+            if is_member {
+                self.vm_value.clone_refcount();
+                let bound = NativePluginBoundMethod {
+                    vm_value: self.vm_value,
+                    method_name: name.to_string(),
+                };
+                return Ok(Py::new(py, bound)?.into_any());
+            }
         }
         Err(PyAttributeError::new_err(format!(
             "'NativePluginObject' object has no attribute '{name}'"
@@ -193,6 +205,8 @@ impl Drop for NativePluginBoundMethod {
 impl NativePluginBoundMethod {
     #[pyo3(signature = (*args))]
     fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        // SAFETY: self.vm_value is the PluginObject value this bound method owns one
+        // live reference to (released in Drop), so the backing Arc is alive for this borrow.
         let (handle, cbs) = unsafe { self.vm_value.as_plugin_object_ref() }
             .ok_or_else(|| PyRuntimeError::new_err("invalid plugin object"))?;
         let method_fn = cbs
@@ -201,7 +215,7 @@ impl NativePluginBoundMethod {
 
         let mut vm_args: Vec<VmValue> = Vec::with_capacity(args.len());
         for a in args.iter() {
-            vm_args.push(convert_py_to_vm_value(py, &a)?);
+            vm_args.push(convert_py_to_vm_value(&a)?);
         }
 
         let name = self.method_name.clone();
@@ -234,16 +248,7 @@ impl NativePluginBoundMethod {
 /// Order: `$CATNIP_STDLIB_PATH` (colon-separated) then the installed `catnip`
 /// package directory (where `_rs` and the bundled plugins live).
 fn discover_plugin_paths(py: Python<'_>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    if let Ok(val) = std::env::var("CATNIP_STDLIB_PATH") {
-        for p in val.split(':') {
-            let pb = PathBuf::from(p);
-            if pb.is_dir() {
-                paths.push(pb);
-            }
-        }
-    }
+    let mut paths = catnip_core::paths::stdlib_env_paths();
 
     if let Ok(catnip) = py.import("catnip") {
         if let Ok(file) = catnip.getattr("__file__") {
@@ -288,6 +293,8 @@ pub fn load_native_module(py: Python<'_>, registry: &SharedPluginRegistry, name:
     let mut rs_ns = ModuleNamespace::new(name.to_string());
     for (attr_name, val) in module_ns.attrs.iter() {
         let py_val: Py<PyAny> = if val.is_native_str() {
+            // SAFETY: is_native_str() was verified on the line above, and val borrows a
+            // live entry of module_ns.attrs, so the backing NativeString Arc is alive.
             let s = unsafe { val.as_native_str_ref() }.unwrap();
             if let Some(_short) = s.strip_prefix(PLUGIN_PREFIX) {
                 let qualified = s.to_string();

@@ -10,10 +10,12 @@ Le formatteur `catnip format` applique un style cohérent sur tout le code Catni
 - **Les commentaires** (inline et standalone)
 - **Les newlines intentionnelles** (pas de reformatage destructif)
 - **La structure du code** (seuls les espaces et l'indentation sont ajustés)
+- **Les annotations de type** (paramètres, retours, champs de struct) — conservées et normalisées : l'espacement interne
+  d'un type est canonisé (`(cb: (int,int)->bool)` → `(cb: (int, int) -> bool)`)
 
 Le style appliqué s'inspire de Black (Python) : un seul style, pas de configuration, zéro débat.
 
-**Code invalide** : le formatteur opère sur l'arbre syntaxique. Si le code ne parse pas correctement (noeuds ERROR dans
+**Code invalide** : le formatteur opère sur l'arbre syntaxique. Si le code ne parse pas correctement (nœuds ERROR dans
 tree-sitter), le texte source est préservé tel quel sans tentative de normalisation partielle.
 
 ## Utilisation CLI
@@ -200,6 +202,18 @@ data.[1:3]
 data.[-2:]
 ```
 
+**Indexation** : tous les index sont préservés ; un espace après chaque virgule pour les subscripts multi-index
+
+```python
+# Avant
+grid[a,b,c]
+arr[ i , j:k ]
+
+# Après
+grid[a, b, c]
+arr[i, j:k]
+```
+
 ### Indentation
 
 **Blocs** : 4 espaces par niveau
@@ -281,7 +295,7 @@ if x {
 
 ### F-strings et b-strings
 
-Les f-strings et b-strings sont preservees intactes (pas de reformatage du contenu) :
+Les f-strings et b-strings sont préservées intactes (pas de reformatage du contenu) :
 
 ```python
 x = f"hello {name}"       # préservé
@@ -290,9 +304,9 @@ y = b'raw bytes'          # préservé
 
 ### Newlines
 
-**Lignes vides preservees** : les sauts de ligne intentionnels du codeur sont respectes.
+**Lignes vides préservées** : les sauts de ligne intentionnels du codeur sont respectés.
 
-**Maximum 2 newlines consecutives** : les sequences de 3+ newlines sont reduites a 2.
+**Maximum 2 newlines consécutives** : les séquences de 3+ newlines sont réduites à 2.
 
 **Pas de newlines en début de fichier** : les lignes vides initiales sont supprimées.
 

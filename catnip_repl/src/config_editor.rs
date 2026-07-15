@@ -1,6 +1,8 @@
 // FILE: catnip_repl/src/config_editor.rs
 //! Interactive config editor overlay for the REPL.
 
+use catnip_rs::constants::{self, OPTIMIZE_MAX, THEME_VALUES};
+
 /// Logical grouping of config keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigGroup {
@@ -66,11 +68,10 @@ pub enum ConfigType {
     Choice(&'static [&'static str]),
 }
 
-/// Config key metadata (type constraints, defaults).
+/// Config key metadata (type constraints).
 struct KeyMeta {
     key: &'static str,
     config_type: ConfigType,
-    default_display: &'static str,
     is_format: bool,
     is_repl: bool,
 }
@@ -79,130 +80,143 @@ const ALL_KEYS: &[KeyMeta] = &[
     KeyMeta {
         key: "executor",
         config_type: ConfigType::Choice(&["vm", "ast"]),
-        default_display: "'vm'",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "optimize",
-        config_type: ConfigType::Int { min: 0, max: 3 },
-        default_display: "3",
+        config_type: ConfigType::Int {
+            min: 0,
+            max: OPTIMIZE_MAX,
+        },
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "tco",
         config_type: ConfigType::Bool,
-        default_display: "True",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "jit",
         config_type: ConfigType::Bool,
-        default_display: "False",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "no_color",
         config_type: ConfigType::Bool,
-        default_display: "False",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "theme",
-        config_type: ConfigType::Choice(&["auto", "dark", "light"]),
-        default_display: "'auto'",
+        config_type: ConfigType::Choice(THEME_VALUES),
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "enable_cache",
         config_type: ConfigType::Bool,
-        default_display: "True",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "cache_max_size_mb",
         config_type: ConfigType::Int { min: 0, max: 10000 },
-        default_display: "100",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "cache_ttl_seconds",
         config_type: ConfigType::Int { min: 0, max: 999999 },
-        default_display: "86400",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "log_weird_errors",
         config_type: ConfigType::Bool,
-        default_display: "True",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "max_weird_logs",
         config_type: ConfigType::Int { min: 0, max: 10000 },
-        default_display: "50",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "memory_limit",
         config_type: ConfigType::Int { min: 0, max: 65536 },
-        default_display: "2048",
         is_format: false,
         is_repl: false,
     },
     KeyMeta {
         key: "indent_size",
         config_type: ConfigType::Int { min: 1, max: 16 },
-        default_display: "4",
         is_format: true,
         is_repl: false,
     },
     KeyMeta {
         key: "line_length",
         config_type: ConfigType::Int { min: 40, max: 500 },
-        default_display: "120",
         is_format: true,
         is_repl: false,
     },
     KeyMeta {
         key: "show_parse_time",
         config_type: ConfigType::Bool,
-        default_display: "false",
         is_format: false,
         is_repl: true,
     },
     KeyMeta {
         key: "show_exec_time",
         config_type: ConfigType::Bool,
-        default_display: "false",
         is_format: false,
         is_repl: true,
     },
     KeyMeta {
         key: "debug_mode",
         config_type: ConfigType::Bool,
-        default_display: "false",
         is_format: false,
         is_repl: true,
     },
     KeyMeta {
         key: "max_history",
         config_type: ConfigType::Int { min: 100, max: 100000 },
-        default_display: "1000",
         is_format: false,
         is_repl: true,
     },
 ];
+
+/// Default value as the editor displays it (quotes for choices, Python-style
+/// booleans for config keys, lowercase for REPL-local keys). Sourced from
+/// catnip_core constants so the editor cannot drift from runtime defaults.
+fn default_display(key: &str) -> String {
+    fn py_bool(b: bool) -> String {
+        if b { "True" } else { "False" }.to_string()
+    }
+    match key {
+        "executor" => format!("'{}'", constants::EXECUTOR_DEFAULT),
+        "optimize" => constants::OPTIMIZATION_LEVEL_DEFAULT.to_string(),
+        "tco" => py_bool(constants::TCO_ENABLED_DEFAULT),
+        "jit" => py_bool(constants::JIT_DEFAULT_PIPELINE),
+        "no_color" => py_bool(false),
+        "theme" => format!("'{}'", constants::THEME_DEFAULT),
+        "enable_cache" => py_bool(true),
+        "cache_max_size_mb" => constants::CACHE_DISK_MAX_SIZE_MB_DEFAULT.to_string(),
+        "cache_ttl_seconds" => constants::CACHE_DISK_TTL_DEFAULT.to_string(),
+        "log_weird_errors" => py_bool(true),
+        "max_weird_logs" => constants::WEIRD_LOG_MAX_DEFAULT.to_string(),
+        "memory_limit" => constants::MEMORY_LIMIT_DEFAULT_MB.to_string(),
+        "indent_size" => constants::FORMAT_INDENT_SIZE_DEFAULT.to_string(),
+        "line_length" => constants::FORMAT_LINE_LENGTH_DEFAULT.to_string(),
+        "show_parse_time" | "show_exec_time" | "debug_mode" => "false".to_string(),
+        "max_history" => constants::REPL_MAX_HISTORY.to_string(),
+        _ => "?".to_string(),
+    }
+}
 
 /// One item in the config editor list.
 #[derive(Debug, Clone)]
@@ -318,24 +332,18 @@ impl ConfigEditorState {
                 } else if let Some((_, v, s)) = entries.iter().find(|(k, _, _)| k == gkey) {
                     (v.clone(), s.clone())
                 } else {
-                    let default = meta.map(|m| m.default_display).unwrap_or("?");
-                    (default.to_string(), "default".to_string())
+                    (default_display(gkey), "default".to_string())
                 };
 
-                let (config_type, default_display, is_format, is_repl) = match meta {
-                    Some(m) => (
-                        m.config_type.clone(),
-                        m.default_display.to_string(),
-                        m.is_format,
-                        m.is_repl,
-                    ),
+                let (config_type, default_value, is_format, is_repl) = match meta {
+                    Some(m) => (m.config_type.clone(), default_display(gkey), m.is_format, m.is_repl),
                     None => (ConfigType::Bool, value.clone(), false, false),
                 };
 
                 self.items.push(ConfigItem {
                     key: gkey.to_string(),
                     value,
-                    default_value: default_display,
+                    default_value,
                     source,
                     config_type,
                     group: gdef.group,

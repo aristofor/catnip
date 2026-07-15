@@ -5,7 +5,20 @@ import sys
 
 import click
 
+from catnip._rs import LintConfig
+
 from ..utils import expand_file_args
+
+# Rust defaults, surfaced in --help; None is passed through so Rust decides
+_LINT_DEFAULTS = LintConfig()
+
+
+def _split_codes(values):
+    """Flatten repeated/comma-separated CLI code lists into a clean list."""
+    codes = []
+    for value in values:
+        codes.extend(code.strip() for code in value.split(',') if code.strip())
+    return codes
 
 
 @click.command('lint')
@@ -19,25 +32,62 @@ from ..utils import expand_file_args
 )
 @click.option('--deep', is_flag=True, help="Enable deep IR analysis (opt-in)")
 @click.option('--check-names', is_flag=True, help="Check for undefined names (E200, opt-in)")
-@click.option('--max-depth', type=click.IntRange(min=0), default=5, help="Max nesting depth (I200, default: 5, 0=off)")
+@click.option(
+    '--max-depth',
+    type=click.IntRange(min=0),
+    default=None,
+    help=f"Max nesting depth (I200, default: {_LINT_DEFAULTS.max_nesting_depth}, 0=off)",
+)
 @click.option(
     '--max-complexity',
     type=click.IntRange(min=0),
-    default=10,
-    help="Max cyclomatic complexity (I201, default: 10, 0=off)",
+    default=None,
+    help=f"Max cyclomatic complexity (I201, default: {_LINT_DEFAULTS.max_cyclomatic_complexity}, 0=off)",
 )
 @click.option(
     '--max-length',
     type=click.IntRange(min=0),
-    default=30,
-    help="Max function length in statements (I202, default: 30, 0=off)",
+    default=None,
+    help=f"Max function length in statements (I202, default: {_LINT_DEFAULTS.max_function_length}, 0=off)",
 )
 @click.option(
-    '--max-params', type=click.IntRange(min=0), default=6, help="Max parameters per function (I203, default: 6, 0=off)"
+    '--max-params',
+    type=click.IntRange(min=0),
+    default=None,
+    help=f"Max parameters per function (I203, default: {_LINT_DEFAULTS.max_parameters}, 0=off)",
 )
+@click.option(
+    '--disable',
+    'disable_codes',
+    multiple=True,
+    metavar='CODE',
+    help="Disable diagnostic codes (repeatable, comma-separated). Adds to [lint] disable in config",
+)
+@click.option(
+    '--enable',
+    'enable_codes',
+    multiple=True,
+    metavar='CODE',
+    help="Re-enable codes disabled via config or --disable (repeatable, comma-separated)",
+)
+@click.option('--strict', is_flag=True, help="Exit non-zero when warnings are present (CI gate)")
 @click.option('--stdin', is_flag=True, help="Read from stdin")
 @click.pass_context
-def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, max_length, max_params, stdin):
+def cmd_lint(
+    ctx,
+    files,
+    level,
+    deep,
+    check_names,
+    max_depth,
+    max_complexity,
+    max_length,
+    max_params,
+    disable_codes,
+    enable_codes,
+    strict,
+    stdin,
+):
     """Full code analysis (syntax + style + semantic).
 
     \b
@@ -48,12 +98,27 @@ def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, ma
         catnip lint -l style *.cat
         catnip lint --check-names script.cat
         catnip lint --deep script.cat
+        catnip lint --disable W401,I200 script.cat
+        catnip lint --enable W401 script.cat       # override [lint] disable
+        catnip lint --deep --strict codex/         # CI gate: warnings are fatal
         cat code.cat | catnip lint --stdin
     """
     from ...tools.linter import Severity, lint_code, lint_file
 
     verbose = ctx.obj.get('verbose', False) if ctx.obj else False
     no_color = ctx.obj.get('no_color', False) if ctx.obj else False
+
+    # Effective disabled codes: config [lint] disable + --disable, minus --enable
+    config_manager = ctx.obj.get('config_manager') if ctx.obj else None
+    if config_manager is None:
+        from ...config import ConfigManager
+
+        config_manager = ConfigManager()
+        config_manager.load_file()
+    file_disable = list(config_manager.get_lint_disable())
+    cli_disable = _split_codes(disable_codes)
+    cli_enable = _split_codes(enable_codes)
+    disabled_codes = sorted((set(file_disable) | set(cli_disable)) - set(cli_enable))
 
     # Collect files to lint
     file_list = []
@@ -101,6 +166,7 @@ def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, ma
                 check_semantic=check_semantic,
                 check_ir=check_ir,
                 check_names=check_names,
+                disabled_codes=disabled_codes,
                 **threshold_kwargs,
             )
             prefix = '<stdin>:'
@@ -122,6 +188,7 @@ def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, ma
                 check_semantic=check_semantic,
                 check_ir=check_ir,
                 check_names=check_names,
+                disabled_codes=disabled_codes,
                 **threshold_kwargs,
             )
             prefix = f"{file_path}:"
@@ -148,6 +215,10 @@ def cmd_lint(ctx, files, level, deep, check_names, max_depth, max_complexity, ma
         else:
             if verbose:
                 click.echo(f"{prefix[:-1]}: OK")
+
+    # Errors are always fatal; --strict promotes warnings (Info/Hint stay advisory)
+    if strict and exit_code == 0 and any(d.severity == Severity.Warning for d in all_diagnostics):
+        exit_code = 1
 
     # Summary
     if files_linted > 0 and (verbose or exit_code != 0):

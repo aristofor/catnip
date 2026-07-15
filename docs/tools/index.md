@@ -59,12 +59,12 @@ Debugger interactif avec breakpoints, stepping et inspection de variables.
 - `catnip debug -b 5 script.cat` - Debugger avec breakpoint
 - `catnip debug -c "code" -b 1` - Debugger du code inline
 
-**Caracteristiques** :
+**Caractéristiques** :
 
 - Breakpoints par ligne (`-b`) ou dans le code (`breakpoint()`)
 - Stepping : step into, step over, step out
-- Inspection : variables locales, call stack, evaluation d'expressions
-- Integration MCP (6 tools pour agents)
+- Inspection : variables locales, call stack, évaluation d'expressions
+- Intégration MCP (6 tools pour agents)
 
 ### [Extract Grammar](extract_grammar.md)
 

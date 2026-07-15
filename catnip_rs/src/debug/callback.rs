@@ -14,10 +14,10 @@ use catnip_tools::sourcemap::SourceMap;
 use super::types::*;
 
 /// Wrapper to satisfy pyclass Send+Sync requirement for mpsc::Receiver.
-/// Safety: only the VM thread ever calls __call__, so Receiver access is
-/// single-threaded. The Sync bound is required by pyclass but never exercised.
 struct SyncReceiver(mpsc::Receiver<DebugAction>);
 
+// SAFETY: only the VM thread ever calls __call__, so the Receiver is accessed
+// single-threaded; the Sync bound is required by pyclass but never exercised.
 unsafe impl Sync for SyncReceiver {}
 
 #[pyclass]
@@ -107,6 +107,9 @@ impl DebugCallback {
         let max_retries = DEBUG_COMMAND_MAX_RETRIES;
 
         let action = py.detach(move || {
+            // SAFETY: rx_ptr was built from &self.command_rx.0; self is borrowed for the
+            // whole __call__, so it outlives this synchronously-joined detach closure,
+            // and the VM thread is the receiver's sole consumer.
             let rx = unsafe { rx_ptr.as_ref() };
             for attempt in 0..max_retries {
                 match rx.recv_timeout(timeout) {

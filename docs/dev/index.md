@@ -67,7 +67,7 @@ Détails de chaque étape : voir [Architecture](ARCHITECTURE.md).
 
 ```
 catnip/             # module Python
-catnip_rs/          # coeur Rust
+catnip_rs/          # cœur Rust
 catnip_grammar/     # Grammaire Tree-sitter
 catnip_repl/        # REPL
 catnip_tools/       # outils format, linter
@@ -82,7 +82,7 @@ catnip_mcp/         # serveur mcp
 uv pip install -e .
 
 # Tests rapides Rust (~5s)
-make rust-test-fast
+make test-rust-fast
 
 # Tests complets Python (~25s)
 make test

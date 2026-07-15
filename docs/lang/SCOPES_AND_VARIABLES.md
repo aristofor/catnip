@@ -217,14 +217,17 @@ else:
 
 ### Ordre de résolution
 
-Quand Catnip cherche une variable, il suit cet ordre :
+Quand Catnip cherche une variable, il suit l'ordre lexical (LEGB) :
 
-1. **IndexMap local** : Lookup O(1) dans `context.locals.symbols`
-1. **Scope global** : `context.globals` si non trouvé
+1. **Scope local** : variables liées dans la fonction courante (paramètres, locales)
+1. **Scopes englobants** : variables des fonctions parentes capturées par la closure -- une liaison englobante masque un
+   global de même nom
+1. **Scope global** : `context.globals` du module
+1. **Builtins** : fonctions et modules de l'hôte
 1. **Erreur** : `NameError` si non trouvé
 
-Scope stocke toutes les variables locales dans un seul IndexMap flat, évitant les traversées de chaîne parent. La
-résolution est donc toujours O(1).
+En mode AST, le scope local stocke ses symboles (y compris ceux capturés du parent) dans un seul IndexMap flat : le
+lookup local est O(1), sans traverser une chaîne d'objets scope.
 
 ### Exemple de résolution
 
@@ -250,6 +253,22 @@ f1 = () => {
 f1()
 ```
 
+### Homonyme local/global
+
+Si un nom est lié à la fois par une fonction englobante (paramètre ou locale) et au niveau module, c'est la liaison
+englobante qui l'emporte -- y compris depuis une closure imbriquée ou un callback de broadcast `.[]` :
+
+```catnip
+v = 100
+
+f = (v) => {
+    g = () => { v }   # le v du paramètre de f, pas le global
+    g()
+}
+
+print(f(7))  # 7, pas 100
+```
+
 ### Assignation dans les fonctions
 
 **Règle** : Les fonctions créent un **scope isolé**. Les assignations dans une fonction créent des variables locales,
@@ -269,15 +288,16 @@ print(x)  # 10 - la globale est inchangée
 
 ### Closures mutables
 
-Quand une closure **lit puis écrit** une variable capturée, la modification est propagée au scope parent via le
-mécanisme de capture :
+Une closure **capture par copie à sa création** les variables du scope parent qu'elle lit. Cette capture lui appartient
+: quand la closure lit puis écrit une variable capturée, c'est **sa capture** qui est mise à jour — persistante d'un
+appel à l'autre de la même closure, invisible du scope parent :
 
 ```catnip
 compteur = () => {
-    count = 0  # Variable capturée par increment
+    count = 0  # Capturé par increment à sa création
 
     increment = () => {
-        count = count + 1  # Lecture puis écriture → propage
+        count = count + 1  # Met à jour la capture d'increment
         count
     }
 
@@ -290,8 +310,27 @@ print(c())  # 2
 print(c())  # 3
 ```
 
+Le compteur fonctionne parce que `c` relit sa propre capture mutée à chaque appel. En revanche, le `count` du scope de
+`compteur` n'est pas modifié : deux closures créées dans le même scope ont chacune leur capture, et le parent qui
+relirait sa variable après coup verrait la valeur d'origine.
+
 La distinction repose sur la **capture** : `increment` capture `count` parce qu'elle le lit. L'écriture subséquente met
 à jour la valeur capturée. Un simple `count = 42` sans lecture préalable créerait une variable locale.
+
+**Exception : le scope module.** Les variables top-level ne sont pas capturées par copie — une closure les résout
+**vivantes, au moment de l'appel** (late binding). Une écriture qui **lit d'abord** le nom modifie la liaison vivante ;
+un `x = 42` sans lecture crée une locale, comme partout ailleurs (la règle est la même lecture-d'abord, indépendante de
+l'ordre des définitions dans le fichier) :
+
+```catnip
+seuil = 10
+verifie = (x) => { x > seuil }
+seuil = 20
+verifie(15)  # False - seuil vaut 20 au moment de l'appel
+```
+
+> Une closure emporte des instantanés privés de son quartier et garde une ligne directe avec la place du village. Les
+> deux vieillissent différemment.
 
 > Le scope est isolé, pas hermétique. Une closure qui lit une variable la capture. Une closure qui écrit sans lire crée
 > une locale. C'est la différence entre vouloir modifier et vouloir nommer.

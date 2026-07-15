@@ -242,43 +242,79 @@ impl PeepholeOptimizer {
     ///
     /// Remove dead code (Nop instructions), adjust jump offsets,
     /// and keep line_table in sync with instructions.
+    ///
+    /// Every branching arg is remapped through one forward map (an old index
+    /// resolves to the first surviving instruction at or after it, the end
+    /// stays the end), covering the plain-target opcodes AND the composite
+    /// encodings: `ForRangeInt` carries a *relative* exit offset in its low
+    /// bits and `ForRangeStep` an *absolute* back-target -- leaving either
+    /// unadjusted after removals lands the loop exit on an arbitrary
+    /// instruction (silent wrong result or stack underflow; found by the
+    /// Phase 4 property harness on `for i in range(..) { break; <dead> }`).
     fn compact_with_line_table(
         instrs: Vec<Instruction>,
         line_table: Vec<u32>,
         live_set: &HashSet<usize>,
     ) -> (Vec<Instruction>, Vec<u32>) {
         let mut old_to_new = HashMap::new();
+        let mut new_to_old = Vec::new();
         let mut result = Vec::new();
         let mut result_line_table = Vec::new();
 
         for (old_idx, instr) in instrs.iter().enumerate() {
             if live_set.contains(&old_idx) && instr.op != VMOpCode::Nop {
                 old_to_new.insert(old_idx, result.len());
+                new_to_old.push(old_idx);
                 result.push(*instr);
                 // Carry over line_table entry (use 0 if missing)
                 result_line_table.push(line_table.get(old_idx).copied().unwrap_or(0));
             }
         }
 
+        // Forward map: old index -> first surviving instruction at or after
+        // it. A live branch can legitimately target a removed instruction (a
+        // jump-to-next rewritten to Nop, a folded DupTop/PopTop pair, a dead
+        // loop exit): control then flows to that instruction's live successor.
+        let mut forward_map = vec![result.len() as u32; instrs.len() + 1];
+        let mut next = result.len() as u32;
+        for old_idx in (0..instrs.len()).rev() {
+            if let Some(&new_idx) = old_to_new.get(&old_idx) {
+                next = new_idx as u32;
+            }
+            forward_map[old_idx] = next;
+        }
+        let remap = |old_target: usize| forward_map[old_target.min(instrs.len())];
+
         // Update jump targets
-        for instr in &mut result {
-            if matches!(
-                instr.op,
+        for (new_idx, instr) in result.iter_mut().enumerate() {
+            match instr.op {
                 VMOpCode::Jump
-                    | VMOpCode::JumpIfFalse
-                    | VMOpCode::JumpIfTrue
-                    | VMOpCode::JumpIfFalseOrPop
-                    | VMOpCode::JumpIfTrueOrPop
-                    | VMOpCode::JumpIfNone
-                    | VMOpCode::JumpIfNotNoneOrPop
-                    | VMOpCode::ForIter
-                    | VMOpCode::SetupExcept
-                    | VMOpCode::SetupFinally
-            ) {
-                let old_target = instr.arg as usize;
-                if let Some(&new_target) = old_to_new.get(&old_target) {
-                    instr.arg = new_target as u32;
+                | VMOpCode::JumpIfFalse
+                | VMOpCode::JumpIfTrue
+                | VMOpCode::JumpIfFalseOrPop
+                | VMOpCode::JumpIfTrueOrPop
+                | VMOpCode::JumpIfNone
+                | VMOpCode::JumpIfNotNoneOrPop
+                | VMOpCode::ForIter
+                | VMOpCode::SetupExcept
+                | VMOpCode::SetupFinally => {
+                    instr.arg = remap(instr.arg as usize);
                 }
+                VMOpCode::ForRangeInt => {
+                    // Relative exit offset in the low bits; slots/sign above.
+                    let old_idx = new_to_old[new_idx];
+                    let old_target = old_idx + (instr.arg & super::FOR_RANGE_JUMP_MASK) as usize;
+                    let new_offset = remap(old_target) - new_idx as u32;
+                    instr.arg = (instr.arg & !super::FOR_RANGE_JUMP_MASK) | (new_offset & super::FOR_RANGE_JUMP_MASK);
+                }
+                VMOpCode::ForRangeStep => {
+                    // Absolute back-target in the low bits; slot/step above.
+                    let old_target = (instr.arg & super::FOR_RANGE_STEP_JUMP_MASK) as usize;
+                    let new_target = remap(old_target);
+                    instr.arg =
+                        (instr.arg & !super::FOR_RANGE_STEP_JUMP_MASK) | (new_target & super::FOR_RANGE_STEP_JUMP_MASK);
+                }
+                _ => {}
             }
         }
 
@@ -785,5 +821,102 @@ mod tests {
 
         // All paths should be live
         assert_eq!(optimized.len(), 5);
+    }
+
+    // --- Composite branch args must survive compaction ---
+    //
+    // ForRangeInt carries a relative exit offset and ForRangeStep an absolute
+    // back-target inside a packed arg. Removing instructions without
+    // re-encoding them lands the loop exit on an arbitrary instruction
+    // (silent wrong result or stack underflow at runtime). Found by the CFG
+    // property harness on `for i in range(..) { break\n<dead code> }`.
+
+    #[test]
+    fn compact_reencodes_for_range_int_exit_offset() {
+        use crate::vm::{FOR_RANGE_JUMP_MASK, FOR_RANGE_SLOT_I_SHIFT, FOR_RANGE_SLOT_STOP_SHIFT};
+
+        let fri_arg = (0u32 << FOR_RANGE_SLOT_I_SHIFT) | (1u32 << FOR_RANGE_SLOT_STOP_SHIFT) | 6;
+        let instrs = vec![
+            make_instr(VMOpCode::ForRangeInt, fri_arg), // exit = 0 + 6
+            make_instr(VMOpCode::DupTop, 0),            // folded to Nop
+            make_instr(VMOpCode::PopTop, 0),            // folded to Nop
+            make_instr(VMOpCode::JumpIfFalse, 5),
+            make_instr(VMOpCode::Jump, 6), // break -> exit
+            make_instr(VMOpCode::ForRangeStep, 0),
+            make_instr(VMOpCode::Halt, 0),
+        ];
+
+        let (optimized, _) = PeepholeOptimizer::optimize(instrs, vec![0; 7]);
+
+        assert_eq!(optimized.len(), 5, "DupTop/PopTop pair folded away");
+        assert_eq!(optimized[0].op, VMOpCode::ForRangeInt);
+        assert_eq!(
+            optimized[0].arg & FOR_RANGE_JUMP_MASK,
+            4,
+            "relative exit offset re-encoded after removals (Halt is at 4)"
+        );
+        assert_eq!(
+            optimized[0].arg & !FOR_RANGE_JUMP_MASK,
+            fri_arg & !FOR_RANGE_JUMP_MASK,
+            "slot/sign bits untouched"
+        );
+        assert_eq!(optimized[1].op, VMOpCode::JumpIfFalse);
+        assert_eq!(optimized[1].arg, 3, "plain target remapped");
+        assert_eq!(optimized[2].arg, 4, "break target remapped");
+    }
+
+    #[test]
+    fn compact_reencodes_for_range_step_back_target() {
+        use crate::vm::{FOR_RANGE_STEP_JUMP_MASK, FOR_RANGE_STEP_SHIFT};
+
+        let step_arg = (1u32 << FOR_RANGE_STEP_SHIFT) | 3; // back-target = 3
+        let instrs = vec![
+            make_instr(VMOpCode::LoadConst, 0),
+            make_instr(VMOpCode::Jump, 3),        // skips the dead slot
+            make_instr(VMOpCode::LoadConst, 1),   // dead
+            make_instr(VMOpCode::ForRangeInt, 4), // exit = 3 + 4 = 7
+            make_instr(VMOpCode::JumpIfFalse, 6),
+            make_instr(VMOpCode::Jump, 7), // break -> exit
+            make_instr(VMOpCode::ForRangeStep, step_arg),
+            make_instr(VMOpCode::Halt, 0),
+        ];
+
+        let (optimized, _) = PeepholeOptimizer::optimize(instrs, vec![0; 8]);
+
+        assert_eq!(optimized.len(), 7, "dead slot removed");
+        assert_eq!(optimized[5].op, VMOpCode::ForRangeStep);
+        assert_eq!(
+            optimized[5].arg & FOR_RANGE_STEP_JUMP_MASK,
+            2,
+            "absolute back-target re-encoded (header is at 2)"
+        );
+        assert_eq!(
+            optimized[5].arg & !FOR_RANGE_STEP_JUMP_MASK,
+            step_arg & !FOR_RANGE_STEP_JUMP_MASK,
+            "slot/step bits untouched"
+        );
+    }
+
+    #[test]
+    fn compact_remaps_branch_to_removed_target_forward() {
+        // A live conditional can target an instruction that compaction
+        // removes (here a jump-to-next rewritten to Nop by resolve_jumps):
+        // the branch must land on that target's live successor, not keep the
+        // stale index.
+        let instrs = vec![
+            make_instr(VMOpCode::JumpIfFalse, 2),
+            make_instr(VMOpCode::LoadConst, 0),
+            make_instr(VMOpCode::Jump, 3), // jump-to-next -> Nop -> removed
+            make_instr(VMOpCode::Return, 0),
+        ];
+
+        let (optimized, _) = PeepholeOptimizer::optimize(instrs, vec![0; 4]);
+
+        assert_eq!(optimized.len(), 3);
+        assert_eq!(optimized[0].op, VMOpCode::JumpIfFalse);
+        assert_eq!(
+            optimized[0].arg, 2,
+            "branch to the removed Nop lands on its successor (Return)"
+        );
     }
 }

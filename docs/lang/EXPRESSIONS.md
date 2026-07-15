@@ -252,6 +252,10 @@ exclusif = 0xFF ^ 0x0F         # 0xF0
 inverse = ~0xFF
 ```
 
+Comme les opérateurs arithmétiques, `&`, `|`, `^` et `~` délèguent au protocole de l'opérande quand ce n'est pas un
+entier natif : sur un tableau numpy ils s'appliquent élément par élément (`arr & 254`, `a | b`), et un struct peut les
+surcharger via `op &`, `op |`, `op ^`, `op ~`.
+
 ______________________________________________________________________
 
 ## Accès aux attributs et chaînage
@@ -446,6 +450,41 @@ element = sous[1]               # 30
 # Équivalent en une ligne
 element = liste[1:4][1]         # 30
 ```
+
+### Indexation multiple (clé tuple)
+
+Plusieurs index séparés par des virgules dans une même paire de crochets forment une **clé tuple** : `obj[a, b]` est
+équivalent à `obj[(a, b)]` et appelle `__getitem__((a, b))`. C'est la forme attendue par l'indexation N-dimensionnelle
+de numpy/pandas.
+
+```catnip
+numpy = import('numpy')
+
+arr = numpy.array(list(list(1, 2, 3), list(4, 5, 6)))
+
+# Accès (ligne, colonne) en une seule indexation
+arr[1, 2]                       # 6
+arr[0, 0]                       # 1
+
+# Chaque position accepte une expression ou un slice
+arr[1, 0:2]                     # [4, 5]
+arr[0:2, 1]                     # [2, 5]
+
+# Trois index ou plus : la clé tuple s'étend
+cube = numpy.arange(8).reshape(2, 2, 2)
+cube[0, 1, 1]                   # 3
+
+# Affectation par clé tuple
+arr[1, 2] = 99
+```
+
+Un seul index n'est jamais enveloppé dans un tuple : `obj[i]` reste `__getitem__(i)`. La forme multi-index (`obj[i, j]`)
+diffère donc de l'indexation imbriquée (`obj[i][j]`) : la première passe la clé `(i, j)` en un seul appel, la seconde
+enchaîne deux accès.
+
+> Une virgule dans des crochets ne construit pas une liste : elle construit une coordonnée. La liste vit dans `[...]` en
+> position d'expression, la coordonnée dans `[...]` en position d'accès. Même paire de crochets, deux lectures selon le
+> côté où on se tient.
 
 ### Exemple pratique : recherche dichotomique
 

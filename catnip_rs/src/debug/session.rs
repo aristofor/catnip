@@ -231,6 +231,9 @@ impl DebugSession {
         // Safety: rx points to self.event_rx which outlives the closure
         let rx_ptr = SendPtr::new(rx as *const mpsc::Receiver<DebugEvent>);
         let event = py.detach(move || {
+            // SAFETY: rx_ptr was built from &self.event_rx; &mut self is held for the whole
+            // wait_for_event call, so it outlives this synchronously-joined detach closure,
+            // and this thread is the receiver's sole consumer.
             let rx = unsafe { rx_ptr.as_ref() };
             rx.recv_timeout(dur).ok()
         });

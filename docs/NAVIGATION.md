@@ -7,7 +7,7 @@ ______________________________________________________________________
 ## Origine
 
 - [INTRODUCTION](INTRODUCTION.md)
-- [CHANGELOG](CHANGELOG.md)
+- [CHANGELOG](changelog/index.md)
 - [META](META.md)
 
 ______________________________________________________________________
@@ -67,6 +67,8 @@ ______________________________________________________________________
 - [CONTROL_FLOW](lang/CONTROL_FLOW.md)
 - [FUNCTIONS](lang/FUNCTIONS.md)
 - [STRUCTURES](lang/STRUCTURES.md)
+- [ENUMS](lang/ENUMS.md)
+- [UNIONS](lang/UNIONS.md)
 - [PATTERN_MATCHING](lang/PATTERN_MATCHING.md)
 - [BROADCAST](lang/BROADCAST.md)
 - [BROADCAST_SPEC](lang/BROADCAST_SPEC.md)
@@ -92,7 +94,6 @@ ______________________________________________________________________
 - [pattern-matching/](examples/pattern-matching/)
 - [control-flow/](examples/control-flow/)
 - [broadcast/](examples/broadcast/)
-- [cfg/](examples/cfg/)
 - [module-loading/](examples/module-loading/)
 - [run/](examples/run/)
 - [advanced/](examples/advanced/)

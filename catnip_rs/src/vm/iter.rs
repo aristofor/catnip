@@ -44,6 +44,9 @@ impl SeqIter {
             return Ok(None);
         }
         // Direct FFI access: skip PyO3 cast + bounds check per iteration
+        // SAFETY: under the GIL (py); self.seq is a live List/Tuple matching self.kind
+        // (set at construction), and self.index < self.len was checked above. The
+        // borrowed pointer returned stays valid while self.seq is alive.
         let item_ptr = unsafe {
             match self.kind {
                 SeqKind::List => pyo3::ffi::PyList_GetItem(self.seq.as_ptr(), self.index as pyo3::ffi::Py_ssize_t),
@@ -55,6 +58,8 @@ impl SeqIter {
                 .unwrap_or_else(|| pyo3::exceptions::PyIndexError::new_err("sequence index out of range")));
         }
         self.index += 1;
+        // SAFETY: item_ptr is non-null (checked above) and borrows a live element of
+        // self.seq, under the GIL. from_borrowed_ptr takes a new owned reference.
         let item = unsafe { pyo3::Bound::from_borrowed_ptr(py, item_ptr) };
         Ok(Some(Value::from_pyobject(py, &item)?))
     }

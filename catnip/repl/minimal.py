@@ -8,6 +8,8 @@ from catnip._rs import (
     should_continue_multiline,
 )
 
+from .._theme import PROMPT_CONTINUATION, PROMPT_MAIN
+
 
 class MinimalREPL:
     """Lightweight REPL for Python module integration.
@@ -29,14 +31,14 @@ class MinimalREPL:
         while True:
             try:
                 # Simple prompt
-                command = input("▸ ")
+                command = input(PROMPT_MAIN)
 
                 # Multiline support (Rust function)
                 if should_continue_multiline(command):
                     lines = [command]
                     while True:
                         try:
-                            line = input("▹ ")
+                            line = input(PROMPT_CONTINUATION)
                             lines.append(line)
                             full_text = '\n'.join(lines)
                             if not should_continue_multiline(full_text):

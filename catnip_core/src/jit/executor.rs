@@ -6,7 +6,7 @@ use super::detector::HotLoopDetector;
 use super::function_info::JitFunctionInfo;
 use super::inliner::{InliningConfig, PureInliner};
 use super::registry::PureFunctionRegistry;
-use super::trace::{Trace, TraceRecorder};
+use super::trace::{Trace, TraceOp, TraceRecorder};
 use super::trace_cache::TraceCache;
 use crate::constants::JIT_THRESHOLD_DEFAULT;
 use std::collections::HashMap;
@@ -14,6 +14,11 @@ use std::sync::Arc;
 
 type NameGuard = (String, i64, usize);
 type FunctionTrace = (CompiledFn, usize, Vec<NameGuard>);
+/// Key for per-loop compiled state: (bytecode_hash, loop_offset). The hash
+/// disambiguates loops sharing a loop_offset across distinct code objects -- a
+/// second program reusing the same VM, or a function vs the top level -- so a
+/// stale trace is never run for the wrong bytecode.
+type LoopKey = (u64, usize);
 
 /// JIT executor that manages compilation and execution of hot loops and functions.
 pub struct JITExecutor {
@@ -23,14 +28,28 @@ pub struct JITExecutor {
     pub recorder: TraceRecorder,
     /// Code generator
     codegen: Option<JITCodegen>,
-    /// Compiled loop traces: loop_offset -> function pointer
-    compiled: HashMap<usize, CompiledFn>,
-    /// Guards for each compiled loop trace: loop_offset -> Vec<(name, expected_value, slot)>
-    guards: HashMap<usize, Vec<NameGuard>>,
-    /// Highest local slot the compiled loop code addresses: loop_offset -> max_slot.
+    /// Compiled loop traces: (bytecode_hash, loop_offset) -> function pointer
+    compiled: HashMap<LoopKey, CompiledFn>,
+    /// Guards for each compiled loop trace: key -> Vec<(name, expected_value, slot)>
+    guards: HashMap<LoopKey, Vec<NameGuard>>,
+    /// Function-identity guards for each compiled loop trace:
+    /// key -> Vec<(name, expected_nanbox_bits)>. Check-only at JIT entry
+    /// (an inlined scope function must still resolve to the same value).
+    func_guards: HashMap<LoopKey, Vec<(String, u64)>>,
+    /// Identity guards for inlined functions held in a frame LOCAL slot:
+    /// key -> Vec<(slot, expected_nanbox_bits)>. Verified at JIT entry
+    /// against frame.locals[slot] (and those slots are excluded from the
+    /// numeric-only local scan, since they hold a function, not a number).
+    func_slot_guards: HashMap<LoopKey, Vec<(usize, u64)>>,
+    /// Highest local slot the compiled loop code addresses: key -> max_slot.
     /// Sizes the locals array at execution time; codegen writes every
     /// `trace.locals_used` slot, not just guard slots.
-    loop_max_slot: HashMap<usize, usize>,
+    loop_max_slot: HashMap<LoopKey, usize>,
+    /// Per-slot type contract of the compiled loop: key -> Vec<(slot, is_float)>,
+    /// from the trace's GuardInt/GuardFloat (post-inlining, what codegen typed).
+    /// Compiled code unboxes each slot with this type and never re-checks at
+    /// runtime; the VM must validate it at JIT entry.
+    slot_type_guards: HashMap<LoopKey, Vec<(usize, bool)>>,
     /// Compiled function traces: func_id -> (function pointer, num_locals_used, name_guards)
     compiled_functions: HashMap<String, FunctionTrace>,
     /// Registry of pure functions available for inlining
@@ -54,7 +73,10 @@ impl JITExecutor {
             codegen: None,
             compiled: HashMap::new(),
             guards: HashMap::new(),
+            func_guards: HashMap::new(),
+            func_slot_guards: HashMap::new(),
             loop_max_slot: HashMap::new(),
+            slot_type_guards: HashMap::new(),
             compiled_functions: HashMap::new(),
             pure_registry: PureFunctionRegistry::new(),
             enabled: true,
@@ -86,12 +108,13 @@ impl JITExecutor {
     /// Must be called before execution with the hash of the current code object.
     pub fn set_bytecode_hash(&mut self, hash: u64) {
         self.bytecode_hash = hash;
+        self.detector.set_bytecode_hash(hash);
     }
 
     /// Try to compile a loop from a cached trace (skip warm-up recording).
     /// Returns true if a cached trace was found and compiled successfully.
     pub fn try_compile_from_cache(&mut self, loop_offset: usize) -> bool {
-        if !self.enabled || self.compiled.contains_key(&loop_offset) {
+        if !self.enabled || self.compiled.contains_key(&(self.bytecode_hash, loop_offset)) {
             return false;
         }
 
@@ -115,24 +138,40 @@ impl JITExecutor {
     /// Check if a compiled version exists for a loop.
     #[inline]
     pub fn has_compiled(&self, offset: usize) -> bool {
-        self.compiled.contains_key(&offset)
+        self.compiled.contains_key(&(self.bytecode_hash, offset))
     }
 
     /// Get compiled function for a loop.
     #[inline]
     pub fn get_compiled(&self, offset: usize) -> Option<CompiledFn> {
-        self.compiled.get(&offset).copied()
+        self.compiled.get(&(self.bytecode_hash, offset)).copied()
     }
 
     /// Get guards for a compiled loop.
     pub fn get_guards(&self, offset: usize) -> Option<&Vec<(String, i64, usize)>> {
-        self.guards.get(&offset)
+        self.guards.get(&(self.bytecode_hash, offset))
+    }
+
+    /// Get function-identity guards for a compiled loop.
+    pub fn get_func_guards(&self, offset: usize) -> Option<&Vec<(String, u64)>> {
+        self.func_guards.get(&(self.bytecode_hash, offset))
+    }
+
+    /// Get local-slot function-identity guards for a compiled loop.
+    pub fn get_func_slot_guards(&self, offset: usize) -> Option<&Vec<(usize, u64)>> {
+        self.func_slot_guards.get(&(self.bytecode_hash, offset))
     }
 
     /// Highest local slot the compiled loop code addresses, if compiled.
     #[inline]
     pub fn get_loop_max_slot(&self, offset: usize) -> Option<usize> {
-        self.loop_max_slot.get(&offset).copied()
+        self.loop_max_slot.get(&(self.bytecode_hash, offset)).copied()
+    }
+
+    /// Per-slot type contract of a compiled loop: (slot, is_float) pairs the
+    /// VM must validate before entering the compiled code.
+    pub fn get_slot_type_guards(&self, offset: usize) -> Option<&Vec<(usize, bool)>> {
+        self.slot_type_guards.get(&(self.bytecode_hash, offset))
     }
 
     /// Check if a compiled version exists for a function.
@@ -205,13 +244,11 @@ impl JITExecutor {
     /// Internal compilation logic shared between fresh traces and cached loads.
     fn compile_trace_inner(&mut self, trace: Trace) -> Result<bool, String> {
         let offset = trace.loop_offset;
+        let key = (self.bytecode_hash, offset);
 
         if !trace.is_compilable() {
             return Ok(false);
         }
-
-        // Store guards for this trace
-        self.guards.insert(offset, trace.name_guards.clone());
 
         // Apply pure function inlining optimization
         let mut trace = trace;
@@ -221,18 +258,48 @@ impl JITExecutor {
             let _ = inliner.optimize(&mut trace);
         }
 
-        // Record the highest slot codegen will address (post-inlining), so the
+        // Compile trace FIRST: the guard maps below must describe the code
+        // that actually sits in `compiled`. Overwriting them before a compile
+        // that can fail (or bail) leaves stale native code paired with fresh
+        // guards -- the VM would then admit values the old code cannot unbox
+        // (silent garbage results).
+        let hash = self.bytecode_hash;
+        let codegen = self.ensure_codegen()?;
+        let func = codegen.compile(&trace, hash)?;
+
+        // Store guards for this trace. All inserted unconditionally so a
+        // recompile of the same key overwrites any prior entry (an empty
+        // func_guards must replace a stale non-empty one, never leave it behind).
+        self.guards.insert(key, trace.name_guards.clone());
+        self.func_guards.insert(key, trace.func_guards.clone());
+        self.func_slot_guards.insert(key, trace.func_slot_guards.clone());
+
+        // Record the highest slot codegen addresses (post-inlining), so the
         // executor can size the locals array even on the warm-start path where
         // frame.locals was never extended by tracing.
         if let Some(max_slot) = trace.locals_used.iter().copied().max() {
-            self.loop_max_slot.insert(offset, max_slot);
+            self.loop_max_slot.insert(key, max_slot);
         }
 
-        // Compile trace
-        let codegen = self.ensure_codegen()?;
-        let func = codegen.compile(&trace)?;
+        // Per-slot type contract (post-inlining, mirrors codegen's
+        // compute_slot_types last-wins semantics): compiled code unboxes each
+        // guarded slot as this type without any runtime re-check, so the VM
+        // must enforce it at JIT entry.
+        let mut slot_kinds: HashMap<usize, bool> = HashMap::new();
+        for op in &trace.ops {
+            match op {
+                TraceOp::GuardInt(slot) => {
+                    slot_kinds.insert(*slot, false);
+                }
+                TraceOp::GuardFloat(slot) => {
+                    slot_kinds.insert(*slot, true);
+                }
+                _ => {}
+            }
+        }
+        self.slot_type_guards.insert(key, slot_kinds.into_iter().collect());
 
-        self.compiled.insert(offset, func);
+        self.compiled.insert(key, func);
         self.detector.mark_compiled_offset(offset);
 
         Ok(true)
@@ -258,8 +325,9 @@ impl JITExecutor {
         let name_guards = trace.name_guards.clone();
 
         // Compile function trace
+        let hash = self.bytecode_hash;
         let codegen = self.ensure_codegen()?;
-        let func = codegen.compile(&trace)?;
+        let func = codegen.compile(&trace, hash)?;
 
         Ok((func, max_slot, name_guards))
     }
@@ -277,7 +345,7 @@ impl JITExecutor {
     /// Caller must ensure locals array has enough elements.
     #[inline]
     pub unsafe fn execute(&self, offset: usize, locals: &mut [i64]) -> Option<i64> {
-        let func = self.compiled.get(&offset)?;
+        let func = self.compiled.get(&(self.bytecode_hash, offset))?;
         Some(func(locals.as_mut_ptr(), 0))
     }
 
@@ -311,6 +379,8 @@ impl JITExecutor {
         self.recorder.abort();
         self.compiled.clear();
         self.guards.clear();
+        self.func_guards.clear();
+        self.func_slot_guards.clear();
         self.loop_max_slot.clear();
     }
 

@@ -33,7 +33,7 @@ big = 2 ** 100
 
 L'arithmétique sur les entiers est en précision arbitraire. Les petits entiers (47-bit signés, de -2^46 à 2^46-1) sont
 stockés inline sans allocation. Au-delà, la VM promeut automatiquement en BigInt (`Arc<GmpInt>` via `rug`/GMP). La
-demotion inverse se fait si le résultat retombe dans la plage SmallInt.
+démotion inverse se fait si le résultat retombe dans la plage SmallInt.
 
 ```catnip
 # Promotion transparente
@@ -389,12 +389,12 @@ Catnip utilise les mêmes règles de truthiness que Python. Toute valeur peut ê
 
 ```catnip
 x = 0
-if x { "jamais" } else { "zero est falsy" }
-# → "zero est falsy"
+if x { "jamais" } else { "zéro est falsy" }
+# → "zéro est falsy"
 
 s = ""
-if s { "jamais" } else { "chaine vide est falsy" }
-# → "chaine vide est falsy"
+if s { "jamais" } else { "chaîne vide est falsy" }
+# → "chaîne vide est falsy"
 
 data = list(1)
 if data { "liste non vide est truthy" }
@@ -444,6 +444,30 @@ Code équivalent explosé :
 
 > `??` est le seul opérateur qui distingue `None` de `False`. Les autres s'en remettent à la truthiness, qui ne fait pas
 > de différence entre les deux.
+
+#### `??` et les clés absentes
+
+`??` coalesce une valeur, il n'intercepte pas les exceptions : dans `d['k'] ?? defaut`, le subscript s'évalue d'abord et
+lève `KeyError` si la clé est absente — l'opérateur ne voit jamais passer de valeur. Il ne couvre que la clé présente
+valant `None`. La forme qui couvre les deux cas est `d.get('k') ?? defaut` (le linter signale le pattern fragile : règle
+W304).
+
+```catnip
+d = dict(a=None)
+d['a'] ?? 1          # → 1    (clé présente, valeur None)
+d.get('x') ?? 1      # → 1    (clé absente, couverte par .get)
+# d['x'] ?? 1        # KeyError : le subscript lève avant que ?? n'évalue quoi que ce soit
+```
+
+Ce n'est pas un oubli. Faire capturer `KeyError` par `??` rendrait le périmètre de capture ambigu — dans
+`f(d['k']) ?? x`, un `KeyError` levé à l'intérieur de `f` serait avalé aussi — et masquerait les fautes de frappe sur
+les clés. Traiter spécialement le subscript sous `??` donnerait deux sémantiques à la même expression selon son contexte
+: extraire `v = d['k']` avant le `??` changerait le comportement du programme. Dans les langages où `x[k] ?? defaut`
+fonctionne (JavaScript, Swift, Kotlin), c'est le subscript qui est total — il renvoie `undefined`/`Optional`/`null` —
+jamais l'opérateur qui capture une exception. Ici le subscript garde la sémantique Python, et la composition `.get()` +
+`??` fait le travail avec deux constructions existantes.
+
+> Un opérateur qui rattrape les exceptions de son opérande gauche ne sait pas où sa gauche commence.
 
 ## Enums
 
@@ -618,7 +642,7 @@ for (x, y) in list(tuple(1, 2), tuple(3, 4)) {
 ```
 
 **Note** : la syntaxe `(a, b)` est réservée aux appels de fonction et au groupement d'expressions. Les tuples utilisent
-`tuple(…)` pour lever l'ambiguité.
+`tuple(…)` pour lever l'ambiguïté.
 
 ## Ranges (via Python)
 
@@ -765,3 +789,11 @@ RUNTIME.smallint_min   # → -70368744177664 (-2^46)
 
 RUNTIME.smallint_max + 1   # → BigInt, toujours exact
 ```
+
+## Voir aussi
+
+Les types ci-dessus peuvent aussi **annoter** des paramètres et des variables (annotations optionnelles, frontière de
+types nominaux) :
+
+- [FUNCTIONS](FUNCTIONS.md) - annotations de paramètres (`(x: int)`), composites `list[T]`/`dict[K, V]`
+- [UNIONS](UNIONS.md) - unions de types (`int | str`, `Point | None`) et unions taggées (ADT)

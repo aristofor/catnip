@@ -37,26 +37,35 @@ pub fn handle(
     code: &str,
     context: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let result = server.with_pipeline(|pipeline| {
-        // Reset pipeline state for isolation between calls
-        pipeline.reset();
-        if let Some(ctx) = context {
-            for (name, val) in ctx {
-                pipeline.set_global(name, json_to_value(val));
+    // Capture stdout: the native io plugin prints to the raw process fd, which
+    // would otherwise corrupt the JSON-RPC stream on stdout and be lost to the
+    // caller. stdin is redirected to /dev/null so `input()` sees EOF.
+    let (result, stdout) = crate::capture::with_captured_stdio(|| {
+        server.with_pipeline(|pipeline| {
+            // Reset pipeline state for isolation between calls
+            pipeline.reset();
+            if let Some(ctx) = context {
+                for (name, val) in ctx {
+                    pipeline.set_global(name, json_to_value(val));
+                }
             }
-        }
-        pipeline.execute(code)
+            pipeline.execute(code)
+        })
     });
 
     match result {
         Ok(value) => {
             let repr = value.repr_string();
             let type_name = super::value_type_name(&value);
+            // execute() returns an owned ref; without this a heap result
+            // (list, struct...) leaks once per eval on the long-lived server.
+            value.decref();
             let payload = serde_json::json!({
                 "result_repr": repr,
                 "result_type": type_name,
+                "stdout": stdout,
             });
-            Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+            Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
                 serde_json::to_string(&payload).unwrap(),
             )]))
         }
@@ -64,8 +73,9 @@ pub fn handle(
             let payload = serde_json::json!({
                 "error": e.to_string(),
                 "type": format!("{:?}", e).split('(').next().unwrap_or("VMError"),
+                "stdout": stdout,
             });
-            Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+            Ok(CallToolResult::error(vec![rmcp::model::ContentBlock::text(
                 serde_json::to_string(&payload).unwrap(),
             )]))
         }

@@ -10,7 +10,7 @@ from ._version import __build_date__, __commit__, __lang_id__, __version__
 from .cachesys import CatnipCache
 from .context import Context, _ImportWrapper, configure_logging
 from .executor import Executor
-from .pragma import PRAGMA_ATTRS, PragmaContext
+from .pragma import PragmaContext
 from .registry import Registry
 from .semantic.opcode import OpCode
 
@@ -53,9 +53,9 @@ class Catnip:
 
         # VM execution mode: "on" (default), "off"
         # Can be set via CATNIP_EXECUTOR env var or -x/--executor CLI flag
-        from .config import executor_to_vm_mode
+        from .config import EXECUTOR_DEFAULT, executor_to_vm_mode
 
-        default_mode = executor_to_vm_mode(os.environ.get('CATNIP_EXECUTOR') or 'vm')
+        default_mode = executor_to_vm_mode(os.environ.get('CATNIP_EXECUTOR') or EXECUTOR_DEFAULT)
         self.vm_mode = kwargs.get('vm_mode', default_mode)
 
         # Runtime introspection - create and inject into context
@@ -139,6 +139,10 @@ class Catnip:
             if not semantic:
                 return self._pipeline.parse_to_ir(text, False)
 
+            # A failed prepare() (now reachable via fatal E300) must not leave
+            # the previous AST-mode code executable: drop it before re-preparing,
+            # mirroring the Rust pipeline invalidating prepared_ir up front.
+            self.code = None
             self._pipeline.prepare(text)
             self.code = self._pipeline.prepared_ir_to_op()
             self._sync_pragmas_from_ir()
@@ -162,70 +166,38 @@ class Catnip:
             return self._execute_ast(trace)
         return self._execute_vm(trace)
 
-    def _line_from_byte(self, byte_offset):
-        """Convert byte offset to 1-based line number."""
+    def _sourcemap(self):
+        """SourceMap over the last parsed source, or None."""
         src = self._source_text
-        if src is None or byte_offset is None:
+        if src is None:
             return None
-        raw = src.encode('utf-8')
-        return raw[:byte_offset].count(b'\n') + 1
+        return SourceMap(src.encode('utf-8') if isinstance(src, str) else src, '<input>')
 
-    def _col_from_byte(self, byte_offset):
-        """Convert byte offset to 0-based column number."""
-        src = self._source_text
-        if src is None or byte_offset is None:
-            return None
-        raw = src.encode('utf-8')
-        last_nl = raw.rfind(b'\n', 0, byte_offset)
-        return byte_offset - last_nl - 1 if last_nl >= 0 else byte_offset
+    def _line_col_from_byte(self, byte_offset):
+        """Convert byte offset to (1-based line, 0-based column), or (None, None)."""
+        from .compat import _byte_to_line_col
+
+        return _byte_to_line_col(self._sourcemap(), byte_offset)
 
     def _sync_pragmas_from_ir(self):
         """Sync pragma directives from prepared IR to PragmaContext."""
         from .exc import CatnipPragmaError, CatnipSemanticError
+        from .pragma import sync_pragmas_from_nodes
 
-        for node in self._pipeline.get_prepared_ir_nodes():
-            if node.kind == 'Op' and node.opcode == 'Pragma':
-                args = node.args
-                if not args:
-                    continue
-                directive = args[0].value
-                value = args[1].value if len(args) > 1 else True
-                mapping = PRAGMA_ATTRS.get(directive)
-                if mapping is None:
-                    if directive == 'warning':
-                        if not isinstance(value, bool):
-                            exc = CatnipPragmaError("Pragma 'warning' requires True or False")
-                            exc.line = self._line_from_byte(node.start_byte)
-                            exc.column = self._col_from_byte(node.start_byte)
-                            raise exc
-                        continue
-                    if directive in ('inline', 'pure'):
-                        continue
-                    exc = CatnipSemanticError(f"Unknown pragma directive: '{directive}'")
-                    exc.line = self._line_from_byte(node.start_byte)
-                    exc.column = self._col_from_byte(node.start_byte)
-                    raise exc
-                attr, typ = mapping
-                try:
-                    # jit accepts bool or 'all'
-                    if directive == 'jit' and value == 'all':
-                        self.pragma_context.jit_enabled = True
-                        self.pragma_context.jit_all = True
-                        continue
-                    # bool() on strings silently returns True, check type
-                    if typ is bool and not isinstance(value, bool):
-                        raise ValueError(f"requires True or False, got {value!r}")
-                    # Caller overrides (kwargs/CLI/env) win over file pragmas:
-                    # pragma_context must keep the forced (effective) value,
-                    # both for the next parse and for catnip.optimize introspection
-                    if (directive == 'optimize' and self._optimize_forced) or (directive == 'tco' and self._tco_forced):
-                        continue
-                    setattr(self.pragma_context, attr, typ(value))
-                except (ValueError, TypeError) as e:
-                    exc = CatnipPragmaError(f"Invalid value for pragma '{directive}': {e}")
-                    exc.line = self._line_from_byte(node.start_byte)
-                    exc.column = self._col_from_byte(node.start_byte)
-                    raise exc from None
+        def on_error(kind, message, node):
+            exc = (CatnipSemanticError if kind == 'semantic' else CatnipPragmaError)(message)
+            exc.line, exc.column = self._line_col_from_byte(node.start_byte)
+            raise exc from None
+
+        sync_pragmas_from_nodes(
+            self._pipeline.get_prepared_ir_nodes(),
+            self.pragma_context,
+            on_error=on_error,
+            # Caller overrides (kwargs/CLI/env) win over file pragmas:
+            # pragma_context must keep the forced (effective) value,
+            # both for the next parse and for catnip.optimize introspection
+            skip_directive=lambda d: (d == 'optimize' and self._optimize_forced) or (d == 'tco' and self._tco_forced),
+        )
 
     def _apply_pragmas(self):
         """Apply pragma settings to context."""
@@ -236,16 +208,11 @@ class Catnip:
             self.context.tco_enabled = self.pragma_context.tco_enabled
             self.context.jit_enabled = self.pragma_context.jit_enabled
             self.context.jit_all = self.pragma_context.jit_all
-            if self.context.jit_enabled:
-                self.context._init_jit()
 
             self.context.nd_mode = self.pragma_context.nd_mode
             self.context.nd_workers = self.pragma_context.nd_workers
             self.context.nd_memoize = self.pragma_context.nd_memoize
             self.context.nd_batch_size = self.pragma_context.nd_batch_size
-
-            if self.vm_mode in ('on', 'rust') and self.context.nd_mode == 'process':
-                self.context.nd_mode = 'thread'
 
     def _execute_vm(self, trace):
         """Execute via Pipeline delegation."""
@@ -300,19 +267,10 @@ class Catnip:
     def _enrich_name_suggestion(self, exc):
         """Add 'Did you mean' to CatnipNameError if a close match exists in globals."""
         from .exc import CatnipNameError
+        from .suggest import suggest_name
 
-        if not isinstance(exc, CatnipNameError):
+        if not isinstance(exc, CatnipNameError) or exc.suggestions:
             return
-        msg = str(exc)
-        if 'Did you mean' in msg:
-            return
-        import difflib
-        import re
-
-        m = re.search(r"Name '(\w+)' is not defined", msg)
-        if not m:
-            return
-        name = m.group(1)
         candidates = list(self.context.globals.keys())
         # Also add pipeline globals
         try:
@@ -321,24 +279,24 @@ class Catnip:
                 candidates.extend(pg.keys())
         except (AttributeError, TypeError):
             pass
-        matches = difflib.get_close_matches(name, candidates, n=1, cutoff=0.6)
+        matches = suggest_name(exc.name, candidates, max_suggestions=1)
         if matches:
-            exc.args = (f"{msg}. Did you mean '{matches[0]}'?",)
+            exc.suggestions = matches
+            exc.args = (f"{exc}. Did you mean '{matches[0]}'?",)
 
     def _enrich_from_vm_error_context(self, exc):
         """Enrich exception with position, snippet and traceback from VM's ErrorContext."""
+        from .compat import _byte_to_line_col
+
         ctx = self._pipeline.get_last_error_context()
         if ctx is None:
             return
+        sm = self._sourcemap()
         byte_offset = ctx.get('start_byte')
         if byte_offset is not None:
-            exc.line = self._line_from_byte(byte_offset)
-            exc.column = self._col_from_byte(byte_offset)
+            exc.line, exc.column = _byte_to_line_col(sm, byte_offset)
             # Build code snippet with pointer
-            src = self._source_text
-            if src:
-                source_bytes = src.encode('utf-8') if isinstance(src, str) else src
-                sm = SourceMap(source_bytes, '<input>')
+            if self._source_text:
                 exc.context = sm.get_snippet(byte_offset, byte_offset + 1)
 
         # Build traceback from call stack (deduplicate identical display lines)
@@ -349,7 +307,7 @@ class Catnip:
             tb = CatnipTraceback()
             prev_key = None
             for name, sb in call_stack:
-                line = self._line_from_byte(sb)
+                line, _ = _byte_to_line_col(sm, sb)
                 key = (name, line)
                 if key == prev_key:
                     continue
@@ -373,8 +331,7 @@ class Catnip:
             byte_offset = getattr(stmt, 'start_byte', None)
             if byte_offset is None:
                 return
-        exc.line = self._line_from_byte(byte_offset)
-        exc.column = self._col_from_byte(byte_offset)
+        exc.line, exc.column = self._line_col_from_byte(byte_offset)
 
     @staticmethod
     def _enrich_attribute_error(exc, msg):

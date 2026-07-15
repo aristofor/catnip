@@ -88,6 +88,50 @@ z = other       # noqa: W200, E200  -- supprime plusieurs codes
 
 Le commentaire n'affecte que la ligne où il apparaît.
 
+### Désactivation globale par code
+
+Là où `# noqa` agit sur une ligne, `--disable` éteint une règle pour tout le fichier. Plusieurs codes par occurrence
+(séparés par des virgules) ou plusieurs occurrences :
+
+```bash
+# Taire une règle pour toute l'analyse
+catnip lint --disable W401 script.cat
+
+# Plusieurs codes, deux notations équivalentes
+catnip lint --disable W401,I200 script.cat
+catnip lint --disable W401 --disable I200 script.cat
+```
+
+Pour une désactivation persistante, déclarer la liste dans `catnip.toml` :
+
+```toml
+[lint]
+disable = ["W401", "I200"]
+```
+
+`--enable` ré-active un code éteint par le fichier (ou par un `--disable` de la même commande). C'est le seul rôle
+d'`--enable` : annuler un `disable`, pas allumer une phase éteinte (`--check-names`, `--deep` restent les leviers des
+règles opt-in).
+
+```bash
+# Le fichier désactive W401 ; on le veut juste cette fois-ci
+catnip lint --enable W401 script.cat
+```
+
+L'ensemble effectif des codes tus est `(fichier ∪ --disable) \ --enable`.
+
+> Warning: un code inconnu dans `disable` ne proteste pas. Il attend une règle qui n'existe pas encore.
+
+### Mode strict (gate CI)
+
+Par défaut, seules les erreurs (Exxx) produisent un code de sortie non-zéro — les warnings s'affichent mais laissent
+passer. `--strict` promeut les warnings en fatals ; les diagnostics Info et Hint restent consultatifs dans les deux
+modes. Même doctrine que `clippy -D warnings` : un gate qui affiche sans échouer n'est pas un gate.
+
+```bash
+catnip lint --deep --strict codex/     # échoue au premier warning
+```
+
 ### Analyse deep (CFG)
 
 ```bash
@@ -189,22 +233,50 @@ par `_`. W202 avertit qu'assigner le retour d'un `import('...', wild=True)` est 
 | W300 | Warning  | Unreachable code after return                          |
 | W301 | Warning  | Dead branch (condition always True/False)              |
 | W302 | Warning  | `while True` without break (infinite loop détectable)  |
+| W303 | Info     | Variable de condition de boucle jamais modifiée        |
+| W304 | Warning  | Subscript à clé string sous `??`, KeyError non couvert |
 | W310 | Warning  | Variable possibly uninitialized (`--deep` requis)      |
 | W311 | Warning  | Unreachable code after terminating branches (`--deep`) |
 | W312 | Warning  | Dead store: variable écrasée avant lecture (`--deep`)  |
 | W313 | Hint     | Branche `else`/`elif` redondante après un exit         |
 
 W300 détecte le code mort après un `return` dans le même bloc. W302 signale les boucles `while True` dont le corps ne
-contient pas de `break` (les `break` dans des boucles ou lambdas imbriquées ne comptent pas). W201 signale les
-paramètres de fonction jamais utilisés dans le corps (les paramètres préfixés par `_` et `self` sont ignorés). Les
-paramètres lus dans une lambda imbriquée (capture) comptent comme utilisés. W204 détecte les affectations qui créent une
-variable locale qui masque une variable du scope parent. L'heuristique distingue les mutations de capture (`x = x + 1`
-dans une closure) du vrai shadowing. W301 signale les branches mortes quand la condition d'un `if` est un littéral
-booléen (`if True` / `if False`).
+contient pas de `break` (les `break` dans des boucles ou lambdas imbriquées ne comptent pas). W303 complète W302 pour
+l'autre forme de boucle qui ne s'arrête jamais : `while running { ... }` où la condition est un seul identifiant que le
+corps ne modifie jamais. Périmètre volontairement étroit pour ne jamais crier au loup : le corps ne doit contenir aucun
+appel (un closure capturé pourrait muter la variable), aucune lambda, aucun `for`/`match`/`try`, aucune réaffectation de
+la variable, ni `break`/`return`/`raise`. Sous ces conditions la condition est invariante.
+
+> Note: une boucle dont la condition ne bouge pas est soit infinie, soit jamais exécutée. Le linter ne sait pas laquelle
+> -- les deux méritent un regard.
+
+W304 signale un subscript à clé string en opérande non-final de `??`. L'opérateur ne coalesce que `None` :
+`d['k'] ?? defaut` lève quand même `KeyError` si la clé est **absente** -- ce n'est pas un « get avec défaut ». La forme
+qui couvre les deux cas (clé absente et valeur nulle) est `d.get('k') ?? defaut`. Tous les opérandes sont vérifiés sauf
+le fallback final de la chaîne : dans `a ?? d['k'] ?? x`, l'opérande médian n'est pas protégé par le `?? x` qui le suit,
+il est donc signalé. Périmètre volontairement étroit : la règle ne se déclenche que si le dernier membre de l'opérande
+est un index à clé string littérale (le pattern d'accès dict) ; les clés calculées et les indices entiers, qui peuvent
+viser des listes, ne sont pas signalés.
+
+> Le défaut attend patiemment que la première source réelle omette un champ optionnel. Les jeux de test, eux, ont
+> toujours toutes leurs clés.
+
+W201 signale les paramètres de fonction jamais utilisés dans le corps (les paramètres préfixés par `_` et `self` sont
+ignorés). Les paramètres lus dans une lambda imbriquée (capture) comptent comme utilisés. W204 détecte les affectations
+qui créent une variable locale masquant une variable du scope parent. Le shadowing suppose une frontière de fonction :
+une affectation dans un bloc de contrôle (`for`/`match`/`except`) vers une variable de la même fonction est un
+write-through (`found = True` dans une boucle mute la variable extérieure), pas un shadow. Au-delà d'une frontière de
+fonction (closure), l'heuristique distingue une mutation de capture qui relit le nom (`x = x + 1`) d'un vrai shadowing.
+W301 signale les branches mortes quand la condition d'un `if` est un littéral booléen (`if True` / `if False`).
 
 W310 détecte les variables définies dans certaines branches d'un `if`/`elif`/`match` mais pas toutes, puis lues après le
-point de jonction. Nécessite `--deep` car l'analyse construit un CFG et calcule un point fixe de dataflow (forward
-definite-assignment). Les variables jamais définies nulle part ne déclenchent pas W310 (c'est le rôle de E200).
+point de jonction. La détection vaut aussi quand le contrôle de flux est en position de valeur (un
+`if`/`match`-expression comme membre droit) et pour le court-circuit `and`/`or`, dont le membre droit n'est évalué que
+conditionnellement : une variable écrite seulement par ce membre déclenche W310 si elle est lue ensuite. Les cibles
+d'affectation dans un `with` ou un bloc-expression (`r = { x = 10; x }`) comptent comme des définitions, et un nom de
+kwarg (`f(nom=v)`) n'est pas une lecture de variable : ni l'un ni l'autre ne produit de faux W310. Nécessite `--deep`
+car l'analyse construit un CFG et calcule un point fixe de dataflow (forward definite-assignment). Les variables jamais
+définies nulle part ne déclenchent pas W310 (c'est le rôle de E200).
 
 W311 détecte le code inatteignable après des branches qui terminent toutes : si chaque branche d'un `if`/`match`
 contient un `return` ou `raise`, le code qui suit le bloc ne sera jamais exécuté. Complémente W300 (code mort intra-bloc
@@ -244,6 +316,71 @@ les branches terminent (`if X { return } else { return }`) ne sont pas signalés
 <stdin>:1:34: hint [W313]: redundant else: previous branch always exits; flatten this block to the enclosing scope
 ```
 
+```bash
+⇒ printf 'while running {\n    x = 1\n}' | catnip lint --stdin
+<stdin>:1:1: info [W303]: Loop condition 'running' is never modified in the body; the loop cannot terminate normally
+```
+
+```bash
+⇒ echo "cover = item.properties['eo:cloud_cover'] ?? 100" | catnip lint --stdin
+<stdin>:1:9: warning [W304]: '??' only coalesces None: ['eo:cloud_cover'] still raises KeyError when the key is missing
+```
+
+### Patterns avancés (W4xx)
+
+| Code | Sévérité | Description                                     |
+| ---- | -------- | ----------------------------------------------- |
+| W401 | Warning  | Effet de bord (builtin impur) dans un broadcast |
+
+W401 signale l'appel d'un builtin à effet de bord à l'intérieur d'un broadcast (`data.[print(_)]`), **uniquement quand
+le fichier active un mode ND parallèle** via `pragma("nd_mode", ND.thread)` ou `ND.process`. Par défaut le broadcast est
+séquentiel : l'ordre est défini, et un `data.[(x) => { print(x) }]` est parfaitement valide. Sous thread/process, en
+revanche, l'opération s'exécute par élément dans un ordre non spécifié (GIL relâché, voire vrais processus) : y glisser
+une entrée/sortie donne un résultat dont l'ordre n'est pas garanti. La règle s'en tient à une liste fermée de builtins
+sans ambiguïté (`print`, `input`, `open`, `breakpoint`) ; les fonctions utilisateur et les builtins purs ne sont jamais
+signalés.
+
+> Un effet de bord broadcasté en parallèle, c'est demander à N copies de soi d'écrire dans le même journal sans se
+> concerter. En séquentiel elles font la queue ; en thread, non.
+
+```bash
+⇒ printf 'pragma("nd_mode", ND.thread)\nnums.[print(_)]' | catnip lint --stdin
+<stdin>:2:7: warning [W401]: Side effect in broadcast: 'print' is impure; it runs per element in unspecified order
+```
+
+### Sémantique - Types (E3xx)
+
+| Code | Sévérité | Description                                                                    |
+| ---- | -------- | ------------------------------------------------------------------------------ |
+| E300 | Error    | Type mismatch entre une annotation et une valeur prouvablement d'un autre type |
+
+E300 vérifie les annotations de type optionnelles (`x: int`) là où l'incompatibilité est **prouvable** -- valeur
+littérale ou type inféré concret. Sites couverts :
+
+- défaut de paramètre vs annotation (`(x: int = "no")`) ;
+- défaut de champ de struct vs annotation (`struct P { x: int = "no" }`) ;
+- type de retour déclaré vs type produit par le corps (`(): int => { "no" }`, en déballant un `return` terminal) ;
+- argument vs paramètre **au site d'appel** d'une fonction à liaison prouvablement unique (`f("no")`), positionnels et
+  par mot-clé (`f(x="no")`) ;
+- argument vs champ **au constructeur d'un struct** (`P(1, "no")`).
+
+La vérification des appels est **monomorphe** : elle ne s'applique qu'aux cibles statiquement uniques (une fonction
+assignée une seule fois, jamais réassignée, jamais passée comme valeur ni masquée par un paramètre). Les arguments
+absorbés par un `*args` ne sont pas vérifiés ; omettre un paramètre à défaut ne déclenche aucune erreur d'arité.
+
+L'analyse est volontairement sound (zéro faux positif) : les primitifs, les types nominaux (enum/union/struct) et les
+composites `list[T]`/`dict[K, V]` (conteneur et paramètres) sont modélisés ; un composite non modélisé ou un type
+inconnu (`set[int]`) ne déclenche jamais E300. Une annotation ne sert pas qu'à E300 : elle alimente aussi l'inférence du
+scrutinee de `match` (voir I103).
+
+```bash
+⇒ echo 'f = (x: int = "no") => { 0 }' | catnip lint --
+<stdin>:1:5: error [E300]: Type mismatch: parameter 'x' declared 'int' but value has type 'str'
+
+⇒ printf 'f = (x: int) => { x }\nf("no")\n' | catnip lint --
+<stdin>:2:1: error [E300]: argument 'x' of 'f' expects 'int' but got 'str'
+```
+
 ### Hints (Ixxx)
 
 | Code | Sévérité | Description                                           |
@@ -251,7 +388,7 @@ les branches terminent (`if X { return } else { return }`) ne sont pas signalés
 | I100 | Hint     | Recursive call to 'f' is not in tail position         |
 | I101 | Hint     | Redundant comparison with boolean literal             |
 | I102 | Hint     | Self-assignment has no effect                         |
-| I103 | Hint     | Match has no wildcard/catch-all branch                |
+| I103 | Hint     | Non-exhaustive match (missing variants or catch-all)  |
 | I200 | Hint     | Nesting depth exceeds threshold (default: 5)          |
 | I201 | Hint     | Function cyclomatic complexity exceeds threshold (10) |
 | I202 | Hint     | Function has too many statements (default: 30)        |
@@ -265,8 +402,15 @@ I200 signale les structures de contrôle imbriquées au-delà du seuil (if, whil
 à zéro aux limites de chaque fonction. I201 mesure la complexité cyclomatique par fonction : chaque branche (if, elif,
 while, for, `and`, `or`) et chaque case d'un match (sauf le premier) ajoutent 1 au compteur. Les lambdas imbriquées sont
 comptées séparément. I202 compte les statements directs dans le corps d'une fonction. I203 compte les paramètres d'une
-fonction (`self` exclu pour les méthodes). I103 signale un `match` sans branche catch-all (`_` ou variable nue sans
-guard).
+fonction (`self` exclu pour les méthodes).
+
+I103 vérifie l'exhaustivité des `match`. Quand le type du scrutinee est inférable (enum, union taggée, booléen), le
+message liste les variantes manquantes (`Non-exhaustive match on union 'Option'; missing: None`) ; dans une méthode
+d'union, `self` est typé comme l'union déclarante, donc `match self` est vérifié avec la même précision. Une annotation
+de type étend cette inférence : un paramètre annoté (`(c: Color) => match c`) et un champ de struct typé (`match p.x`)
+fournissent le type du scrutinee de la même façon. Sinon, la règle signale un `match` sans branche catch-all (`_` ou
+variable nue sans guard). Voir [UNIONS](../lang/UNIONS.md#exhaustivit%C3%A9-linter) pour les règles d'inférence du
+scrutinee.
 
 ```bash
 ⇒ echo 'f = (n) => { 1 + f(n - 1) }' | catnip lint --
@@ -432,8 +576,9 @@ for diag in result.diagnostics:
 
 ## Architecture interne
 
-Le linter est implémenté en Rust (`catnip_tools/src/linter.rs`) avec un wrapper Python léger (`catnip/tools/linter.py`).
-Les quatre phases s'exécutent séquentiellement dans le même appel Rust.
+Le linter est implémenté en Rust (`catnip_tools/src/linter/`) avec un wrapper Python léger (`catnip/tools/linter.py`).
+Les quatre phases s'exécutent séquentiellement dans le même appel Rust ; l'analyse sémantique (phase 3) et les
+suggestions (phase 4) vivent dans les sous-modules `semantic.rs` et `improvements.rs`.
 
 ### Phase 1 : Analyse syntaxique
 
@@ -508,11 +653,12 @@ Passes globales sur le CST, indépendantes de l'analyse sémantique :
 ```mermaid
 flowchart LR
     A["Parse Tree (CST)"] --> B["CFG Builder (par scope)"]
+    B --> E4["W311 (code mort, détecté à la construction)"]
     B --> C["LintCFG (blocs + edges)"]
     C --> D["Forward Dataflow<br/>(definite-assignment)"]
     C --> F["Backward Dataflow<br/>(liveness)"]
     C --> G["Structural walk"]
-    D --> E1["W310, W311"]
+    D --> E1["W310"]
     F --> E2["W312"]
     G --> E3["W313"]
 ```
@@ -548,7 +694,7 @@ l'inverse `inc = () => { count = count + 1 }` a une écriture self-référentiel
 déjà traversés et les corps des **autres** fonctions (leurs défs internes ne sont pas visibles). Les captures retenues
 sont seedées comme defs implicites du block entry (W310 silencieux) et exclues des candidats W312 (la mutation propage
 vers le parent). Le critère ne s'applique pas au root : `print(x); x = 1` au module reste un W310. Les bindings de
-pattern et de paramètre sont sequencés à la fin du node de leur déclaration, pas à la fin du case clause ou de la
+pattern et de paramètre sont séquencés à la fin du node de leur déclaration, pas à la fin du case clause ou de la
 lambda, pour qu'une lecture en aval ne les fasse pas passer pour captures.
 
 > Ce CFG est distinct du CFG/SSA utilisé par l'optimiseur (`catnip_core/src/cfg/`). L'optimiseur travaille sur l'IR

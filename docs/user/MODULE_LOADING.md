@@ -73,7 +73,7 @@ m.pi
 # → 3.141592653589793
 ```
 
-### Resolution par nom
+### Résolution par nom
 
 `import()` prend un **nom**, pas un chemin de fichier. Le loader cherche le module dans les répertoires de recherche,
 puis tombe en fallback sur `importlib` (stdlib, pip) :
@@ -240,7 +240,7 @@ Contraintes :
 > `"./foo"` reste rejeté (migration path-based). Le `.` en tête suivi d'un nom, c'est du relatif. Le `./` suivi d'un
 > chemin, c'est du filesystem. La distinction est un slash.
 
-### Repertoires de recherche
+### Répertoires de recherche
 
 La résolution parcourt ces répertoires dans l'ordre (dédupliqués) :
 
@@ -450,7 +450,7 @@ triple(3)    # → 9
 ```
 
 `wild=True` retourne `None` - il n'y a pas de namespace à stocker. Les exports sont filtrés par les mêmes règles que
-l'import classique (`META.exports` > `__all__` > heuristique). Les métadonnées du module (`META`, noms commencant par
+l'import classique (`META.exports` > `__all__` > heuristique). Les métadonnées du module (`META`, noms commençant par
 `_`) ne sont jamais injectées dans le wild import.
 
 ### Import sélectif

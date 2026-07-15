@@ -263,6 +263,23 @@ if (
         c.execute()
         self.assertEqual(c.context.globals['result'], True)
 
+    def test_deeply_indented_else_is_continuation(self):
+        """`else`/`elif` on a new line stay continuations regardless of indent.
+
+        The external scanner skips the next line's indentation to look ahead for
+        a continuation keyword; a fixed bound there once misclassified a deeply
+        indented `else` as a new statement (parse error past ~50 spaces).
+        """
+        for indent in (4, 50, 60, 200):
+            pad = " " * indent
+            c = Catnip()
+            c.parse(f'y = if 1 > 0 {{\n  "pos"\n}}\n{pad}else {{\n  "neg"\n}}\n')
+            self.assertEqual(c.execute(), "pos", f"else broke at indent={indent}")
+
+            c = Catnip()
+            c.parse(f'x = 2\nz = if x == 1 {{\n  "a"\n}}\n{pad}elif x == 2 {{\n  "b"\n}}\n')
+            self.assertEqual(c.execute(), "b", f"elif broke at indent={indent}")
+
     def test_multiline_while_condition(self):
         """Condition while multiligne."""
         c = Catnip()

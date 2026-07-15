@@ -22,6 +22,8 @@ mod patterns;
 mod stack;
 
 use crate::constants::*;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::cell::RefCell;
@@ -35,6 +37,16 @@ const OPERATOR_MODULE: &str = "operator";
 pub(crate) struct OpCodeCache {
     // Arithmetic
     pub add: i32,
+    // Typed arithmetic (TH4 canal A): behave as their polymorphic counterpart in
+    // AST mode (the typed opcodes are an oracle there, no specialized execution).
+    pub add_int: i32,
+    pub check_return: i32,
+    pub add_float: i32,
+    pub sub_int: i32,
+    pub sub_float: i32,
+    pub mul_int: i32,
+    pub mul_float: i32,
+    pub div_float: i32,
     pub sub: i32,
     pub mul: i32,
     pub truediv: i32,
@@ -146,6 +158,14 @@ impl OpCodeCache {
 
         Ok(Self {
             add: get("ADD")?,
+            add_int: get("ADD_INT")?,
+            check_return: get("CHECK_RETURN")?,
+            add_float: get("ADD_FLOAT")?,
+            sub_int: get("SUB_INT")?,
+            sub_float: get("SUB_FLOAT")?,
+            mul_int: get("MUL_INT")?,
+            mul_float: get("MUL_FLOAT")?,
+            div_float: get("DIV_FLOAT")?,
             sub: get("SUB")?,
             mul: get("MUL")?,
             truediv: get("TRUEDIV")?,
@@ -383,6 +403,54 @@ impl Registry {
         registry.update_context_globals(py)?;
 
         Ok(registry)
+    }
+
+    /// Participate in CPython's cyclic GC. The registry holds a strong `ctx`
+    /// reference and the context's globals hold this registry back, forming a
+    /// `Context <-> Registry` cycle the collector cannot otherwise see (a Rust
+    /// pyclass is opaque to it). Visiting these fields lets the collector detect
+    /// the cycle; `__clear__` breaks it. Without this, every `Catnip()` session
+    /// leaks its context.
+    ///
+    /// The `RefCell` fields may be borrowed when the GC fires re-entrantly during
+    /// execution, so we `try_borrow` and skip rather than risk a panic -- a missed
+    /// visit only defers a collection, a panic would abort. `operator_cache`
+    /// holds `operator.*` builtins (immortal, not GC-tracked), so it is not
+    /// visited.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.ctx)?;
+        visit.call(&self.internals)?;
+        if let Ok(cache) = self.op_cache.try_borrow() {
+            for v in cache.values() {
+                visit.call(v)?;
+            }
+        }
+        if let Ok(stack) = self.stack.try_borrow() {
+            for v in stack.iter() {
+                visit.call(v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Break the `Context <-> Registry` cycle by dropping the strong references.
+    /// Only called by the GC on an otherwise-unreachable object, so no live
+    /// execution is using these fields; `try_borrow_mut` still guards against a
+    /// re-entrant GC mid-execution.
+    fn __clear__(&mut self) {
+        Python::attach(|py| {
+            self.ctx = py.None();
+            self.internals = py.None();
+        });
+        if let Ok(mut cache) = self.op_cache.try_borrow_mut() {
+            cache.clear();
+        }
+        if let Ok(mut stack) = self.stack.try_borrow_mut() {
+            stack.clear();
+        }
+        if let Ok(mut exc) = self.active_exception.try_borrow_mut() {
+            *exc = None;
+        }
     }
 
     /// Execute a statement (main dispatch function)
@@ -1079,9 +1147,19 @@ impl Registry {
         let globals = ctx.getattr("globals")?;
         let globals_dict = globals.cast::<PyDict>()?;
 
-        // globals()/locals() fallbacks for indirect calls (f = globals; f())
+        // globals()/locals() fallbacks for indirect calls (f = globals; f()).
         // Direct calls are intercepted by the semantic analyzer as intrinsic opcodes.
-        let ctx_ref = self.ctx.clone_ref(py);
+        //
+        // These closures are stored in `ctx.globals`, so a strong `Py<ctx>`
+        // capture would close a `ctx.globals -> closure -> ctx` cycle that the
+        // collector cannot see: a `PyCFunction` closure's captured environment is
+        // opaque to `tp_traverse`, so the captured reference is never subtracted
+        // and the context leaks. Capturing a `weakref` instead breaks the strong
+        // edge -- the closure is only reachable while `ctx.globals` (hence `ctx`)
+        // is alive, so the upgrade always succeeds during normal use.
+        let weakref_mod = py.import("weakref")?;
+        let ctx_weak = weakref_mod.call_method1("ref", (self.ctx.bind(py),))?.unbind();
+        let ctx_weak2 = ctx_weak.clone_ref(py);
         let globals_fn = pyo3::types::PyCFunction::new_closure(
             py,
             Some(c"globals"),
@@ -1090,13 +1168,15 @@ impl Registry {
                   _kwargs: Option<&Bound<'_, PyDict>>|
                   -> PyResult<Py<PyAny>> {
                 let py = _args.py();
-                let ctx = ctx_ref.bind(py);
+                let ctx = ctx_weak.bind(py).call0()?;
+                if ctx.is_none() {
+                    return Ok(PyDict::new(py).into_any().unbind());
+                }
                 let g = ctx.getattr("globals")?;
                 let dict = g.cast::<PyDict>()?;
                 Ok(dict.copy()?.into_any().unbind())
             },
         )?;
-        let ctx_ref2 = self.ctx.clone_ref(py);
         let locals_fn = pyo3::types::PyCFunction::new_closure(
             py,
             Some(c"locals"),
@@ -1105,7 +1185,10 @@ impl Registry {
                   _kwargs: Option<&Bound<'_, PyDict>>|
                   -> PyResult<Py<PyAny>> {
                 let py = _args.py();
-                let ctx = ctx_ref2.bind(py);
+                let ctx = ctx_weak2.bind(py).call0()?;
+                if ctx.is_none() {
+                    return Ok(PyDict::new(py).into_any().unbind());
+                }
                 let locals_scope = ctx.getattr("locals")?;
                 locals_scope.call_method0("items").map(|v| v.unbind())
             },

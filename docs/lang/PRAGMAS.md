@@ -38,7 +38,7 @@ Les pragmas sont des directives d'exécution qui contrôlent :
 | --------------- | ---------------------------------------- | --------------- | ------------------------------------- |
 | `tco`           | `True`/`False`                           | `True`          | Optimisation des appels terminaux     |
 | `jit`           | `True`/`False`, `"all"`                  | `False`         | Compilation JIT                       |
-| `optimize`      | `0`-`3`                                  | `3`             | Niveau d'optimisation                 |
+| `optimize`      | `0`-`3` (seuil : `0`=off, `≥1`=on)       | `3`             | Passes d'optimisation                 |
 | `cache`         | `True`/`False`                           | `True`          | Cache de compilation                  |
 | `debug`         | `True`/`False`                           | `False`         | Mode debug                            |
 | `pure`          | `"func_name"`                            | -               | Marque une fonction comme pure        |
@@ -440,7 +440,8 @@ pragma("debug", False)  # Désactive le debug
 ### Pure
 
 Marque une fonction comme pure (sans effets de bord, résultat déterministe). Les fonctions pures peuvent bénéficier
-d'optimisations supplémentaires dans le broadcasting.
+d'optimisations supplémentaires : dans le broadcasting, et via l'inlining de leur corps directement dans une boucle
+chaude compilée par le JIT (voir `docs/dev/JIT.md`).
 
 **Syntaxe :**
 
@@ -535,6 +536,6 @@ sum_range(100000)  # Pas de dépassement de pile avec TCO
 
 ## Voir aussi
 
-- [Exemples ND-récursion](../examples/advanced/nd_recursion.md) - Exemples d'usage de ND-récursion
+- [Exemples ND-récursion](../examples/advanced/05_nd_recursion.cat) - Exemples d'usage de ND-récursion
 - [Quickstart 2 Minutes](../tuto/QUICKSTART_2MIN.md) - Introduction à Catnip
 - [Glossary](GLOSSARY.md) - Référence du langage

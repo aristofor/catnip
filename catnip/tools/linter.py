@@ -73,21 +73,31 @@ def lint_code(
     check_semantic: bool = True,
     check_ir: bool = False,
     check_names: bool = False,
-    max_nesting_depth: int = 5,
-    max_cyclomatic_complexity: int = 10,
-    max_function_length: int = 30,
-    max_parameters: int = 6,
+    max_nesting_depth: Optional[int] = None,
+    max_cyclomatic_complexity: Optional[int] = None,
+    max_function_length: Optional[int] = None,
+    max_parameters: Optional[int] = None,
+    disabled_codes: Optional[List[str]] = None,
 ) -> LintResult:
+    # None thresholds fall through to the Rust LintConfig defaults
+    thresholds = {
+        key: value
+        for key, value in (
+            ('max_nesting_depth', max_nesting_depth),
+            ('max_cyclomatic_complexity', max_cyclomatic_complexity),
+            ('max_function_length', max_function_length),
+            ('max_parameters', max_parameters),
+        )
+        if value is not None
+    }
     config = LintConfig(
         check_syntax=check_syntax,
         check_style=check_style,
         check_semantic=check_semantic,
         check_ir=check_ir,
         check_names=check_names,
-        max_nesting_depth=max_nesting_depth,
-        max_cyclomatic_complexity=max_cyclomatic_complexity,
-        max_function_length=max_function_length,
-        max_parameters=max_parameters,
+        disabled_codes=list(disabled_codes) if disabled_codes else None,
+        **thresholds,
     )
     diagnostics = _rs_lint_code(source, config)
     return LintResult(diagnostics=diagnostics, source=source, filename=filename)

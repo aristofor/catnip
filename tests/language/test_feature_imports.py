@@ -46,6 +46,129 @@ class TestModuleImports(unittest.TestCase):
             self.assertTrue(hasattr(namespace, 'double'))
             self.assertFalse(hasattr(namespace, '_hidden'))
 
+    def test_import_inter_function_call(self):
+        """An exported function calling a sibling resolves it after the child VM
+        is dropped (func_table transplant into the caller VM)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text('double = (x) => { x * 2 }\nquad = (x) => { double(double(x)) }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('m = import("m")\nm.quad(3)')
+            self.assertEqual(catnip.execute(), 12)
+
+    def test_import_nested_closure_in_exported_container(self):
+        """A closure exported *inside* a container (list/tuple/dict) resolves its
+        transplanted parent slot, not its child-relative index. The parent
+        defines an unrelated `parent_fn` first so the unshifted child index (0)
+        collides with it (identity) -- the pre-fix VM returned 5 instead of 6."""
+        cases = (
+            ('handlers = [f]', 'm.handlers[0](5)'),
+            ('handlers = tuple(f)', 'm.handlers[0](5)'),
+            ('handlers = {"k": f}', 'm.handlers["k"](5)'),
+            ('handlers = {"outer": [f]}', 'm.handlers["outer"][0](5)'),
+        )
+        for export, call in cases:
+            with self.subTest(export=export):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    (Path(tmpdir) / "m.cat").write_text(
+                        f'f = (x) => {{ inc = (y) => {{ y + 1 }}\n inc(x) }}\n{export}\n'
+                    )
+                    catnip = _catnip_in(tmpdir)
+                    catnip.parse(f'parent_fn = (x) => {{ x }}\nm = import("m")\n{call}')
+                    self.assertEqual(catnip.execute(), 6)
+
+    def test_import_closure_in_struct_field_inside_container(self):
+        """A closure captured in a struct field resolves its transplanted parent
+        slot when the struct is materialized as a Python proxy inside an exported
+        container (the walk descends the proxy's field_values)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text(
+                'f = (x) => { inc = (y) => { y + 1 }\n inc(x) }\nstruct R { h }\nrs = [R(f)]\n'
+            )
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('parent_fn = (x) => { x }\nm = import("m")\nm.rs[0].h(5)')
+            self.assertEqual(catnip.execute(), 6)
+
+    def test_import_closure_in_native_struct_field(self):
+        """A closure captured in a struct exported as a bare global (native
+        TAG_STRUCT, fields in the registry rather than a Python proxy) resolves
+        its transplanted parent slot. Covers direct, multi-field, nested-struct,
+        struct-field-container and shared-instance shapes; `parent_fn` collides
+        with the unshifted child index 0 so a miss returns 5 instead of 6."""
+        cases = (
+            ('struct R { h }\nr = R(f)', 'm.r.h(5)', 6),
+            ('g = (x) => { d = (y) => { y + 10 }\n d(x) }\nstruct P { a; b }\np = P(f, g)', 'm.p.a(5) + m.p.b(5)', 21),
+            ('struct In { h }\nstruct Out { i }\no = Out(In(f))', 'm.o.i.h(5)', 6),
+            ('struct R { hs }\nr = R([f])', 'm.r.hs[0](5)', 6),
+            ('struct R { h }\nr = R(f)\nr2 = r', 'm.r.h(5) + m.r2.h(5)', 12),
+        )
+        for export, call, expected in cases:
+            with self.subTest(export=export):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    (Path(tmpdir) / "m.cat").write_text(
+                        f'f = (x) => {{ inc = (y) => {{ y + 1 }}\n inc(x) }}\n{export}\n'
+                    )
+                    catnip = _catnip_in(tmpdir)
+                    catnip.parse(f'parent_fn = (x) => {{ x }}\nm = import("m")\n{call}')
+                    self.assertEqual(catnip.execute(), expected)
+
+    def test_import_generic_union_enforces_payload(self):
+        """A generic union wild-imported from a module keeps enforcing its
+        payload contract (type templates survive the cross-module transplant)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "opt.cat").write_text('union Option[T] { Some(value: T); None }\n')
+            good = _catnip_in(tmpdir)
+            good.parse('import("opt", wild=True)\nf = (x: Option[int]) => { 1 }\nf(Option.Some(1))')
+            self.assertEqual(good.execute(), 1)
+            bad = _catnip_in(tmpdir)
+            bad.parse('import("opt", wild=True)\nf = (x: Option[int]) => { 1 }\nf(Option.Some("s"))')
+            with self.assertRaises(Exception):
+                bad.execute()
+
+    def test_import_calls_private_helper(self):
+        """A sibling call into a non-exported helper still resolves."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text('_helper = (x) => { x * 10 }\nscale = (x) => { _helper(x) + 1 }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('m = import("m")\nm.scale(4)')
+            self.assertEqual(catnip.execute(), 41)
+
+    def test_import_recursive_function(self):
+        """A recursive exported function (letrec self-reference capture)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text('fact = (n) => { match n { 0 => { 1 } _ => { n * fact(n - 1) } } }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('m = import("m")\nm.fact(5)')
+            self.assertEqual(catnip.execute(), 120)
+
+    def test_import_mutual_recursion(self):
+        """Mutually recursive exported functions (PatchClosure siblings)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text(
+                "is_even = (n) => { match n { 0 => { True } _ => { is_odd(n - 1) } } }\n"
+                "is_odd  = (n) => { match n { 0 => { False } _ => { is_even(n - 1) } } }"
+            )
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('m = import("m")\n[m.is_even(10), m.is_odd(10)]')
+            self.assertEqual(catnip.execute(), [True, False])
+
+    def test_import_with_caller_functions(self):
+        """Sibling calls work when the caller defined its own functions first
+        (transplant offset by a non-zero func_base)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "m.cat").write_text('double = (x) => { x * 2 }\nquad = (x) => { double(double(x)) }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('g = (z) => { z + 100 }\nm = import("m")\ng(m.quad(3))')
+            self.assertEqual(catnip.execute(), 112)
+
+    def test_import_transitive_function_calls(self):
+        """A module function calling into a function of a module it imported."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "leaf.cat").write_text('base = (x) => { x + 1 }\nplus2 = (x) => { base(base(x)) }')
+            (Path(tmpdir) / "mid.cat").write_text('l = import("leaf")\ncombo = (x) => { l.plus2(x) * 2 }')
+            catnip = _catnip_in(tmpdir)
+            catnip.parse('m = import("mid")\nm.combo(10)')
+            self.assertEqual(catnip.execute(), 24)
+
 
 class TestModuleResolution(unittest.TestCase):
     """Tests for bare-name resolution priority and search path."""
@@ -833,6 +956,12 @@ class TestNativeStdlibPlugin(unittest.TestCase):
         c.parse(code)
         return c.execute()
 
+    @staticmethod
+    def _eval_mode(code, mode):
+        c = Catnip(vm_mode=mode)
+        c.parse(code)
+        return c.execute()
+
     def test_resolves_catnip_lib_not_python(self):
         self.assertEqual(self._eval("import('http')\nhttp.PROTOCOL"), "rust")
         self.assertTrue(self._eval("import('http')\nhttp.VERSION"))
@@ -913,6 +1042,32 @@ class TestNativeStdlibPlugin(unittest.TestCase):
         finally:
             server.shutdown()
             t.join(timeout=5)
+
+    def test_object_unknown_member_is_rejected(self):
+        """An unknown member raises (no phantom bound method) and `hasattr`
+        stays False, in both VM and AST -- while real attributes and methods
+        keep resolving.
+
+        The AST executor lowers `obj.m(...)` to getattr-then-call, so the bridge
+        cannot decide attribute-vs-method syntactically. It consults the plugin's
+        v3 membership probe (`has_member`) instead of binding any name to a method
+        optimistically; the old bridge returned a phantom `NativePluginBoundMethod`
+        for `s.typo` and let `hasattr(s, 'typo')` report True in AST mode.
+        """
+        # `Server(addr)` binds an ephemeral local port; no traffic is exchanged.
+        setup = "import('http')\ns = http.Server('127.0.0.1:0')\n"
+        for mode in ("on", "off"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(Exception):
+                    self._eval_mode(setup + "s.typo", mode)
+                self.assertFalse(self._eval_mode(setup + "hasattr(s, 'typo')", mode))
+                # Real attribute (`addr`) and real method (`recv_timeout`) resolve.
+                self.assertTrue(self._eval_mode(setup + "hasattr(s, 'addr')", mode))
+                self.assertIsNone(self._eval_mode(setup + "s.recv_timeout(0.0)", mode))
+
+        # The AST path specifically raises AttributeError (the fixed behaviour).
+        with self.assertRaises(AttributeError):
+            self._eval_mode(setup + "s.typo", "off")
 
 
 if __name__ == "__main__":

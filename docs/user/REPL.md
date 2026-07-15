@@ -66,7 +66,7 @@ Les commandes commencent par `/` :
 | `/verbose`       | Activer/désactiver le mode verbeux    |
 | `/debug`         | Activer/désactiver le mode debug      |
 | `/time <expr>`   | Benchmarker une expression            |
-| `/config`        | Editeur interactif de configuration   |
+| `/config`        | Éditeur interactif de configuration   |
 | `/version`       | Afficher la version                   |
 
 **Note** : `exit()` n'est pas un builtin du langage. Pour quitter la REPL, utiliser `/exit`, `/quit` ou Ctrl+D. Pour
@@ -100,7 +100,7 @@ JIT compiler: disabled
 JIT compiler: enabled
 ```
 
-## Editeur de configuration (`/config`)
+## Éditeur de configuration (`/config`)
 
 `/config` sans arguments ouvre un overlay interactif sous la ligne de prompt. Les clés sont organisées en 6 groupes :
 
@@ -397,7 +397,7 @@ CatnipRuntimeError: division by zero
 
 Le highlighter utilise tree-sitter pour coloriser le code en temps réel :
 
-| Element        | Couleur   | Style | Exemples                                |
+| Élément        | Couleur   | Style | Exemples                                |
 | -------------- | --------- | ----- | --------------------------------------- |
 | Keywords       | Cyan      | Bold  | `if`, `while`, `for`, `match`, `return` |
 | Constants      | Purple    | Bold  | `True`, `False`, `None`                 |
@@ -410,4 +410,4 @@ Le highlighter utilise tree-sitter pour coloriser le code en temps réel :
 | Punctuation    | White     | -     | `(`, `)`, `[`, `]`, `{`, `}`            |
 | Identifiers    | Default   | -     | Variables et fonctions                  |
 
-Les noeuds `ERROR` (code incomplet) sont aussi traversés pour que le highlighting fonctionne pendant la saisie.
+Les nœuds `ERROR` (code incomplet) sont aussi traversés pour que le highlighting fonctionne pendant la saisie.

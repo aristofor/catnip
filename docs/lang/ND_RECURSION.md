@@ -206,24 +206,24 @@ pragma("nd_mode", ND.thread)
 - `"thread"` : distribution rayon avec `py.detach()` / `Python::attach()` par thread
 
 > Le parallélisme repose sur rayon (Rust), pas sur des threads Python. Le GIL est relâché pendant le dispatch et
-> réacquis par chaque worker pour les callbacks Python. La memoization reste thread-safe via `Arc<Mutex>`.
+> réacquis par chaque worker pour les callbacks Python. La mémoïsation reste thread-safe via `Arc<Mutex>`.
 
-### Memoization
+### Mémoïsation
 
 Le pragma `nd_memoize` active un cache automatique des résultats :
 
 ```catnip
-# Activer la memoization
+# Activer la mémoïsation
 pragma("nd_memoize", True)
 
-# Fibonacci avec memoization - 11x speedup sur fib(25)
+# Fibonacci avec mémoïsation - 11x speedup sur fib(25)
 ~~(25, (n, recur) => {
     if n <= 1 { n }
     else { recur(n - 1) + recur(n - 2) }
 })
 # → 75025
 
-# Désactiver la memoization (défaut)
+# Désactiver la mémoïsation (défaut)
 pragma("nd_memoize", False)
 ```
 
@@ -238,8 +238,8 @@ résultat en cache est retourné au lieu de recalculer.
 
 **Performance** :
 
-- Fibonacci sans memoization : O(2^n) appels
-- Fibonacci avec memoization : O(n) appels
+- Fibonacci sans mémoïsation : O(2^n) appels
+- Fibonacci avec mémoïsation : O(n) appels
 - Speedup mesuré : 11x sur fib(25), plus élevé pour n plus grand
 
 ### Batching (Phase 6)
@@ -277,7 +277,7 @@ désactivé pour éviter l'overhead.
 - Mode parallel avec plusieurs workers
 - Items avec temps de calcul variable
 
-**Combinaison avec memoization** :
+**Combinaison avec mémoïsation** :
 
 ```catnip
 pragma("nd_mode", ND.process)
@@ -286,7 +286,7 @@ pragma("nd_batch_size", 5)
 
 # Broadcast sur collection avec doublons
 # Batching: réduit overhead ThreadPoolExecutor
-# Memoization: évite recalculs des valeurs déjà vues
+# Mémoïsation : évite les recalculs des valeurs déjà vues
 list(10, 12, 10, 15, 12, 20).[~~(n, recur) => {
     if n <= 1 { n }
     else { recur(n - 1) + recur(n - 2) }
@@ -316,4 +316,4 @@ ______________________________________________________________________
 > **Principe** : La sémantique du code reste identique, seul le mode d'exécution change. Le déterminisme est préservé -
 > résultat identique en séquentiel et parallèle.
 >
-> Les optimisations (memoization, batching) réduisent le temps d'exécution sans changer le résultat.
+> Les optimisations (mémoïsation, batching) réduisent le temps d'exécution sans changer le résultat.

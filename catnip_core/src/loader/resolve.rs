@@ -116,7 +116,7 @@ pub fn search_dirs(caller_dir: Option<&Path>, cwd: Option<&Path>) -> Vec<PathBuf
     if let Some(c) = effective_cwd {
         push_if_new(c);
     }
-    if let Ok(env_path) = env::var("CATNIP_PATH") {
+    if let Ok(env_path) = env::var(crate::constants::ENV_CATNIP_PATH) {
         for entry in env_path.split(if cfg!(windows) { ';' } else { ':' }) {
             if !entry.is_empty() {
                 let p = PathBuf::from(entry);

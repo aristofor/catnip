@@ -18,8 +18,12 @@ pub struct HotLoopDetector {
     hot_functions: HashSet<String>,
     /// Functions that have been compiled
     compiled_functions: HashSet<String>,
-    /// Functions currently being traced (for VM use)
-    tracing_loops: HashSet<u64>,
+    /// Loops currently being traced, keyed by (bytecode_hash, offset)
+    tracing_loops: HashSet<(u64, usize)>,
+    /// Current program's bytecode hash. Loop func_ids are keyed by
+    /// (bytecode_hash, offset) so a reused detector (REPL/embedding) does not
+    /// treat a different program's hot loop at the same offset as already hot.
+    bytecode_hash: u64,
 }
 
 impl HotLoopDetector {
@@ -31,25 +35,41 @@ impl HotLoopDetector {
             hot_functions: HashSet::new(),
             compiled_functions: HashSet::new(),
             tracing_loops: HashSet::new(),
+            bytecode_hash: 0,
         }
+    }
+
+    /// Set the current program's bytecode hash. Must be called when the active
+    /// CodeObject changes so loop func_ids stay keyed by (bytecode_hash, offset).
+    #[inline]
+    pub fn set_bytecode_hash(&mut self, hash: u64) {
+        self.bytecode_hash = hash;
+    }
+
+    /// Build the func_id of a loop header under the current bytecode hash.
+    #[inline]
+    fn loop_id(&self, offset: usize) -> String {
+        format!("{}_offset_{}", self.bytecode_hash, offset)
     }
 
     /// Record a loop header execution (VM use). Returns true if loop just became hot.
     #[inline]
     pub fn record_loop_header(&mut self, offset: usize) -> bool {
-        let func_id = format!("offset_{}", offset);
+        let func_id = self.loop_id(offset);
         self.record_call_internal(&func_id)
     }
 
     /// Record a function call (public for VM use). Returns true if function just became hot.
     pub fn record_call_internal(&mut self, func_id: &str) -> bool {
-        // Skip if already compiled
+        // Always count (stats and tests observe tracked loops), but a compiled
+        // entry never re-arms hot detection: repeated guard failures (e.g. a
+        // type flip) must not re-trace and recompile mid-loop.
+        let count = self.counts.entry(func_id.to_string()).or_insert(0);
+        *count += 1;
+
         if self.compiled_functions.contains(func_id) {
             return false;
         }
-
-        let count = self.counts.entry(func_id.to_string()).or_insert(0);
-        *count += 1;
 
         if *count >= self.threshold && !self.hot_functions.contains(func_id) {
             self.hot_functions.insert(func_id.to_string());
@@ -67,7 +87,7 @@ impl HotLoopDetector {
 
     /// Mark a loop as compiled (VM use with offset).
     pub fn mark_compiled_offset(&mut self, offset: usize) {
-        let func_id = format!("offset_{}", offset);
+        let func_id = self.loop_id(offset);
         self.mark_compiled_internal(&func_id);
     }
 
@@ -83,12 +103,12 @@ impl HotLoopDetector {
 
     /// Mark a loop as currently being traced.
     pub fn start_tracing(&mut self, offset: usize) {
-        self.tracing_loops.insert(offset as u64);
+        self.tracing_loops.insert((self.bytecode_hash, offset));
     }
 
     /// Mark a loop as no longer being traced.
     pub fn stop_tracing(&mut self, offset: usize) {
-        self.tracing_loops.remove(&(offset as u64));
+        self.tracing_loops.remove(&(self.bytecode_hash, offset));
     }
 
     /// Reset all profiling data.
@@ -138,7 +158,7 @@ mod tests {
         assert!(detector.record_loop_header(100)); // count = 3, HOT!
         assert!(!detector.record_loop_header(100)); // already hot
 
-        assert!(detector.is_hot_internal("offset_100"));
+        assert!(detector.is_hot_internal("0_offset_100"));
     }
 
     #[test]
@@ -147,13 +167,34 @@ mod tests {
 
         detector.record_loop_header(100);
         detector.record_loop_header(100); // HOT
-        assert!(detector.is_hot_internal("offset_100"));
+        assert!(detector.is_hot_internal("0_offset_100"));
 
         detector.mark_compiled_offset(100);
-        assert!(!detector.is_hot_internal("offset_100"));
-        assert!(detector.is_compiled_internal("offset_100"));
+        assert!(!detector.is_hot_internal("0_offset_100"));
+        assert!(detector.is_compiled_internal("0_offset_100"));
 
         // Should not increment count anymore
         assert!(!detector.record_loop_header(100));
+    }
+
+    #[test]
+    fn test_loops_keyed_by_bytecode_hash() {
+        // Two programs reusing the same detector with a hot loop at the same
+        // offset must keep independent counters, keyed by bytecode hash. Without
+        // the (hash, offset) keying, the second program's loop is seen as
+        // already-hot and never re-traced.
+        let mut detector = HotLoopDetector::new(2);
+
+        detector.set_bytecode_hash(111);
+        detector.record_loop_header(100); // count = 1 (hash 111)
+        assert!(detector.record_loop_header(100)); // count = 2, hot for 111
+
+        detector.set_bytecode_hash(222);
+        assert!(!detector.record_loop_header(100)); // fresh count = 1 (hash 222)
+        assert!(detector.record_loop_header(100)); // count = 2, hot for 222
+
+        // The two programs are tracked independently.
+        assert!(detector.is_hot_internal("111_offset_100"));
+        assert!(detector.is_hot_internal("222_offset_100"));
     }
 }

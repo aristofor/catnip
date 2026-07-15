@@ -5,8 +5,14 @@ Vue d'ensemble des optimisations disponibles dans Catnip, avec l'idée simple : 
 ## Niveaux d'Optimisation
 
 Le niveau accepte les valeurs 0-3, mais l'effet est binaire : `0` désactive toutes les passes, `1` à `3` les activent
-toutes. Les valeurs intermédiaires sont acceptées pour compatibilité ; aucune sélection de passes par niveau n'est
-câblée.
+toutes. Les valeurs intermédiaires (et les alias `low`/`medium`/`high`) sont acceptées pour compatibilité ; aucune
+sélection de passes par niveau n'est câblée.
+
+La plage 0-3 est conservée parce que le niveau est, par nature, un arbitrage compile/runtime (historiquement, sur le
+cœur Python, les passes dominaient la compile des petits scripts ; la réécriture Rust a ramené ce coût à ~7-10 %). Le
+seul tier assez coûteux pour justifier un palier distinct est l'optimisation inter-blocs (CFG/SSA : construction de
+graphe + SSA + reconstruction) : elle est **réservée au niveau 3** une fois rebranchée (moteur pur Rust dormant
+aujourd'hui, voir [ARCHITECTURE](ARCHITECTURE.md)).
 
 **Défauts par entrypoint** :
 
@@ -18,8 +24,8 @@ câblée.
 
 ## Quand Désactiver les Optimisations
 
-Les passes sont sûres (elles préservent les valeurs observables) et leur coût de compilation est négligeable. Désactiver
-(`optimize=0`) sert surtout à :
+Les passes sont sûres (elles préservent les valeurs observables) et leur coût de compilation est faible (mesuré ~7-10 %
+d'une compile déjà rapide). Désactiver (`optimize=0`) sert surtout à :
 
 - inspecter l'IR tel qu'écrit (`-p 2` montre l'IR que le niveau 3 exécute, optimisations comprises) ;
 - isoler une passe suspecte en cas de comportement inattendu ;
@@ -112,7 +118,7 @@ Optimisations locales sur expressions et statements :
 
    - `not (a == b)` → `a != b` (et `!=` → `==` ; les comparaisons d'ordre ne sont pas inversées : `not (a < b)` n'est
      pas équivalent à `a >= b` en présence de `NaN`)
-   - `x and (not x)` → `False` (complement)
+   - `x and (not x)` → `False` (complément)
    - Les simplifications `and`/`or` avec constantes (`x and False` → `False`, `x or True` → `True`) ne s'appliquent que
      quand les deux opérandes sont des `Bool`. En Catnip, `and`/`or` retournent toujours un booléen — simplifier avec un
      opérande non-bool changerait le type de retour
@@ -120,20 +126,41 @@ Optimisations locales sur expressions et statements :
 **Identités absentes par construction** : sans information de type, les réécritures arithmétiques changent des valeurs
 observables dans un langage dynamique. `"abc" * 0` vaut `""` (pas `0`), `7.5 // 1` vaut `7.0` (pas `7.5`), `7 / 1` vaut
 `7.0` (pas `7`), `5 == True` vaut `False` (pas `5`), `not not 5` vaut `True` (pas `5`), et `x ** 2` ne peut pas devenir
-`x * x` (`**` et `*` dispatchent vers des surcharges distinctes). Le cas tout-littéral revient au constant folding ; les
-réductions typées relèvent du JIT, où les types sont gardés au runtime.
+`x * x` (`**` et `*` dispatchent vers des surcharges distinctes). Le cas tout-littéral revient au constant folding.
+
+**Spécialisation arithmétique typée** : quand un type *est* connu, l'analyse réécrit l'opération polymorphe en sa
+variante typée. Une opération binaire dont les deux opérandes sont prouvés `int` (resp. `float`) -- via un paramètre
+annoté, dont le type est garanti à l'entrée de la fonction (voir la spécialisation au boundary dans
+`docs/lang/FUNCTIONS.md`), un littéral, ou le résultat chaîné d'une réécriture typée -- devient `AddInt`/`AddFloat`,
+`SubInt`/`SubFloat`, `MulInt`/`MulFloat` ou `DivFloat`. La forme typée saute le dispatch de type et la recherche de
+surcharge à l'exécution, et fournit au JIT une trace déjà typée. La réécriture (`rewrite_typed_arith`,
+`catnip_core/src/pipeline/semantic/`) est sound par construction : un opérande dont le type n'est plus garanti
+(paramètre réassigné, lié par un pattern, variable de boucle, binding `except`, ou masqué par une définition locale)
+fait retomber l'opération sur sa forme polymorphe. La division vraie (`/`) n'a pas de variante entière : elle produit
+toujours un `float`, donc seule `DivFloat` existe et `int / int` reste polymorphe.
 
 **Passes désactivées** : Constant Propagation, Copy Propagation et Dead Store Elimination sont retirées du pipeline.
 Leur suivi des assignations est insensible au flot de contrôle et aux scopes ; les réactiver demande un vrai dataflow
 (invalidation par branche, invalidation des sources de copies, détection de cycles).
 
-### Passes CFG/SSA (hors pipeline)
+### Passes CFG/SSA (gate interne)
 
-Le module `catnip_rs/src/cfg/` contient une infrastructure complète CFG + SSA
+Le module `catnip_core/src/cfg/` contient une infrastructure complète CFG + SSA
 ([Braun et al. 2013](https://pp.ipd.kit.edu/uploads/publikationen/braun13cc.pdf)) : construction du graphe, passes
-inter-blocs (CSE, LICM, GVN, DSE globale), destruction SSA et reconstruction IR. Elle n'est **pas branchée** sur le
-pipeline sémantique vivant : son unique consommateur (l'analyzer PyO3 hérité) a été supprimé, il ne reste que ses
-propres tests. Le JIT construit ses propres CFG pour la compilation de traces, indépendamment de ce module.
+inter-blocs (LICM, DSE globale, GVN — qui subsume la CSE syntaxique —, IV), destruction SSA et reconstruction IR. Elle
+n'est **pas branchée par défaut** sur le pipeline sémantique vivant ; le JIT construit ses propres CFG indépendamment.
+
+Un **gate interne** (`SemanticAnalyzer::set_cfg_enabled`, off par défaut, sans surface utilisateur) câble le round-trip
+`IR → CFG → SSA → LICM → DSE → GVN → destruction → reconstruction` dans `analyze_full`. Trois passes inter-blocs y
+tournent, chacune gardée pour refuser plutôt que dégrader : **LICM** (hoist des défs invariantes de `while` dans un bloc
+gardé par une copie de la condition — pas de spéculation zéro-itération), **DSE** (v1 étroite : seuls les stores «
+transparents » — littéral scalaire ou référence — tués sur tous les chemins tombent ; un call ou un op fautable dans la
+fenêtre fait barrière), **GVN** (les expressions redondantes prouvées scalaires immuables deviennent des copies — alias
+ou snapshot selon le nombre de défs du canonique). Validé en différentiel d'exécution sur la **suite entière** (env
+interne `CATNIP_CFG_INTERNAL`, modes VM et AST), passes actives. Le gate reste néanmoins **interne** : le `match`
+round-trippe par préservation d'op (arms non reconstruits), et l'activation par env ambiante doit sortir du binaire
+distribué avant tout ship. Une fois ces garanties acquises, ce tier inter-blocs devient le **niveau 3** (cf. plus haut).
+Détails dans [ARCHITECTURE](ARCHITECTURE.md).
 
 ## Architecture du Pipeline
 
@@ -156,14 +183,20 @@ flowchart TD
     LOCAL --> VALID["Validation + diagnostics"]
 ```
 
-**Ordre d'exécution** (`SemanticAnalyzer::analyze_full`, `catnip_core/src/pipeline/semantic.rs`) :
+**Ordre d'exécution** (`SemanticAnalyzer::analyze_full`, `catnip_core/src/pipeline/semantic/mod.rs`) :
 
 1. Transform (interception des intrinsics : `typeof`, `breakpoint`)
 1. Pré-scan des pragmas top-level (`tco`, `optimize`) -- précédence : override host (CLI/env) > pragma in-file >
    baseline
 1. Marquage des tail calls (si TCO actif)
 1. Passes IR (5 passes) jusqu'au point fixe, max 10 itérations (si optimisation active)
-1. Validation des opcodes et pragmas, collecte des diagnostics (exhaustivité)
+1. Validation des opcodes et pragmas, puis une pré-passe globale (`collect_unique_fns`) qui relève les signatures des
+   fonctions à liaison prouvablement unique et les noms susceptibles de masquer un constructeur, suivie de la traversée
+   type-aware (`check_exhaustiveness`) qui suit les types des variables sur un treillis plat (`types.rs`), lie les
+   paramètres annotés, infère les champs de struct typés, et collecte les diagnostics : exhaustivité des `match` (I103)
+   et incompatibilités de type prouvables (E300) -- aux sites de déclaration (défaut de param/champ, type de retour)
+   comme aux sites d'appel (arguments positionnels et nommés vs paramètres d'une fonction unique, ou champs d'un
+   constructeur de struct)
 
 ## Tail Call Optimization (TCO)
 
@@ -178,7 +211,7 @@ is_even = (n) => { if n == 0 { True } else { is_odd(n - 1) } }   # ← tail call
 is_odd  = (n) => { if n == 0 { False } else { is_even(n - 1) } }
 ```
 
-**Détection** : traversée unique `mark_tails` dans l'analyseur sémantique (`catnip_core/src/pipeline/semantic.rs`).
+**Détection** : traversée unique `mark_tails` dans l'analyseur sémantique (`catnip_core/src/pipeline/semantic/mod.rs`).
 Positions terminales propagées : dernière expression d'un bloc, corps des branches d'un `if`, corps des cases d'un
 `match`, expression d'un `return`. La traversée descend dans tous les corps de lambdas, y compris les définitions
 imbriquées et les lambdas passées en argument. Le flag ne peut jamais apparaître hors d'un corps de lambda (un signal

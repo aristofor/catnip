@@ -1,0 +1,62 @@
+#!/usr/bin/env catnip
+# Unions taggées : variantes, pattern matching, méthodes
+
+print("⇒ Déclaration et construction")
+
+union Shape {
+    Circle(r);
+    Rect(w, h);
+    Point;
+}
+
+c = Shape.Circle(2)
+p = Shape.Point
+print(c)
+print(p)
+
+print()
+print("⇒ Match sur les variantes")
+
+aire = (s) => {
+    match s {
+        Shape.Circle{r} => { 3.14159 * r * r }
+        Shape.Rect{w, h} => { w * h }
+        Shape.Point => { 0 }
+    }
+}
+
+print("aire du cercle:", aire(c))
+print("aire du rectangle:", aire(Shape.Rect(3, 4)))
+print("aire du point:", aire(p))
+
+print()
+print("⇒ Égalité structurelle")
+
+print(Shape.Circle(2) == Shape.Circle(2))
+print(Shape.Circle(2) == Shape.Rect(2, 2))
+print(Shape.Point == Shape.Point)
+
+print()
+print("⇒ Méthodes : self reçoit la variante, le corps discrimine")
+
+union Option {
+    Some(value);
+    None;
+
+    map(self, f) => {
+        match self {
+            Option.Some{value} => { Option.Some(f(value)) }
+            Option.None => { Option.None }
+        }
+    }
+
+    unwrap_or(self, default) => {
+        match self {
+            Option.Some{value} => { value }
+            Option.None => { default }
+        }
+    }
+}
+
+print(Option.Some(21).map((x) => { x * 2 }).unwrap_or(0))
+print(Option.None.map((x) => { x * 2 }).unwrap_or(-1))

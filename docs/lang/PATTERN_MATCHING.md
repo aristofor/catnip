@@ -236,6 +236,26 @@ match opt {
 Les variantes nullaires se matchent comme des variantes d'enum (`Union.Variant` sans accolades). Voir
 [UNIONS](UNIONS.md) pour la sémantique complète.
 
+### Résolution du type dans un pattern qualifié
+
+Un pattern qualifié (`Color.Red`, `Union.Variant`) exige que le **type** nommé soit résolvable dans le scope courant. Un
+module importé sous namespace n'expose pas le type en direct : il faut l'aliaser ou l'importer en wild.
+
+<!-- check: no-check -->
+
+```catnip
+m = import("colors")
+Color = m.Color                                  # requis : le pattern nomme `Color`, pas `m.Color`
+match c { Color.Red => { "r" }  _ => { "o" } }
+```
+
+Sans cette mise en scope (`Color = m.Color` ou `import("colors", wild=True)`), le pattern lève `CatnipNameError` — pas
+un non-match silencieux. Le critère est le même que pour toute référence : un nom non lié est une erreur. Les trois
+runtimes (AST, VM, et la VM pure du serveur MCP et des binaires standalone) rejettent le pattern de façon identique.
+
+> Un pattern qui nomme un type jamais importé ne « ne matche pas » : il n'existe pas. La distinction est celle entre une
+> question sans réponse et une question mal posée.
+
 ### Patterns struct dans les tuples
 
 Les patterns de structure peuvent apparaître à l'intérieur de tuple patterns. Chaque position du tuple est matchée

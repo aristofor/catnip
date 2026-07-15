@@ -143,7 +143,7 @@ python catnip_rs/gen_opcodes.py
 
 ### 2. Implémenter le dispatch
 
-Dans `catnip_rs/src/vm/core.rs` :
+Dans `catnip_rs/src/vm/core/mod.rs` :
 
 ```rust
 match opcode {
@@ -323,7 +323,7 @@ catnip mycommand file.cat
 vim catnip_rs/src/...
 
 # 2. Tests Rust rapides
-make rust-test-fast
+make test-rust-fast
 
 # 3. Recompiler
 uv pip install -e .

@@ -30,6 +30,14 @@ pub struct PureFrame {
     pub discard_return: bool,
     /// Closure scope for free variable resolution (set by MakeFunction/Call).
     pub closure_scope: Option<PureClosureScope>,
+    /// The callee value this frame is executing (a runtime `TAG_CLOSURE`, or a
+    /// template `TAG_VMFUNC`/`NIL`). The frame owns one strong ref for its whole
+    /// lifetime so a runtime closure's slot stays alive while its body runs --
+    /// letrec self-recursion resolves through the slot's *weak* self-ref, which
+    /// must upgrade during the call even when the callee had no surviving binding
+    /// (e.g. `mk()(5)`). Released at frame teardown (`free`/`reset`); a template
+    /// or NIL decref is a no-op.
+    pub callee: Value,
     /// Exception handler stack (try/except/finally)
     pub handler_stack: Vec<Handler>,
     /// Active exception stack for CheckExcMatch/LoadException.
@@ -51,6 +59,7 @@ impl PureFrame {
             match_bindings: None,
             discard_return: false,
             closure_scope: None,
+            callee: Value::NIL,
             handler_stack: Vec::new(),
             active_exception_stack: Vec::new(),
             pending_unwind: None,
@@ -76,6 +85,7 @@ impl PureFrame {
             match_bindings: None,
             discard_return: false,
             closure_scope: None,
+            callee: Value::NIL,
             handler_stack: Vec::new(),
             active_exception_stack: Vec::new(),
             pending_unwind: None,
@@ -88,10 +98,18 @@ impl PureFrame {
         self.locals.clear();
         self.ip = 0;
         self.code = None;
-        self.block_stack.clear();
+        for (_slot_start, saved) in self.block_stack.drain(..) {
+            for val in saved {
+                val.decref();
+            }
+        }
         self.match_bindings = None;
         self.discard_return = false;
         self.closure_scope = None;
+        // `free` already released and NIL'd the callee on the pooled path; this
+        // decref is a no-op there and correct for any standalone reset.
+        self.callee.decref();
+        self.callee = Value::NIL;
         self.handler_stack.clear();
         self.active_exception_stack.clear();
         self.pending_unwind = None;
@@ -149,6 +167,12 @@ impl PureFrame {
     }
 
     /// Bind positional arguments to local slots (pure Rust, no kwargs).
+    ///
+    /// Consumes the caller's `args`: bound slots take ownership of the refs, the
+    /// excess is collected into the variadic slot (which also takes ownership),
+    /// and any remaining arg is released here. Mirrors the PyO3 VM's `bind_args`
+    /// (`catnip_rs`) so both runtimes agree on arity, defaults, and variadic
+    /// collection.
     pub fn bind_args(&mut self, args: &[Value]) {
         let code = match &self.code {
             Some(c) => c,
@@ -156,21 +180,59 @@ impl PureFrame {
         };
 
         let nparams = code.nargs;
-        let n = args.len().min(nparams);
-        self.locals[..n].copy_from_slice(&args[..n]);
+        let vararg_idx = code.vararg_idx;
 
-        // Fill defaults for unbound params
-        let ndefaults = code.defaults.len();
-        if ndefaults > 0 {
-            let default_start = nparams.saturating_sub(ndefaults);
-            for i in n.max(default_start)..nparams {
-                if !self.locals[i].is_nil() && !self.locals[i].is_invalid() {
-                    continue;
-                }
-                let default_idx = i - default_start;
-                if default_idx < ndefaults {
-                    self.locals[i] = code.defaults[default_idx];
-                }
+        if vararg_idx >= 0 {
+            let vararg_idx = vararg_idx as usize;
+            // Fixed params before the variadic slot take their args by move.
+            let nfixed = args.len().min(vararg_idx);
+            self.locals[..nfixed].copy_from_slice(&args[..nfixed]);
+            // The excess becomes the variadic list; `from_list` takes ownership
+            // of those refs, so they are transferred, not leaked.
+            let rest = if args.len() > vararg_idx {
+                Value::from_list(args[vararg_idx..].to_vec())
+            } else {
+                Value::from_list(Vec::new())
+            };
+            self.locals[vararg_idx] = rest;
+
+            Self::fill_defaults(&mut self.locals, &code.defaults, nfixed, vararg_idx);
+        } else {
+            let n = args.len().min(nparams);
+            self.locals[..n].copy_from_slice(&args[..n]);
+            // Excess positional args (a malformed, non-variadic call) are
+            // consumed but unbound: release them instead of leaking.
+            for v in &args[n..] {
+                v.decref();
+            }
+
+            Self::fill_defaults(&mut self.locals, &code.defaults, n, nparams);
+        }
+    }
+
+    /// Fill unbound parameter slots in `[nbound, end)` with their defaults.
+    ///
+    /// Defaults live in the CodeObject's constant pool, so a default that is a
+    /// heap value must be incref'd: the slot will be decref'd at frame teardown
+    /// like any other local, and without the incref that would over-release the
+    /// shared constant.
+    fn fill_defaults(locals: &mut [Value], defaults: &[Value], nbound: usize, end: usize) {
+        let ndefaults = defaults.len();
+        if ndefaults == 0 {
+            return;
+        }
+        let default_start = end.saturating_sub(ndefaults);
+        // index arithmetic across two arrays (locals slot vs defaults[i - default_start])
+        #[allow(clippy::needless_range_loop)]
+        for i in nbound.max(default_start)..end {
+            if !locals[i].is_nil() && !locals[i].is_invalid() {
+                continue;
+            }
+            let default_idx = i - default_start;
+            if default_idx < ndefaults {
+                let val = defaults[default_idx];
+                val.clone_refcount();
+                locals[i] = val;
             }
         }
     }
@@ -178,21 +240,34 @@ impl PureFrame {
     // --- Block stack operations ---
 
     /// Save locals from slot_start onwards and push to block stack.
+    /// Each saved value gets an independent refcount so the snapshot can be
+    /// released independently of the current locals on pop / truncate / clear.
     pub fn push_block(&mut self, slot_start: usize) {
-        let saved: Vec<Value> = self.locals[slot_start..].to_vec();
+        let mut saved: Vec<Value> = self.locals[slot_start..].to_vec();
+        for val in &mut saved {
+            val.clone_refcount();
+        }
         self.block_stack.push((slot_start, saved));
     }
 
     /// Restore locals from top of block stack.
+    ///
+    /// Each snapshot entry holds an independent refcount (taken at push_block),
+    /// so every overwritten current local and every NILed block-local slot is
+    /// decref'd before the snapshot value is transferred.
     pub fn pop_block(&mut self) {
         if let Some((slot_start, saved)) = self.block_stack.pop() {
             let saved_len = saved.len();
             for (i, val) in saved.into_iter().enumerate() {
                 if slot_start + i < self.locals.len() {
+                    let old = self.locals[slot_start + i];
+                    old.decref();
                     self.locals[slot_start + i] = val;
                 }
             }
             for i in (slot_start + saved_len)..self.locals.len() {
+                let old = self.locals[i];
+                old.decref();
                 self.locals[i] = Value::NIL;
             }
         }
@@ -263,6 +338,26 @@ impl PureFramePool {
         for &val in &frame.locals {
             val.decref();
         }
+        // The frame owned one strong ref to its callee; release it and NIL it so
+        // the pooled reset() does not double-decref.
+        frame.callee.decref();
+        frame.callee = Value::NIL;
+        // block_stack snapshots hold independent refcounts (taken at push_block).
+        // Release them unconditionally: reset() (which also drains) runs only on
+        // the pooled path, so a frame freed with a non-empty block_stack while the
+        // pool is full would otherwise leak its snapshot refs.
+        for (_slot_start, saved) in frame.block_stack.drain(..) {
+            for val in saved {
+                val.decref();
+            }
+        }
+        // Pending match bindings own independent refs (BindMatch clones into
+        // slots); release them here for the same pool-full reason.
+        if let Some(bindings) = frame.match_bindings.take() {
+            for (_slot, val) in bindings {
+                val.decref();
+            }
+        }
         if self.frames.len() < self.max_size {
             frame.reset();
             self.frames.push(frame);
@@ -321,6 +416,9 @@ mod tests {
             complexity: 0,
             line_table: vec![],
             patterns: vec![],
+            union_checks: vec![],
+            composite_checks: vec![],
+            generic_checks: vec![],
             encoded_ir: None,
         };
         let code = Arc::new(code);
@@ -350,6 +448,9 @@ mod tests {
             complexity: 0,
             line_table: vec![],
             patterns: vec![],
+            union_checks: vec![],
+            composite_checks: vec![],
+            generic_checks: vec![],
             encoded_ir: None,
         });
         let mut f = PureFrame::with_code(code);
@@ -377,6 +478,9 @@ mod tests {
             complexity: 0,
             line_table: vec![],
             patterns: vec![],
+            union_checks: vec![],
+            composite_checks: vec![],
+            generic_checks: vec![],
             encoded_ir: None,
         });
         let mut f = PureFrame::with_code(code);
@@ -423,6 +527,9 @@ mod tests {
             complexity: 0,
             line_table: vec![],
             patterns: vec![],
+            union_checks: vec![],
+            composite_checks: vec![],
+            generic_checks: vec![],
             encoded_ir: None,
         });
 

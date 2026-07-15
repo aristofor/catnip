@@ -21,19 +21,14 @@ pub const PY_MOD_CONTEXT: &str = "catnip.context";
 pub const PY_MOD_LOADER: &str = "catnip.loader";
 pub const PY_MOD_SEMANTIC: &str = "catnip.semantic";
 pub const PY_MOD_SEMANTIC_OPCODE: &str = "catnip.semantic.opcode";
-pub const PY_MOD_TRANSFORMER: &str = "catnip.transformer";
-pub const PY_MOD_PARSER: &str = "catnip.parser";
-pub const PY_MOD_PRAGMA: &str = "catnip.pragma";
 pub const PY_MOD_ND: &str = "catnip.nd";
 pub const PY_MOD_VERSION: &str = "catnip._version";
 pub const PY_MOD_SUGGEST: &str = "catnip.suggest";
 pub const PY_MOD_CLI: &str = "catnip.cli";
-pub const PY_MOD_JIT: &str = "catnip.jit";
 pub const PY_MOD_VM_EXECUTOR: &str = "catnip.vm.executor";
 pub const PY_MOD_UTILS: &str = "catnip.utils";
 pub const PY_MOD_EXTENSIONS: &str = "catnip.extensions";
 pub const PY_MOD_MEMOIZATION: &str = "catnip.cachesys.memoization";
-pub const PY_MOD_CONFIG: &str = "catnip.config";
 
 // ============================================================================
 // Config Keys

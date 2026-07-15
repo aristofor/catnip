@@ -6,7 +6,7 @@ Catnip est volontairement **sans I/O** : pas d'accès réseau, fichiers, ni mêm
 (`print`, `write`, `input`) viennent du module `io`, auto-importé en CLI et REPL mais absent en embedded mode. Le host
 expose ensuite ce dont l'application a besoin, au bon niveau de contrôle.
 
-> Kernighan, Ritchie et Thompson auraient probablement approuvé un coeur sans I/O.
+> Kernighan, Ritchie et Thompson auraient probablement approuvé un cœur sans I/O.
 
 Le point d'extension principal est le **context** (`Context`). Il fait le lien entre l'application et le runtime, et
 transporte :
@@ -183,6 +183,120 @@ catnip.parse('math.pi * 2')
 result = catnip.execute()
 print(result)  # 6.283185307179586
 ```
+
+## Méthode 5 : extension distribuable (`__catnip_extension__`)
+
+Les méthodes 1 à 4 câblent le `Context` dans l'application hôte, avant exécution. Parfait quand le host contrôle le
+runtime — mais ça ne se distribue pas : impossible de publier un paquet qu'un autre projet « branche » sans réécrire le
+câblage à la main.
+
+Une **extension** renverse le sens. C'est un module Python qui se déclare lui-même extensible Catnip, via un attribut
+`__catnip_extension__`. Au moment d'un `import(...)`, le runtime le détecte, appelle son hook et injecte ce qu'il
+exporte. Un entry point `pip` ne déclenche pas ce chargement : il rend seulement l'extension découvrable par la CLI
+(`catnip extensions list` / `info`).
+
+> Une extension est un module qui se sait importable. Le Context, lui, ignore jusqu'à sa propre existence.
+
+### Le descripteur
+
+`__catnip_extension__` est un dict :
+
+- `'name'` (str, requis) — identifiant de l'extension
+- `'version'` (str, requis)
+- `'description'` (str, optionnel)
+- `'register'` (callable, optionnel) — hook appelé avec un proxy transparent vers le `Context`
+- `'exports'` (dict, optionnel) — noms injectés dans `context.globals`
+
+Un module extension complet tient en quelques lignes :
+
+```python
+# greetings_ext.py -- une extension Catnip distribuable
+
+def _greet(name):
+    return f"Hello, {name}!"
+
+def _register(context):
+    # Le hook reçoit un proxy transparent vers le Context : effet de bord direct + lecture d'attributs réels.
+    context.globals['greeting_loaded'] = True
+    if context.logger is not None:
+        context.logger.info("greetings extension ready")
+
+__catnip_extension__ = dict(
+    name='greetings',
+    version='1.0.0',
+    description="Salutations pour Catnip",
+    register=_register,
+    exports=dict(greet=_greet, EXCLAIM='!'),
+)
+```
+
+### Charger depuis Catnip : `import()`
+
+`import("module")` détecte le descripteur, exécute `register`, puis injecte `exports`. Les noms exportés sont
+immédiatement disponibles dans le scope :
+
+```python
+from catnip import Catnip
+
+c = Catnip()
+c.parse('import("greetings_ext"); greet("world")')
+print(c.execute())  # Hello, world!
+```
+
+Côté script Catnip, c'est un `import` ordinaire — la détection est transparente :
+
+```
+import("greetings_ext")
+greet("Catnip")    # "Hello, Catnip!"
+```
+
+Les `exports` écrasent les globals préexistants de même nom (aligné sur l'API Python). L'extension est suivie dans
+`context._extensions`. Dans un même contexte, le module est mis en cache : un second `import` renvoie le namespace déjà
+chargé sans relancer `register` ni réinjecter `exports`. Une nouvelle instance `Catnip` (cache neuf) recharge
+l'extension avec les valeurs courantes du descripteur.
+
+### `register(context)` : au-delà du sac de valeurs
+
+`exports` couvre le cas simple : un dictionnaire de noms à exposer. `register` sert quand l'extension a besoin du
+`Context` lui-même. Le hook reçoit un proxy transparent : écrire dans `context.globals` atteint à la fois la VM et les
+globals réels, et tout autre attribut (`context.logger`, etc.) délègue au vrai `Context` — pas une copie appauvrie. Les
+effets de bord d'un `register` sont identiques en mode VM et en mode AST.
+
+> `exports` déclare ce que l'extension donne. `register` agit sur ce qu'elle touche. Les deux sont optionnels, mais une
+> extension sans ni l'un ni l'autre n'étend rien.
+
+### Packager : entry point `catnip.extensions`
+
+Pour qu'une extension soit installable et découvrable sans `import()` explicite, déclarer un entry point dans le groupe
+`catnip.extensions` :
+
+```toml
+[project.entry-points."catnip.extensions"]
+greetings = "greetings_ext"
+```
+
+Une fois le paquet installé, la CLI inspecte ce qui est disponible :
+
+```bash
+catnip extensions list             # name + entry_point
+catnip extensions info greetings   # name, version, register?, exports
+```
+
+L'entry point alimente cette inspection CLI, pas le chargement : pour utiliser l'extension dans un script, il faut
+toujours `import("greetings_ext")`.
+
+### Context manuel ou extension ?
+
+| Critère         | Méthodes 1-4 (Context)       | Méthode 5 (extension)            |
+| --------------- | ---------------------------- | -------------------------------- |
+| Qui câble       | l'application hôte           | le module lui-même               |
+| Distribution    | non (code local)             | oui (paquet `pip` + entry point) |
+| Chargement      | avant exécution              | `import(...)`                    |
+| Découverte CLI  | non                          | entry point (`extensions list`)  |
+| Accès `Context` | direct (vous le construisez) | via `register(context)`          |
+
+Les deux coexistent : un host peut construire son `Context` (méthodes 1-4) **et** charger des extensions tierces
+par-dessus.
 
 ## Exemples pratiques
 

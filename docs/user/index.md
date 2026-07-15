@@ -23,4 +23,4 @@ Documentation pour apprendre et utiliser Catnip.
 ## Référence avancée
 
 - [EXTENDING_CONTEXT](EXTENDING_CONTEXT.md) - Étendre le contexte d'exécution. API du contexte, opérations
-  personnalisées, hooks, intégration profonde
+  personnalisées, hooks, extensions distribuables (`__catnip_extension__`), intégration profonde
